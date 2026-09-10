@@ -47,6 +47,15 @@ pytestmark = pytest.mark.skipif(
 
 D = Decimal
 
+# client_order_id — единственная глобально уникальная колонка в этом файле
+# (UNIQUE без привязки к user_id, в отличие от telegram_id ниже). Успешные
+# тесты коммитят свои ордера по-настоящему (Database.session() коммитит по
+# выходу из `async with`), поэтому голые литералы вроде "tj1" ловили бы
+# UniqueViolation при повторном прогоне против той же БД. Префикс на основе
+# времени запуска делает их уникальными от прогона к прогону, тем же
+# способом, что и telegram_id в фикстурах ctx() по всему проекту.
+_RUN_ID = f"{int(datetime.now(UTC).timestamp() * 1_000_000) % 100_000_000:x}"
+
 
 def _signal(user_id: int, **overrides: object) -> SignalRecord:
     now = datetime.now(UTC)
@@ -78,7 +87,7 @@ def _trade(user_id: int, **overrides: object) -> Trade:
 def _order(user_id: int, client_order_id: str, **overrides: object) -> ExecutionOrder:
     fields: dict[str, object] = {
         "user_id": user_id,
-        "client_order_id": client_order_id,
+        "client_order_id": f"{_RUN_ID}-{client_order_id}",
         "symbol": "BTC-USDT",
         "side": OrderSide.BUY,
         "position_side": TradeSide.LONG,
@@ -155,7 +164,7 @@ async def test_get_by_client_order_id(ctx) -> None:  # type: ignore[no-untyped-d
     repo.add(order)
     await repo.flush()
 
-    found = await repo.get_by_client_order_id(user.id, "tj-lookup")
+    found = await repo.get_by_client_order_id(user.id, order.client_order_id)
     assert found is not None
     assert found.id == order.id
 
@@ -182,13 +191,18 @@ async def test_list_by_signal(ctx) -> None:  # type: ignore[no-untyped-def]
     session.add(signal)
     await session.flush()
 
-    repo.add(_order(user.id, "tj-entry", signal_id=signal.id, role=OrderRole.ENTRY))
-    repo.add(_order(user.id, "tj-sl", signal_id=signal.id, role=OrderRole.STOP_LOSS))
+    entry = _order(user.id, "tj-entry", signal_id=signal.id, role=OrderRole.ENTRY)
+    stop = _order(user.id, "tj-sl", signal_id=signal.id, role=OrderRole.STOP_LOSS)
+    repo.add(entry)
+    repo.add(stop)
     repo.add(_order(user.id, "tj-unrelated"))
     await repo.flush()
 
     orders = await repo.list_by_signal(user.id, signal.id)
-    assert {o.client_order_id for o in orders} == {"tj-entry", "tj-sl"}
+    assert {o.client_order_id for o in orders} == {
+        entry.client_order_id,
+        stop.client_order_id,
+    }
 
 
 async def test_signal_deletion_sets_null_not_cascade(ctx) -> None:  # type: ignore[no-untyped-def]
