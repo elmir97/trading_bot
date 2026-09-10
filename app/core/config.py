@@ -59,9 +59,38 @@ class Settings(BaseSettings):
 
     # --- BingX -------------------------------------------------------------
     bingx_base_url: str = "https://open-api.bingx.com"
+    # demo — торговля виртуальными USDT (VST) на демо-хосте (этап 15.5);
+    # live переключается вручную через .env + рестарт, кнопки в боте нет.
+    bingx_trading_mode: Literal["demo", "live"] = "demo"
     bingx_recv_window: int = 5000
     http_timeout_seconds: float = 10.0
     http_max_retries: int = 3
+
+    # --- Redis (этап 15: блокировка от двойного нажатия «Да», раздел 8) ---
+    redis_url: str = "redis://localhost:6379/0"
+
+    # --- Исполнение сделок по подтверждению (этап 15, раздел 11 ТЗ) -------
+    trading_execution_enabled: bool = Field(
+        default=False,
+        description=(
+            "Главный выключатель модуля execution. По умолчанию выключен; "
+            "переключатель в настройках бота может только выключить его "
+            "дополнительно, но не включить при False здесь."
+        ),
+    )
+    exec_max_open_positions: int = 4
+    exec_max_total_risk_percent: Decimal = Decimal("5")
+    # Доля расстояния до стопа, в пределах которой дрейф цены на подтверждении
+    # ещё не требует пересчёта карточки (раздел 5, 9 ТЗ).
+    exec_max_price_drift_ratio: Decimal = Decimal("0.3")
+    exec_confirm_ttl_seconds: int = 60
+    exec_min_rr: Decimal = Decimal("1.5")
+    exec_symbol_whitelist: str = Field(
+        default="BTC-USDT,ETH-USDT",
+        description="Через запятую. Пустая строка = ограничения нет.",
+    )
+    # Час по местному времени пользователя для сводки исполнения (раздел 12а).
+    exec_daily_digest_hour: int = 21
 
     # --- Дефолты торгового плана ------------------------------------------
     # Реальные значения хранятся в БД per-user; это лишь начальные значения
@@ -149,6 +178,17 @@ class Settings(BaseSettings):
         if not raw:
             return frozenset()
         return frozenset(int(part) for part in raw.split(",") if part.strip())
+
+    @property
+    def exec_symbol_whitelist_symbols(self) -> tuple[str, ...]:
+        """Разобранный список инструментов, разрешённых к исполнению.
+
+        Пустой кортеж = ограничения нет (см. guards.check_symbol_allowed).
+        """
+        raw = self.exec_symbol_whitelist.strip()
+        if not raw:
+            return ()
+        return tuple(part.strip().upper() for part in raw.split(",") if part.strip())
 
     @property
     def secret_values(self) -> tuple[str, ...]:

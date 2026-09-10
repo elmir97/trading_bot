@@ -154,6 +154,10 @@ class OrderStatus(StrEnum):
     подтверждённым, ни отклонённым. См. app/execution/service.py (этап
     15.5) — повторная отправка при UNKNOWN запрещена, пока сверка по
     client_order_id не подтвердит, что ордера на бирже нет.
+
+    DRY_RUN — этап 15.4: подтверждение получено, ордер прошёл все guard-ы,
+    но на биржу ничего не уходит (отправка появится в 15.5) — строка лишь
+    фиксирует, что именно ушло бы, для наблюдения по сводкам раздела 12а.
     """
 
     PENDING = "PENDING"
@@ -162,3 +166,4 @@ class OrderStatus(StrEnum):
     REJECTED = "REJECTED"
     CANCELED = "CANCELED"
     UNKNOWN = "UNKNOWN"
+    DRY_RUN = "DRY_RUN"

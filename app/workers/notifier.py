@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
-from aiogram.types import BufferedInputFile
+from aiogram.types import BufferedInputFile, InlineKeyboardMarkup
 
 from app.core.logging import get_logger
 from app.database.models.user import DEFAULT_NOTIFICATIONS, UserSettings
@@ -38,9 +38,21 @@ def notification_enabled(settings: UserSettings | None, kind: str) -> bool:
     return bool(settings.notifications.get(kind, default))
 
 
-async def send_notification(bot: Bot, telegram_id: int, text: str) -> None:
+async def send_notification(
+    bot: Bot,
+    telegram_id: int,
+    text: str,
+    *,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> None:
     try:
-        await bot.send_message(telegram_id, text)
+        # reply_markup передаётся только когда задан: тестовые дублёры бота
+        # (FakeBot) в существующих тестах принимают send_message(chat_id, text)
+        # без лишних именованных аргументов.
+        if reply_markup is not None:
+            await bot.send_message(telegram_id, text, reply_markup=reply_markup)
+        else:
+            await bot.send_message(telegram_id, text)
     except TelegramForbiddenError:
         # Пользователь заблокировал бота или удалил чат — это не сбой
         # доставки, который стоит ретраить, а устойчивое состояние.
@@ -55,17 +67,30 @@ async def send_notification(bot: Bot, telegram_id: int, text: str) -> None:
 
 
 async def send_notification_photo(
-    bot: Bot, telegram_id: int, photo: bytes, caption: str
+    bot: Bot,
+    telegram_id: int,
+    photo: bytes,
+    caption: str,
+    *,
+    reply_markup: InlineKeyboardMarkup | None = None,
 ) -> None:
     """Фото с подписью; при любой проблеме с фото (не только с сетью —
     сюда же попадает, например, подпись длиннее 1024 символов) откатывается
     на обычный текст, чтобы уведомление не терялось только из-за картинки."""
     try:
-        await bot.send_photo(
-            telegram_id,
-            BufferedInputFile(photo, filename="setup.png"),
-            caption=caption,
-        )
+        if reply_markup is not None:
+            await bot.send_photo(
+                telegram_id,
+                BufferedInputFile(photo, filename="setup.png"),
+                caption=caption,
+                reply_markup=reply_markup,
+            )
+        else:
+            await bot.send_photo(
+                telegram_id,
+                BufferedInputFile(photo, filename="setup.png"),
+                caption=caption,
+            )
     except TelegramForbiddenError:
         logger.info(
             "Уведомление не доставлено: бот заблокирован",
@@ -76,4 +101,4 @@ async def send_notification_photo(
             "Не удалось отправить график, шлём текстом",
             extra={"telegram_id": telegram_id},
         )
-        await send_notification(bot, telegram_id, caption)
+        await send_notification(bot, telegram_id, caption, reply_markup=reply_markup)

@@ -34,17 +34,24 @@ D = __import__("decimal").Decimal
 
 class FakeBot:
     """Не настоящий aiogram.Bot: send_notification(_photo) зовёт только
-    send_message/send_photo."""
+    send_message/send_photo.
+
+    reply_markup принимается и запоминается отдельно: READY-уведомления
+    (этап 15.4) приходят с кнопкой "Открыть сделку", FORMING — без неё
+    (см. app/workers/scanner.py и test_ready_notification_has_open_button)."""
 
     def __init__(self) -> None:
         self.sent: list[tuple[int, str]] = []
         self.sent_photos: list[tuple[int, str]] = []
+        self.sent_markups: list[object] = []
 
-    async def send_message(self, chat_id: int, text: str) -> None:
+    async def send_message(self, chat_id: int, text: str, reply_markup=None) -> None:  # type: ignore[no-untyped-def]
         self.sent.append((chat_id, text))
+        self.sent_markups.append(reply_markup)
 
-    async def send_photo(self, chat_id: int, photo, caption: str) -> None:
+    async def send_photo(self, chat_id: int, photo, caption: str, reply_markup=None) -> None:  # type: ignore[no-untyped-def]
         self.sent_photos.append((chat_id, caption))
+        self.sent_markups.append(reply_markup)
 
 
 def _context() -> MarketContext:
@@ -180,7 +187,7 @@ async def test_expired_ttl_notifies_again(ctx) -> None:  # type: ignore[no-untyp
 
 
 async def test_setup_disappearing_expires_both_slots(ctx) -> None:  # type: ignore[no-untyped-def]
-    user, session, repo, scanner, bot, _ = ctx
+    user, session, repo, scanner, _bot, _ = ctx
 
     await scanner._handle_signal(
         repo, user, _forming_signal(), "BTC-USDT", "4h", want_ready=True, want_forming=True
@@ -318,3 +325,36 @@ async def test_chart_render_failure_still_sends_text(ctx, monkeypatch) -> None: 
 
     assert bot.sent_photos == []
     assert len(bot.sent) == 1
+
+
+async def test_ready_notification_has_open_trade_button(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Раздел 5 ТЗ этапа 15: кнопка "Открыть сделку" — только под READY."""
+    user, session, repo, scanner, bot, _ = ctx
+
+    await scanner._handle_signal(
+        repo, user, _ready_signal(), "BTC-USDT", "4h", want_ready=True, want_forming=True
+    )
+    await session.flush()
+
+    assert len(bot.sent_markups) == 1
+    markup = bot.sent_markups[0]
+    assert markup is not None
+    buttons = [b for row in markup.inline_keyboard for b in row]
+    assert any(b.text == "⚡ Открыть сделку" for b in buttons)
+
+    record = await repo.get_active_slot(user.id, "BTC-USDT", "4h", SignalLevel.READY)
+    assert record is not None
+    assert any(b.callback_data == f"exec:open:{record.id}" for b in buttons)
+
+
+async def test_forming_notification_has_no_open_trade_button(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Под FORMING кнопка входа не появляется никогда (раздел 5 ТЗ)."""
+    user, session, repo, scanner, bot, _ = ctx
+
+    await scanner._handle_signal(
+        repo, user, _forming_signal(), "BTC-USDT", "4h", want_ready=True, want_forming=True
+    )
+    await session.flush()
+
+    assert len(bot.sent_markups) == 1
+    assert bot.sent_markups[0] is None

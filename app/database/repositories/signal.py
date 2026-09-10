@@ -30,6 +30,12 @@ class SignalRepository:
         )
         return await self.session.scalar(stmt)
 
+    async def get(self, signal_id: int, user_id: int) -> SignalRecord | None:
+        stmt = select(SignalRecord).where(
+            SignalRecord.id == signal_id, SignalRecord.user_id == user_id
+        )
+        return await self.session.scalar(stmt)
+
     async def get_slot(
         self, user_id: int, symbol: str, timeframe: str, level: SignalLevel
     ) -> SignalRecord | None:

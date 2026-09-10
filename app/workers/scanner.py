@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.analysis.charting import render_setup_chart
 from app.analysis.engine import AnalysisEngine
 from app.analysis.signals import MarketContext, Signal, wait_signal
+from app.bot.keyboards.execution import open_trade_button
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.database.models.signal import SignalRecord
@@ -245,6 +246,10 @@ class SetupScanner:
         await repo.flush()
 
         if should_notify:
+            # Раздел 5 ТЗ: кнопка входа только под READY, под FORMING —
+            # никогда. record.id уже назначен предыдущим repo.flush().
+            keyboard = open_trade_button(record.id) if level is SignalLevel.READY else None
+
             photo = None
             if context is not None and notification_enabled(user.settings, "setup_charts"):
                 # В отдельном потоке: matplotlib/mplfinance синхронны и
@@ -252,6 +257,10 @@ class SetupScanner:
                 # остальных пользователей в этом цикле сканера.
                 photo = await asyncio.to_thread(render_setup_chart, context, signal, level)
             if photo is not None:
-                await send_notification_photo(self._bot, user.telegram_id, photo, record.detail)
+                await send_notification_photo(
+                    self._bot, user.telegram_id, photo, record.detail, reply_markup=keyboard
+                )
             else:
-                await send_notification(self._bot, user.telegram_id, record.detail)
+                await send_notification(
+                    self._bot, user.telegram_id, record.detail, reply_markup=keyboard
+                )

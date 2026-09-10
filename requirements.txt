@@ -20,6 +20,9 @@ aiohttp-socks==0.12.0
 # Background jobs
 APScheduler==3.11.3
 
+# Redis (блокировка от двойного нажатия, этап 15 раздел 8)
+redis==5.2.1
+
 # Math / indicators
 numpy==2.5.2
 

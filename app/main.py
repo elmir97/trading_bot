@@ -19,6 +19,7 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, MenuButtonCommands
+from redis.asyncio import Redis
 
 from app.analysis.ai.provider import AnthropicClient
 from app.bot.handlers import (
@@ -27,6 +28,7 @@ from app.bot.handlers import (
     diagnostics,
     exchange,
     exchange_menu,
+    execution,
     fsm_guard,
     insights,
     pending,
@@ -88,7 +90,7 @@ async def setup_bot_ui(bot: Bot) -> None:
 
 
 def build_dispatcher(
-    settings: Settings, db: Database, llm_client: AnthropicClient | None
+    settings: Settings, db: Database, llm_client: AnthropicClient | None, redis: Redis
 ) -> Dispatcher:
     """Собирает диспетчер: зависимости, middlewares, роутеры.
 
@@ -101,6 +103,9 @@ def build_dispatcher(
     dp["db"] = db
     dp["settings"] = settings
     dp["cipher"] = SecretCipher(settings.encryption_key.get_secret_value())
+    # Этап 15, раздел 8: блокировка от двойного нажатия "Да" — отдельный
+    # клиент от FSM-хранилища выше, назначение другое (см. app/core/locks.py).
+    dp["redis"] = redis
 
     # Порядок критичен:
     #   access     — отсекаем чужих до любых запросов в базу;
@@ -127,6 +132,7 @@ def build_dispatcher(
     dp.include_router(statistics.router)
     dp.include_router(settings_handlers.router)
     dp.include_router(insights.router)
+    dp.include_router(execution.router)
     dp.include_router(pending.router)
 
     return dp
@@ -192,7 +198,11 @@ async def run() -> None:
     else:
         logger.warning("AI-слой выключен: AI_ENABLED=false или не задан ANTHROPIC_API_KEY")
 
-    dp = build_dispatcher(settings, db, llm_client)
+    # Только для блокировки от двойного нажатия (этап 15, раздел 8) —
+    # соединение ленивое, падать здесь не на чем, пока не понадобится ключ.
+    redis = Redis.from_url(settings.redis_url, decode_responses=True)
+
+    dp = build_dispatcher(settings, db, llm_client, redis)
 
     if not settings.allowed_ids:
         logger.warning(
@@ -219,6 +229,7 @@ async def run() -> None:
         if llm_client is not None:
             await llm_client.aclose()
         await bot.session.close()
+        await redis.aclose()
         await db.dispose()
 
 

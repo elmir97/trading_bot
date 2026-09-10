@@ -92,3 +92,16 @@ class ExchangeFactory:
                 )
             )
         ) is not None
+
+    async def get_credentials(
+        self, session: AsyncSession, user_id: int, exchange: str = "bingx"
+    ) -> ExchangeCredentials | None:
+        """Активная строка ключей без расшифровки — этап 15 использует её,
+        чтобы узнать is_read_only (guard NO_TRADING_KEY), не трогая секреты."""
+        return await session.scalar(
+            select(ExchangeCredentials).where(
+                ExchangeCredentials.user_id == user_id,
+                ExchangeCredentials.exchange == exchange,
+                ExchangeCredentials.is_active.is_(True),
+            )
+        )
