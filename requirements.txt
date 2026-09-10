@@ -1,0 +1,35 @@
+# Telegram
+aiogram==3.30.0
+
+# Config / validation
+pydantic==2.13.4
+pydantic-settings==2.15.0
+
+# Database
+SQLAlchemy==2.0.52
+alembic==1.19.1
+asyncpg==0.31.0
+
+# HTTP / exchange clients
+httpx==0.28.1
+tenacity==9.1.4
+
+# SOCKS5-прокси для Telegram (нужен, если хостинг блокирует IP Telegram)
+aiohttp-socks==0.12.0
+
+# Background jobs
+APScheduler==3.11.3
+
+# Math / indicators
+numpy==2.5.2
+
+# Графики к уведомлениям о сетапах
+mplfinance==0.12.10b0
+matplotlib==3.11.1
+pandas==3.0.5
+
+# Crypto (API key encryption at rest)
+cryptography==50.0.0
+
+# Serialization
+orjson==3.12.0

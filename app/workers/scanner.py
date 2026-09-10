@@ -1,0 +1,257 @@
+"""Сканер сетапов (этап 12).
+
+READY — Signal.is_actionable (все условия детектора выполнены). FORMING —
+единственное невыполненное условие во всём Signal.conditions это
+"Подтверждающий паттерн" (см. app/analysis/setups.py: оба детектора
+проверяют его последним, прямо перед расчётом входа). Это единственное
+место, завязанное на конкретные имена условий детекторов — если в
+setups.py появится новый детектор с другим порядком проверок, это тоже
+нужно будет учесть здесь.
+
+Дедуп — по "слоту" (user, symbol, timeframe, level) в таблице signals:
+не то же самое, что случалось в прошлом скане, а то, что сейчас активно.
+См. SignalRepository и docstring SignalRecord.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+from datetime import UTC, datetime, timedelta
+
+from aiogram import Bot
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.analysis.charting import render_setup_chart
+from app.analysis.engine import AnalysisEngine
+from app.analysis.signals import MarketContext, Signal, wait_signal
+from app.core.config import Settings
+from app.core.logging import get_logger
+from app.database.models.signal import SignalRecord
+from app.database.models.user import User
+from app.database.repositories.signal import SignalRepository
+from app.database.repositories.user import UserRepository
+from app.database.session import Database
+from app.market.cache import TTLCache
+from app.market.data import MarketDataService
+from app.services.exchange_factory import ExchangeFactory
+from app.trading.enums import SignalLevel, SignalRecordStatus, Timeframe
+from app.workers.base import fmt_decimal
+from app.workers.notifier import (
+    notification_enabled,
+    send_notification,
+    send_notification_photo,
+)
+
+logger = get_logger(__name__)
+
+CONFIRMATION_CONDITION_NAME = "Подтверждающий паттерн"
+SCAN_TIMEFRAMES = (Timeframe.H1.value, Timeframe.H4.value)
+
+
+def classify_signal(signal: Signal) -> SignalLevel | None:
+    """READY/FORMING/ни один — см. docstring модуля."""
+    if signal.is_actionable:
+        return SignalLevel.READY
+
+    failed = signal.failed_conditions
+    if len(failed) == 1 and failed[0].name == CONFIRMATION_CONDITION_NAME:
+        return SignalLevel.FORMING
+    return None
+
+
+def build_fingerprint(signal: Signal, level: SignalLevel) -> str:
+    """Хэш условий сетапа — дедуп сравнивает его, а не поля по отдельности.
+
+    READY зависит от конкретных цен: заметно изменившийся вход/стоп/цель —
+    это по сути другой сетап, даже если имя и направление те же.
+
+    FORMING не может использовать signal.setup: wait_signal() в
+    app/analysis/signals.py всегда пишет туда "Нет сетапа" независимо от
+    того, какой детектор сработал — само имя детектора для WAIT-сигнала
+    нигде не сохраняется. Вместо этого берём signal.note — у каждого
+    детектора текст "не хватает подтверждения" свой и не меняется от
+    скана к скану, так что он и определяет "какой именно сетап формируется"
+    не хуже имени, и заодно не плодит уведомления от мелких колебаний.
+    """
+    if level is SignalLevel.READY:
+        parts = [
+            signal.setup,
+            signal.direction.value,
+            fmt_decimal(signal.entry_zone_low),
+            fmt_decimal(signal.entry_zone_high),
+            fmt_decimal(signal.stop_loss),
+            fmt_decimal(signal.take_profit_1),
+        ]
+    else:
+        parts = [signal.note, "forming"]
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()
+
+
+def render_detail(signal: Signal, level: SignalLevel) -> str:
+    if level is SignalLevel.READY:
+        return (
+            f"🎯 <b>Сетап готов: {signal.symbol} · {signal.timeframe.upper()}</b>\n\n"
+            f"{signal.setup} — {signal.direction.value}\n"
+            f"Вход: {fmt_decimal(signal.entry_zone_low)} – {fmt_decimal(signal.entry_zone_high)}\n"
+            f"Стоп: {fmt_decimal(signal.stop_loss)}\n"
+            f"Цель: {fmt_decimal(signal.take_profit_1)}\n"
+            f"RR: 1:{fmt_decimal(signal.risk_reward)} · Качество: {signal.confidence}/10\n\n"
+            f"<i>Проверь актуальность перед входом — рынок мог уйти с момента скана.</i>"
+        )
+    # signal.setup здесь бесполезен (см. docstring build_fingerprint) —
+    # signal.note уже содержит конкретику детектора ("цена на ретесте,
+    # но подтверждения нет" и т.п.), этого достаточно без имени сетапа.
+    return (
+        f"🌱 <b>Формируется сетап: {signal.symbol} · {signal.timeframe.upper()}</b>\n\n"
+        f"{signal.note}"
+    )
+
+
+class SetupScanner:
+    def __init__(self, bot: Bot, db: Database, settings: Settings) -> None:
+        self._bot = bot
+        self._db = db
+        self._settings = settings
+        client = ExchangeFactory(settings, None).public_client()  # type: ignore[arg-type]
+        # Свой кэш, не общий с интерактивными хендлерами — воркеры не
+        # зависят от app.bot.handlers, см. app/workers/__init__.py.
+        self._market = MarketDataService(client, TTLCache())
+        self._engine = AnalysisEngine(self._market)
+
+    async def run(self) -> None:
+        async with self._db.session() as session:
+            users = await UserRepository(session).list_active_with_plan()
+            for user in users:
+                await self._scan_user(session, user)
+            await session.flush()
+
+    async def _scan_user(self, session: AsyncSession, user: User) -> None:
+        plan = user.trading_plan
+        if plan is None or not plan.allowed_symbols:
+            return
+
+        want_ready = notification_enabled(user.settings, "setup_ready")
+        want_forming = notification_enabled(user.settings, "setup_forming")
+        if not want_ready and not want_forming:
+            return
+
+        repo = SignalRepository(session)
+        for symbol in plan.allowed_symbols:
+            for timeframe in SCAN_TIMEFRAMES:
+                try:
+                    # build_context/evaluate вместо analyze(): графику
+                    # нужен тот же MarketContext, что видел детектор, а
+                    # analyze() его не отдаёт наружу.
+                    context = await self._engine.build_context(symbol, timeframe)
+                    signal = (
+                        self._engine.evaluate(context)
+                        if context is not None
+                        else wait_signal(
+                            symbol, timeframe,
+                            "Недостаточно рыночных данных для анализа.",
+                        )
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "Скан инструмента упал",
+                        extra={"user_id": user.id, "symbol": symbol, "timeframe": timeframe},
+                    )
+                    continue
+                await self._handle_signal(
+                    repo, user, signal, symbol, timeframe, want_ready, want_forming, context
+                )
+
+    async def _handle_signal(
+        self,
+        repo: SignalRepository,
+        user: User,
+        signal: Signal,
+        symbol: str,
+        timeframe: str,
+        want_ready: bool,
+        want_forming: bool,
+        context: MarketContext | None = None,
+    ) -> None:
+        level = classify_signal(signal)
+        wanted = {SignalLevel.READY: want_ready, SignalLevel.FORMING: want_forming}
+
+        if level is None or not wanted[level]:
+            # Сетапа нет (или он есть, но пользователь отключил именно этот
+            # уровень) — гасим оба возможных активных слота немедленно, не
+            # дожидаясь TTL.
+            for lvl, enabled in wanted.items():
+                if enabled:
+                    await repo.expire_active_slot(user.id, symbol, timeframe, lvl)
+            # Сессия открыта с autoflush=False (см. Database.session) —
+            # без явного flush следующий скан того же слота в этом же
+            # цикле не увидит только что погашенную строку.
+            await repo.flush()
+            return
+
+        # Сетап дозрел до READY или откатился до FORMING — слот другого
+        # уровня для этой же пары больше не актуален.
+        other = SignalLevel.FORMING if level is SignalLevel.READY else SignalLevel.READY
+        if wanted[other]:
+            await repo.expire_active_slot(user.id, symbol, timeframe, other)
+
+        fingerprint = build_fingerprint(signal, level)
+        # Любой статус, не только ACTIVE: uq_signal_slot не включает status,
+        # так что EXPIRED-строка слота всё ещё занимает уникальный ключ —
+        # её нужно переиспользовать (UPDATE), иначе INSERT ниже словит
+        # IntegrityError, когда сетап появляется снова после того как погас.
+        existing = await repo.get_slot(user.id, symbol, timeframe, level)
+        now = datetime.now(UTC)
+        ttl = timedelta(hours=self._settings.setup_scanner_ttl_hours)
+
+        should_notify = False
+        if existing is None:
+            record = SignalRecord(
+                user_id=user.id, symbol=symbol, timeframe=timeframe, level=level
+            )
+            repo.add(record)
+            should_notify = True
+        else:
+            record = existing
+            # Условия изменились, либо тот же сетап уже провисел дольше TTL,
+            # либо слот был погашен и сетап появился заново — все три случая
+            # из требования 3 ("повтор, только если...").
+            should_notify = (
+                existing.status is not SignalRecordStatus.ACTIVE
+                or existing.fingerprint != fingerprint
+                or now >= existing.expires_at
+            )
+
+        record.status = SignalRecordStatus.ACTIVE
+        # signal.setup у WAIT/FORMING всегда "Нет сетапа" (см. docstring
+        # build_fingerprint) — берём note, но обрезаем: колонка String(64),
+        # а note — законченное предложение, которое туда не влезает целиком.
+        record.setup = (signal.setup if level is SignalLevel.READY else signal.note)[:64]
+        record.direction = signal.direction if level is SignalLevel.READY else None
+        record.fingerprint = fingerprint
+        record.entry_low = signal.entry_zone_low
+        record.entry_high = signal.entry_zone_high
+        record.stop_loss = signal.stop_loss
+        record.take_profit = signal.take_profit_1
+        record.confidence = signal.confidence if level is SignalLevel.READY else None
+        record.detail = render_detail(signal, level)
+        record.expires_at = now + ttl
+        if should_notify:
+            record.notified_at = now
+
+        # Как и в ветке выше: autoflush=False, следующий слот в этом же
+        # цикле (или expire_active_slot другого уровня) должен видеть эту
+        # запись, а не только committed-состояние из прошлого тика.
+        await repo.flush()
+
+        if should_notify:
+            photo = None
+            if context is not None and notification_enabled(user.settings, "setup_charts"):
+                # В отдельном потоке: matplotlib/mplfinance синхронны и
+                # заметно тяжелее текста — рендер не должен задерживать
+                # остальных пользователей в этом цикле сканера.
+                photo = await asyncio.to_thread(render_setup_chart, context, signal, level)
+            if photo is not None:
+                await send_notification_photo(self._bot, user.telegram_id, photo, record.detail)
+            else:
+                await send_notification(self._bot, user.telegram_id, record.detail)

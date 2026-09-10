@@ -1,0 +1,30 @@
+# Секреты — критично
+.env
+*.env
+!.env.example
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Тесты и линтеры
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.idea/
+.vscode/
+.DS_Store
+
+# Данные
+postgres_data/
+logs/
+*.log
