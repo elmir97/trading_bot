@@ -53,26 +53,30 @@ class UserService:
         user = self._users.create(telegram_id, username, first_name)
         await self._users.session.flush()  # нужен user.id для связанных записей
 
+        # Присваиваем через relationship (не только session.add), иначе
+        # user.settings/user.trading_plan остаются непрогруженными: первое же
+        # обращение к ним в этой же сессии ленивой подгрузкой падает с
+        # MissingGreenlet — AsyncSession не умеет грузить лениво вне await.
+        settings_row = UserSettings(
+            user_id=user.id,
+            timezone=self._settings.default_timezone,
+            notifications=dict(DEFAULT_NOTIFICATIONS),
+        )
+        self._users.add_settings(settings_row)
+        user.settings = settings_row
 
-        self._users.add_settings(
-            UserSettings(
-                user_id=user.id,
-                timezone=self._settings.default_timezone,
-                notifications=dict(DEFAULT_NOTIFICATIONS),
-            )
+        plan_row = TradingPlan(
+            user_id=user.id,
+            risk_per_trade_percent=self._settings.default_risk_per_trade_percent,
+            max_daily_loss_percent=self._settings.default_max_daily_loss_percent,
+            max_weekly_loss_percent=self._settings.default_max_weekly_loss_percent,
+            max_trades_per_day=self._settings.default_max_trades_per_day,
+            min_risk_reward=self._settings.min_risk_reward,
+            allowed_symbols=list(DEFAULT_ALLOWED_SYMBOLS),
+            allowed_timeframes=list(DEFAULT_ALLOWED_TIMEFRAMES),
         )
-        self._users.add_trading_plan(
-            TradingPlan(
-                user_id=user.id,
-                risk_per_trade_percent=self._settings.default_risk_per_trade_percent,
-                max_daily_loss_percent=self._settings.default_max_daily_loss_percent,
-                max_weekly_loss_percent=self._settings.default_max_weekly_loss_percent,
-                max_trades_per_day=self._settings.default_max_trades_per_day,
-                min_risk_reward=self._settings.min_risk_reward,
-                allowed_symbols=list(DEFAULT_ALLOWED_SYMBOLS),
-                allowed_timeframes=list(DEFAULT_ALLOWED_TIMEFRAMES),
-            )
-        )
+        self._users.add_trading_plan(plan_row)
+        user.trading_plan = plan_row
 
         for item in DEFAULT_STRATEGIES:
             self._strategies.create(

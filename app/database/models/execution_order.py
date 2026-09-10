@@ -89,6 +89,7 @@ class ExecutionOrder(IntPKMixin, TimestampMixin, Base):
     status: Mapped[OrderStatus] = mapped_column(
         Enum(OrderStatus, native_enum=False, length=16),
         default=OrderStatus.PENDING,
+        server_default="PENDING",
         nullable=False,
     )
 

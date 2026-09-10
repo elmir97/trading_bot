@@ -49,6 +49,7 @@ class SignalRecord(IntPKMixin, TimestampMixin, Base):
     status: Mapped[SignalRecordStatus] = mapped_column(
         Enum(SignalRecordStatus, native_enum=False, length=8),
         default=SignalRecordStatus.ACTIVE,
+        server_default="ACTIVE",
         nullable=False,
     )
 

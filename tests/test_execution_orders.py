@@ -201,13 +201,13 @@ async def test_signal_deletion_sets_null_not_cascade(ctx) -> None:  # type: igno
     order = _order(user.id, "tj-survives-signal", signal_id=signal.id)
     repo.add(order)
     await repo.flush()
-    order_id = order.id
+    order_id, user_id = order.id, user.id
 
     await session.delete(signal)
     await session.flush()
     session.expire_all()
 
-    survivor = await repo.get(order_id, user.id)
+    survivor = await repo.get(order_id, user_id)
     assert survivor is not None
     assert survivor.signal_id is None
 
@@ -221,13 +221,13 @@ async def test_trade_deletion_sets_null(ctx) -> None:  # type: ignore[no-untyped
     order = _order(user.id, "tj-survives-trade", trade_id=trade.id)
     repo.add(order)
     await repo.flush()
-    order_id = order.id
+    order_id, user_id = order.id, user.id
 
     await session.delete(trade)
     await session.flush()
     session.expire_all()
 
-    survivor = await repo.get(order_id, user.id)
+    survivor = await repo.get(order_id, user_id)
     assert survivor is not None
     assert survivor.trade_id is None
 
@@ -263,12 +263,13 @@ async def test_trade_source_signal_execution_round_trips(ctx) -> None:  # type: 
     )
     session.add(trade)
     await session.flush()
+    trade_id, signal_id = trade.id, signal.id
     session.expire_all()
 
-    reloaded = await session.get(Trade, trade.id)
+    reloaded = await session.get(Trade, trade_id)
     assert reloaded is not None
     assert reloaded.source is TradeSource.SIGNAL_EXECUTION
-    assert reloaded.signal_id == signal.id
+    assert reloaded.signal_id == signal_id
 
 
 async def test_signal_trade_opened_at_defaults_to_none(ctx) -> None:  # type: ignore[no-untyped-def]
@@ -282,8 +283,9 @@ async def test_signal_trade_opened_at_defaults_to_none(ctx) -> None:  # type: ig
 
     signal.trade_opened_at = datetime.now(UTC)
     await session.flush()
+    signal_id = signal.id
     session.expire_all()
 
-    reloaded = await session.get(SignalRecord, signal.id)
+    reloaded = await session.get(SignalRecord, signal_id)
     assert reloaded is not None
     assert reloaded.trade_opened_at is not None

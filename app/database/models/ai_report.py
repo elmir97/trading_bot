@@ -34,9 +34,15 @@ class AIReport(Base):
     report_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
 
     model: Mapped[str] = mapped_column(String(64), nullable=False)
-    input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
-    output_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
-    cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False, default=Decimal("0"))
+    input_tokens: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
+    output_tokens: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
+    cost_usd: Mapped[Decimal] = mapped_column(
+        Numeric(12, 6), nullable=False, default=Decimal("0"), server_default="0"
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default="now()"
