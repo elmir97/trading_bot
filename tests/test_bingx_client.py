@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
+from urllib.parse import unquote
 
 import httpx
 import pytest
@@ -19,9 +20,10 @@ from app.exchanges.base import (
     ExchangeRateLimitError,
     ExchangeResponseError,
     ExchangeUnavailableError,
+    TpSlSpec,
 )
 from app.exchanges.bingx import BingXClient
-from app.trading.enums import TradeSide
+from app.trading.enums import OrderSide, TradeSide
 
 D = Decimal
 
@@ -137,6 +139,21 @@ class TestPublicData:
             await client.get_klines("BTC-USDT", "3m")
         await client.close()
 
+    async def test_symbols_include_min_notional(self) -> None:
+        """tradeMinUSDT нужен sizing.py (этап 15.3) для отказа SIZE_TOO_SMALL."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return ok([{
+                "symbol": "BTC-USDT", "status": 1, "pricePrecision": 1,
+                "quantityPrecision": 4, "tradeMinQuantity": "0.0001",
+                "tradeMinUSDT": "2",
+            }])
+
+        client = make_client(handler)
+        symbols = await client.get_symbols()
+
+        assert symbols[0].min_notional == D("2")
+        await client.close()
+
 
 class TestPrivateData:
     async def test_balance(self) -> None:
@@ -200,6 +217,162 @@ class TestPrivateData:
         assert fills[1].is_entry is False   # BUY в шорт — выход
         # Комиссия приходит отрицательной, храним модуль.
         assert fills[0].fee == D("4")
+        await client.close()
+
+
+class TestSetLeverage:
+    async def test_sends_symbol_side_and_leverage_as_post(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.method == "POST"
+            url = str(request.url)
+            assert "symbol=BTC-USDT" in url
+            assert "side=LONG" in url
+            assert "leverage=5" in url
+            assert "signature=" in url
+            return ok({"leverage": 5, "symbol": "BTC-USDT"})
+
+        client = make_client(handler)
+        leverage = await client.set_leverage("BTC-USDT", 5, position_side="LONG")
+
+        assert leverage == 5
+        await client.close()
+
+    async def test_one_way_mode_defaults_to_both(self) -> None:
+        """Без position_side — односторонний режим счёта, BingX ждёт BOTH."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert "side=BOTH" in str(request.url)
+            return ok({"leverage": 10, "symbol": "ETH-USDT"})
+
+        client = make_client(handler)
+        await client.set_leverage("ETH-USDT", 10)
+        await client.close()
+
+
+class TestPlaceMarketOrder:
+    async def test_entry_with_take_profit_and_stop_loss(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.method == "POST"
+            url = unquote(str(request.url))
+            assert "type=MARKET" in url
+            assert "side=BUY" in url
+            assert "positionSide=LONG" in url
+            assert "clientOrderID=tj1-42-entry" in url
+            # takeProfit/stopLoss — JSON, упакованный в строку параметра
+            # (раздел 16 ТЗ — формат проверен по живой документации BingX).
+            assert (
+                '{"type":"TAKE_PROFIT_MARKET","stopPrice":65100,'
+                '"workingType":"MARK_PRICE"}' in url
+            )
+            assert (
+                '{"type":"STOP_MARKET","stopPrice":62400,'
+                '"workingType":"MARK_PRICE"}' in url
+            )
+            return ok({"order": {
+                "symbol": "BTC-USDT", "orderId": 123456, "side": "BUY",
+                "positionSide": "LONG", "type": "MARKET", "status": "FILLED",
+                "avgPrice": "63245.5", "executedQty": "0.014",
+                "clientOrderId": "tj1-42-entry",
+            }})
+
+        client = make_client(handler)
+        result = await client.place_market_order(
+            symbol="BTC-USDT",
+            side=OrderSide.BUY,
+            position_side="LONG",
+            quantity=D("0.014"),
+            client_order_id="tj1-42-entry",
+            take_profit=TpSlSpec(trigger_price=D("65100")),
+            stop_loss=TpSlSpec(trigger_price=D("62400")),
+        )
+
+        assert result.status == "FILLED"
+        assert result.avg_price == D("63245.5")
+        assert result.executed_qty == D("0.014")
+        assert result.client_order_id == "tj1-42-entry"
+        await client.close()
+
+    async def test_optional_price_included_in_tp_sl_payload(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = unquote(str(request.url))
+            assert (
+                '{"type":"STOP_MARKET","stopPrice":62400,"price":62350,'
+                '"workingType":"MARK_PRICE"}' in url
+            )
+            return ok({"order": {"symbol": "BTC-USDT", "status": "FILLED"}})
+
+        client = make_client(handler)
+        await client.place_market_order(
+            symbol="BTC-USDT",
+            side=OrderSide.SELL,
+            position_side="SHORT",
+            quantity=D("1"),
+            client_order_id="tj-price-test",
+            stop_loss=TpSlSpec(trigger_price=D("62400"), price=D("62350")),
+        )
+        await client.close()
+
+    async def test_rejects_client_order_id_out_of_range(self) -> None:
+        """BingX принимает clientOrderID только 1-40 символов (раздел 16 ТЗ)."""
+        client = make_client(lambda r: ok({}))
+        with pytest.raises(ValueError, match="1-40"):
+            await client.place_market_order(
+                symbol="BTC-USDT",
+                side=OrderSide.BUY,
+                position_side="LONG",
+                quantity=D("1"),
+                client_order_id="x" * 41,
+            )
+        await client.close()
+
+    async def test_network_failure_does_not_retry(self) -> None:
+        """Раздел 8 ТЗ: повторная отправка ордера после обрыва запрещена —
+        клиент не должен маскировать обрыв автоматическим повтором, иначе
+        решение "повторять или сверяться по client_order_id" примет не
+        execution/service.py, а транспортный слой."""
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            raise httpx.TimeoutException("timeout")
+
+        client = make_client(handler, max_retries=3)
+        client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
+
+        with pytest.raises(ExchangeUnavailableError):
+            await client.place_market_order(
+                symbol="BTC-USDT",
+                side=OrderSide.BUY,
+                position_side="LONG",
+                quantity=D("1"),
+                client_order_id="tj-timeout-test",
+            )
+        assert calls["n"] == 1
+        await client.close()
+
+
+class TestGetOrder:
+    async def test_query_by_client_order_id(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            assert request.method == "GET"
+            assert "symbol=BTC-USDT" in url
+            assert "clientOrderID=tj1-42-entry" in url
+            return ok({"order": {
+                "symbol": "BTC-USDT", "orderId": 123456,
+                "clientOrderId": "tj1-42-entry", "status": "FILLED",
+                "avgPrice": "63245.5", "executedQty": "0.014",
+                "commission": "-2.53", "side": "BUY", "positionSide": "LONG",
+                "type": "MARKET",
+            }})
+
+        client = make_client(handler)
+        result = await client.get_order("BTC-USDT", "tj1-42-entry")
+
+        assert result.status == "FILLED"
+        assert result.avg_price == D("63245.5")
+        # Комиссия приходит отрицательной — храним модуль, как и в get_fills.
+        assert result.fee == D("2.53")
+        assert result.order_id == "123456"
         await client.close()
 
 

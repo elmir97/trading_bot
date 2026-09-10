@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from app.trading.enums import TradeSide
+from app.trading.enums import OrderSide, TradeSide
 
 # ---------------------------------------------------------------------------
 # Исключения
@@ -170,6 +170,52 @@ class SymbolInfo:
     quantity_precision: int
     min_quantity: Decimal
     max_leverage: int
+    # Минимальный нотионал (tradeMinUSDT у BingX). По умолчанию 0 — сохраняет
+    # обратную совместимость с позиционным конструктором, которым эту
+    # dataclass уже создают в тестах.
+    min_notional: Decimal = Decimal(0)
+
+
+@dataclass(frozen=True, slots=True)
+class TpSlSpec:
+    """Условный ордер (стоп или тейк), вложенный в маркет-вход.
+
+    BingX принимает такой ордер не отдельным вызовом, а JSON-строкой
+    внутри параметров takeProfit/stopLoss запроса на вход — см.
+    BingXClient._build_tp_sl. price опционален: для *_MARKET условных
+    ордеров исполнение идёт по рынку, цена нужна только справочно.
+    """
+
+    trigger_price: Decimal
+    price: Decimal | None = None
+    working_type: str = "MARK_PRICE"
+
+
+@dataclass(frozen=True, slots=True)
+class OrderResult:
+    """Ответ биржи на размещение или запрос ордера.
+
+    status — оригинальная строка биржи (NEW/PENDING/FILLED/...), не наш
+    внутренний OrderStatus из app.trading.enums: перевод одного в другой —
+    ответственность execution/service.py, а не биржевого клиента.
+    """
+
+    order_id: str
+    client_order_id: str
+    symbol: str
+    side: str            # BUY | SELL — сторона ордера, не позиции
+    position_side: str   # LONG | SHORT | BOTH
+    order_type: str
+    status: str
+    price: Decimal
+    avg_price: Decimal
+    quantity: Decimal
+    executed_qty: Decimal
+    # Комиссия. У BingX не приходит в ответе на размещение маркет-ордера
+    # (только avg_price) — появляется лишь при последующем запросе ордера
+    # (get_order) или в get_fills. Здесь 0, если источник её не вернул.
+    fee: Decimal
+    raw: dict[str, object]
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +265,37 @@ class ExchangeClient(ABC):
     async def get_fills(
         self, start_time: datetime, end_time: datetime, symbol: str | None = None
     ) -> list[Fill]: ...
+
+    # --- Торговые методы (нужен ключ с правом Perpetual Futures Trading) ---
+    #
+    # Здесь и только здесь проходит граница с биржей: методы отправляют
+    # запрос и возвращают то, что ответила биржа, ничего не решая сами
+    # (например, в каком режиме позиций аккаунт и что поэтому положить в
+    # position_side — это знание execution/service.py, не биржевого
+    # клиента).
+
+    @abstractmethod
+    async def set_leverage(
+        self, symbol: str, leverage: int, *, position_side: str | None = None
+    ) -> int:
+        """Выставляет плечо. position_side=None — односторонний режим счёта."""
+        ...
+
+    @abstractmethod
+    async def place_market_order(
+        self,
+        *,
+        symbol: str,
+        side: OrderSide,
+        position_side: str,
+        quantity: Decimal,
+        client_order_id: str,
+        take_profit: TpSlSpec | None = None,
+        stop_loss: TpSlSpec | None = None,
+    ) -> OrderResult: ...
+
+    @abstractmethod
+    async def get_order(self, symbol: str, client_order_id: str) -> OrderResult: ...
 
     @abstractmethod
     async def close(self) -> None: ...

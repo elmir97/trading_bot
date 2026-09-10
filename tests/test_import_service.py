@@ -28,6 +28,7 @@ from app.exchanges.base import (
     ExchangeClient,
     Fill,
     Kline,
+    OrderResult,
     Position,
     SymbolInfo,
     Ticker,
@@ -69,6 +70,9 @@ class FakeExchange(ExchangeClient):
     async def get_funding_rate(self, symbol: str) -> Decimal | None: ...
     async def get_balance(self) -> Balance: ...
     async def get_positions(self) -> list[Position]: ...
+    async def set_leverage(self, symbol, leverage, *, position_side=None) -> int: ...  # type: ignore[no-untyped-def]
+    async def place_market_order(self, **kwargs) -> OrderResult: ...  # type: ignore[no-untyped-def]
+    async def get_order(self, symbol: str, client_order_id: str) -> OrderResult: ...
     async def close(self) -> None: ...
 
 

@@ -35,11 +35,13 @@ from app.exchanges.base import (
     ExchangeUnavailableError,
     Fill,
     Kline,
+    OrderResult,
     Position,
     SymbolInfo,
     Ticker,
+    TpSlSpec,
 )
-from app.trading.enums import TradeSide
+from app.trading.enums import OrderSide, OrderType, TradeSide
 
 logger = get_logger(__name__)
 
@@ -51,6 +53,9 @@ QUOTE_PREMIUM_INDEX = "/openApi/swap/v2/quote/premiumIndex"
 USER_BALANCE = "/openApi/swap/v3/user/balance"
 USER_POSITIONS = "/openApi/swap/v2/user/positions"
 TRADE_FILL_HISTORY = "/openApi/swap/v2/trade/allFillOrders"
+TRADE_LEVERAGE = "/openApi/swap/v2/trade/leverage"
+# Один и тот же путь: POST размещает ордер, GET — запрашивает его статус.
+TRADE_ORDER = "/openApi/swap/v2/trade/order"
 
 # Таймфреймы в обозначениях BingX.
 INTERVALS = {
@@ -76,6 +81,28 @@ def _to_decimal(value: Any, field: str) -> Decimal:
 
 def _ms_to_dt(value: Any) -> datetime:
     return datetime.fromtimestamp(int(value) / 1000, tz=UTC)
+
+
+def _decimal_literal(value: Decimal) -> str:
+    """Decimal как литерал числа в JSON — без экспоненциальной записи."""
+    return format(value, "f")
+
+
+def _build_tp_sl(order_type: OrderType, spec: TpSlSpec) -> str:
+    """Собирает takeProfit/stopLoss в формате, который ждёт BingX.
+
+    Не вложенный объект, а JSON, упакованный в строку — так это принимает
+    /openApi/swap/v2/trade/order (проверено по живой документации BingX,
+    см. docs/execution-stage-15.md, раздел 16).
+    """
+    fields = [
+        f'"type":"{order_type.value}"',
+        f'"stopPrice":{_decimal_literal(spec.trigger_price)}',
+    ]
+    if spec.price is not None:
+        fields.append(f'"price":{_decimal_literal(spec.price)}')
+    fields.append(f'"workingType":"{spec.working_type}"')
+    return "{" + ",".join(fields) + "}"
 
 
 class BingXClient(ExchangeClient):
@@ -132,7 +159,13 @@ class BingXClient(ExchangeClient):
     # --- Транспорт ---------------------------------------------------------
 
     async def _request(
-        self, path: str, params: dict[str, Any] | None = None, *, signed: bool = False
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        signed: bool = False,
+        method: str = "GET",
+        max_retries: int | None = None,
     ) -> Any:
         params = params or {}
 
@@ -141,17 +174,22 @@ class BingXClient(ExchangeClient):
                 raise ExchangeAuthError(
                     "Не заданы ключи BingX. Подключи их в настройках бота."
                 )
+            # BingX и для POST ждёт параметры строкой запроса, не JSON-телом —
+            # подписанная строка формируется одинаково для любого метода.
             url = f"{path}?{self._build_signed_query(params)}"
             headers = {"X-BX-APIKEY": self._api_key}
         else:
             url = f"{path}?{urlencode(params)}" if params else path
             headers = {}
 
+        send = self._client.get if method == "GET" else self._client.post
+        retries = max_retries if max_retries is not None else self._max_retries
+
         last_error: Exception | None = None
 
-        for attempt in range(1, self._max_retries + 1):
+        for attempt in range(1, retries + 1):
             try:
-                response = await self._client.get(url, headers=headers)
+                response = await send(url, headers=headers)
             except httpx.TimeoutException as exc:
                 last_error = ExchangeUnavailableError(
                     "BingX не ответил вовремя"
@@ -183,7 +221,7 @@ class BingXClient(ExchangeClient):
                         "BingX временно недоступен", extra={"path": path}
                     )
 
-            if attempt < self._max_retries:
+            if attempt < retries:
                 # Экспоненциальная пауза: при перегрузке биржи частые
                 # повторы только усугубляют ситуацию.
                 delay = self._backoff(last_error, attempt)
@@ -336,6 +374,9 @@ class BingXClient(ExchangeClient):
                         item.get("tradeMinQuantity"), "tradeMinQuantity"
                     ),
                     max_leverage=int(item.get("maxLongLeverage", 20) or 20),
+                    min_notional=_to_decimal(
+                        item.get("tradeMinUSDT"), "tradeMinUSDT"
+                    ),
                 )
             )
         return result
@@ -461,4 +502,90 @@ class BingXClient(ExchangeClient):
             realized_pnl=_to_decimal(item.get("profit"), "profit"),
             executed_at=_ms_to_dt(executed_at) if executed_at else datetime.now(UTC),
             position_id=str(item.get("positionId")) if item.get("positionId") else None,
+        )
+
+    # --- Торговые методы (этап 15.2) ----------------------------------------
+    #
+    # Всё, что размещает или меняет реальные ордера, идёт с retries=1:
+    # автоматический повтор на таймауте здесь недопустим — раздел 8 ТЗ
+    # прямо запрещает повторную отправку без предварительной сверки по
+    # client_order_id, а транспортный retry этой сверки не делает. Чтение
+    # (get_order, set_leverage — идемпотентная по своей природе операция)
+    # обычный retry сохраняет.
+
+    async def set_leverage(
+        self, symbol: str, leverage: int, *, position_side: str | None = None
+    ) -> int:
+        params: dict[str, Any] = {
+            "symbol": symbol,
+            "leverage": leverage,
+            "side": position_side or "BOTH",
+        }
+        data = await self._request(TRADE_LEVERAGE, params, signed=True, method="POST")
+        return int(data.get("leverage", leverage))
+
+    async def place_market_order(
+        self,
+        *,
+        symbol: str,
+        side: OrderSide,
+        position_side: str,
+        quantity: Decimal,
+        client_order_id: str,
+        take_profit: TpSlSpec | None = None,
+        stop_loss: TpSlSpec | None = None,
+    ) -> OrderResult:
+        if not 1 <= len(client_order_id) <= 40:
+            raise ValueError(
+                "clientOrderID у BingX — 1-40 символов, получено "
+                f"{len(client_order_id)}: {client_order_id!r}"
+            )
+
+        params: dict[str, Any] = {
+            "symbol": symbol,
+            "side": side.value,
+            "positionSide": position_side,
+            "type": OrderType.MARKET.value,
+            "quantity": _decimal_literal(quantity),
+            "clientOrderID": client_order_id,
+        }
+        if take_profit is not None:
+            params["takeProfit"] = _build_tp_sl(OrderType.TAKE_PROFIT_MARKET, take_profit)
+        if stop_loss is not None:
+            params["stopLoss"] = _build_tp_sl(OrderType.STOP_MARKET, stop_loss)
+
+        data = await self._request(
+            TRADE_ORDER, params, signed=True, method="POST", max_retries=1
+        )
+        order = data.get("order", data) if isinstance(data, dict) else {}
+        return self._parse_order(order)
+
+    async def get_order(self, symbol: str, client_order_id: str) -> OrderResult:
+        params = {"symbol": symbol, "clientOrderID": client_order_id}
+        data = await self._request(TRADE_ORDER, params, signed=True)
+        order = data.get("order", data) if isinstance(data, dict) else {}
+        return self._parse_order(order)
+
+    @staticmethod
+    def _parse_order(item: dict[str, Any]) -> OrderResult:
+        # Документация BingX сама расходится в написании этих двух полей
+        # (orderId/orderID, clientOrderId/clientOrderID) — берём оба варианта.
+        return OrderResult(
+            order_id=str(item.get("orderId") or item.get("orderID") or ""),
+            client_order_id=str(
+                item.get("clientOrderId") or item.get("clientOrderID") or ""
+            ),
+            symbol=item.get("symbol", ""),
+            side=str(item.get("side", "")),
+            position_side=str(item.get("positionSide", "")),
+            order_type=str(item.get("type", "")),
+            status=str(item.get("status", "")),
+            price=_to_decimal(item.get("price"), "price"),
+            avg_price=_to_decimal(item.get("avgPrice"), "avgPrice"),
+            quantity=_to_decimal(
+                item.get("origQty") or item.get("quantity"), "quantity"
+            ),
+            executed_qty=_to_decimal(item.get("executedQty"), "executedQty"),
+            fee=abs(_to_decimal(item.get("commission"), "commission")),
+            raw=item,
         )
