@@ -638,6 +638,8 @@ async def delete_api_key(
 # Порядок пунктов в требовании 6, дословно: сетапы READY, сетапы FORMING,
 # приближение к TP/SL, дневная сводка, дневной лимит. "Графики к сигналам"
 # добавлен позже сразу за FORMING — он относится к тем же уведомлениям.
+# "Сводка исполнения" (этап 15.4, раздел 12а) добавлена в конец — отдельный
+# переключатель, включён по умолчанию.
 NOTIFICATION_ORDER = [
     "setup_ready",
     "setup_forming",
@@ -645,6 +647,7 @@ NOTIFICATION_ORDER = [
     "tp_sl_approaching",
     "daily_report",
     "daily_limit_reached",
+    "execution_digest",
 ]
 
 

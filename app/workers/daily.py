@@ -1,6 +1,7 @@
-"""Дневная сводка и алерт дневного лимита убытка (этап 12).
+"""Дневная сводка, алерт дневного лимита убытка (этап 12) и сводка
+исполнения (этап 15.4, раздел 12а).
 
-Оба уведомления — не чаще одного раза в локальный календарный день
+Все три уведомления — не чаще одного раза в локальный календарный день
 пользователя: дата последней отправки хранится в user_settings и
 сравнивается с "сегодня" по местному времени (тот же tz_offset_for, что и
 в интерактивных отчётах — см. app/trading/risk.py).
@@ -10,6 +11,10 @@ PlanValidator при сохранении сделки, взять его нео
 процент риска без баланса не посчитать. Поэтому алерт молча пропускается
 для пользователей без подключённых ключей — то же самое ограничение уже
 есть в PlanValidator.check().
+
+Сводка исполнения на биржу не ходит: она считает уже накопленные строки
+execution_orders (см. app/workers/execution_digest.py), поэтому доступна
+даже пользователям без подключённых ключей.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.security import SecretCipher
 from app.database.models.user import User, UserSettings
+from app.database.repositories.execution_order import ExecutionOrderRepository
 from app.database.repositories.trade import TradeRepository
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
@@ -32,6 +38,7 @@ from app.services.statistics_service import StatisticsService
 from app.trading.risk import day_bounds, tz_offset_for
 from app.trading.statistics import Statistics, calculate_statistics
 from app.workers.base import fmt_decimal
+from app.workers.execution_digest import build_stats, render_execution_digest
 from app.workers.notifier import notification_enabled, send_notification
 
 logger = get_logger(__name__)
@@ -87,6 +94,9 @@ class DailyJobs:
 
         await self._maybe_send_summary(session, user, settings_row, now, tz_offset, today_local, local_hour)
         await self._maybe_send_loss_alert(session, user, settings_row, now, tz_offset, today_local)
+        await self._maybe_send_execution_digest(
+            session, user, settings_row, now, tz_offset, today_local, local_hour
+        )
 
     async def _maybe_send_summary(
         self,
@@ -160,5 +170,40 @@ class DailyJobs:
             f"Убыток за день: −{fmt_decimal(day_loss_pct)}% при лимите "
             f"{fmt_decimal(plan.max_daily_loss_percent)}%.\n\n"
             f"Методология рекомендует закрыть торговый день."
+        )
+        await send_notification(self._bot, user.telegram_id, text)
+
+    async def _maybe_send_execution_digest(
+        self,
+        session,
+        user: User,
+        settings_row: UserSettings,
+        now: datetime,
+        tz_offset: int,
+        today_local,
+        local_hour: int,
+    ) -> None:
+        """Раздел 12а ТЗ. Час свой (EXEC_DAILY_DIGEST_HOUR), не
+        DAILY_SUMMARY_HOUR_LOCAL — переключатель у пользователя отдельный
+        ("🔔 Уведомления" → "сводка исполнения"), поэтому и час не завязан
+        на обычную дневную сводку."""
+        if not notification_enabled(settings_row, "execution_digest"):
+            return
+        if settings_row.execution_digest_last_sent_date == today_local:
+            return
+        if local_hour < self._settings.exec_daily_digest_hour:
+            return
+
+        day_start, day_end = day_bounds(now, tz_offset)
+        rows = await ExecutionOrderRepository(session).list_entries_between(
+            user.id, day_start, day_end
+        )
+        plan = user.trading_plan
+        target_risk_percent = plan.risk_per_trade_percent if plan else None
+        stats = build_stats(rows, target_risk_percent=target_risk_percent)
+
+        settings_row.execution_digest_last_sent_date = today_local
+        text = render_execution_digest(
+            stats, max_price_drift_ratio=self._settings.exec_max_price_drift_ratio
         )
         await send_notification(self._bot, user.telegram_id, text)

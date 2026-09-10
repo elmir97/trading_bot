@@ -25,6 +25,7 @@ NOTIFICATION_LABELS: dict[str, str] = {
     "tp_sl_approaching": "📍 приближение к TP/SL",
     "daily_report": "📄 дневная сводка",
     "daily_limit_reached": "🛑 дневной лимит убытка",
+    "execution_digest": "📊 сводка исполнения",
 }
 
 

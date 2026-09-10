@@ -14,8 +14,10 @@ from decimal import Decimal
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
 
 from app.core.config import Settings
+from app.database.models.execution_order import ExecutionOrder
 from app.database.models.signal import SignalRecord
 from app.database.models.trade import Trade
 from app.database.repositories.strategy import MistakeTypeRepository, StrategyRepository
@@ -180,6 +182,62 @@ async def test_execution_disabled_refuses_without_touching_exchange(ctx) -> None
     assert isinstance(result, ExecutionRefusal)
     assert result.code is Code.EXECUTION_DISABLED
     assert client.balance == D("1000")  # get_balance не вызывался — цена/баланс не тронуты
+
+
+async def test_execution_disabled_writes_refused_observation_without_price(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Раздел 12а ТЗ: отказ гварда пишется сам собой, ещё до похода на
+    биржу за ценой — price/price_drift_percent у такой строки NULL."""
+    session, user, client, market = ctx
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+
+    service = ExecutionService(session=session, settings=Settings(), client=client, market=market)  # type: ignore[call-arg]
+    result = await service.evaluate(
+        user=user, signal=signal, plan=user.trading_plan,
+        has_trading_key=True, key_can_trade_futures=True, now=NOW,
+    )
+    assert isinstance(result, ExecutionRefusal)
+
+    rows = list(
+        await session.scalars(select(ExecutionOrder).where(ExecutionOrder.signal_id == signal.id))
+    )
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.status is OrderStatus.REFUSED
+    assert row.role is OrderRole.ENTRY
+    assert row.error_code == Code.EXECUTION_DISABLED.value
+    assert row.client_order_id is None
+    assert row.price is None
+    assert row.quantity is None
+
+
+async def test_max_positions_refused_observation_captures_price_and_drift(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Гварды после захода на биржу (раздел 7, пп. 3-12) уже знают цену и
+    дрейф на момент отказа — они попадают в строку-наблюдение."""
+    session, user, client, market = ctx
+    signal = _signal(user.id)
+    session.add(signal)
+    settings = Settings(trading_execution_enabled=True, exec_max_open_positions=2)  # type: ignore[call-arg]
+    for i in range(2):
+        session.add(_open_trade(user.id, symbol=f"ALT{i}-USDT"))
+    await session.flush()
+
+    service = _service(session, settings, client, market)
+    result = await service.evaluate(
+        user=user, signal=signal, plan=user.trading_plan,
+        has_trading_key=True, key_can_trade_futures=True, now=NOW,
+    )
+    assert isinstance(result, ExecutionRefusal)
+    assert result.code is Code.MAX_POSITIONS
+
+    rows = list(
+        await session.scalars(select(ExecutionOrder).where(ExecutionOrder.signal_id == signal.id))
+    )
+    assert len(rows) == 1
+    assert rows[0].error_code == Code.MAX_POSITIONS.value
+    assert rows[0].price == D("100")  # цена тикера FakeExchangeClient
+    assert rows[0].price_drift_percent is not None  # сигнал на 100.5, цена 100 — не 0
 
 
 async def test_no_trading_key_refuses(ctx) -> None:  # type: ignore[no-untyped-def]

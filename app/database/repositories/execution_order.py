@@ -7,10 +7,13 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models.execution_order import ExecutionOrder
+from app.trading.enums import OrderRole
 
 
 class ExecutionOrderRepository:
@@ -38,6 +41,24 @@ class ExecutionOrderRepository:
         stmt = select(ExecutionOrder).where(
             ExecutionOrder.user_id == user_id,
             ExecutionOrder.signal_id == signal_id,
+        )
+        return list(await self.session.scalars(stmt))
+
+    async def list_entries_between(
+        self, user_id: int, start: datetime, end: datetime
+    ) -> list[ExecutionOrder]:
+        """Раздел 12а ТЗ: сырьё для дневной сводки исполнения.
+
+        role=ENTRY, а не все строки — один подтверждённый вход пишет три
+        строки (вход, стоп, тейк, раздел 8 ТЗ), а REFUSED/DECLINED/EXPIRED
+        (раздел 12а) всегда одна строка с role=ENTRY. Без фильтра по роли
+        подтверждённые входы утроились бы в подсчётах сводки.
+        """
+        stmt = select(ExecutionOrder).where(
+            ExecutionOrder.user_id == user_id,
+            ExecutionOrder.role == OrderRole.ENTRY,
+            ExecutionOrder.created_at >= start,
+            ExecutionOrder.created_at < end,
         )
         return list(await self.session.scalars(stmt))
 

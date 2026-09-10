@@ -87,6 +87,8 @@ class UserSettings(IntPKMixin, TimestampMixin, Base):
     # NULL значит "ещё не отправляли".
     daily_summary_last_sent_date: Mapped[date | None] = mapped_column(Date)
     daily_loss_alert_last_sent_date: Mapped[date | None] = mapped_column(Date)
+    # Этап 15.4, раздел 12а — та же схема "не чаще раза в локальный день".
+    execution_digest_last_sent_date: Mapped[date | None] = mapped_column(Date)
 
     user: Mapped[User] = relationship(back_populates="settings")
 
@@ -103,4 +105,5 @@ DEFAULT_NOTIFICATIONS: dict[str, bool] = {
     "tp_sl_approaching": True,  # этап 12: цена рядом с TP или SL
     "daily_report": True,
     "unannotated_trades": True,
+    "execution_digest": True,  # этап 15.4: ежедневная сводка исполнения (раздел 12а)
 }

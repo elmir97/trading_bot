@@ -275,6 +275,7 @@ async def ctx():  # type: ignore[no-untyped-def]
         dp["settings"] = settings
         dp["cipher"] = None
         dp["redis"] = redis
+        dp["db"] = db
         dp.include_router(_fresh_execution_router())
 
         yield dp, session, user, client, redis, settings
@@ -331,6 +332,14 @@ async def test_open_button_shows_refusal_when_execution_disabled(ctx, bot, monke
     assert "Не открыл" in texts[0]
     assert (user.id, signal.id) not in execution._confirmations
 
+    # Раздел 12а ТЗ: отказ гварда пишется ExecutionService.evaluate() сам,
+    # без похода в биржу — карточка при этом не показывается.
+    orders = await _orders_for_signal(session, signal.id)
+    assert len(orders) == 1
+    assert orders[0].status is OrderStatus.REFUSED
+    assert orders[0].error_code == "EXECUTION_DISABLED"
+    assert orders[0].client_order_id is None
+
 
 # ---------------------------------------------------------------------------
 # Да
@@ -379,8 +388,15 @@ async def test_confirm_no_cancels_without_orders(ctx, bot, monkeypatch) -> None:
 
     await _feed(dp, bot, 2, make_callback(f"exec:no:{signal.id}", message_id=state.message_id))
 
+    # Раздел 12а ТЗ: карточка была показана и отклонена пользователем — не
+    # DRY_RUN (нет тройки вход/стоп/тейк), а одна строка-наблюдение DECLINED
+    # с цифрами карточки, без client_order_id (нечего отправлять на биржу).
     orders = await _orders_for_signal(session, signal.id)
-    assert orders == []
+    assert len(orders) == 1
+    assert orders[0].status is OrderStatus.DECLINED
+    assert orders[0].role is OrderRole.ENTRY
+    assert orders[0].client_order_id is None
+    assert orders[0].quantity is not None
     await session.refresh(signal)
     assert signal.trade_opened_at is None
     assert (user.id, signal.id) not in execution._confirmations
@@ -421,8 +437,44 @@ async def test_confirm_yes_after_ttl_shows_expired(ctx, bot, monkeypatch) -> Non
 
     await _feed(dp, bot, 2, make_callback(f"exec:yes:{signal.id}", message_id=state.message_id))
 
+    # Раздел 12а ТЗ: "Да" пришло позже TTL — считаем карточку истёкшей и
+    # логируем EXPIRED, а не молча проглатываем попытку.
     orders = await _orders_for_signal(session, signal.id)
-    assert orders == []
+    assert len(orders) == 1
+    assert orders[0].status is OrderStatus.EXPIRED
+    assert (user.id, signal.id) not in execution._confirmations
+    edits = [m for m in bot.recorder.calls if isinstance(m, EditMessageReplyMarkup)]
+    assert len(edits) == 1
+
+
+async def test_expire_card_background_task_writes_expired(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Раздел 12а ТЗ: настоящая фоновая просрочка (никто не нажал ни одну
+    кнопку) тоже обязана записать EXPIRED, не только путь через "Да".
+
+    _expire_card пишет из отдельной сессии (задача не участвует в
+    транзакции хендлера, который её запустил) — сигнал обязан быть
+    закоммичен по-настоящему, иначе отдельное соединение его не увидит
+    (в проде транзакция апдейта давно закрыта к моменту срабатывания TTL;
+    здесь это эмулирует явный commit вместо обычного flush).
+    """
+    dp, session, user, client, _redis, settings = ctx
+    settings.exec_confirm_ttl_seconds = 0
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.commit()
+
+    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+    assert (user.id, signal.id) in execution._confirmations
+
+    tasks = list(execution._background_tasks)
+    assert len(tasks) == 1
+    await tasks[0]
+
+    orders = await _orders_for_signal(session, signal.id)
+    assert len(orders) == 1
+    assert orders[0].status is OrderStatus.EXPIRED
     assert (user.id, signal.id) not in execution._confirmations
     edits = [m for m in bot.recorder.calls if isinstance(m, EditMessageReplyMarkup)]
     assert len(edits) == 1
@@ -446,8 +498,13 @@ async def test_confirm_yes_price_drift_sends_recalculated_card(ctx, bot, monkeyp
 
     await _feed(dp, bot, 2, make_callback(f"exec:yes:{signal.id}", message_id=state.message_id))
 
+    # Раздел 12а ТЗ: сам PRICE_DRIFT-отказ на "Да" — это тоже отказ гварда,
+    # ExecutionService.evaluate() пишет его сам (REFUSED). Тройки DRY_RUN
+    # при этом всё ещё нет — вход не состоялся, только пересчёт карточки.
     orders = await _orders_for_signal(session, signal.id)
-    assert orders == []
+    assert len(orders) == 1
+    assert orders[0].status is OrderStatus.REFUSED
+    assert orders[0].error_code == "PRICE_DRIFT"
     await session.refresh(signal)
     assert signal.trade_opened_at is None
 

@@ -10,6 +10,12 @@
 как и _market_cache в exchange.py — рестарт бота теряет незавершённые
 карточки, но не позиции: ни одна не создана, пока не подтверждена. Это
 тот же компромисс, что и у остальных кэшей в проекте.
+
+Раздел 12а ТЗ: каждый исход попытки входа по READY-сигналу пишет строку в
+execution_orders — DRY_RUN при «Да», DECLINED при «Нет», EXPIRED по TTL.
+Отказ гварда (REFUSED) пишет сам ExecutionService.evaluate(), не здесь.
+Отдельной таблицы под ежедневную сводку исполнения нет — см. раздел
+"Что накапливать" в ТЗ и app/workers/execution_digest.py.
 """
 
 from __future__ import annotations
@@ -37,9 +43,17 @@ from app.database.models.trading_plan import TradingPlan
 from app.database.models.user import User
 from app.database.repositories.execution_order import ExecutionOrderRepository
 from app.database.repositories.signal import SignalRepository
+from app.database.session import Database
 from app.exchanges.base import ExchangeAuthError, ExchangeError
 from app.execution.models import ExecutionRefusal, ExecutionRefusalCode
-from app.execution.service import ExecutionQuote, ExecutionService, build_execution_orders
+from app.execution.service import (
+    ExecutionQuote,
+    ExecutionService,
+    build_execution_orders,
+    build_observation_order_from_quote,
+    price_drift_percent,
+    signal_reference_price,
+)
 from app.market.data import MarketDataService
 from app.services.exchange_factory import ExchangeFactory
 from app.trading.enums import OrderStatus, SignalLevel, SignalRecordStatus
@@ -53,12 +67,20 @@ _EvaluationResult = ExecutionQuote | ExecutionRefusal | str
 @dataclass(slots=True)
 class _ConfirmationState:
     """Снимок карточки между показом и «Да» — источник planned_price для
-    дрейф-проверки (раздел 5 ТЗ) и якорь TTL."""
+    дрейф-проверки (раздел 5 ТЗ) и якорь TTL.
+
+    quote/drift_percent — раздел 12а ТЗ: то же самое, что показано на
+    карточке, нужно, чтобы записать исход (DECLINED/EXPIRED) с теми же
+    числами, если пользователь ответит «Нет» или карточка просто истечёт —
+    без повторного похода на биржу ради чисел, которые уже посчитаны.
+    """
 
     planned_price: Decimal
     created_at: datetime
     chat_id: int
     message_id: int
+    quote: ExecutionQuote
+    drift_percent: Decimal | None
 
 
 # (user_id, signal_id) → активная карточка. Одна на пару: новая карточка
@@ -84,21 +106,15 @@ def render_refusal(refusal: ExecutionRefusal) -> str:
     return f"🚫 Не открыл: {refusal.message}"
 
 
-def _signal_reference_price(signal: SignalRecord) -> Decimal | None:
-    if signal.entry_low is not None and signal.entry_high is not None:
-        return (signal.entry_low + signal.entry_high) / 2
-    return signal.entry_low or signal.entry_high
-
-
 def render_confirmation(quote: ExecutionQuote, signal: SignalRecord, settings: Settings) -> str:
     """Раздел 5 ТЗ: карточка подтверждения со всеми цифрами."""
     order = quote.order
     base_asset = order.symbol.split("-")[0]
 
     drift_note = ""
-    reference = _signal_reference_price(signal)
-    if reference is not None and reference > 0:
-        drift_pct = abs(order.entry_price - reference) / reference * Decimal(100)
+    reference = signal_reference_price(signal)
+    drift_pct = price_drift_percent(order.entry_price, signal)
+    if reference is not None and drift_pct is not None:
         drift_note = (
             f" (сигнал был на {fmt_num(reference)}, "
             f"дрейф {fmt_num(drift_pct.quantize(Decimal('0.01')))}%)"
@@ -175,6 +191,7 @@ async def _build_quote(
 
 async def _send_result(
     bot: Bot,
+    db: Database,
     chat_id: int,
     user: User,
     signal: SignalRecord,
@@ -185,6 +202,8 @@ async def _send_result(
         await bot.send_message(chat_id, result)
         return
     if isinstance(result, ExecutionRefusal):
+        # Раздел 12а ТЗ: наблюдение за этим отказом уже записано внутри
+        # ExecutionService.evaluate() (status REFUSED) — здесь только текст.
         await bot.send_message(chat_id, render_refusal(result))
         return
 
@@ -196,10 +215,12 @@ async def _send_result(
         created_at=now,
         chat_id=sent.chat.id,
         message_id=sent.message_id,
+        quote=result,
+        drift_percent=price_drift_percent(result.order.entry_price, signal),
     )
     task = asyncio.create_task(
         _expire_card(
-            bot, user.id, signal.id, sent.chat.id, sent.message_id,
+            bot, db, user.id, signal.id, sent.chat.id, sent.message_id,
             settings.exec_confirm_ttl_seconds,
         )
     )
@@ -208,13 +229,23 @@ async def _send_result(
 
 
 async def _expire_card(
-    bot: Bot, user_id: int, signal_id: int, chat_id: int, message_id: int, ttl_seconds: int
+    bot: Bot,
+    db: Database,
+    user_id: int,
+    signal_id: int,
+    chat_id: int,
+    message_id: int,
+    ttl_seconds: int,
 ) -> None:
     """Раздел 5 ТЗ: по истечении TTL кнопки заменяются на «просрочено».
 
     Сверка по message_id перед правкой: если карточку уже обработали
     (Да/Нет) или заменили пересчитанной после PRICE_DRIFT, задача не
     трогает чужое сообщение — просто выходит.
+
+    Раздел 12а ТЗ: карточка, дожившая до этой точки, точно не была ни
+    подтверждена, ни отклонена — пишем EXPIRED в собственной сессии (эта
+    задача не участвует в транзакции обработчика, который её запустил).
     """
     await asyncio.sleep(ttl_seconds)
     key = (user_id, signal_id)
@@ -222,6 +253,11 @@ async def _expire_card(
     if state is None or state.chat_id != chat_id or state.message_id != message_id:
         return
     del _confirmations[key]
+    row = build_observation_order_from_quote(
+        state.quote.order, status=OrderStatus.EXPIRED, price_drift_percent=state.drift_percent
+    )
+    async with db.session() as session:
+        session.add(row)
     with contextlib.suppress(TelegramBadRequest):
         # Сообщение могли удалить/отредактировать руками — не критично.
         await bot.edit_message_reply_markup(
@@ -241,6 +277,7 @@ async def open_confirmation(
     user: User,
     settings: Settings,
     cipher: SecretCipher,
+    db: Database,
 ) -> None:
     signal_id = _parse_signal_id(str(callback.data), ExecutionCB.OPEN)
     await callback.answer()
@@ -264,16 +301,27 @@ async def open_confirmation(
     result = await _build_quote(
         session, user, signal, plan, settings, cipher, planned_price=None
     )
-    await _send_result(callback.bot, callback.message.chat.id, user, signal, result, settings)
+    await _send_result(
+        callback.bot, db, callback.message.chat.id, user, signal, result, settings
+    )
 
 
 @router.callback_query(F.data.startswith(ExecutionCB.NO))
-async def confirm_no(callback: CallbackQuery, user: User) -> None:
+async def confirm_no(callback: CallbackQuery, user: User, session: AsyncSession) -> None:
+    """Раздел 12а ТЗ: отказ пользователя пишется тут же, в транзакции этого
+    апдейта — карточка ещё жива в _confirmations, повторный поход на биржу
+    ради чисел не нужен, они уже посчитаны при показе (state.quote)."""
     signal_id = _parse_signal_id(str(callback.data), ExecutionCB.NO)
     await callback.answer()
     if signal_id is None or not isinstance(callback.message, Message):
         return
-    _confirmations.pop((user.id, signal_id), None)
+    state = _confirmations.pop((user.id, signal_id), None)
+    if state is not None:
+        row = build_observation_order_from_quote(
+            state.quote.order, status=OrderStatus.DECLINED, price_drift_percent=state.drift_percent
+        )
+        session.add(row)
+        await session.flush()
     await callback.message.edit_text("❌ Вход отменён.", reply_markup=None)
 
 
@@ -290,6 +338,7 @@ async def confirm_yes(
     settings: Settings,
     cipher: SecretCipher,
     redis: RedisLike,
+    db: Database,
 ) -> None:
     signal_id = _parse_signal_id(str(callback.data), ExecutionCB.YES)
     if signal_id is None:
@@ -300,7 +349,7 @@ async def confirm_yes(
     # ответ "уже обрабатывается", без ожидания и без повторной попытки.
     try:
         async with RedisLock(redis, confirm_lock_key(user.id, signal_id), ttl_seconds=15):
-            await _process_confirm(callback, session, user, signal_id, settings, cipher)
+            await _process_confirm(callback, session, user, signal_id, settings, cipher, db)
     except LockBusyError:
         await callback.answer("Уже обрабатывается…", show_alert=True)
 
@@ -312,6 +361,7 @@ async def _process_confirm(
     signal_id: int,
     settings: Settings,
     cipher: SecretCipher,
+    db: Database,
 ) -> None:
     await callback.answer()
     if not isinstance(callback.message, Message) or callback.bot is None:
@@ -322,15 +372,25 @@ async def _process_confirm(
     now = datetime.now(UTC)
     ttl = timedelta(seconds=settings.exec_confirm_ttl_seconds)
 
-    if (
-        state is None
-        or state.message_id != callback.message.message_id
-        or now - state.created_at > ttl
-    ):
-        # Либо TTL истёк раньше фоновой правки кнопок, либо это устаревшая
-        # карточка (заменена пересчётом после PRICE_DRIFT), либо бот
-        # перезапускался — во всех случаях тихий вход недопустим.
+    if state is None or state.message_id != callback.message.message_id:
+        # Устаревшая карточка (заменена пересчётом после PRICE_DRIFT) или
+        # бот перезапускался — нечего логировать как отдельный исход,
+        # актуальная карточка (если есть) сама допишет свой результат.
         _confirmations.pop(key, None)
+        with contextlib.suppress(TelegramBadRequest):
+            await callback.message.edit_reply_markup(reply_markup=expired_keyboard())
+        return
+
+    if now - state.created_at > ttl:
+        # Раздел 12а ТЗ: "Да" пришло позже TTL — фоновая _expire_card ещё
+        # не успела дописать EXPIRED (или уже успела и это гонка), но с
+        # точки зрения пользователя карточка истекла; тихий вход недопустим.
+        _confirmations.pop(key, None)
+        row = build_observation_order_from_quote(
+            state.quote.order, status=OrderStatus.EXPIRED, price_drift_percent=state.drift_percent
+        )
+        session.add(row)
+        await session.flush()
         with contextlib.suppress(TelegramBadRequest):
             await callback.message.edit_reply_markup(reply_markup=expired_keyboard())
         return
@@ -375,7 +435,7 @@ async def _process_confirm(
                 "↻ Цена ушла дальше допустимого. Пересчитал карточку:"
             )
             await _send_result(
-                callback.bot, callback.message.chat.id, user, signal, new_result, settings
+                callback.bot, db, callback.message.chat.id, user, signal, new_result, settings
             )
         else:
             await callback.message.edit_text(render_refusal(result), reply_markup=None)
@@ -384,9 +444,13 @@ async def _process_confirm(
     # Успех: этап 15.4 — реального ордера не будет, только сухой прогон.
     _confirmations.pop(key, None)
     order = result.order
+    # Дрейф — от свежей цены подтверждения (order.entry_price), не от цены
+    # первого показа карточки (state.drift_percent): раздел 5 ТЗ запрашивает
+    # цену заново именно на "Да", это и есть цифры на момент входа.
+    drift = price_drift_percent(order.entry_price, signal)
 
     orders_repo = ExecutionOrderRepository(session)
-    for row in build_execution_orders(order, OrderStatus.DRY_RUN):
+    for row in build_execution_orders(order, OrderStatus.DRY_RUN, price_drift_percent=drift):
         orders_repo.add(row)
     await orders_repo.flush()
 
