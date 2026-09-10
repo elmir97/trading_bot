@@ -37,7 +37,7 @@ from app.trading.calculations import (
     calculate_risk_reward,
     to_decimal,
 )
-from app.trading.enums import TradeSide
+from app.trading.enums import ExchangeKeyMode, TradeSide
 from app.workers.notifier import NOTIFICATION_LABELS
 from sqlalchemy import select
 
@@ -50,10 +50,13 @@ class SetCB:
     TRADES = "set:trades"
     NOTIFY = "set:notify:"
     NOTIFICATIONS = "set:notifications"
-    API = "set:api"
-    API_DELETE = "set:api_delete"
     PLAN = "set:plan"
-    API_BACK = "set:api_back"
+    # Этап 15.4в: переключатель счёта (что показывать) и ключи по режимам.
+    MODE = "set:mode"
+    API = "set:api"                    # submenu: обе пары ключей разом
+    API_MODE = "set:api:"              # + LIVE/DEMO — начать ввод пары
+    API_MODE_DELETE = "set:api_delete:"  # + LIVE/DEMO — удалить пару
+    API_MODE_BACK = "set:api_back:"    # + LIVE/DEMO — назад с шага secret
 
 
 async def _reply(event: Message | CallbackQuery, text: str, keyboard=None) -> None:  # type: ignore[no-untyped-def]
@@ -318,7 +321,9 @@ async def calc_target(message: Message, state: FSMContext) -> None:
 # ---------------------------------------------------------------------------
 
 
-def settings_keyboard(has_api_key: bool) -> InlineKeyboardBuilder:
+def settings_keyboard(
+    active_mode: ExchangeKeyMode, has_live: bool, has_demo: bool
+) -> InlineKeyboardBuilder:
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text="🧮 Риск на сделку", callback_data=SetCB.RISK),
@@ -330,7 +335,13 @@ def settings_keyboard(has_api_key: bool) -> InlineKeyboardBuilder:
     )
     builder.row(
         InlineKeyboardButton(
-            text="🔑 Ключи BingX" if not has_api_key else "🔑 Ключи (подключены)",
+            text=f"💱 Счёт: {active_mode.label}", callback_data=SetCB.MODE
+        )
+    )
+    has_any = has_live or has_demo
+    builder.row(
+        InlineKeyboardButton(
+            text="🔑 Ключи BingX" if not has_any else "🔑 Ключи (подключены)",
             callback_data=SetCB.API,
         )
     )
@@ -342,12 +353,13 @@ def settings_keyboard(has_api_key: bool) -> InlineKeyboardBuilder:
 
 
 async def _get_credentials(
-    session: AsyncSession, user_id: int
+    session: AsyncSession, user_id: int, mode: ExchangeKeyMode
 ) -> ExchangeCredentials | None:
     return await session.scalar(
         select(ExchangeCredentials).where(
             ExchangeCredentials.user_id == user_id,
             ExchangeCredentials.exchange == "bingx",
+            ExchangeCredentials.mode == mode,
         )
     )
 
@@ -361,7 +373,9 @@ async def show_settings(
     repo = UserRepository(session)
     plan = await repo.get_trading_plan(user.id)
     user_settings = await repo.get_settings(user.id)
-    creds = await _get_credentials(session, user.id)
+    active_mode = user_settings.active_exchange_mode if user_settings else ExchangeKeyMode.LIVE
+    live = await _get_credentials(session, user.id, ExchangeKeyMode.LIVE)
+    demo = await _get_credentials(session, user.id, ExchangeKeyMode.DEMO)
 
     lines = ["<b>Настройки</b>", ""]
     if plan is not None:
@@ -376,12 +390,41 @@ async def show_settings(
         lines.append(f"Часовой пояс: {user_settings.timezone}")
 
     lines.append("")
-    if creds is not None:
-        lines.append(f"Ключи BingX: {creds.api_key_masked}")
-    else:
-        lines.append("Ключи BingX: не подключены")
+    lines.append(f"Счёт: {active_mode.label}")
+    lines.append(
+        f"Ключи · реальный: {live.api_key_masked if live else 'не подключены'}"
+    )
+    lines.append(
+        f"Ключи · демо: {demo.api_key_masked if demo else 'не подключены'}"
+    )
 
-    await _reply(event, "\n".join(lines), settings_keyboard(creds is not None).as_markup())
+    await _reply(
+        event,
+        "\n".join(lines),
+        settings_keyboard(active_mode, live is not None, demo is not None).as_markup(),
+    )
+
+
+@router.callback_query(F.data == SetCB.MODE)
+async def toggle_exchange_mode(
+    callback: CallbackQuery, state: FSMContext, user: User, session: AsyncSession
+) -> None:
+    """Переключатель «Счёт: реальный/демо» (этап 15.4в).
+
+    Меняет только то, какой счёт бот читает и показывает (баланс, позиции,
+    цифры карточки подтверждения) — куда реально уходят ордера, решает
+    конфиг (BINGX_TRADING_MODE), см. guards.check_mode_allowed."""
+    settings_row = await UserRepository(session).get_settings(user.id)
+    if settings_row is None:
+        await callback.answer()
+        return
+    settings_row.active_exchange_mode = (
+        ExchangeKeyMode.DEMO
+        if settings_row.active_exchange_mode is ExchangeKeyMode.LIVE
+        else ExchangeKeyMode.LIVE
+    )
+    await session.flush()
+    await show_settings(callback, state, user, session)
 
 
 @router.callback_query(F.data == SetCB.PLAN)
@@ -522,25 +565,76 @@ async def set_trades(
 
 
 # ---------------------------------------------------------------------------
-# Биржевые ключи
+# Биржевые ключи (этап 15.4в: отдельная пара на LIVE и на DEMO)
 # ---------------------------------------------------------------------------
 
 
-async def _show_api_key_prompt(
+def _api_keys_menu(
+    live: ExchangeCredentials | None, demo: ExchangeCredentials | None
+) -> InlineKeyboardBuilder:
+    builder = InlineKeyboardBuilder()
+    for mode, creds in ((ExchangeKeyMode.LIVE, live), (ExchangeKeyMode.DEMO, demo)):
+        label = mode.label
+        builder.row(
+            InlineKeyboardButton(
+                text=f"✏️ {label}: заменить" if creds else f"➕ {label}: добавить",
+                callback_data=f"{SetCB.API_MODE}{mode.value}",
+            )
+        )
+        if creds is not None:
+            builder.row(
+                InlineKeyboardButton(
+                    text=f"🗑 Удалить · {label}",
+                    callback_data=f"{SetCB.API_MODE_DELETE}{mode.value}",
+                )
+            )
+    builder.row(*nav_row(MenuCallback.SETTINGS))
+    return builder
+
+
+async def _show_api_keys_menu(
     event: Message | CallbackQuery, state: FSMContext, user: User, session: AsyncSession
 ) -> None:
-    """Экран ввода API Key — общий для первого захода и для «Назад» с шага Secret."""
-    creds = await _get_credentials(session, user.id)
+    await state.clear()
+    live = await _get_credentials(session, user.id, ExchangeKeyMode.LIVE)
+    demo = await _get_credentials(session, user.id, ExchangeKeyMode.DEMO)
 
-    builder = InlineKeyboardBuilder()
-    if creds is not None:
-        builder.button(text="🗑 Удалить ключи", callback_data=SetCB.API_DELETE)
-    builder.adjust(1)
-    builder.row(*nav_row(MenuCallback.SETTINGS))
+    lines = [
+        "<b>Ключи BingX</b>",
+        "",
+        "Каждый счёт — отдельная пара ключей, обе шифруются перед записью "
+        "в базу и никогда не попадают в логи.",
+        "",
+        f"{ExchangeKeyMode.LIVE.label}: "
+        f"{live.api_key_masked if live else 'не подключены'}",
+        f"{ExchangeKeyMode.DEMO.label}: "
+        f"{demo.api_key_masked if demo else 'не подключены'}",
+    ]
+    await _reply(event, "\n".join(lines), _api_keys_menu(live, demo).as_markup())
+
+
+@router.callback_query(F.data == SetCB.API)
+async def show_api_keys(
+    callback: CallbackQuery, state: FSMContext, user: User, session: AsyncSession
+) -> None:
+    await _show_api_keys_menu(callback, state, user, session)
+
+
+async def _show_api_key_prompt(
+    event: Message | CallbackQuery,
+    state: FSMContext,
+    user: User,
+    session: AsyncSession,
+    mode: ExchangeKeyMode,
+) -> None:
+    """Экран ввода API Key для конкретного режима — общий для первого
+    захода и для «Назад» с шага Secret."""
+    creds = await _get_credentials(session, user.id, mode)
 
     await state.set_state(SettingsStates.api_key)
+    await state.update_data(mode=mode.value)
     text = (
-        "<b>Подключение BingX</b>\n\n"
+        f"<b>Подключение BingX — {mode.label}</b>\n\n"
         "Ключ должен быть <b>только для чтения</b>: без прав на торговлю "
         "и без прав на вывод средств. Привяжи его к IP сервера.\n\n"
         "Ключи шифруются перед записью в базу и никогда не попадают в логи. "
@@ -551,21 +645,23 @@ async def _show_api_key_prompt(
     if creds is not None:
         text = f"Текущий ключ: {creds.api_key_masked}\n\n" + text
 
-    await _reply(event, text, builder.as_markup())
+    await _reply(event, text, back_to(SetCB.API, with_menu=True))
 
 
-@router.callback_query(F.data == SetCB.API)
+@router.callback_query(F.data.startswith(SetCB.API_MODE))
 async def ask_api_key(
     callback: CallbackQuery, state: FSMContext, user: User, session: AsyncSession
 ) -> None:
-    await _show_api_key_prompt(callback, state, user, session)
+    mode = ExchangeKeyMode(str(callback.data).removeprefix(SetCB.API_MODE))
+    await _show_api_key_prompt(callback, state, user, session, mode)
 
 
-@router.callback_query(SettingsStates.api_secret, F.data == SetCB.API_BACK)
+@router.callback_query(SettingsStates.api_secret, F.data.startswith(SetCB.API_MODE_BACK))
 async def back_to_api_key(
     callback: CallbackQuery, state: FSMContext, user: User, session: AsyncSession
 ) -> None:
-    await _show_api_key_prompt(callback, state, user, session)
+    mode = ExchangeKeyMode(str(callback.data).removeprefix(SetCB.API_MODE_BACK))
+    await _show_api_key_prompt(callback, state, user, session, mode)
 
 
 @router.message(SettingsStates.api_key)
@@ -575,11 +671,13 @@ async def receive_api_key(message: Message, state: FSMContext) -> None:
         await message.answer("Ключ выглядит слишком коротким. Проверь и пришли ещё раз.")
         return
 
+    data = await state.get_data()
+    mode = ExchangeKeyMode(data["mode"])
     await state.update_data(api_key=key)
     await state.set_state(SettingsStates.api_secret)
     await message.answer(
         "Теперь пришли API Secret:",
-        reply_markup=back_to(SetCB.API_BACK, with_menu=True),
+        reply_markup=back_to(f"{SetCB.API_MODE_BACK}{mode.value}", with_menu=True),
     )
 
 
@@ -599,10 +697,11 @@ async def receive_api_secret(
     data = await state.get_data()
     await state.clear()
     api_key = data["api_key"]
+    mode = ExchangeKeyMode(data["mode"])
 
-    creds = await _get_credentials(session, user.id)
+    creds = await _get_credentials(session, user.id, mode)
     if creds is None:
-        creds = ExchangeCredentials(user_id=user.id, exchange="bingx")
+        creds = ExchangeCredentials(user_id=user.id, exchange="bingx", mode=mode)
         session.add(creds)
 
     creds.api_key_encrypted = cipher.encrypt(api_key)
@@ -613,22 +712,23 @@ async def receive_api_secret(
     await session.flush()
 
     await message.answer(
-        f"✅ Ключи сохранены: {creds.api_key_masked}\n\n"
+        f"✅ Ключи сохранены ({mode.label}): {creds.api_key_masked}\n\n"
         f"Удали два предыдущих сообщения с ключами из этого чата.",
-        reply_markup=back_to(MenuCallback.SETTINGS),
+        reply_markup=back_to(SetCB.API, with_menu=True),
     )
 
 
-@router.callback_query(F.data == SetCB.API_DELETE)
+@router.callback_query(F.data.startswith(SetCB.API_MODE_DELETE))
 async def delete_api_key(
     callback: CallbackQuery, state: FSMContext, user: User, session: AsyncSession
 ) -> None:
+    mode = ExchangeKeyMode(str(callback.data).removeprefix(SetCB.API_MODE_DELETE))
     await state.clear()
-    creds = await _get_credentials(session, user.id)
+    creds = await _get_credentials(session, user.id, mode)
     if creds is not None:
         await session.delete(creds)
         await session.flush()
-    await _reply(callback, "Ключи удалены.", back_to(MenuCallback.SETTINGS))
+    await _show_api_keys_menu(callback, state, user, session)
 
 
 # ---------------------------------------------------------------------------

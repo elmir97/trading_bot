@@ -10,11 +10,12 @@ from __future__ import annotations
 from datetime import date
 from typing import TYPE_CHECKING
 
-from sqlalchemy import BigInteger, Boolean, Date, ForeignKey, String
+from sqlalchemy import BigInteger, Boolean, Date, Enum, ForeignKey, String
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base, IntPKMixin, TimestampMixin
+from app.trading.enums import ExchangeKeyMode
 
 if TYPE_CHECKING:
     from app.database.models.ai_report import AIReport
@@ -72,6 +73,17 @@ class UserSettings(IntPKMixin, TimestampMixin, Base):
         String(16), default="USDT", nullable=False
     )
     language: Mapped[str] = mapped_column(String(8), default="ru", nullable=False)
+
+    # Этап 15.4в: какой счёт бот ЧИТАЕТ и ПОКАЗЫВАЕТ (баланс, позиции, карточка
+    # подтверждения) — не то, куда реально уходят ордера (это конфиг, см.
+    # Settings.bingx_trading_mode и guards.check_mode_allowed). По умолчанию
+    # LIVE (решение пользователя, раздел "Модель данных" шага 15.4в).
+    active_exchange_mode: Mapped[ExchangeKeyMode] = mapped_column(
+        Enum(ExchangeKeyMode, native_enum=False, length=8),
+        default=ExchangeKeyMode.LIVE,
+        server_default="LIVE",
+        nullable=False,
+    )
 
     # JSONB, а не колонки: набор типов уведомлений будет расти, и каждый новый
     # не должен требовать миграции. Это действительно динамические данные.

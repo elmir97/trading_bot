@@ -157,15 +157,24 @@ async def _build_quote(
 ) -> _EvaluationResult:
     """guards.NO_TRADING_KEY срабатывает до сетевого похода на биржу — поэтому
     без ключа безопасно использовать публичный клиент: ExecutionService.evaluate()
-    вернёт отказ раньше, чем попытается что-то запросить приватным методом."""
+    вернёт отказ раньше, чем попытается что-то запросить приватным методом.
+
+    Этап 15.4в: ключ и клиент берутся для режима, разрешённого КОНФИГОМ
+    (settings.bingx_allowed_exchange_mode) — туда реально ушёл бы ордер,
+    а не для того, что выбрано в настройках на показ. guards.MODE_NOT_ALLOWED
+    сверяет это с user.settings.active_exchange_mode и отказывает при
+    расхождении раньше, чем дело дойдёт до цены/баланса (см. service.py)."""
+    allowed_mode = settings.bingx_allowed_exchange_mode
+    selected_mode = user.settings.active_exchange_mode
+
     factory = ExchangeFactory(settings, cipher)
-    credentials = await factory.get_credentials(session, user.id)
+    credentials = await factory.get_credentials(session, user.id, mode=allowed_mode)
     has_trading_key = credentials is not None
     key_can_trade_futures = has_trading_key and not credentials.is_read_only  # type: ignore[union-attr]
 
     if has_trading_key:
         try:
-            client = await factory.for_user(session, user.id)
+            client = await factory.for_user(session, user.id, mode=allowed_mode)
         except ExchangeAuthError as exc:
             return _describe(exc)
     else:
@@ -180,6 +189,7 @@ async def _build_quote(
             plan=plan,
             has_trading_key=has_trading_key,
             key_can_trade_futures=key_can_trade_futures,
+            selected_exchange_mode=selected_mode,
             planned_price=planned_price,
         )
     except ExchangeError as exc:

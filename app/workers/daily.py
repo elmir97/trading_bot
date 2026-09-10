@@ -140,7 +140,12 @@ class DailyJobs:
 
         plan = user.trading_plan
         try:
-            client = await self._exchange_factory.for_user(session, user.id)
+            # Этап 15.4в: баланс для этого алерта — то же самое "читает и
+            # показывает", что и остальной интерфейс, поэтому берётся для
+            # счёта, выбранного в настройках, а не для счёта исполнения.
+            client = await self._exchange_factory.for_user(
+                session, user.id, mode=settings_row.active_exchange_mode
+            )
         except ExchangeAuthError:
             return  # ключи не подключены — процент риска не посчитать
 

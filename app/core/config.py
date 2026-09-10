@@ -14,6 +14,7 @@ from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.analysis.ai.pricing import is_known, pricing_for
+from app.trading.enums import ExchangeKeyMode
 
 
 class Settings(BaseSettings):
@@ -59,8 +60,16 @@ class Settings(BaseSettings):
 
     # --- BingX -------------------------------------------------------------
     bingx_base_url: str = "https://open-api.bingx.com"
-    # demo — торговля виртуальными USDT (VST) на демо-хосте (этап 15.5);
-    # live переключается вручную через .env + рестарт, кнопки в боте нет.
+    # Хосты по режиму ключа (этап 15.4в) — куда ExchangeFactory ходит за
+    # балансом/позициями для показа, в зависимости от того, ключ какого
+    # режима используется. Демо-хост проверен по живому API (не по статье,
+    # раздел 16 ТЗ): GET .../openApi/swap/v2/quote/contracts на
+    # open-api-vst.bingx.com отвечает 200 с реальными контрактами.
+    bingx_live_base_url: str = "https://open-api.bingx.com"
+    bingx_demo_base_url: str = "https://open-api-vst.bingx.com"
+    # Куда РЕАЛЬНО уходят ордера (этап 15.5+) — не путать с переключателем
+    # показа в настройках (UserSettings.active_exchange_mode). Меняется
+    # только через .env + рестарт, кнопки в боте нет (раздел 3 ТЗ).
     bingx_trading_mode: Literal["demo", "live"] = "demo"
     bingx_recv_window: int = 5000
     http_timeout_seconds: float = 10.0
@@ -178,6 +187,13 @@ class Settings(BaseSettings):
         if not raw:
             return frozenset()
         return frozenset(int(part) for part in raw.split(",") if part.strip())
+
+    @property
+    def bingx_allowed_exchange_mode(self) -> ExchangeKeyMode:
+        """Режим, разрешённый конфигом для реальной отправки (раздел 3, 11
+        ТЗ) — guards.check_mode_allowed (этап 15.4в) сверяет с ним то, что
+        выбрано в настройках пользователя, и отказывает при расхождении."""
+        return ExchangeKeyMode.LIVE if self.bingx_trading_mode == "live" else ExchangeKeyMode.DEMO
 
     @property
     def exec_symbol_whitelist_symbols(self) -> tuple[str, ...]:

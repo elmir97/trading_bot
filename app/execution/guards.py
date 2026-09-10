@@ -23,7 +23,7 @@ from app.execution.models import ExecutionRefusal
 from app.execution.models import ExecutionRefusalCode as Code
 from app.execution.sizing import SizingResult, calculate_size
 from app.trading.calculations import CalculationError, calculate_risk_reward
-from app.trading.enums import TradeSide
+from app.trading.enums import ExchangeKeyMode, TradeSide
 
 ZERO = Decimal(0)
 
@@ -48,6 +48,32 @@ def check_trading_key(
     if not key_can_trade_futures:
         return ExecutionRefusal(
             Code.NO_TRADING_KEY, "Ключ BingX без права на фьючерсную торговлю."
+        )
+    return None
+
+
+# --- 2а. MODE_NOT_ALLOWED (этап 15.4в) ---------------------------------------
+
+_ACCOUNT_LABEL = {
+    ExchangeKeyMode.LIVE: "реальном счёте",
+    ExchangeKeyMode.DEMO: "демо-счёте",
+}
+
+
+def check_mode_allowed(
+    *, selected_mode: ExchangeKeyMode, allowed_mode: ExchangeKeyMode
+) -> ExecutionRefusal | None:
+    """Счёт, показанный в настройках (UserSettings.active_exchange_mode), и
+    счёт, куда реально уходят ордера (Settings.bingx_trading_mode), обязаны
+    совпадать — иначе пользователь подтверждает вход по цифрам одного
+    счёта, а ордер ушёл бы на другой. Молчаливого исполнения на "не тот"
+    счёт нет: рассинхрон блокирует вход целиком, симметрично в обе стороны.
+    """
+    if selected_mode is not allowed_mode:
+        return ExecutionRefusal(
+            Code.MODE_NOT_ALLOWED,
+            f"Исполнение разрешено только на {_ACCOUNT_LABEL[allowed_mode]}. "
+            "Переключи счёт в «Настройках».",
         )
     return None
 
@@ -214,6 +240,9 @@ class GuardInputs:
     # 2
     has_trading_key: bool
     key_can_trade_futures: bool
+    # 2а (этап 15.4в)
+    selected_exchange_mode: ExchangeKeyMode
+    allowed_exchange_mode: ExchangeKeyMode
     # 3
     signal_expires_at: datetime
     now: datetime
@@ -255,6 +284,11 @@ def run_guards(inputs: GuardInputs) -> ExecutionRefusal | None:
         return refusal
     if refusal := check_trading_key(
         has_key=inputs.has_trading_key, key_can_trade_futures=inputs.key_can_trade_futures
+    ):
+        return refusal
+    if refusal := check_mode_allowed(
+        selected_mode=inputs.selected_exchange_mode,
+        allowed_mode=inputs.allowed_exchange_mode,
     ):
         return refusal
     if refusal := check_signal_not_expired(expires_at=inputs.signal_expires_at, now=inputs.now):

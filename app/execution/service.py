@@ -36,12 +36,25 @@ from app.database.models.user import User
 from app.database.repositories.execution_order import ExecutionOrderRepository
 from app.database.repositories.trade import TradeRepository
 from app.exchanges.base import ExchangeClient
-from app.execution.guards import GuardInputs, check_execution_enabled, check_trading_key, run_guards
+from app.execution.guards import (
+    GuardInputs,
+    check_execution_enabled,
+    check_mode_allowed,
+    check_trading_key,
+    run_guards,
+)
 from app.execution.models import ExecutionRefusal, ExecutionRefusalCode, OrderRequest
 from app.execution.sizing import calculate_size
 from app.market.data import MarketDataService
 from app.trading.calculations import PERCENT_PRECISION, calculate_risk_reward
-from app.trading.enums import OrderRole, OrderSide, OrderStatus, OrderType, TradeSide
+from app.trading.enums import (
+    ExchangeKeyMode,
+    OrderRole,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    TradeSide,
+)
 from app.trading.risk import day_bounds, tz_offset_for
 
 ZERO = Decimal(0)
@@ -134,6 +147,7 @@ class ExecutionService:
         plan: TradingPlan,
         has_trading_key: bool,
         key_can_trade_futures: bool,
+        selected_exchange_mode: ExchangeKeyMode,
         planned_price: Decimal | None = None,
         now: datetime | None = None,
     ) -> ExecutionQuote | ExecutionRefusal:
@@ -175,6 +189,11 @@ class ExecutionService:
             has_key=has_trading_key, key_can_trade_futures=key_can_trade_futures
         ):
             return await refuse(refusal)
+        allowed_exchange_mode = self._settings.bingx_allowed_exchange_mode
+        if refusal := check_mode_allowed(
+            selected_mode=selected_exchange_mode, allowed_mode=allowed_exchange_mode
+        ):
+            return await refuse(refusal)
 
         ticker = await self._client.get_ticker(signal.symbol)
         current_price = ticker.last_price
@@ -214,6 +233,8 @@ class ExecutionService:
             execution_enabled=self._settings.trading_execution_enabled,
             has_trading_key=has_trading_key,
             key_can_trade_futures=key_can_trade_futures,
+            selected_exchange_mode=selected_exchange_mode,
+            allowed_exchange_mode=allowed_exchange_mode,
             signal_expires_at=signal.expires_at,
             now=moment,
             signal_trade_opened_at=signal.trade_opened_at,

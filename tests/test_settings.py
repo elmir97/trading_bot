@@ -23,6 +23,7 @@ from app.database.repositories.strategy import (
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
 from app.services.user_service import UserService
+from app.trading.enums import ExchangeKeyMode
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("DATABASE_URL"), reason="Нужен PostgreSQL"
@@ -123,6 +124,90 @@ async def test_one_credential_per_exchange(ctx) -> None:  # type: ignore[no-unty
     with pytest.raises(IntegrityError):
         await session.flush()
     await session.rollback()
+
+
+async def test_live_and_demo_keys_coexist(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Этап 15.4в: UNIQUE(user_id, exchange, mode) — две пары ключей одного
+    пользователя на одну биржу разрешены, если это разные режимы."""
+    user, session, cipher = ctx
+    for mode, key in ((ExchangeKeyMode.LIVE, API_KEY), (ExchangeKeyMode.DEMO, "demo_" + API_KEY)):
+        session.add(
+            ExchangeCredentials(
+                user_id=user.id,
+                exchange="bingx",
+                mode=mode,
+                api_key_encrypted=cipher.encrypt(key),
+                api_secret_encrypted=cipher.encrypt(API_SECRET),
+                api_key_masked=mask_secret(key),
+            )
+        )
+    await session.flush()
+
+    rows = list(
+        await session.scalars(
+            select(ExchangeCredentials).where(ExchangeCredentials.user_id == user.id)
+        )
+    )
+    assert {row.mode for row in rows} == {ExchangeKeyMode.LIVE, ExchangeKeyMode.DEMO}
+
+
+async def test_one_credential_per_exchange_and_mode(ctx) -> None:  # type: ignore[no-untyped-def]
+    """UNIQUE(user_id, exchange, mode) не даёт завести два ключа одного
+    режима — переключение счёта в настройках не должно требовать этого."""
+    from sqlalchemy.exc import IntegrityError
+
+    user, session, cipher = ctx
+    for _ in range(2):
+        session.add(
+            ExchangeCredentials(
+                user_id=user.id,
+                exchange="bingx",
+                mode=ExchangeKeyMode.DEMO,
+                api_key_encrypted=cipher.encrypt(API_KEY),
+                api_secret_encrypted=cipher.encrypt(API_SECRET),
+                api_key_masked=mask_secret(API_KEY),
+            )
+        )
+    with pytest.raises(IntegrityError):
+        await session.flush()
+    await session.rollback()
+
+
+async def test_active_exchange_mode_defaults_to_live(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Этап 15.4в, раздел "Модель данных": по умолчанию показывается LIVE."""
+    user, session, _cipher = ctx
+    settings_row = await UserRepository(session).get_settings(user.id)
+    assert settings_row is not None
+    assert settings_row.active_exchange_mode is ExchangeKeyMode.LIVE
+
+
+async def test_switching_active_exchange_mode_keeps_both_key_pairs(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Переключение показа не трогает уже заведённые ключи ни одного режима."""
+    user, session, cipher = ctx
+    for mode, key in ((ExchangeKeyMode.LIVE, API_KEY), (ExchangeKeyMode.DEMO, "demo_" + API_KEY)):
+        session.add(
+            ExchangeCredentials(
+                user_id=user.id,
+                exchange="bingx",
+                mode=mode,
+                api_key_encrypted=cipher.encrypt(key),
+                api_secret_encrypted=cipher.encrypt(API_SECRET),
+                api_key_masked=mask_secret(key),
+            )
+        )
+    await session.flush()
+
+    settings_row = await UserRepository(session).get_settings(user.id)
+    assert settings_row is not None
+    settings_row.active_exchange_mode = ExchangeKeyMode.DEMO
+    await session.flush()
+
+    rows = list(
+        await session.scalars(
+            select(ExchangeCredentials).where(ExchangeCredentials.user_id == user.id)
+        )
+    )
+    assert len(rows) == 2  # оба режима целы, переключение их не удаляет
 
 
 async def test_plan_update_persists(ctx) -> None:  # type: ignore[no-untyped-def]

@@ -91,10 +91,14 @@ async def _with_exchange(
     cipher: SecretCipher,
     action: Callable[[Any], Awaitable[str]],
 ) -> None:
-    """Создаёт клиент, выполняет действие, гарантированно закрывает сессию."""
+    """Создаёт клиент, выполняет действие, гарантированно закрывает сессию.
+
+    Этап 15.4в: счёт, для которого берутся ключи и хост, — тот, что выбран
+    в настройках (user.settings.active_exchange_mode), а не тот, куда
+    реально уходят ордера. Здесь только чтение (баланс, позиции, импорт)."""
     factory = ExchangeFactory(settings, cipher)
     try:
-        client = await factory.for_user(session, user.id)
+        client = await factory.for_user(session, user.id, mode=user.settings.active_exchange_mode)
     except ExchangeAuthError as exc:
         await _reply(event, _describe(exc), back_to(MenuCallback.EXCHANGE))
         return
@@ -132,7 +136,7 @@ async def show_balance(
             else Decimal(0)
         )
         return (
-            f"<b>Баланс BingX</b>\n\n"
+            f"<b>Баланс BingX · {user.settings.active_exchange_mode.label}</b>\n\n"
             f"Эквити: {fmt_amount(balance.equity)} {balance.asset}\n"
             f"Свободно: {fmt_amount(balance.available)} "
             f"({fmt_num(free_ratio.quantize(Decimal('0.1')))}%)\n"
@@ -161,7 +165,7 @@ async def show_exchange_positions(
         if not positions:
             return "На бирже нет открытых позиций."
 
-        lines = ["<b>Позиции на бирже</b>", ""]
+        lines = [f"<b>Позиции на бирже · {user.settings.active_exchange_mode.label}</b>", ""]
         for position in positions:
             icon = "🟢" if position.side.value == "LONG" else "🔴"
             lines.append(
@@ -259,7 +263,7 @@ async def ask_import_period(
     # Проверяем ключи до выбора периода: предлагать выбор, зная, что
     # он упрётся в ошибку, — значит тратить время пользователя впустую.
     if not await ExchangeFactory(settings, cipher).has_credentials(
-        session, user.id
+        session, user.id, mode=user.settings.active_exchange_mode
     ):
         await _reply(
             event,
@@ -303,7 +307,7 @@ async def run_import(
 
     factory = ExchangeFactory(settings, cipher)
     try:
-        client = await factory.for_user(session, user.id)
+        client = await factory.for_user(session, user.id, mode=user.settings.active_exchange_mode)
     except ExchangeAuthError as exc:
         await _reply(callback, _describe(exc), back)
         return

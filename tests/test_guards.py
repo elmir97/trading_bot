@@ -18,6 +18,7 @@ from app.execution.guards import (
     check_execution_enabled,
     check_max_positions,
     check_max_total_risk,
+    check_mode_allowed,
     check_no_existing_position,
     check_price_drift,
     check_signal_not_expired,
@@ -31,7 +32,7 @@ from app.execution.guards import (
 from app.execution.models import ExecutionRefusal
 from app.execution.models import ExecutionRefusalCode as Code
 from app.execution.sizing import SizingResult, calculate_size
-from app.trading.enums import TradeSide
+from app.trading.enums import ExchangeKeyMode, TradeSide
 
 D = Decimal
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
@@ -56,6 +57,8 @@ def _valid_inputs(**overrides: object) -> GuardInputs:
         "execution_enabled": True,
         "has_trading_key": True,
         "key_can_trade_futures": True,
+        "selected_exchange_mode": ExchangeKeyMode.LIVE,
+        "allowed_exchange_mode": ExchangeKeyMode.LIVE,
         "signal_expires_at": NOW + timedelta(hours=1),
         "now": NOW,
         "signal_trade_opened_at": None,
@@ -111,6 +114,38 @@ class TestTradingKey:
 
     def test_valid_key_passes(self) -> None:
         assert check_trading_key(has_key=True, key_can_trade_futures=True) is None
+
+
+class TestModeNotAllowed:
+    """Этап 15.4в: показанный в настройках счёт против разрешённого конфигом."""
+
+    def test_live_selected_but_demo_allowed_refuses(self) -> None:
+        refusal = check_mode_allowed(
+            selected_mode=ExchangeKeyMode.LIVE, allowed_mode=ExchangeKeyMode.DEMO
+        )
+        assert refusal is not None
+        assert refusal.code is Code.MODE_NOT_ALLOWED
+        assert "демо-счёте" in refusal.message
+
+    def test_demo_selected_but_live_allowed_refuses(self) -> None:
+        """Симметрично: рассинхрон блокирует вход в обе стороны, не только
+        когда пользователь «смотрит выше», чем разрешено."""
+        refusal = check_mode_allowed(
+            selected_mode=ExchangeKeyMode.DEMO, allowed_mode=ExchangeKeyMode.LIVE
+        )
+        assert refusal is not None
+        assert refusal.code is Code.MODE_NOT_ALLOWED
+        assert "реальном счёте" in refusal.message
+
+    def test_matching_live_passes(self) -> None:
+        assert check_mode_allowed(
+            selected_mode=ExchangeKeyMode.LIVE, allowed_mode=ExchangeKeyMode.LIVE
+        ) is None
+
+    def test_matching_demo_passes(self) -> None:
+        assert check_mode_allowed(
+            selected_mode=ExchangeKeyMode.DEMO, allowed_mode=ExchangeKeyMode.DEMO
+        ) is None
 
 
 class TestSignalExpired:
@@ -304,24 +339,25 @@ class TestSymbolAllowed:
 GUARD_ORDER: list[tuple[int, Code, dict[str, object]]] = [
     (1, Code.EXECUTION_DISABLED, {"execution_enabled": False}),
     (2, Code.NO_TRADING_KEY, {"has_trading_key": False}),
-    (3, Code.SIGNAL_EXPIRED, {"signal_expires_at": NOW - timedelta(seconds=1)}),
-    (4, Code.SIGNAL_ALREADY_USED, {"signal_trade_opened_at": NOW}),
-    (5, Code.POSITION_EXISTS, {"has_open_position": True}),
-    (6, Code.MAX_POSITIONS, {"open_positions_count": 4, "max_positions": 4}),
+    (3, Code.MODE_NOT_ALLOWED, {"selected_exchange_mode": ExchangeKeyMode.DEMO}),
+    (4, Code.SIGNAL_EXPIRED, {"signal_expires_at": NOW - timedelta(seconds=1)}),
+    (5, Code.SIGNAL_ALREADY_USED, {"signal_trade_opened_at": NOW}),
+    (6, Code.POSITION_EXISTS, {"has_open_position": True}),
+    (7, Code.MAX_POSITIONS, {"open_positions_count": 4, "max_positions": 4}),
     (
-        7,
+        8,
         Code.MAX_TOTAL_RISK,
         {"current_total_risk_percent": D("10"), "max_total_risk_percent": D("1")},
     ),
     (
-        8,
+        9,
         Code.DAILY_LOSS_LIMIT,
         {"day_loss_percent": D("10"), "max_daily_loss_percent": D("1")},
     ),
-    (9, Code.PRICE_DRIFT, {"current_price": D("10000")}),
-    (10, Code.INVALID_LEVELS, {"stop_loss": D("105")}),
-    (11, Code.SIZE_TOO_SMALL, {"symbol_info": _symbol_info(min_quantity=D("1000"))}),
-    (12, Code.SYMBOL_NOT_ALLOWED, {"symbol": "XRP-USDT"}),
+    (10, Code.PRICE_DRIFT, {"current_price": D("10000")}),
+    (11, Code.INVALID_LEVELS, {"stop_loss": D("105")}),
+    (12, Code.SIZE_TOO_SMALL, {"symbol_info": _symbol_info(min_quantity=D("1000"))}),
+    (13, Code.SYMBOL_NOT_ALLOWED, {"symbol": "XRP-USDT"}),
 ]
 
 
@@ -336,6 +372,7 @@ class TestGuardOrder:
             execution_enabled=False,
             has_trading_key=False,
             key_can_trade_futures=False,
+            selected_exchange_mode=ExchangeKeyMode.DEMO,
             signal_expires_at=NOW - timedelta(seconds=1),
             signal_trade_opened_at=NOW,
             has_open_position=True,

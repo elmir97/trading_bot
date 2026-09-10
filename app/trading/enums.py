@@ -125,6 +125,26 @@ class SignalRecordStatus(StrEnum):
 # --- Исполнение сделок по подтверждению (этап 15) --------------------------
 
 
+class ExchangeKeyMode(StrEnum):
+    """Какому контуру биржи принадлежит пара ключей (этап 15.4в).
+
+    LIVE — боевой счёт, DEMO — демо-торговля виртуальными USDT (VST).
+    У пользователя может быть по одной паре ключей на каждый режим
+    (UNIQUE(user_id, exchange, mode) — см. ExchangeCredentials). То же
+    перечисление хранит, какой счёт пользователь выбрал ПОКАЗЫВАТЬ
+    (UserSettings.active_exchange_mode) — читать/показывать и то, куда
+    реально уходят ордера (Settings.bingx_trading_mode), это разные вещи,
+    см. guards.check_mode_allowed.
+    """
+
+    LIVE = "LIVE"
+    DEMO = "DEMO"
+
+    @property
+    def label(self) -> str:
+        return "🟢 Реальный" if self is ExchangeKeyMode.LIVE else "🧪 Демо"
+
+
 class OrderSide(StrEnum):
     """Сторона биржевого ордера — не путать с TradeSide (стороной позиции)."""
 

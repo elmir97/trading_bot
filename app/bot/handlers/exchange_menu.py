@@ -58,22 +58,24 @@ async def show_exchange_menu(
     settings: Settings,
     cipher: SecretCipher,
 ) -> None:
+    active_mode = user.settings.active_exchange_mode
     has_keys = await ExchangeFactory(settings, cipher).has_credentials(
-        session, user.id
+        session, user.id, mode=active_mode
     )
 
     if has_keys:
         text = (
-            "<b>BingX</b>\n\nКлючи подключены.\n\n"
+            f"<b>BingX · {active_mode.label}</b>\n\nКлючи подключены.\n\n"
             "Баланс и позиции берутся с биржи напрямую. "
-            "Импорт добавляет закрытые сделки в журнал."
+            "Импорт добавляет закрытые сделки в журнал.\n\n"
+            "Счёт переключается в «Настройках»."
         )
     else:
         text = (
-            "<b>BingX</b>\n\nКлючи не подключены.\n\n"
+            f"<b>BingX · {active_mode.label}</b>\n\nКлючи не подключены.\n\n"
             "Цены доступны без них. Для баланса, позиций и импорта "
-            "истории нужен API-ключ <b>только на чтение</b>, "
-            "привязанный к IP этого сервера."
+            "истории нужен API-ключ, привязанный к IP этого сервера. "
+            "Подключи его в «Настройках»."
         )
 
     if isinstance(callback.message, Message):

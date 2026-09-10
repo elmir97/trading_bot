@@ -19,6 +19,10 @@ class ExecutionRefusalCode(StrEnum):
 
     EXECUTION_DISABLED = "EXECUTION_DISABLED"
     NO_TRADING_KEY = "NO_TRADING_KEY"
+    # Этап 15.4в: показанный в настройках счёт (LIVE/DEMO) не совпадает с
+    # тем, что разрешён конфигом (Settings.bingx_trading_mode) — см.
+    # guards.check_mode_allowed.
+    MODE_NOT_ALLOWED = "MODE_NOT_ALLOWED"
     SIGNAL_EXPIRED = "SIGNAL_EXPIRED"
     SIGNAL_ALREADY_USED = "SIGNAL_ALREADY_USED"
     POSITION_EXISTS = "POSITION_EXISTS"

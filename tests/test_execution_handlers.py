@@ -43,7 +43,7 @@ from app.database.repositories.user import UserRepository
 from app.database.session import Database
 from app.exchanges.base import Balance, ExchangeClient, SymbolInfo, Ticker
 from app.services.user_service import UserService
-from app.trading.enums import OrderRole, OrderStatus, SignalDirection, SignalLevel
+from app.trading.enums import ExchangeKeyMode, OrderRole, OrderStatus, SignalDirection, SignalLevel
 
 pytestmark = pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="Нужен PostgreSQL")
 
@@ -119,10 +119,10 @@ def _patch_exchange_factory(
         def __init__(self, settings, cipher) -> None:
             pass
 
-        async def get_credentials(self, session, user_id, exchange="bingx"):
+        async def get_credentials(self, session, user_id, exchange="bingx", mode=None):
             return credentials
 
-        async def for_user(self, session, user_id, exchange="bingx"):
+        async def for_user(self, session, user_id, exchange="bingx", mode=None):
             return client
 
         def public_client(self):
@@ -257,7 +257,10 @@ def make_callback(data: str, message_id: int) -> CallbackQuery:
 
 @pytest_asyncio.fixture
 async def ctx():  # type: ignore[no-untyped-def]
-    settings = Settings(trading_execution_enabled=True)  # type: ignore[call-arg]
+    # bingx_trading_mode="live" — совпадает с дефолтом
+    # UserSettings.active_exchange_mode=LIVE (этап 15.4в), иначе guard
+    # MODE_NOT_ALLOWED отказывал бы во всех «счастливых» тестах ниже.
+    settings = Settings(trading_execution_enabled=True, bingx_trading_mode="live")  # type: ignore[call-arg]
     db = Database(settings)
     async with db.session() as session:
         user_service = UserService(
@@ -339,6 +342,32 @@ async def test_open_button_shows_refusal_when_execution_disabled(ctx, bot, monke
     assert orders[0].status is OrderStatus.REFUSED
     assert orders[0].error_code == "EXECUTION_DISABLED"
     assert orders[0].client_order_id is None
+
+
+async def test_open_button_shows_refusal_when_mode_not_allowed(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Этап 15.4в: в настройках выбран демо-счёт, а конфиг (в фикстуре ctx —
+    bingx_trading_mode="live") разрешает исполнение только на реальном —
+    карточка не показывается, приходит понятный отказ."""
+    dp, session, user, client, _redis, _settings = ctx
+    user.settings.active_exchange_mode = ExchangeKeyMode.DEMO
+    await session.flush()
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+
+    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+
+    texts = bot.recorder.sent_texts()
+    assert len(texts) == 1
+    assert "реальном счёте" in texts[0]
+    assert (user.id, signal.id) not in execution._confirmations
+
+    orders = await _orders_for_signal(session, signal.id)
+    assert len(orders) == 1
+    assert orders[0].status is OrderStatus.REFUSED
+    assert orders[0].error_code == "MODE_NOT_ALLOWED"
 
 
 # ---------------------------------------------------------------------------
