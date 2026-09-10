@@ -393,8 +393,19 @@ class BingXClient(ExchangeClient):
     async def get_balance(self) -> Balance:
         data = await self._request(USER_BALANCE, signed=True)
         if isinstance(data, list):
-            data = data[0] if data else {}
-        if isinstance(data, dict) and "balance" in data:
+            # Боевая форма ответа (проверено по логам, не по документации,
+            # раздел 16 ТЗ): список записей по активам, у каждой уже плоский
+            # набор полей — "balance" тут строка-сумма, а не вложенный
+            # объект. Берём запись USDT явно: порядок активов в списке не
+            # гарантирован (в живом ответе после USDT шёл USDC).
+            data = next(
+                (item for item in data if item.get("asset") == "USDT"),
+                data[0] if data else {},
+            )
+        if isinstance(data, dict) and isinstance(data.get("balance"), dict):
+            # Другая форма ответа: {"balance": {...вложенный объект...}}.
+            # Разворачиваем, только если "balance" действительно объект —
+            # в форме выше это просто строка, и разворачивать там нечего.
             data = data["balance"]
 
         equity = _to_decimal(data.get("equity"), "equity")

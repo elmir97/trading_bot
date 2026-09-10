@@ -174,6 +174,58 @@ class TestPrivateData:
         assert balance.used_margin == D("2010")
         await client.close()
 
+    async def test_balance_list_of_assets_shape(self) -> None:
+        """Регрессия: реальный боевой ключ вернул баланс не вложенным
+        объектом (test_balance выше), а списком записей по активам, где
+        "balance" — строка-сумма, а не объект. Прежний код разворачивал
+        её как вложенный объект и падал с AttributeError на data.get()
+        у строки. Форма ответа — дословно то, что залогировано при
+        первом воспроизведении бага (raw dump из живого аккаунта),
+        не придумана по документации."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return ok([
+                {
+                    "userId": "1314404133518147588", "asset": "USDT",
+                    "balance": "0.0000", "equity": "0.0000",
+                    "unrealizedProfit": "0.0000", "realizedProfit": "0",
+                    "availableMargin": "0.0000", "usedMargin": "0.0000",
+                    "frozenMargin": "0.0000", "shortUid": "21792211",
+                },
+                {
+                    "userId": "1314404133518147588", "asset": "USDC",
+                    "balance": "0.0000", "equity": "0.0000",
+                    "unrealizedProfit": "0.0000", "realizedProfit": "0",
+                    "availableMargin": "0.0000", "usedMargin": "0.0000",
+                    "frozenMargin": "0.0000", "shortUid": "21792211",
+                },
+            ])
+
+        client = make_client(handler)
+        balance = await client.get_balance()
+
+        assert balance.asset == "USDT"
+        assert balance.equity == D("0.0000")
+        assert balance.available == D("0.0000")
+        await client.close()
+
+    async def test_balance_list_picks_usdt_not_first_entry(self) -> None:
+        """Порядок активов в списке не гарантирован — берём запись USDT
+        по полю asset, а не первую попавшуюся (data[0])."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return ok([
+                {"asset": "USDC", "balance": "1.0", "equity": "1.0",
+                 "unrealizedProfit": "0", "usedMargin": "0", "availableMargin": "1.0"},
+                {"asset": "USDT", "balance": "500.0", "equity": "512.5",
+                 "unrealizedProfit": "12.5", "usedMargin": "0", "availableMargin": "500.0"},
+            ])
+
+        client = make_client(handler)
+        balance = await client.get_balance()
+
+        assert balance.asset == "USDT"
+        assert balance.equity == D("512.5")
+        await client.close()
+
     async def test_positions_skip_closed(self) -> None:
         """Биржа возвращает и закрытые позиции с нулевым объёмом."""
         def handler(request: httpx.Request) -> httpx.Response:
