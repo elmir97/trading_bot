@@ -620,6 +620,21 @@ async def show_api_keys(
     await _show_api_keys_menu(callback, state, user, session)
 
 
+_KEY_REQUIREMENTS = {
+    ExchangeKeyMode.DEMO: (
+        "Ключ создаётся в личном кабинете BingX в режиме <b>демо-торговли</b> "
+        "(виртуальные USDT, VST). Нужны права <b>Read + Perpetual Futures "
+        "Trading</b> — без них бот не сможет отправлять ордера на демо-счёт. "
+        "Вывод средств (Withdraw) — выключить."
+    ),
+    ExchangeKeyMode.LIVE: (
+        "Права <b>Perpetual Futures Trading</b> понадобятся только начиная "
+        "с этапа 15.7 — пока что достаточно ключа с правом <b>Read</b>. "
+        "Вывод средств (Withdraw) — выключить в любом случае."
+    ),
+}
+
+
 async def _show_api_key_prompt(
     event: Message | CallbackQuery,
     state: FSMContext,
@@ -628,15 +643,17 @@ async def _show_api_key_prompt(
     mode: ExchangeKeyMode,
 ) -> None:
     """Экран ввода API Key для конкретного режима — общий для первого
-    захода и для «Назад» с шага Secret."""
+    захода и для «Назад» с шага Secret. Требования к правам ключа зависят
+    от режима (этап 15.4в): DEMO сразу торгует на VST и без прав на
+    фьючерсы бесполезен, LIVE до этапа 15.7 участвует только чтением."""
     creds = await _get_credentials(session, user.id, mode)
 
     await state.set_state(SettingsStates.api_key)
     await state.update_data(mode=mode.value)
     text = (
         f"<b>Подключение BingX — {mode.label}</b>\n\n"
-        "Ключ должен быть <b>только для чтения</b>: без прав на торговлю "
-        "и без прав на вывод средств. Привяжи его к IP сервера.\n\n"
+        f"{_KEY_REQUIREMENTS[mode]}\n\n"
+        "IP whitelist: <code>147.45.111.10</code> — обязательно, без исключений.\n\n"
         "Ключи шифруются перед записью в базу и никогда не попадают в логи. "
         "Удали сообщение с ключом из чата после отправки — Telegram хранит "
         "историю на своих серверах.\n\n"
