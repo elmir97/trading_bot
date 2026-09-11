@@ -56,6 +56,7 @@ from app.execution.service import (
 )
 from app.market.data import MarketDataService
 from app.services.exchange_factory import ExchangeFactory
+from app.services.permissions import refresh_permissions
 from app.trading.enums import OrderStatus, SignalLevel, SignalRecordStatus
 
 router = Router(name="execution")
@@ -154,6 +155,7 @@ async def _build_quote(
     cipher: SecretCipher,
     *,
     planned_price: Decimal | None,
+    check_permissions: bool,
 ) -> _EvaluationResult:
     """guards.NO_TRADING_KEY срабатывает до сетевого похода на биржу — поэтому
     без ключа безопасно использовать публичный клиент: ExecutionService.evaluate()
@@ -163,7 +165,12 @@ async def _build_quote(
     (settings.bingx_allowed_exchange_mode) — туда реально ушёл бы ордер,
     а не для того, что выбрано в настройках на показ. guards.MODE_NOT_ALLOWED
     сверяет это с user.settings.active_exchange_mode и отказывает при
-    расхождении раньше, чем дело дойдёт до цены/баланса (см. service.py)."""
+    расхождении раньше, чем дело дойдёт до цены/баланса (см. service.py).
+
+    check_permissions: раздел 8 ТЗ — обязан быть False на вызовах внутри
+    RedisLock (confirm_yes/"Да"): лишний поход на биржу там не нужен, права
+    уже проверены при показе карточки. True только при первом построении
+    карточки (open_confirmation)."""
     allowed_mode = settings.bingx_allowed_exchange_mode
     selected_mode = user.settings.active_exchange_mode
 
@@ -179,6 +186,18 @@ async def _build_quote(
             return _describe(exc)
     else:
         client = factory.public_client()
+
+    if has_trading_key and check_permissions:
+        outcome = await refresh_permissions(
+            session, credentials, client, ttl_hours=settings.exec_permissions_ttl_hours  # type: ignore[arg-type]
+        )
+        if not outcome.trustworthy:
+            await client.close()
+            return ExecutionRefusal(
+                ExecutionRefusalCode.PERMISSIONS_UNKNOWN,
+                "Не удалось проверить права ключа.",
+            )
+        key_can_trade_futures = not credentials.is_read_only  # type: ignore[union-attr]
 
     market = MarketDataService(client, _market_cache)
     service = ExecutionService(session=session, settings=settings, client=client, market=market)
@@ -309,7 +328,8 @@ async def open_confirmation(
         return
 
     result = await _build_quote(
-        session, user, signal, plan, settings, cipher, planned_price=None
+        session, user, signal, plan, settings, cipher,
+        planned_price=None, check_permissions=True,
     )
     await _send_result(
         callback.bot, db, callback.message.chat.id, user, signal, result, settings
@@ -424,7 +444,8 @@ async def _process_confirm(
         return
 
     result = await _build_quote(
-        session, user, signal, plan, settings, cipher, planned_price=state.planned_price
+        session, user, signal, plan, settings, cipher,
+        planned_price=state.planned_price, check_permissions=False,
     )
 
     if isinstance(result, str):
@@ -439,7 +460,8 @@ async def _process_confirm(
             # с пересчётом и повторным "Да/Нет".
             await callback.message.edit_reply_markup(reply_markup=None)
             new_result = await _build_quote(
-                session, user, signal, plan, settings, cipher, planned_price=None
+                session, user, signal, plan, settings, cipher,
+                planned_price=None, check_permissions=False,
             )
             await callback.message.answer(
                 "↻ Цена ушла дальше допустимого. Пересчитал карточку:"

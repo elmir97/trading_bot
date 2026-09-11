@@ -18,6 +18,10 @@ class ExecutionRefusalCode(StrEnum):
     """Раздел 7 ТЗ. Значение — порядок проверки в run_guards()."""
 
     EXECUTION_DISABLED = "EXECUTION_DISABLED"
+    # Раздел 8 ТЗ: права ключа не удалось проверить (сбой запроса к бирже,
+    # отметка отсутствует или протухла) — отдельно от NO_TRADING_KEY, у
+    # которого права ИЗВЕСТНЫ и они недостаточны. См. app/services/permissions.py.
+    PERMISSIONS_UNKNOWN = "PERMISSIONS_UNKNOWN"
     NO_TRADING_KEY = "NO_TRADING_KEY"
     # Этап 15.4в: показанный в настройках счёт (LIVE/DEMO) не совпадает с
     # тем, что разрешён конфигом (Settings.bingx_trading_mode) — см.

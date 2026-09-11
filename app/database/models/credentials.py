@@ -8,9 +8,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, Enum, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base, IntPKMixin, TimestampMixin
@@ -42,10 +43,17 @@ class ExchangeCredentials(IntPKMixin, TimestampMixin, Base):
     api_secret_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
     api_key_masked: Mapped[str] = mapped_column(String(64), nullable=False)
 
-    # Пользователь подтверждает, что ключ read-only. Проверить это по API
-    # надёжно нельзя, поэтому храним как декларацию и предупреждаем при false.
+    # Раньше было декларацией пользователя ("я обещаю, что ключ read-only"),
+    # непроверяемой по API. Теперь заполняется реальным ответом биржи
+    # (GET /openApi/v1/account/apiRestrictions, см. app/services/permissions.py)
+    # — is_read_only = not enable_futures. Дефолт True остаётся: до первой
+    # успешной проверки безопаснее считать, что торговать нельзя.
     is_read_only: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # NULL — права ещё не проверялись ни разу (новый ключ). Раздел 8 ТЗ,
+    # этап проверки прав: TTL решает, пора ли перепроверить (см.
+    # app/services/permissions.py, Settings.exec_permissions_ttl_hours).
+    permissions_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     user: Mapped[User] = relationship(back_populates="credentials")
 

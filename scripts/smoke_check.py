@@ -407,6 +407,12 @@ async def _seed_execution_fixtures(db: Database, settings) -> SignalRecord:  # t
         creds = ExchangeCredentials(
             user_id=user.id, exchange="bingx", mode=ExchangeKeyMode.DEMO,
             is_read_only=False, is_active=True,
+            # Раздел 8 ТЗ: отметка сразу свежая — иначе _build_quote() при
+            # check_permissions=True (открытие карточки) сходит за
+            # get_api_restrictions() в РЕАЛЬНЫЙ BingXClient (не патчится
+            # ниже вместе с get_ticker/get_symbols/get_balance) с фейковым
+            # ключом. Сети в смоук-тесте нет и не будет.
+            permissions_checked_at=datetime.now(UTC),
         )
         creds.api_key_encrypted = cipher.encrypt("smoke-test-fake-api-key")
         creds.api_secret_encrypted = cipher.encrypt("smoke-test-fake-api-secret")

@@ -24,6 +24,7 @@ from app.database.repositories.strategy import MistakeTypeRepository, StrategyRe
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
 from app.exchanges.base import (
+    ApiRestrictions,
     Balance,
     ExchangeClient,
     Fill,
@@ -88,6 +89,9 @@ class FakeExchangeClient(ExchangeClient):
 
     async def get_positions(self) -> list[Position]:
         return []
+
+    async def get_api_restrictions(self) -> ApiRestrictions:
+        raise NotImplementedError
 
     async def get_fills(self, start_time, end_time, symbol=None) -> list[Fill]:
         return []

@@ -27,6 +27,7 @@ import httpx
 
 from app.core.logging import get_logger
 from app.exchanges.base import (
+    ApiRestrictions,
     Balance,
     ExchangeAuthError,
     ExchangeClient,
@@ -52,6 +53,11 @@ QUOTE_KLINES = "/openApi/swap/v3/quote/klines"
 QUOTE_PREMIUM_INDEX = "/openApi/swap/v2/quote/premiumIndex"
 USER_BALANCE = "/openApi/swap/v3/user/balance"
 USER_POSITIONS = "/openApi/swap/v2/user/positions"
+# Раздел 8 ТЗ: права ключа. Проверено живым запросом (не по документации —
+# страница bingx-api.github.io отдаёт только SPA-шелл): поля лежат на
+# ВЕРХНЕМ уровне JSON, рядом с code/msg, а не под data, как у остальных
+# приватных методов ниже.
+API_RESTRICTIONS = "/openApi/v1/account/apiRestrictions"
 TRADE_FILL_HISTORY = "/openApi/swap/v2/trade/allFillOrders"
 TRADE_LEVERAGE = "/openApi/swap/v2/trade/leverage"
 # Один и тот же путь: POST размещает ордер, GET — запрашивает его статус.
@@ -485,6 +491,27 @@ class BingXClient(ExchangeClient):
                 )
             )
         return positions
+
+    async def get_api_restrictions(self) -> ApiRestrictions:
+        # ВАЖНО: в отличие от get_balance/get_positions выше, здесь поля
+        # лежат на верхнем уровне ответа, не под "data" — _request()/_parse()
+        # в этом случае возвращают payload целиком (payload.get("data",
+        # payload) откатывается на payload при отсутствии ключа "data"),
+        # так что fallback уже отрабатывает сам собой, без доп. кода тут.
+        data = await self._request(API_RESTRICTIONS, signed=True)
+        create_time = data.get("createTime")
+        if create_time is None:
+            raise ExchangeResponseError("В ответе apiRestrictions нет createTime")
+        return ApiRestrictions(
+            ip_restrict=bool(data.get("ipRestrict", False)),
+            create_time=_ms_to_dt(create_time),
+            permits_universal_transfer=bool(data.get("permitsUniversalTransfer", False)),
+            enable_reading=bool(data.get("enableReading", False)),
+            enable_futures=bool(data.get("enableFutures", False)),
+            enable_spot_and_margin_trading=bool(
+                data.get("enableSpotAndMarginTrading", False)
+            ),
+        )
 
     async def get_fills(
         self, start_time: datetime, end_time: datetime, symbol: str | None = None

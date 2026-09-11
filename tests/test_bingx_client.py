@@ -263,6 +263,36 @@ class TestPrivateData:
             await client.get_balance()
         await client.close()
 
+    async def test_api_restrictions_fields_on_top_level(self) -> None:
+        """apiRestrictions — единственный приватный метод, где поля лежат
+        на верхнем уровне ответа, рядом с code/msg, а не под "data" (в
+        отличие от get_balance/get_positions выше). Значения — дословно
+        то, что вернула биржа при живой разведке (не придуманы)."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.headers["X-BX-APIKEY"] == "test-key"
+            return httpx.Response(200, json={
+                "code": 0, "msg": "",
+                "ipRestrict": True,
+                "createTime": 1789058346655,
+                "permitsUniversalTransfer": False,
+                "enableReading": True,
+                "enableFutures": True,
+                "enableSpotAndMarginTrading": False,
+            })
+
+        client = make_client(handler)
+        restrictions = await client.get_api_restrictions()
+
+        assert restrictions.ip_restrict is True
+        assert restrictions.permits_universal_transfer is False
+        assert restrictions.enable_reading is True
+        assert restrictions.enable_futures is True
+        assert restrictions.enable_spot_and_margin_trading is False
+        assert restrictions.create_time == datetime.fromtimestamp(
+            1789058346655 / 1000, tz=UTC
+        )
+        await client.close()
+
     async def test_positions_skip_closed(self) -> None:
         """Биржа возвращает и закрытые позиции с нулевым объёмом."""
         def handler(request: httpx.Request) -> httpx.Response:

@@ -41,7 +41,14 @@ from app.database.models.signal import SignalRecord
 from app.database.repositories.strategy import MistakeTypeRepository, StrategyRepository
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
-from app.exchanges.base import Balance, ExchangeClient, SymbolInfo, Ticker
+from app.exchanges.base import (
+    ApiRestrictions,
+    Balance,
+    ExchangeClient,
+    ExchangeUnavailableError,
+    SymbolInfo,
+    Ticker,
+)
 from app.services.user_service import UserService
 from app.trading.enums import ExchangeKeyMode, OrderRole, OrderStatus, SignalDirection, SignalLevel
 
@@ -62,10 +69,20 @@ BOT_ID = 999
 class FakeExchangeClient(ExchangeClient):
     name = "fake"
 
-    def __init__(self, *, price: Decimal, balance: Decimal, symbol_info: SymbolInfo) -> None:
+    def __init__(
+        self,
+        *,
+        price: Decimal,
+        balance: Decimal,
+        symbol_info: SymbolInfo,
+        restrictions: ApiRestrictions | None = None,
+        restrictions_error: Exception | None = None,
+    ) -> None:
         self.price = price
         self.balance = balance
         self.symbol_info = symbol_info
+        self.restrictions = restrictions
+        self.restrictions_error = restrictions_error
 
     async def get_ticker(self, symbol: str) -> Ticker:
         return Ticker(
@@ -91,6 +108,13 @@ class FakeExchangeClient(ExchangeClient):
     async def get_positions(self):
         return []
 
+    async def get_api_restrictions(self) -> ApiRestrictions:
+        if self.restrictions_error is not None:
+            raise self.restrictions_error
+        if self.restrictions is None:
+            raise NotImplementedError
+        return self.restrictions
+
     async def get_fills(self, start_time, end_time, symbol=None):
         return []
 
@@ -110,6 +134,12 @@ class FakeExchangeClient(ExchangeClient):
 @dataclass(slots=True)
 class FakeCredentials:
     is_read_only: bool = False
+    # NOW (не None) по умолчанию — большинство существующих тестов проверяют
+    # execution-путь, а не раздел 8 (проверку прав), и не должны неожиданно
+    # начать дёргать get_api_restrictions() из-за "протухшей" отметки.
+    permissions_checked_at: datetime | None = NOW
+    user_id: int = 1
+    mode: ExchangeKeyMode = ExchangeKeyMode.LIVE
 
 
 def _patch_exchange_factory(
@@ -156,6 +186,15 @@ def _symbol_info() -> SymbolInfo:
         symbol="BTC-USDT", price_precision=1, quantity_precision=3,
         min_quantity=D("0.001"), max_leverage=50, min_notional=D("5"),
     )
+
+
+def _restrictions(**overrides: object) -> ApiRestrictions:
+    fields: dict[str, object] = {
+        "ip_restrict": True, "create_time": NOW, "permits_universal_transfer": False,
+        "enable_reading": True, "enable_futures": True, "enable_spot_and_margin_trading": False,
+    }
+    fields.update(overrides)
+    return ApiRestrictions(**fields)  # type: ignore[arg-type]
 
 
 def _signal(user_id: int, **overrides: object) -> SignalRecord:
@@ -342,6 +381,64 @@ async def test_open_button_shows_refusal_when_execution_disabled(ctx, bot, monke
     assert orders[0].status is OrderStatus.REFUSED
     assert orders[0].error_code == "EXECUTION_DISABLED"
     assert orders[0].client_order_id is None
+
+
+async def test_open_button_refuses_permissions_unknown_on_stale_check_failure(  # type: ignore[no-untyped-def]
+    ctx, bot, monkeypatch
+) -> None:
+    """Раздел 8 ТЗ: отметки нет вовсе, запрос к бирже за правами
+    провалился — отказ PERMISSIONS_UNKNOWN, не "открыл бы" вслепую."""
+    dp, session, user, client, _redis, _settings = ctx
+    client.restrictions_error = ExchangeUnavailableError("BingX не ответил")
+    _patch_exchange_factory(
+        monkeypatch, client, FakeCredentials(is_read_only=True, permissions_checked_at=None)
+    )
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+
+    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+
+    texts = bot.recorder.sent_texts()
+    assert len(texts) == 1
+    assert "Не удалось проверить права ключа" in texts[0]
+    assert (user.id, signal.id) not in execution._confirmations
+
+    # ДО гвардов и до evaluate() — как и ExchangeAuthError на построении
+    # клиента (_describe), REFUSED-строка здесь не пишется вовсе.
+    orders = await _orders_for_signal(session, signal.id)
+    assert orders == []
+
+
+async def test_open_button_refreshes_stale_permissions_and_proceeds(  # type: ignore[no-untyped-def]
+    ctx, bot, monkeypatch
+) -> None:
+    """Отметка протухла, но запрос прошёл успешно и права дают торговать —
+    карточка строится по СВЕЖИМ правам, а не по устаревшему is_read_only
+    в БД (raздел 8 ТЗ: NO_TRADING_KEY не должен сработать зря)."""
+    dp, session, user, client, _redis, _settings = ctx
+    client.restrictions = _restrictions(enable_futures=True)
+    creds = FakeCredentials(
+        is_read_only=True,  # устаревшее значение — по нему NO_TRADING_KEY отказал бы
+        permissions_checked_at=NOW - timedelta(hours=7),
+    )
+    _patch_exchange_factory(monkeypatch, client, creds)
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+
+    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+
+    texts = bot.recorder.sent_texts()
+    assert len(texts) == 1
+    assert "Не открыл" not in texts[0]
+    assert "BTC-USDT" in texts[0]
+    assert (user.id, signal.id) in execution._confirmations
+
+    assert creds.is_read_only is False
+    assert creds.permissions_checked_at is not None
 
 
 async def test_open_button_shows_refusal_when_mode_not_allowed(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]

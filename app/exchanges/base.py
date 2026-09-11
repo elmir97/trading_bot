@@ -192,6 +192,24 @@ class TpSlSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class ApiRestrictions:
+    """Права API-ключа (раздел 8 ТЗ) — GET /openApi/v1/account/apiRestrictions.
+
+    enable_futures — единственное поле, которое приложение реально
+    использует (is_read_only = not enable_futures, см.
+    app/services/permissions.py); остальные — справочные, для показа
+    пользователю и на будущее.
+    """
+
+    ip_restrict: bool
+    create_time: datetime
+    permits_universal_transfer: bool
+    enable_reading: bool
+    enable_futures: bool
+    enable_spot_and_margin_trading: bool
+
+
+@dataclass(frozen=True, slots=True)
 class OrderResult:
     """Ответ биржи на размещение или запрос ордера.
 
@@ -260,6 +278,12 @@ class ExchangeClient(ABC):
 
     @abstractmethod
     async def get_positions(self) -> list[Position]: ...
+
+    @abstractmethod
+    async def get_api_restrictions(self) -> ApiRestrictions:
+        """Права ключа (раздел 8 ТЗ) — не путать с get_balance/get_positions:
+        читает саму учётку, а не торговые данные, но требует подписи так же."""
+        ...
 
     @abstractmethod
     async def get_fills(

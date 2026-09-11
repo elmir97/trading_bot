@@ -31,6 +31,9 @@ from app.core.security import SecretCipher, mask_secret
 from app.database.models.credentials import ExchangeCredentials
 from app.database.models.user import DEFAULT_NOTIFICATIONS, User
 from app.database.repositories.user import UserRepository
+from app.exchanges.base import ExchangeAuthError
+from app.services.exchange_factory import ExchangeFactory
+from app.services.permissions import refresh_permissions
 from app.trading.calculations import (
     CalculationError,
     calculate_position_size,
@@ -57,6 +60,7 @@ class SetCB:
     API_MODE = "set:api:"              # + LIVE/DEMO — начать ввод пары
     API_MODE_DELETE = "set:api_delete:"  # + LIVE/DEMO — удалить пару
     API_MODE_BACK = "set:api_back:"    # + LIVE/DEMO — назад с шага secret
+    API_MODE_CHECK = "set:api_check:"  # + LIVE/DEMO — принудительно проверить права (раздел 8 ТЗ)
 
 
 async def _reply(event: Message | CallbackQuery, text: str, keyboard=None) -> None:  # type: ignore[no-untyped-def]
@@ -584,6 +588,12 @@ def _api_keys_menu(
         if creds is not None:
             builder.row(
                 InlineKeyboardButton(
+                    text=f"🔍 Проверить права · {label}",
+                    callback_data=f"{SetCB.API_MODE_CHECK}{mode.value}",
+                )
+            )
+            builder.row(
+                InlineKeyboardButton(
                     text=f"🗑 Удалить · {label}",
                     callback_data=f"{SetCB.API_MODE_DELETE}{mode.value}",
                 )
@@ -698,12 +708,28 @@ async def receive_api_key(message: Message, state: FSMContext) -> None:
     )
 
 
+def _permission_verdict(creds: ExchangeCredentials) -> str:
+    return "может торговать фьючерсами" if not creds.is_read_only else "только чтение"
+
+
+def _last_known_permission_line(creds: ExchangeCredentials) -> str:
+    """Раздел 8 ТЗ: при сбое запроса нельзя молча показать прежний
+    результат как новый — пользователь решит, что проверка только что
+    прошла успешно. Показываем явно, что это старые данные, и когда они
+    получены (или что их вообще ещё нет)."""
+    if creds.permissions_checked_at is None:
+        return "Прежних данных о правах ключа нет."
+    checked_at = creds.permissions_checked_at.strftime("%Y-%m-%d %H:%M UTC")
+    return f"Последняя известная проверка: {checked_at}, {_permission_verdict(creds)}."
+
+
 @router.message(SettingsStates.api_secret)
 async def receive_api_secret(
     message: Message,
     state: FSMContext,
     user: User,
     session: AsyncSession,
+    settings: Settings,
     cipher: SecretCipher,
 ) -> None:
     secret = (message.text or "").strip()
@@ -728,8 +754,34 @@ async def receive_api_secret(
 
     await session.flush()
 
+    # Раздел 8 ТЗ: права проверяются сразу, чтобы пользователь не думал,
+    # что подключённый ключ уже готов торговать, если это не так.
+    factory = ExchangeFactory(settings, cipher)
+    try:
+        client = await factory.for_user(session, user.id, mode=mode)
+    except ExchangeAuthError:
+        client = None  # свежерасшифрованный ключ не должен падать здесь,
+        # но если всё же упал — не мешаем показать хотя бы сохранение ключа
+
+    if client is None:
+        rights_line = "Не удалось проверить права ключа — уточню перед следующим входом."
+    else:
+        try:
+            outcome = await refresh_permissions(
+                session, creds, client,
+                ttl_hours=settings.exec_permissions_ttl_hours, force=True,
+            )
+        finally:
+            await client.close()
+        rights_line = (
+            f"Не удалось опросить биржу: {outcome.error}. {_last_known_permission_line(creds)}"
+            if outcome.error is not None
+            else f"Ключ {_permission_verdict(creds)}."
+        )
+
     await message.answer(
-        f"✅ Ключи сохранены ({mode.label}): {creds.api_key_masked}\n\n"
+        f"✅ Ключи сохранены ({mode.label}): {creds.api_key_masked}\n"
+        f"{rights_line}\n\n"
         f"Удали два предыдущих сообщения с ключами из этого чата.",
         reply_markup=back_to(SetCB.API, with_menu=True),
     )
@@ -745,6 +797,52 @@ async def delete_api_key(
     if creds is not None:
         await session.delete(creds)
         await session.flush()
+    await _show_api_keys_menu(callback, state, user, session)
+
+
+@router.callback_query(F.data.startswith(SetCB.API_MODE_CHECK))
+async def check_api_permissions(
+    callback: CallbackQuery,
+    state: FSMContext,
+    user: User,
+    session: AsyncSession,
+    settings: Settings,
+    cipher: SecretCipher,
+) -> None:
+    """Раздел 8 ТЗ: принудительная проверка (force=True) — по нажатию
+    пользователь ждёт результат сейчас, а не "когда-нибудь по TTL"."""
+    mode = ExchangeKeyMode(str(callback.data).removeprefix(SetCB.API_MODE_CHECK))
+    creds = await _get_credentials(session, user.id, mode)
+    if creds is None:
+        await callback.answer("Ключ не подключён.", show_alert=True)
+        return
+
+    factory = ExchangeFactory(settings, cipher)
+    try:
+        client = await factory.for_user(session, user.id, mode=mode)
+    except ExchangeAuthError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+
+    try:
+        outcome = await refresh_permissions(
+            session, creds, client, ttl_hours=settings.exec_permissions_ttl_hours, force=True
+        )
+    finally:
+        await client.close()
+
+    if outcome.error is not None:
+        # Сбой — даже если сохранённая отметка формально ещё в пределах TTL,
+        # пользователь только что явно попросил проверить СЕЙЧАС: показать
+        # старое значение без оговорки выглядело бы так, будто проверка
+        # прошла успешно (см. app/services/permissions.py).
+        await callback.answer(
+            f"Не удалось опросить биржу: {outcome.error}. {_last_known_permission_line(creds)}",
+            show_alert=True,
+        )
+        return
+
+    await callback.answer(f"{mode.label}: {_permission_verdict(creds)}.", show_alert=True)
     await _show_api_keys_menu(callback, state, user, session)
 
 

@@ -93,6 +93,9 @@ class Settings(BaseSettings):
     # ещё не требует пересчёта карточки (раздел 5, 9 ТЗ).
     exec_max_price_drift_ratio: Decimal = Decimal("0.3")
     exec_confirm_ttl_seconds: int = 60
+    # Раздел 8 ТЗ: как часто перепроверять права ключа (GET .../apiRestrictions)
+    # при построении карточки подтверждения — см. app/services/permissions.py.
+    exec_permissions_ttl_hours: int = 6
     exec_min_rr: Decimal = Decimal("1.5")
     exec_symbol_whitelist: str = Field(
         default="BTC-USDT,ETH-USDT",
