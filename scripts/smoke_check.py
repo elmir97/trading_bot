@@ -20,8 +20,17 @@ from sqlalchemy import delete, select
 from sqlalchemy.engine import make_url
 
 from app.core.config import get_settings
+from app.core.locks import RedisLock, confirm_lock_key
+from app.core.security import SecretCipher, mask_secret
+from app.database.models.credentials import ExchangeCredentials
+from app.database.models.execution_order import ExecutionOrder
+from app.database.models.signal import SignalRecord
 from app.database.models.user import User
+from app.database.repositories.user import UserRepository
 from app.database.session import Database
+from app.exchanges.base import Balance, SymbolInfo, Ticker
+from app.exchanges.bingx import BingXClient
+from app.trading.enums import ExchangeKeyMode, SignalDirection, SignalLevel, SignalRecordStatus
 from scripts.simulate_chat import USER_ID, build  # noqa: E402
 
 # Скрипт пишет и удаляет реальные строки — только тестовая база. Имя, а не
@@ -44,12 +53,33 @@ def _ensure_test_database(database_url: str) -> None:
         sys.exit(1)
 
 
+def _ensure_execution_enabled(execution_enabled: bool) -> None:
+    """Без TRADING_EXECUTION_ENABLED=true guard EXECUTION_DISABLED в
+    evaluate() отказывает раньше похода за ценой — раздел [14] не строит
+    карточку и падает шестью разными проверками с непохожими друг на
+    друга деталями (одна REFUSED-строка вместо трёх DRY_RUN и т.п.),
+    выглядя как баг execution-пути, а не как забытая переменная запуска."""
+    if not execution_enabled:
+        print(
+            "Отказ: TRADING_EXECUTION_ENABLED не включён. Раздел [14] "
+            "(execution-путь) не сможет построить карточку подтверждения "
+            "и упадёт шестью проверками, которые выглядят как баг, а не как "
+            "забытая переменная окружения. Запусти с "
+            "TRADING_EXECUTION_ENABLED=true."
+        )
+        sys.exit(1)
+
+
 async def _find_leftover_user(db: Database) -> bool:
     """Своя область данных — весь след скрипта висит на этом telegram_id
-    (см. USER_ID/CHAT_ID в scripts/simulate_chat.py), каскады FK убирают
-    детей одним DELETE (см. app/database/models/*.py: везде ON DELETE
-    CASCADE от users.id, кроме общего справочника mistake_types — тот
-    сценариями не создаётся, только читается по существующим кодам)."""
+    (см. USER_ID/CHAT_ID в scripts/simulate_chat.py). Каскады FK убирают
+    детей одним DELETE FROM users — проверено по каждой таблице, которую
+    пишет скрипт (везде ForeignKey("users.id", ondelete="CASCADE") в
+    app/database/models/*.py):
+      user_settings, trading_plans, strategies, trades (→ trade_fills,
+      trade_mistakes), signals, exchange_credentials.
+    Исключение — mistake_types: общий справочник (user_id IS NULL у
+    системных строк), скрипт его не создаёт, только читает по кодам."""
     async with db.session() as session:
         row = await session.scalar(select(User.id).where(User.telegram_id == USER_ID))
     return row is not None
@@ -107,8 +137,9 @@ async def close_trade(sim, symbol, exit_price, fee="10", mistakes=()):  # type: 
 async def main() -> None:
     settings = get_settings()
     _ensure_test_database(settings.database_url.get_secret_value())
+    _ensure_execution_enabled(settings.trading_execution_enabled)
 
-    sim, _tg, db = await build()
+    sim, tg, db, redis = await build()
 
     if await _find_leftover_user(db):
         print(
@@ -117,15 +148,17 @@ async def main() -> None:
             f"(смотри лог того прогона), и убери руками перед новым запуском:\n"
             f"  DELETE FROM users WHERE telegram_id = {USER_ID};  -- каскад доберёт детей"
         )
+        await redis.aclose()
         await db.dispose()
         sys.exit(1)
 
     try:
-        await _run_scenarios(sim)
+        await _run_scenarios(sim, tg, db, redis, settings)
     finally:
         # Выполняется и при падении сценария в середине — без этого база
         # копит мусор от каждого прогона (см. историю: 860 строк в trades).
         await _cleanup_smoke_data(db)
+        await redis.aclose()
         await db.dispose()
 
     print("\n" + "=" * 60)
@@ -138,7 +171,7 @@ async def main() -> None:
         print("Проблем не найдено.")
 
 
-async def _run_scenarios(sim) -> None:  # type: ignore[no-untyped-def]
+async def _run_scenarios(sim, tg, db, redis, settings) -> None:  # type: ignore[no-untyped-def]
     print("\n[1] Базовые команды")
     text = await sim.send("/start")
     check("/start открывает меню", has(text, "торговый журнал", "выбери раздел"), text[:60])
@@ -305,6 +338,167 @@ async def _run_scenarios(sim) -> None:  # type: ignore[no-untyped-def]
     text = await sim.tap("Анализ рынка")
     check("раздел не заглушка", "этап" not in text.lower(), text[:100])
     check("просит выбрать инструмент", has(text, "выбери инструмент"), text[:150])
+
+    print("\n[14] Execution: карточка подтверждения")
+    await _run_execution_scenario(sim, tg, db, redis, settings)
+
+
+# --- [14] Execution: карточка подтверждения, сухой прогон, лок --------------
+#
+# ExecutionService.evaluate() (app/execution/service.py) трогает биржу в
+# трёх местах: get_ticker (цена), get_symbols→get_symbol_info (лот/тик),
+# get_balance. Подставляем все три на уровне готовых типизированных
+# методов BingXClient — то же, что делает FakeExchangeClient в
+# tests/test_execution_service.py, но там клиент подставляется через
+# конструктор ExecutionService, а здесь настоящий хендлер сам строит
+# BingXClient внутри ExchangeFactory.for_user(), поэтому патчим три
+# leaf-метода на классе на время сценария и возвращаем оригиналы в finally.
+# ExchangeFactory и MarketDataService не подменяются: расшифровка ключей,
+# выбор режима/хоста, кэш — всё настоящее.
+
+# Снято вручную: GET https://open-api.bingx.com/openApi/swap/v2/quote/contracts
+# 2026-09-11, запись для symbol="BTC-USDT". price_precision/quantity_precision/
+# min_quantity/min_notional — поля pricePrecision/quantityPrecision/
+# tradeMinQuantity/tradeMinUSDT из ответа биржи (влияют на округление объёма,
+# выдумывать их нельзя). max_leverage=20 — не выдумано и не "реальное значение
+# с биржи": BingX для этого контракта вообще не отдаёт maxLongLeverage, и
+# get_symbols() (app/exchanges/bingx.py) в этом случае сама подставляет тот
+# же дефолт 20 — то есть это фактическое поведение прод-кода для BTC-USDT.
+_FAKE_SYMBOL_INFO = SymbolInfo(
+    symbol="BTC-USDT",
+    price_precision=1,
+    quantity_precision=4,
+    min_quantity=D("0.0001"),
+    max_leverage=20,
+    min_notional=D("2"),
+)
+_FAKE_PRICE = D("100250")  # середина зоны входа сигнала ниже — дрейф ровно 0%
+_FAKE_BALANCE = D("10000")
+
+
+async def _fake_get_ticker(self, symbol: str) -> Ticker:  # type: ignore[no-untyped-def]
+    return Ticker(
+        symbol=symbol, last_price=_FAKE_PRICE, volume_24h=D("0"),
+        price_change_percent=D("0"), timestamp=datetime.now(UTC),
+    )
+
+
+async def _fake_get_symbols(self) -> list[SymbolInfo]:  # type: ignore[no-untyped-def]
+    return [_FAKE_SYMBOL_INFO]
+
+
+async def _fake_get_balance(self) -> Balance:  # type: ignore[no-untyped-def]
+    return Balance(
+        asset="USDT", available=_FAKE_BALANCE, used_margin=D("0"),
+        unrealized_pnl=D("0"), equity=_FAKE_BALANCE,
+    )
+
+
+async def _seed_execution_fixtures(db: Database, settings) -> SignalRecord:  # type: ignore[no-untyped-def]
+    """SignalRecord (READY/ACTIVE) + фейковые ключи биржи, тем же путём, что
+    и бот: repository + SecretCipher.encrypt (не сырой INSERT) — расшифровка
+    в ExchangeFactory.for_user() должна реально отработать, не просто найти
+    непустую строку в базе."""
+    cipher = SecretCipher(settings.encryption_key.get_secret_value())
+    async with db.session() as session:
+        user = await UserRepository(session).get_by_telegram_id(USER_ID)
+        assert user is not None, "ожидали пользователя smoke-теста — /start уже прошёл"
+
+        creds = ExchangeCredentials(
+            user_id=user.id, exchange="bingx", mode=ExchangeKeyMode.DEMO,
+            is_read_only=False, is_active=True,
+        )
+        creds.api_key_encrypted = cipher.encrypt("smoke-test-fake-api-key")
+        creds.api_secret_encrypted = cipher.encrypt("smoke-test-fake-api-secret")
+        creds.api_key_masked = mask_secret("smoke-test-fake-api-key")
+        session.add(creds)
+
+        signal = SignalRecord(
+            user_id=user.id,
+            symbol="BTC-USDT",
+            timeframe="4h",
+            level=SignalLevel.READY,
+            status=SignalRecordStatus.ACTIVE,
+            direction=SignalDirection.LONG,
+            setup="Пробой с ретестом",
+            fingerprint="smoke-check-fingerprint",
+            detail="Сигнал для execution-сценария smoke_check.py.",
+            entry_low=D("100000"),
+            entry_high=D("100500"),
+            stop_loss=D("99000"),
+            take_profit=D("103000"),
+            confidence=8,
+            expires_at=datetime.now(UTC) + timedelta(hours=4),
+        )
+        session.add(signal)
+        await session.flush()
+        return signal
+
+
+async def _run_execution_scenario(sim, tg, db, redis, settings) -> None:  # type: ignore[no-untyped-def]
+    # Гвард MODE_NOT_ALLOWED (execution.py) требует user.settings.active_exchange_mode
+    # == settings.bingx_allowed_exchange_mode (DEMO по умолчанию — BINGX_TRADING_MODE
+    # =demo). Дефолт нового пользователя — LIVE, переключаем тем же тапом, что и
+    # пользователь: кнопка "💱 Счёт: ..." в «Настройках» (SetCB.MODE).
+    await sim.send("/start")
+    await sim.tap("Настройки")
+    await sim.tap("Счёт")
+
+    signal = await _seed_execution_fixtures(db, settings)
+    signal_id = signal.id
+
+    originals = (BingXClient.get_ticker, BingXClient.get_symbols, BingXClient.get_balance)
+    BingXClient.get_ticker = _fake_get_ticker
+    BingXClient.get_symbols = _fake_get_symbols
+    BingXClient.get_balance = _fake_get_balance
+    try:
+        text = await sim.tap_data(f"exec:open:{signal_id}")
+        check("карточка: объём", has(text, "объём"), text[:300])
+        check("карточка: риск", has(text, "риск"), text[:300])
+        check("карточка: RR", has(text, "rr"), text[:300])
+
+        text = await sim.tap_data(f"exec:yes:{signal_id}")
+        # "Да" отправляет ДВА сообщения (execution.py:478-483): edit_text
+        # "Подтверждено" на самой карточке, затем отдельным send детали
+        # ордера ("Сухой прогон: ушёл бы..."). tap_data() возвращает только
+        # последнее, поэтому первое проверяем по tg.log.
+        edit_text = tg.log[-2][1]
+        check("подтверждение: карточка помечена", has(edit_text, "подтверждено"), edit_text[:120])
+        check("подтверждение: детали сухого прогона", has(text, "сухой прогон"), text[:200])
+
+        async with db.session() as session:
+            rows = (
+                await session.scalars(
+                    select(ExecutionOrder).where(ExecutionOrder.signal_id == signal_id)
+                )
+            ).all()
+        check(
+            "execution_orders: 3 строки DRY_RUN",
+            len(rows) == 3 and all(r.status.value == "DRY_RUN" for r in rows),
+            f"{len(rows)} строк, статусы {[r.status.value for r in rows]}",
+        )
+
+        # Второе "Да" держим за руку: лок ставит тот же RedisLock/ключ, что
+        # и хендлер (confirm_lock_key), но берём его снаружи ДО тапа — так
+        # результат детерминирован (не зависит от того, как event loop
+        # чередует две по-настоящему параллельные корутины), а код хендлера
+        # исполняется настоящий: confirm_yes реально получит LockBusyError.
+        lock_key = confirm_lock_key(user_id=signal.user_id, signal_id=signal_id)
+        blocker = RedisLock(redis, lock_key, ttl_seconds=15)
+        await blocker.__aenter__()
+        try:
+            await sim.tap_data(f"exec:yes:{signal_id}")
+        finally:
+            await blocker.__aexit__(None, None, None)
+
+        last_alert = next((entry for entry in reversed(tg.log) if entry[0] == "alert"), None)
+        check(
+            "повторное «Да»: отказ по локу, не трейс",
+            last_alert is not None and "уже обрабатывается" in last_alert[1].lower(),
+            str(last_alert),
+        )
+    finally:
+        BingXClient.get_ticker, BingXClient.get_symbols, BingXClient.get_balance = originals
 
 
 if __name__ == "__main__":
