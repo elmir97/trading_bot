@@ -16,10 +16,48 @@ from decimal import Decimal as D
 
 sys.path.insert(0, ".")
 
-from scripts.simulate_chat import build  # noqa: E402
+from sqlalchemy import delete, select
+from sqlalchemy.engine import make_url
+
+from app.core.config import get_settings
+from app.database.models.user import User
+from app.database.session import Database
+from scripts.simulate_chat import USER_ID, build  # noqa: E402
+
+# Скрипт пишет и удаляет реальные строки — только тестовая база. Имя, а не
+# просто "не совпадает с проду по случайности": DATABASE_URL может указывать
+# на что угодно, включая прод по опечатке в окружении запуска.
+REQUIRED_DB_NAME = "trading_bot_test"
 
 problems: list[str] = []
 checks = {"total": 0, "passed": 0}
+
+
+def _ensure_test_database(database_url: str) -> None:
+    name = make_url(database_url).database
+    if name != REQUIRED_DB_NAME:
+        print(
+            f"Отказ: DATABASE_URL указывает на базу «{name}», а не на "
+            f"«{REQUIRED_DB_NAME}». smoke_check.py пишет и удаляет реальные "
+            "строки — запускать его можно только против тестовой базы."
+        )
+        sys.exit(1)
+
+
+async def _find_leftover_user(db: Database) -> bool:
+    """Своя область данных — весь след скрипта висит на этом telegram_id
+    (см. USER_ID/CHAT_ID в scripts/simulate_chat.py), каскады FK убирают
+    детей одним DELETE (см. app/database/models/*.py: везде ON DELETE
+    CASCADE от users.id, кроме общего справочника mistake_types — тот
+    сценариями не создаётся, только читается по существующим кодам)."""
+    async with db.session() as session:
+        row = await session.scalar(select(User.id).where(User.telegram_id == USER_ID))
+    return row is not None
+
+
+async def _cleanup_smoke_data(db: Database) -> None:
+    async with db.session() as session:
+        await session.execute(delete(User).where(User.telegram_id == USER_ID))
 
 
 def check(name: str, condition: bool, detail: str = "") -> None:
@@ -67,8 +105,40 @@ async def close_trade(sim, symbol, exit_price, fee="10", mistakes=()):  # type: 
 
 
 async def main() -> None:
-    sim, tg, db = await build()
+    settings = get_settings()
+    _ensure_test_database(settings.database_url.get_secret_value())
 
+    sim, _tg, db = await build()
+
+    if await _find_leftover_user(db):
+        print(
+            f"Отказ: в базе уже есть данные smoke-теста (telegram_id={USER_ID}) — "
+            "похоже, прошлый прогон упал до уборки в finally. Разберись, почему "
+            f"(смотри лог того прогона), и убери руками перед новым запуском:\n"
+            f"  DELETE FROM users WHERE telegram_id = {USER_ID};  -- каскад доберёт детей"
+        )
+        await db.dispose()
+        sys.exit(1)
+
+    try:
+        await _run_scenarios(sim)
+    finally:
+        # Выполняется и при падении сценария в середине — без этого база
+        # копит мусор от каждого прогона (см. историю: 860 строк в trades).
+        await _cleanup_smoke_data(db)
+        await db.dispose()
+
+    print("\n" + "=" * 60)
+    print(f"Проверок: {checks['total']}, успешно: {checks['passed']}")
+    if problems:
+        print(f"\nПРОБЛЕМЫ ({len(problems)}):")
+        for p in problems:
+            print(f"  • {p}")
+    else:
+        print("Проблем не найдено.")
+
+
+async def _run_scenarios(sim) -> None:  # type: ignore[no-untyped-def]
     print("\n[1] Базовые команды")
     text = await sim.send("/start")
     check("/start открывает меню", has(text, "торговый журнал", "выбери раздел"), text[:60])
@@ -235,17 +305,6 @@ async def main() -> None:
     text = await sim.tap("Анализ рынка")
     check("раздел не заглушка", "этап" not in text.lower(), text[:100])
     check("просит выбрать инструмент", has(text, "выбери инструмент"), text[:150])
-
-    await db.dispose()
-
-    print("\n" + "=" * 60)
-    print(f"Проверок: {checks['total']}, успешно: {checks['passed']}")
-    if problems:
-        print(f"\nПРОБЛЕМЫ ({len(problems)}):")
-        for p in problems:
-            print(f"  • {p}")
-    else:
-        print("Проблем не найдено.")
 
 
 if __name__ == "__main__":
