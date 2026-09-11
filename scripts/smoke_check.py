@@ -175,15 +175,26 @@ async def main() -> None:
     await sim.send("/start")
     text = await sim.tap("Биржа")
     check("раздел биржи", has(text, "bingx"), text[:80])
-    check("объяснение про ключи", "только на чтение" in text.lower(), text[:250])
+    # Экран "Биржа" (app/bot/handlers/exchange_menu.py) показывает режим
+    # счёта (ExchangeKeyMode.label — "🟢 Реальный" или "🧪 Демо") и статус
+    # ключей — памятка про уровень доступа ("только на чтение") здесь не
+    # выводится, она на экране /import (см. app/bot/handlers/exchange.py).
+    check(
+        "режим и статус ключей",
+        (has(text, "реальный") or has(text, "демо")) and "не подключены" in text.lower(),
+        text[:150],
+    )
 
     text = await sim.send("/balance")
     check("баланс без ключей объясняет", "не подключены" in text.lower(), text[:120])
 
     text = await sim.send("/import")
-    check("импорт без ключей не спрашивает период",
-          "не подключены" in text.lower() or "требует ключей" in text.lower(),
-          text[:150])
+    check(
+        "импорт без ключей: требует ключ только на чтение",
+        ("не подключены" in text.lower() or "требует ключей" in text.lower())
+        and "только на чтение" in text.lower(),
+        text[:250],
+    )
 
     print("\n[10] Защита формы командой")
     await sim.send("/start")
