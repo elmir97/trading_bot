@@ -91,6 +91,7 @@ class ExchangeFactory:
             recv_window=self._settings.bingx_recv_window,
             timeout=self._settings.http_timeout_seconds,
             max_retries=self._settings.http_max_retries,
+            mode=mode,
         )
 
     async def has_credentials(

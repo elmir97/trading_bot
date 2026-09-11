@@ -41,7 +41,7 @@ from app.exchanges.base import (
     Ticker,
     TpSlSpec,
 )
-from app.trading.enums import OrderSide, OrderType, TradeSide
+from app.trading.enums import ExchangeKeyMode, OrderSide, OrderType, TradeSide
 
 logger = get_logger(__name__)
 
@@ -56,6 +56,15 @@ TRADE_FILL_HISTORY = "/openApi/swap/v2/trade/allFillOrders"
 TRADE_LEVERAGE = "/openApi/swap/v2/trade/leverage"
 # Один и тот же путь: POST размещает ордер, GET — запрашивает его статус.
 TRADE_ORDER = "/openApi/swap/v2/trade/order"
+
+# Валюта маржи зависит от контура: LIVE торгует настоящими USDT, DEMO —
+# виртуальными VST (см. app/bot/handlers/settings.py:626). get_balance()
+# должен искать в ответе биржи именно этот актив, а не всегда "USDT" —
+# иначе на DEMO фильтр промахивается при каждом запросе.
+_QUOTE_ASSET_BY_MODE = {
+    ExchangeKeyMode.LIVE: "USDT",
+    ExchangeKeyMode.DEMO: "VST",
+}
 
 # Таймфреймы в обозначениях BingX.
 INTERVALS = {
@@ -118,12 +127,19 @@ class BingXClient(ExchangeClient):
         timeout: float = 10.0,
         max_retries: int = 3,
         client: httpx.AsyncClient | None = None,
+        mode: ExchangeKeyMode = ExchangeKeyMode.LIVE,
     ) -> None:
         self._api_key = api_key
         self._api_secret = api_secret
         self._base_url = base_url.rstrip("/")
         self._recv_window = recv_window
         self._max_retries = max_retries
+        # Не угадывается по base_url (второй источник истины разошёлся бы с
+        # Settings.bingx_demo_base_url) — вызывающий код (ExchangeFactory.
+        # for_user(), тот же самый mode) и так знает режим, достаточно его
+        # передать. public_client() данными приватного баланса не пользуется
+        # (там нет ключей), LIVE-дефолт там ничего не решает.
+        self._mode = mode
         # Клиент можно передать снаружи — это точка подмены в тестах,
         # позволяющая проверить разбор ответов без обращения к сети.
         self._client = client or httpx.AsyncClient(
@@ -391,17 +407,28 @@ class BingXClient(ExchangeClient):
     # --- Приватные данные --------------------------------------------------
 
     async def get_balance(self) -> Balance:
+        expected_asset = _QUOTE_ASSET_BY_MODE[self._mode]
         data = await self._request(USER_BALANCE, signed=True)
         if isinstance(data, list):
             # Боевая форма ответа (проверено по логам, не по документации,
             # раздел 16 ТЗ): список записей по активам, у каждой уже плоский
             # набор полей — "balance" тут строка-сумма, а не вложенный
-            # объект. Берём запись USDT явно: порядок активов в списке не
-            # гарантирован (в живом ответе после USDT шёл USDC).
-            data = next(
-                (item for item in data if item.get("asset") == "USDT"),
-                data[0] if data else {},
+            # объект. Берём запись нужного актива явно: порядок активов в
+            # списке не гарантирован (в живом ответе после USDT шёл USDC),
+            # а сам актив зависит от контура — USDT на LIVE, VST на DEMO
+            # (_QUOTE_ASSET_BY_MODE). Если ожидаемого актива нет вовсе —
+            # не берём первый попавшийся молча, а падаем с понятной
+            # ошибкой: тихая подмена валюты маржи хуже явного отказа.
+            match = next(
+                (item for item in data if item.get("asset") == expected_asset), None
             )
+            if match is None:
+                found = [item.get("asset") for item in data]
+                raise ExchangeResponseError(
+                    f"В ответе BingX нет актива {expected_asset} "
+                    f"(режим {self._mode.value}). Получены активы: {found or 'пусто'}."
+                )
+            data = match
         if isinstance(data, dict) and isinstance(data.get("balance"), dict):
             # Другая форма ответа: {"balance": {...вложенный объект...}}.
             # Разворачиваем, только если "balance" действительно объект —
@@ -410,7 +437,7 @@ class BingXClient(ExchangeClient):
 
         equity = _to_decimal(data.get("equity"), "equity")
         return Balance(
-            asset=data.get("asset", "USDT"),
+            asset=data.get("asset", expected_asset),
             available=_to_decimal(
                 data.get("availableMargin") or data.get("balance"), "available"
             ),

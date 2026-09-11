@@ -23,7 +23,7 @@ from app.exchanges.base import (
     TpSlSpec,
 )
 from app.exchanges.bingx import BingXClient
-from app.trading.enums import OrderSide, TradeSide
+from app.trading.enums import ExchangeKeyMode, OrderSide, TradeSide
 
 D = Decimal
 
@@ -224,6 +224,43 @@ class TestPrivateData:
 
         assert balance.asset == "USDT"
         assert balance.equity == D("512.5")
+        await client.close()
+
+    async def test_balance_demo_mode_picks_vst_not_usdt(self) -> None:
+        """DEMO торгует виртуальными VST, не USDT (см. _QUOTE_ASSET_BY_MODE
+        в bingx.py) — список из нескольких активов, включая настоящий USDT
+        вперемешку, должен выбрать именно VST, раз клиент создан в режиме
+        DEMO."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return ok([
+                {"asset": "USDT", "balance": "0.0", "equity": "0.0",
+                 "unrealizedProfit": "0", "usedMargin": "0", "availableMargin": "0.0"},
+                {"asset": "VST", "balance": "88329.9129", "equity": "88980.4276",
+                 "unrealizedProfit": "-1138.5134", "usedMargin": "1789.0281",
+                 "availableMargin": "88329.9129"},
+            ])
+
+        client = make_client(handler, mode=ExchangeKeyMode.DEMO)
+        balance = await client.get_balance()
+
+        assert balance.asset == "VST"
+        assert balance.equity == D("88980.4276")
+        await client.close()
+
+    async def test_balance_missing_expected_asset_raises_clear_error(self) -> None:
+        """Ожидаемого актива в ответе нет вовсе (например, DEMO-ключ
+        случайно дёрнули с mode=LIVE) — не подставлять первый попавшийся
+        актив молча, а поднять понятную ошибку с перечислением того, что
+        реально вернула биржа."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return ok([
+                {"asset": "VST", "balance": "100.0", "equity": "100.0",
+                 "unrealizedProfit": "0", "usedMargin": "0", "availableMargin": "100.0"},
+            ])
+
+        client = make_client(handler, mode=ExchangeKeyMode.LIVE)
+        with pytest.raises(ExchangeResponseError, match=r"USDT.*VST"):
+            await client.get_balance()
         await client.close()
 
     async def test_positions_skip_closed(self) -> None:
