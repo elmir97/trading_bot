@@ -5,3 +5,6 @@ pytest-asyncio==1.4.0
 pytest-cov==7.1.0
 ruff==0.16.4
 mypy==2.3.1
+# [lua] тянет lupa — без него FakeRedis.eval() не выполняет Lua-скрипт
+# снятия лока (RedisLock._RELEASE_SCRIPT), нужный для tests/test_locks.py.
+fakeredis[lua]==2.38.0

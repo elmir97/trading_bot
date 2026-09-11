@@ -25,6 +25,7 @@ from aiogram.types import (
     Update,
     User as TgUser,
 )
+from fakeredis.aioredis import FakeRedis
 
 from app.core.config import get_settings
 from app.database.session import Database
@@ -138,7 +139,11 @@ class Simulator:
 async def build() -> tuple[Simulator, FakeTelegram, Database]:
     settings = get_settings()
     db = Database(settings)
-    dp = build_dispatcher(settings, db, llm_client=None)
+    # Локального Redis нет — блокировка от двойного нажатия (build_dispatcher
+    # требует клиент с этапа 15.4а) в симуляторе не участвует, FakeRedis
+    # достаточно как замены протокола (SET NX / EVAL).
+    redis = FakeRedis(decode_responses=True)
+    dp = build_dispatcher(settings, db, llm_client=None, redis=redis)
 
     tg = FakeTelegram()
 
