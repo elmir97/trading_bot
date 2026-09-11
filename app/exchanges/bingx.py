@@ -122,6 +122,11 @@ def _build_tp_sl(order_type: OrderType, spec: TpSlSpec) -> str:
 
 class BingXClient(ExchangeClient):
     name = "bingx"
+    # Подтверждено живым запросом: тот же ключ аутентифицируется и на
+    # open-api.bingx.com, и на open-api-vst.bingx.com (get_balance/
+    # get_api_restrictions отработали одинаково на обоих хостах одним и
+    # тем же ключом). Отдельная пара для DEMO не обязательна.
+    shares_keys_across_modes = True
 
     def __init__(
         self,

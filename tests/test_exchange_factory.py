@@ -1,9 +1,14 @@
-"""Тесты app/services/exchange_factory.py (этап 15.4в).
+"""Тесты app/services/exchange_factory.py (этап 15.4в + раздел "общие ключи").
 
 Проверяем: клиент для LIVE-ключа идёт на боевой хост, для DEMO-ключа — на
-VST-хост; отсутствие ключа нужного режима даёт понятный ExchangeAuthError
-(не молчание и не подмена режима); has_credentials/get_credentials/
-list_credentials различают режимы, а не первую попавшуюся пару ключей.
+VST-хост; has_credentials/get_credentials/list_credentials различают
+режимы, а не первую попавшуюся пару ключей — КРОМЕ случая, когда биржа
+объявила ключи общими для LIVE/DEMO (BingXClient.shares_keys_across_modes,
+подтверждено живым запросом): тогда отсутствие строки под запрошенный
+режим — не отказ, а подстановка ключа другого режима. Для бирж без общих
+ключей (дефолт ExchangeClient.shares_keys_across_modes=False) старое
+поведение — явный отказ без подмены — проверено монкипатчем этого флага
+на BingXClient (единственная реализация в проекте сейчас).
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ from app.database.repositories.strategy import MistakeTypeRepository, StrategyRe
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
 from app.exchanges.base import ExchangeAuthError
+from app.exchanges.bingx import BingXClient
 from app.services.exchange_factory import ExchangeFactory
 from app.services.user_service import UserService
 from app.trading.enums import ExchangeKeyMode
@@ -88,9 +94,48 @@ async def test_demo_key_uses_demo_vst_host(ctx) -> None:  # type: ignore[no-unty
         await client.close()
 
 
-async def test_missing_mode_key_raises_auth_error_without_falling_back(ctx) -> None:  # type: ignore[no-untyped-def]
-    """Есть только LIVE-ключ — запрос DEMO-клиента не должен молча взять
-    LIVE-ключ и постучаться не туда: явный отказ вместо подмены режима."""
+async def test_missing_mode_key_falls_back_to_shared_key(ctx) -> None:  # type: ignore[no-untyped-def]
+    """BingX объявил ключи общими (shares_keys_across_modes=True) — есть
+    только LIVE-строка, запрос DEMO-клиента берёт её ключ, но host всё
+    равно демо-хоста запрошенного режима, не LIVE."""
+    settings, user, session, cipher, factory = ctx
+    await _add_credentials(session, cipher, user.id, ExchangeKeyMode.LIVE)
+
+    client = await factory.for_user(session, user.id, mode=ExchangeKeyMode.DEMO)
+    try:
+        assert client._base_url == settings.bingx_demo_base_url  # type: ignore[attr-defined]
+        assert client._api_key == f"{ExchangeKeyMode.LIVE.value.lower()}_{API_KEY}"  # type: ignore[attr-defined]
+    finally:
+        await client.close()
+
+
+async def test_get_credentials_fallback_is_symmetric(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Тот же fallback работает и в обратную сторону: только DEMO-строка,
+    запрошен LIVE."""
+    _settings, user, session, cipher, factory = ctx
+    await _add_credentials(session, cipher, user.id, ExchangeKeyMode.DEMO)
+
+    found = await factory.get_credentials(session, user.id, mode=ExchangeKeyMode.LIVE)
+    assert found is not None
+    assert found.mode is ExchangeKeyMode.DEMO  # строка не перезаписывается, просто одолжена
+
+
+async def test_has_credentials_true_via_shared_fallback(ctx) -> None:  # type: ignore[no-untyped-def]
+    _settings, user, session, cipher, factory = ctx
+    await _add_credentials(session, cipher, user.id, ExchangeKeyMode.LIVE)
+
+    assert await factory.has_credentials(session, user.id, mode=ExchangeKeyMode.LIVE) is True
+    assert await factory.has_credentials(session, user.id, mode=ExchangeKeyMode.DEMO) is True
+
+
+async def test_no_sharing_exchange_raises_without_falling_back(  # type: ignore[no-untyped-def]
+    ctx, monkeypatch
+) -> None:
+    """Биржа БЕЗ общих ключей (дефолт ExchangeClient.shares_keys_across_modes
+    — у BingX включён явно, здесь временно выключаем монкипатчем): есть
+    только LIVE-ключ — запрос DEMO-клиента не должен молча взять LIVE-ключ
+    и постучаться не туда, явный отказ вместо подмены режима."""
+    monkeypatch.setattr(BingXClient, "shares_keys_across_modes", False)
     _settings, user, session, cipher, factory = ctx
     await _add_credentials(session, cipher, user.id, ExchangeKeyMode.LIVE)
 
@@ -98,7 +143,10 @@ async def test_missing_mode_key_raises_auth_error_without_falling_back(ctx) -> N
         await factory.for_user(session, user.id, mode=ExchangeKeyMode.DEMO)
 
 
-async def test_has_credentials_is_mode_specific(ctx) -> None:  # type: ignore[no-untyped-def]
+async def test_no_sharing_exchange_has_credentials_is_mode_specific(  # type: ignore[no-untyped-def]
+    ctx, monkeypatch
+) -> None:
+    monkeypatch.setattr(BingXClient, "shares_keys_across_modes", False)
     _settings, user, session, cipher, factory = ctx
     await _add_credentials(session, cipher, user.id, ExchangeKeyMode.LIVE)
 

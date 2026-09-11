@@ -101,16 +101,19 @@ class ExchangeFactory:
         exchange: str = "bingx",
         mode: ExchangeKeyMode = ExchangeKeyMode.LIVE,
     ) -> bool:
-        return (
-            await session.scalar(
-                select(ExchangeCredentials.id).where(
-                    ExchangeCredentials.user_id == user_id,
-                    ExchangeCredentials.exchange == exchange,
-                    ExchangeCredentials.mode == mode,
-                    ExchangeCredentials.is_active.is_(True),
-                )
+        return (await self.get_credentials(session, user_id, exchange, mode=mode)) is not None
+
+    async def _get_credentials_exact(
+        self, session: AsyncSession, user_id: int, exchange: str, mode: ExchangeKeyMode
+    ) -> ExchangeCredentials | None:
+        return await session.scalar(
+            select(ExchangeCredentials).where(
+                ExchangeCredentials.user_id == user_id,
+                ExchangeCredentials.exchange == exchange,
+                ExchangeCredentials.mode == mode,
+                ExchangeCredentials.is_active.is_(True),
             )
-        ) is not None
+        )
 
     async def get_credentials(
         self,
@@ -121,15 +124,21 @@ class ExchangeFactory:
     ) -> ExchangeCredentials | None:
         """Активная строка ключей конкретного режима без расшифровки —
         этап 15 использует её, чтобы узнать is_read_only (guard
-        NO_TRADING_KEY), не трогая секреты."""
-        return await session.scalar(
-            select(ExchangeCredentials).where(
-                ExchangeCredentials.user_id == user_id,
-                ExchangeCredentials.exchange == exchange,
-                ExchangeCredentials.mode == mode,
-                ExchangeCredentials.is_active.is_(True),
-            )
-        )
+        NO_TRADING_KEY), не трогая секреты.
+
+        Если строки под запрошенный режим нет, а биржа объявила ключи
+        общими для LIVE/DEMO (ExchangeClient.shares_keys_across_modes) —
+        берём строку другого режима: ключ тот же, только сохранён под
+        другой меткой. mode в найденной строке от этого не меняется —
+        это метка "под каким режимом ключ вводили", а не "для чего он
+        единственно годится"."""
+        exact = await self._get_credentials_exact(session, user_id, exchange, mode)
+        if exact is not None:
+            return exact
+        if exchange != "bingx" or not BingXClient.shares_keys_across_modes:
+            return None
+        other_mode = ExchangeKeyMode.DEMO if mode is ExchangeKeyMode.LIVE else ExchangeKeyMode.LIVE
+        return await self._get_credentials_exact(session, user_id, exchange, other_mode)
 
     async def list_credentials(
         self, session: AsyncSession, user_id: int, exchange: str = "bingx"

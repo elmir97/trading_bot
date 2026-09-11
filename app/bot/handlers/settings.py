@@ -32,6 +32,7 @@ from app.database.models.credentials import ExchangeCredentials
 from app.database.models.user import DEFAULT_NOTIFICATIONS, User
 from app.database.repositories.user import UserRepository
 from app.exchanges.base import ExchangeAuthError
+from app.exchanges.bingx import BingXClient
 from app.services.exchange_factory import ExchangeFactory
 from app.services.permissions import refresh_permissions
 from app.trading.calculations import (
@@ -574,30 +575,65 @@ async def set_trades(
 
 
 def _api_keys_menu(
-    live: ExchangeCredentials | None, demo: ExchangeCredentials | None
+    live: ExchangeCredentials | None, demo: ExchangeCredentials | None, *, shared: bool
 ) -> InlineKeyboardBuilder:
     builder = InlineKeyboardBuilder()
-    for mode, creds in ((ExchangeKeyMode.LIVE, live), (ExchangeKeyMode.DEMO, demo)):
-        label = mode.label
+
+    if shared:
+        # У BingX ключ общий для обоих счетов (ExchangeClient.
+        # shares_keys_across_modes) — раз ровно одна пара реально
+        # сохранена, кнопки без суффикса режима и без второй пары на
+        # экране: показывать LIVE/DEMO как раздельные сущности здесь
+        # было бы неправдой. Отдельный ключ всё ещё можно завести —
+        # последней, менее заметной строкой.
+        primary_mode = ExchangeKeyMode.LIVE if live is not None else ExchangeKeyMode.DEMO
+        other_mode = (
+            ExchangeKeyMode.DEMO if primary_mode is ExchangeKeyMode.LIVE else ExchangeKeyMode.LIVE
+        )
         builder.row(
             InlineKeyboardButton(
-                text=f"✏️ {label}: заменить" if creds else f"➕ {label}: добавить",
-                callback_data=f"{SetCB.API_MODE}{mode.value}",
+                text="✏️ Заменить ключ", callback_data=f"{SetCB.API_MODE}{primary_mode.value}"
             )
         )
-        if creds is not None:
+        builder.row(
+            InlineKeyboardButton(
+                text="🔍 Проверить права",
+                callback_data=f"{SetCB.API_MODE_CHECK}{primary_mode.value}",
+            )
+        )
+        builder.row(
+            InlineKeyboardButton(
+                text="🗑 Удалить", callback_data=f"{SetCB.API_MODE_DELETE}{primary_mode.value}"
+            )
+        )
+        builder.row(
+            InlineKeyboardButton(
+                text=f"➕ Отдельный ключ для {other_mode.label}",
+                callback_data=f"{SetCB.API_MODE}{other_mode.value}",
+            )
+        )
+    else:
+        for mode, creds in ((ExchangeKeyMode.LIVE, live), (ExchangeKeyMode.DEMO, demo)):
+            label = mode.label
             builder.row(
                 InlineKeyboardButton(
-                    text=f"🔍 Проверить права · {label}",
-                    callback_data=f"{SetCB.API_MODE_CHECK}{mode.value}",
+                    text=f"✏️ {label}: заменить" if creds else f"➕ {label}: добавить",
+                    callback_data=f"{SetCB.API_MODE}{mode.value}",
                 )
             )
-            builder.row(
-                InlineKeyboardButton(
-                    text=f"🗑 Удалить · {label}",
-                    callback_data=f"{SetCB.API_MODE_DELETE}{mode.value}",
+            if creds is not None:
+                builder.row(
+                    InlineKeyboardButton(
+                        text=f"🔍 Проверить права · {label}",
+                        callback_data=f"{SetCB.API_MODE_CHECK}{mode.value}",
+                    )
                 )
-            )
+                builder.row(
+                    InlineKeyboardButton(
+                        text=f"🗑 Удалить · {label}",
+                        callback_data=f"{SetCB.API_MODE_DELETE}{mode.value}",
+                    )
+                )
     builder.row(*nav_row(MenuCallback.SETTINGS))
     return builder
 
@@ -609,18 +645,37 @@ async def _show_api_keys_menu(
     live = await _get_credentials(session, user.id, ExchangeKeyMode.LIVE)
     demo = await _get_credentials(session, user.id, ExchangeKeyMode.DEMO)
 
-    lines = [
-        "<b>Ключи BingX</b>",
-        "",
-        "Каждый счёт — отдельная пара ключей, обе шифруются перед записью "
-        "в базу и никогда не попадают в логи.",
-        "",
-        f"{ExchangeKeyMode.LIVE.label}: "
-        f"{live.api_key_masked if live else 'не подключены'}",
-        f"{ExchangeKeyMode.DEMO.label}: "
-        f"{demo.api_key_masked if demo else 'не подключены'}",
-    ]
-    await _reply(event, "\n".join(lines), _api_keys_menu(live, demo).as_markup())
+    # "Общие ключи" на экране — это не "биржа умеет делиться ключами"
+    # (BingXClient.shares_keys_across_modes), а то, что пользователь
+    # реально этим воспользовался: сохранена ровно одна пара, не обе.
+    # Если он всё же завёл раздельные ключи — показываем как раньше,
+    # по одной строке на каждый режим.
+    shared = BingXClient.shares_keys_across_modes and (live is not None) != (demo is not None)
+
+    if shared:
+        creds = live or demo
+        assert creds is not None
+        lines = [
+            "<b>Ключи BingX</b>",
+            "",
+            "У BingX один ключ обслуживает и реальный, и демо-счёт — "
+            "разные пары не нужны.",
+            "",
+            f"Ключ: {creds.api_key_masked}",
+        ]
+    else:
+        lines = [
+            "<b>Ключи BingX</b>",
+            "",
+            "Каждый счёт — отдельная пара ключей, обе шифруются перед записью "
+            "в базу и никогда не попадают в логи.",
+            "",
+            f"{ExchangeKeyMode.LIVE.label}: "
+            f"{live.api_key_masked if live else 'не подключены'}",
+            f"{ExchangeKeyMode.DEMO.label}: "
+            f"{demo.api_key_masked if demo else 'не подключены'}",
+        ]
+    await _reply(event, "\n".join(lines), _api_keys_menu(live, demo, shared=shared).as_markup())
 
 
 @router.callback_query(F.data == SetCB.API)

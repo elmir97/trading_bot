@@ -453,6 +453,35 @@ async def _run_execution_scenario(sim, tg, db, redis, settings) -> None:  # type
     signal = await _seed_execution_fixtures(db, settings)
     signal_id = signal.id
 
+    # Раздел "общие ключи BingX": ровно одна пара сохранена (DEMO, только
+    # что засеяна выше) — экран "Ключи" обязан показать её как ОДИН ключ
+    # на оба счёта, а не как раздельные LIVE/DEMO. См. app/bot/handlers/
+    # settings.py::_show_api_keys_menu/_api_keys_menu (shared=True).
+    await sim.send("/start")
+    await sim.tap("Настройки")
+    text = await sim.tap("Ключи")
+    check(
+        "Ключи BingX: общая пара — одна строка про ключ",
+        has(text, "ключ:") and "обслуживает" in text.lower(),
+        text[:300],
+    )
+    check(
+        "Ключи BingX: нет второй строки «Демо: не подключены»",
+        "демо:" not in text.lower(),  # не сама фраза "и демо-счёт" в пояснении, а строка-кредит
+        text[:300],
+    )
+    buttons = sim.available_buttons()
+    check(
+        "Ключи BingX: кнопки без суффикса режима",
+        "✏️ Заменить ключ" in buttons and "🔍 Проверить права" in buttons,
+        str(list(buttons)),
+    )
+    check(
+        "Ключи BingX: есть кнопка «Отдельный ключ для…»",
+        any("отдельный ключ" in b.lower() for b in buttons),
+        str(list(buttons)),
+    )
+
     originals = (BingXClient.get_ticker, BingXClient.get_symbols, BingXClient.get_balance)
     BingXClient.get_ticker = _fake_get_ticker
     BingXClient.get_symbols = _fake_get_symbols
