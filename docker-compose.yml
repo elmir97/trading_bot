@@ -42,15 +42,33 @@ services:
       timeout: 5s
       retries: 15
 
+  redis:
+    image: redis:7.4-alpine
+    container_name: trading_bot_redis
+    restart: unless-stopped
+    command: >-
+      redis-server --appendonly no --save "" --maxmemory 256mb
+      --maxmemory-policy noeviction
+    # Порт наружу не публикуем: доступен только внутри compose-сети.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   bot:
     build: .
     container_name: trading_bot
     restart: unless-stopped
     env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
     depends_on:
       postgres:
         # Не просто "запущен", а "принимает соединения" — иначе бот
         # падает на старте в гонке с инициализацией базы.
+        condition: service_healthy
+      redis:
         condition: service_healthy
     volumes:
       - ./logs:/app/logs
