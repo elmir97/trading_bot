@@ -14,6 +14,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot.formatting import fmt_amount, fmt_num, fmt_qty
 from app.bot.keyboards.main import (
     MenuCallback,
     back_to,
@@ -26,11 +27,6 @@ from app.bot.keyboards.main import (
 from app.bot.keyboards.trade import (
     TradeCB,
     mistakes_keyboard,
-    fmt_amount,
-    fmt_money,
-    fmt_num,
-    fmt_qty,
-    fmt_price,
     open_trades_keyboard,
     quantity_mode_keyboard,
     side_keyboard,

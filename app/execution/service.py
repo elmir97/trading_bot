@@ -35,7 +35,7 @@ from app.database.models.trading_plan import TradingPlan
 from app.database.models.user import User
 from app.database.repositories.execution_order import ExecutionOrderRepository
 from app.database.repositories.trade import TradeRepository
-from app.exchanges.base import ExchangeClient
+from app.exchanges.base import ExchangeClient, SymbolInfo
 from app.execution.guards import (
     GuardInputs,
     check_execution_enabled,
@@ -87,6 +87,7 @@ class ExecutionQuote:
     order: OrderRequest
     open_positions_count: int
     current_total_risk_percent: Decimal
+    symbol_info: SymbolInfo
 
     @property
     def total_risk_after_percent(self) -> Decimal:
@@ -314,6 +315,7 @@ class ExecutionService:
             order=order,
             open_positions_count=open_positions_count,
             current_total_risk_percent=current_total_risk_percent,
+            symbol_info=symbol_info,
         )
 
 

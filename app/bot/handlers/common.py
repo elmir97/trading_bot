@@ -7,8 +7,8 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
+from app.bot.formatting import fmt_num
 from app.bot.keyboards.main import MenuCallback, back_to_main, main_menu
-from app.bot.keyboards.trade import fmt_num
 from app.database.models.trading_plan import TradingPlan
 from app.database.models.user import User
 from app.database.repositories.user import UserRepository

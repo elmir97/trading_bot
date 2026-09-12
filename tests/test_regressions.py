@@ -14,13 +14,7 @@ import pytest
 import pytest_asyncio
 from aiogram.dispatcher.event.bases import SkipHandler
 
-from app.bot.keyboards.trade import (
-    fmt_amount,
-    fmt_num,
-    fmt_qty,
-    plural_trades,
-    trade_card,
-)
+from app.bot.keyboards.trade import plural_trades, trade_card
 from app.bot.middlewares.errors import ErrorMiddleware
 from app.core.config import Settings
 from app.database.repositories.strategy import (
@@ -61,35 +55,7 @@ class TestErrorMiddlewarePassesControlFlow:
         assert result is None
 
 
-class TestNumberFormatting:
-    """Формат :g не убирает хвост нулей у Decimal.
-
-    Из-за этого проценты выводились как «2.0000%», а RR как «1:2.0000».
-    """
-
-    @pytest.mark.parametrize(
-        ("value", "expected"),
-        [
-            (D("2.0000"), "2"),
-            (D("10.0000"), "10"),      # normalize() даёт 1E+1 — проверяем
-            (D("1.5000"), "1.5"),
-            (D("0.00001234"), "0.00001234"),
-            (D("100.50"), "100.5"),
-            (None, "—"),
-        ],
-    )
-    def test_fmt_num(self, value: Decimal | None, expected: str) -> None:
-        assert fmt_num(value) == expected
-
-    def test_qty_rounded_to_exchange_precision(self) -> None:
-        """Расчёт от риска даёт периодическую дробь: 200 / 60 = 3.333…"""
-        assert fmt_qty(D("3.333333333333")) == "3.33333333"
-
-    def test_amount_has_no_plus_sign(self) -> None:
-        """«Сумма риска: +200» читалось как прибыль."""
-        assert fmt_amount(D("200")) == "200.00"
-        assert fmt_amount(D("10050")) == "10050.00"
-
+class TestPluralAgreement:
     @pytest.mark.parametrize(
         ("count", "word"),
         [(1, "сделка"), (2, "сделки"), (5, "сделок"),

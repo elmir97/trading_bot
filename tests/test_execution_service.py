@@ -171,14 +171,23 @@ def _service(session, settings: Settings, client, market) -> ExecutionService:
 
 
 async def test_execution_disabled_refuses_without_touching_exchange(ctx) -> None:  # type: ignore[no-untyped-def]
-    """Settings() по умолчанию TRADING_EXECUTION_ENABLED=false — guard #1
-    обязан сработать раньше любого обращения к бирже."""
+    """trading_execution_enabled=False явно в конструкторе — guard #1 обязан
+    сработать раньше любого обращения к бирже.
+
+    Явный аргумент, а не Settings() без параметров: последнее зависело бы
+    от TRADING_EXECUTION_ENABLED в окружении запуска, а не от того, что
+    тест проверяет по существу."""
     session, user, client, market = ctx
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
 
-    service = ExecutionService(session=session, settings=Settings(), client=client, market=market)  # type: ignore[call-arg]
+    service = ExecutionService(
+        session=session,
+        settings=Settings(trading_execution_enabled=False),  # type: ignore[call-arg]
+        client=client,
+        market=market,
+    )
 
     result = await service.evaluate(
         user=user, signal=signal, plan=user.trading_plan,
@@ -198,7 +207,12 @@ async def test_execution_disabled_writes_refused_observation_without_price(ctx) 
     session.add(signal)
     await session.flush()
 
-    service = ExecutionService(session=session, settings=Settings(), client=client, market=market)  # type: ignore[call-arg]
+    service = ExecutionService(
+        session=session,
+        settings=Settings(trading_execution_enabled=False),  # type: ignore[call-arg]
+        client=client,
+        market=market,
+    )
     result = await service.evaluate(
         user=user, signal=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,

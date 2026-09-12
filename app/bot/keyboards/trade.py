@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from decimal import Decimal
-
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from app.bot.formatting import fmt_money, fmt_percent, fmt_price, fmt_qty, fmt_ratio
 from app.database.models.mistake import MistakeType
 from app.database.models.strategy import Strategy
 from app.database.models.trade import Trade
@@ -132,67 +131,8 @@ def mistakes_keyboard(
 
 
 # ---------------------------------------------------------------------------
-# Форматирование
+# Рендер
 # ---------------------------------------------------------------------------
-
-
-def fmt_num(value: Decimal | None) -> str:
-    """Убирает незначащие нули: 2.0000 → 2, но 0.00001234 сохраняет.
-
-    Формат :g для Decimal не годится — он оставляет хвост нулей
-    (Decimal("2.0000") выводится как «2.0000»), из-за чего проценты
-    и RR отображались как «2.0000%» и «1:2.0000».
-    """
-    if value is None:
-        return "—"
-    normalized = value.normalize()
-    sign, digits, exponent = normalized.as_tuple()
-    # normalize() превращает Decimal("10.0000") в 1E+1 — возвращаем
-    # обратно к обычной записи.
-    if isinstance(exponent, int) and exponent > 0:
-        normalized = normalized.quantize(Decimal(1))
-    return f"{normalized:f}"
-
-
-# Исторический псевдоним: цены форматируются тем же правилом.
-fmt_price = fmt_num
-
-
-def fmt_qty(value: Decimal | None) -> str:
-    """Объём с точностью 8 знаков — как на бирже.
-
-    Расчёт от риска даёт периодические дроби (200 / 60 = 3.333…), и
-    показывать все 12 знаков хранимой точности бессмысленно: биржа всё
-    равно округлит до шага лота.
-    """
-    if value is None:
-        return "—"
-    return fmt_num(value.quantize(Decimal("0.00000001")))
-
-
-def fmt_money(value: Decimal | None) -> str:
-    if value is None:
-        return "—"
-    sign = "+" if value > 0 else ""
-    return f"{sign}{value.quantize(Decimal('0.01')):f}"
-
-
-def fmt_percent(value: Decimal | None) -> str:
-    if value is None:
-        return "—"
-    sign = "+" if value > 0 else ""
-    return f"{sign}{value.quantize(Decimal('0.01')):f}%"
-
-
-def fmt_amount(value: Decimal | None) -> str:
-    """Денежная величина без знака: риск, маржа, размер позиции.
-
-    Отличается от fmt_money тем, что не ставит «+»: плюс уместен у PnL,
-    где знак несёт смысл, но «Сумма риска: +200» читается как прибыль.
-    """
-    if value is None:
-        return "—"
-    return f"{value.quantize(Decimal('0.01')):f}"
 
 
 def plural_trades(count: int) -> str:
@@ -242,14 +182,14 @@ def trade_card(trade: Trade) -> str:
             f"<b>PnL: {fmt_money(trade.pnl)} USDT ({fmt_percent(trade.pnl_percent)})</b>",
         ]
         if trade.risk_reward is not None:
-            lines.append(f"Результат: {fmt_num(trade.risk_reward)}R")
+            lines.append(f"Результат: {fmt_ratio(trade.risk_reward)}R")
     else:
         lines.append("")
         lines.append("Статус: открыта")
         if trade.risk_percent is not None:
-            lines.append(f"Риск: {fmt_num(trade.risk_percent)}%")
+            lines.append(f"Риск: {fmt_ratio(trade.risk_percent)}%")
         if trade.risk_reward is not None:
-            lines.append(f"Плановый RR: 1:{fmt_num(trade.risk_reward)}")
+            lines.append(f"Плановый RR: 1:{fmt_ratio(trade.risk_reward)}")
 
     if trade.fees:
         lines.append(f"Комиссии: {fmt_price(trade.fees)}")

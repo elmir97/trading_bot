@@ -8,8 +8,6 @@
 
 from __future__ import annotations
 
-from decimal import Decimal
-
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
@@ -18,9 +16,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.analysis.engine import AnalysisEngine
 from app.analysis.signals import MarketContext, Signal
+from app.bot.formatting import fmt_price, fmt_ratio
 from app.bot.handlers.exchange import _describe, _market_cache
 from app.bot.keyboards.main import MenuCallback, back_to, nav_row
-from app.bot.keyboards.trade import fmt_num
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.database.models.user import User
@@ -77,12 +75,16 @@ def _symbols_keyboard(symbols: list[str], prefix: str) -> InlineKeyboardBuilder:
 # ---------------------------------------------------------------------------
 
 
-def render_signal(signal: Signal) -> str:
+def render_signal(signal: Signal, price_precision: int | None = None) -> str:
     """Текст сигнала.
 
     Формулировки намеренно осторожные: «сценарий актуален при
     выполнении условий», а не «цена вырастет». Система не может знать
     исход сделки, и говорить иначе значит вводить в заблуждение.
+
+    price_precision — из SymbolInfo.price_precision биржи; None, если
+    инструмент не удалось сопоставить (тогда fmt_price сам выбирает
+    точность по порядку величины).
     """
     if signal.direction is SignalDirection.WAIT:
         lines = [
@@ -106,11 +108,12 @@ def render_signal(signal: Signal) -> str:
         f"<i>{signal.setup} · {signal.timeframe.upper()}</i>",
         "",
         "<b>Зона входа</b>",
-        f"{fmt_num(signal.entry_zone_low)} – {fmt_num(signal.entry_zone_high)}",
+        f"{fmt_price(signal.entry_zone_low, price_precision)} – "
+        f"{fmt_price(signal.entry_zone_high, price_precision)}",
         "",
-        f"<b>Стоп-лосс:</b> {fmt_num(signal.stop_loss)}",
-        f"<b>Цель:</b> {fmt_num(signal.take_profit_1)}",
-        f"<b>RR:</b> 1:{fmt_num(signal.risk_reward)}",
+        f"<b>Стоп-лосс:</b> {fmt_price(signal.stop_loss, price_precision)}",
+        f"<b>Цель:</b> {fmt_price(signal.take_profit_1, price_precision)}",
+        f"<b>RR:</b> 1:{fmt_ratio(signal.risk_reward)}",
         f"<b>Качество сетапа:</b> {signal.confidence}/10",
         "",
         f"<b>Подтверждение:</b> {signal.confirmation}",
@@ -131,23 +134,27 @@ def render_signal(signal: Signal) -> str:
     return "\n".join(lines)
 
 
-def render_market(context: MarketContext) -> str:
-    """Сводка по рынку без торговых рекомендаций."""
+def render_market(context: MarketContext, price_precision: int | None = None) -> str:
+    """Сводка по рынку без торговых рекомендаций.
+
+    price_precision — из SymbolInfo.price_precision биржи; None, если
+    инструмент не удалось сопоставить.
+    """
     lines = [
         f"<b>{context.symbol} · {context.timeframe.upper()}</b>",
         "",
-        f"Цена: {fmt_num(context.price)}",
+        f"Цена: {fmt_price(context.price, price_precision)}",
         "",
         "<b>Тренд</b>",
     ]
 
     if context.ema200 is not None:
         side = "выше" if context.above_ema200 else "ниже"
-        lines.append(f"Цена {side} EMA200 ({fmt_num(context.ema200)})")
+        lines.append(f"Цена {side} EMA200 ({fmt_price(context.ema200, price_precision)})")
     if context.ema50 is not None:
-        lines.append(f"EMA50: {fmt_num(context.ema50)}")
+        lines.append(f"EMA50: {fmt_price(context.ema50, price_precision)}")
     if context.ema20 is not None:
-        lines.append(f"EMA20: {fmt_num(context.ema20)}")
+        lines.append(f"EMA20: {fmt_price(context.ema20, price_precision)}")
 
     lines += ["", f"Структура: {context.structure.value}"]
     if context.higher_structure is not None:
@@ -163,14 +170,12 @@ def render_market(context: MarketContext) -> str:
             state = " — зона перекупленности"
         elif context.rsi <= 30:
             state = " — зона перепроданности"
-        lines.append(f"RSI: {fmt_num(context.rsi.quantize(Decimal('0.1')))}{state}")
+        lines.append(f"RSI: {fmt_ratio(context.rsi)}{state}")
 
     if context.atr is not None:
-        lines.append(f"ATR: {fmt_num(context.atr.quantize(Decimal('0.0001')))}")
+        lines.append(f"ATR: {fmt_price(context.atr, price_precision)}")
     if context.volume_ratio is not None:
-        lines.append(
-            f"Объём к среднему: {fmt_num(context.volume_ratio.quantize(Decimal('0.01')))}"
-        )
+        lines.append(f"Объём к среднему: {fmt_ratio(context.volume_ratio)}")
 
     if context.levels:
         lines += ["", "<b>Ближайшие уровни</b>"]
@@ -180,7 +185,7 @@ def render_market(context: MarketContext) -> str:
         for level in sorted(nearby, key=lambda level: level.price, reverse=True):
             kind = "сопротивление" if level.is_resistance else "поддержка"
             lines.append(
-                f"{fmt_num(level.price)} · {kind} · "
+                f"{fmt_price(level.price, price_precision)} · {kind} · "
                 f"касаний {level.touches}"
             )
 
@@ -254,7 +259,10 @@ async def run_signal(callback: CallbackQuery, settings: Settings) -> None:
     engine, client = await _engine(settings)
     try:
         signal = await engine.analyze(symbol, timeframe)
-        text = render_signal(signal)
+        symbol_info = await engine.get_symbol_info(symbol)
+        text = render_signal(
+            signal, symbol_info.price_precision if symbol_info else None
+        )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Анализ не удался", extra={"symbol": symbol})
         text = _describe(exc)
@@ -284,6 +292,16 @@ async def run_scan(
     engine, client = await _engine(settings)
     try:
         signals = await engine.scan(symbols, timeframe)
+        # Один запрос списка инструментов на всё сканирование (кэш общий,
+        # ключ один на биржу), а не по запросу на каждый найденный сетап:
+        # словарь строится локально, дальше — только обращения к памяти.
+        try:
+            symbol_precisions = {
+                info.symbol: info.price_precision for info in await engine.get_symbols()
+            }
+        except Exception:  # noqa: BLE001
+            logger.warning("Не удалось получить точность инструментов для сканирования")
+            symbol_precisions = {}
     except Exception as exc:  # noqa: BLE001
         logger.exception("Сканирование не удалось")
         await _reply(callback, _describe(exc), back_to(MenuCallback.FIND_ENTRY))
@@ -299,12 +317,13 @@ async def run_scan(
         lines.append("")
         for signal in actionable:
             icon = "🟢" if signal.direction is SignalDirection.LONG else "🔴"
+            precision = symbol_precisions.get(signal.symbol)
             lines.append(
                 f"{icon} <b>{signal.symbol}</b> — {signal.setup}\n"
-                f"Вход {fmt_num(signal.entry_zone_low)}–"
-                f"{fmt_num(signal.entry_zone_high)} · "
-                f"стоп {fmt_num(signal.stop_loss)} · "
-                f"RR 1:{fmt_num(signal.risk_reward)} · "
+                f"Вход {fmt_price(signal.entry_zone_low, precision)}–"
+                f"{fmt_price(signal.entry_zone_high, precision)} · "
+                f"стоп {fmt_price(signal.stop_loss, precision)} · "
+                f"RR 1:{fmt_ratio(signal.risk_reward)} · "
                 f"{signal.confidence}/10"
             )
     else:
@@ -358,11 +377,13 @@ async def show_market(
     engine, client = await _engine(settings)
     try:
         context = await engine.build_context(symbol, timeframe)
-        text = (
-            render_market(context)
-            if context is not None
-            else "Недостаточно рыночных данных для анализа."
-        )
+        if context is not None:
+            symbol_info = await engine.get_symbol_info(symbol)
+            text = render_market(
+                context, symbol_info.price_precision if symbol_info else None
+            )
+        else:
+            text = "Недостаточно рыночных данных для анализа."
     except Exception as exc:  # noqa: BLE001
         logger.exception("Анализ рынка не удался", extra={"symbol": symbol})
         text = _describe(exc)

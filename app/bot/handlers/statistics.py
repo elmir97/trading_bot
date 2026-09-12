@@ -2,21 +2,15 @@
 
 from __future__ import annotations
 
-from decimal import Decimal
-
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot.formatting import fmt_money, fmt_num, fmt_ratio
 from app.bot.keyboards.main import MenuCallback, back_to_main
-from app.bot.keyboards.trade import (
-    fmt_money,
-    fmt_num,
-    fmt_percent,
-    plural_trades,
-)
+from app.bot.keyboards.trade import plural_trades
 from app.database.models.user import User
 from app.database.repositories.user import UserRepository
 from app.services.statistics_service import StatisticsService, period_bounds
@@ -85,7 +79,7 @@ def render_statistics(stats: Statistics, title: str) -> str:
         "",
         f"Сделок: {stats.total_trades}",
         f"Прибыльных: {stats.wins} · убыточных: {stats.losses}",
-        f"Win Rate: {fmt_num(stats.win_rate)}%",
+        f"Win Rate: {fmt_ratio(stats.win_rate)}%",
         "",
         f"<b>PnL: {fmt_money(stats.total_pnl)} USDT</b>",
         f"Средняя сделка: {fmt_money(stats.average_pnl)}",
@@ -95,13 +89,13 @@ def render_statistics(stats: Statistics, title: str) -> str:
     ]
 
     if stats.profit_factor is not None:
-        lines.append(f"Profit Factor: {fmt_num(stats.profit_factor)}")
+        lines.append(f"Profit Factor: {fmt_ratio(stats.profit_factor)}")
     else:
         lines.append("Profit Factor: — (убыточных сделок нет)")
 
     lines.append(f"Expectancy: {fmt_money(stats.expectancy)} на сделку")
     if stats.average_rr is not None:
-        lines.append(f"Средний R: {fmt_num(stats.average_rr)}")
+        lines.append(f"Средний R: {fmt_ratio(stats.average_rr)}")
 
     lines += [
         "",
@@ -110,7 +104,7 @@ def render_statistics(stats: Statistics, title: str) -> str:
         f"Серия побед: {stats.max_win_streak} · убытков: {stats.max_loss_streak}",
         "",
         f"Макс. просадка: −{fmt_num(stats.drawdown.max_drawdown)} USDT "
-        f"({fmt_num(stats.drawdown.max_drawdown_percent)}%)",
+        f"({fmt_ratio(stats.drawdown.max_drawdown_percent)}%)",
     ]
 
     if stats.drawdown.current_drawdown > 0:
@@ -232,12 +226,12 @@ async def show_breakdown(
         by_weekday = group_by_weekday(snapshots, offset)
         lines = ["<b>Результат по времени</b>", "", "<b>Лучшие часы</b>"]
         lines += [
-            f"{g.key} · {g.trades} сд. · {fmt_num(g.win_rate)}% · {fmt_money(g.total_pnl)}"
+            f"{g.key} · {g.trades} сд. · {fmt_ratio(g.win_rate)}% · {fmt_money(g.total_pnl)}"
             for g in by_hour
         ]
         lines += ["", "<b>По дням недели</b>"]
         lines += [
-            f"{g.key} · {g.trades} сд. · {fmt_num(g.win_rate)}% · {fmt_money(g.total_pnl)}"
+            f"{g.key} · {g.trades} сд. · {fmt_ratio(g.win_rate)}% · {fmt_money(g.total_pnl)}"
             for g in by_weekday
         ]
         await _reply(callback, "\n".join(lines), period_keyboard().as_markup())
@@ -254,7 +248,7 @@ async def show_breakdown(
     for group in groups[:15]:
         lines.append(
             f"<b>{group.key}</b>\n"
-            f"Сделок: {group.trades} · Win Rate: {fmt_num(group.win_rate)}%\n"
+            f"Сделок: {group.trades} · Win Rate: {fmt_ratio(group.win_rate)}%\n"
             f"PnL: {fmt_money(group.total_pnl)} · средняя: {fmt_money(group.average_pnl)}\n"
         )
 
@@ -283,7 +277,7 @@ async def show_drawdown(
     lines = [
         "<b>Просадка</b>",
         "",
-        f"Максимальная: −{fmt_num(dd.max_drawdown)} USDT ({fmt_num(dd.max_drawdown_percent)}%)",
+        f"Максимальная: −{fmt_num(dd.max_drawdown)} USDT ({fmt_ratio(dd.max_drawdown_percent)}%)",
         f"Пик эквити: {fmt_num(dd.peak_equity)}",
         f"Дно: {fmt_num(dd.trough_equity)}",
         "",
@@ -338,7 +332,7 @@ async def show_mistakes(
         lines += [
             f"⚠️ <b>Самая дорогая: {worst.title}</b>",
             f"{worst.occurrences} {plural_trades(worst.occurrences)} · "
-            f"Win Rate {fmt_num(worst.win_rate)}%",
+            f"Win Rate {fmt_ratio(worst.win_rate)}%",
             f"Суммарно: {fmt_money(worst.total_pnl)} USDT",
             "",
         ]
@@ -346,7 +340,7 @@ async def show_mistakes(
     for impact in impacts:
         line = (
             f"<b>{impact.title}</b> — {impact.occurrences} сд. · "
-            f"{fmt_num(impact.win_rate)}% · {fmt_money(impact.total_pnl)} USDT"
+            f"{fmt_ratio(impact.win_rate)}% · {fmt_money(impact.total_pnl)} USDT"
         )
         # Сравнение со средней сделкой: цифра по ошибке сама по себе
         # ни о чём не говорит без базы для сравнения.
@@ -384,7 +378,7 @@ async def show_report(
 
         parts.append(
             f"<b>{label}</b>\n"
-            f"Сделок: {stats.total_trades} · Win Rate: {fmt_num(stats.win_rate)}%\n"
+            f"Сделок: {stats.total_trades} · Win Rate: {fmt_ratio(stats.win_rate)}%\n"
             f"PnL: {fmt_money(stats.total_pnl)} USDT\n"
             f"Макс. DD: −{fmt_num(stats.drawdown.max_drawdown)}"
         )

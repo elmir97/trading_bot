@@ -31,9 +31,9 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot.formatting import fmt_amount, fmt_price, fmt_qty, fmt_ratio
 from app.bot.handlers.exchange import _describe, _market_cache
 from app.bot.keyboards.execution import ExecutionCB, confirm_keyboard, expired_keyboard
-from app.bot.keyboards.trade import fmt_amount, fmt_num, fmt_qty
 from app.core.config import Settings
 from app.core.locks import LockBusyError, RedisLike, RedisLock, confirm_lock_key
 from app.core.logging import get_logger
@@ -111,32 +111,35 @@ def render_confirmation(quote: ExecutionQuote, signal: SignalRecord, settings: S
     """Раздел 5 ТЗ: карточка подтверждения со всеми цифрами."""
     order = quote.order
     base_asset = order.symbol.split("-")[0]
+    price_precision = quote.symbol_info.price_precision
+    quantity_precision = quote.symbol_info.quantity_precision
 
     drift_note = ""
     reference = signal_reference_price(signal)
     drift_pct = price_drift_percent(order.entry_price, signal)
     if reference is not None and drift_pct is not None:
         drift_note = (
-            f" (сигнал был на {fmt_num(reference)}, "
-            f"дрейф {fmt_num(drift_pct.quantize(Decimal('0.01')))}%)"
+            f" (сигнал был на {fmt_price(reference, price_precision)}, "
+            f"дрейф {fmt_ratio(drift_pct)}%)"
         )
 
     stop_pct = abs(order.entry_price - order.stop_loss) / order.entry_price * Decimal(100)
 
     lines = [
         f"<b>{order.symbol} · {order.position_side.label} · маркет</b>",
-        f"Цена сейчас: {fmt_num(order.entry_price)}{drift_note}",
-        f"Объём: {fmt_qty(order.quantity)} {base_asset} ≈ "
+        f"Цена сейчас: {fmt_price(order.entry_price, price_precision)}{drift_note}",
+        f"Объём: {fmt_qty(order.quantity, quantity_precision)} {base_asset} ≈ "
         f"{fmt_amount(order.notional)} USDT нотионал",
         f"Плечо: {order.leverage}x, маржа {fmt_amount(order.margin)} USDT",
-        f"Стоп: {fmt_num(order.stop_loss)}  (−{fmt_num(stop_pct.quantize(Decimal('0.01')))}%)  "
-        f"риск {fmt_amount(order.risk_amount)} USDT = {fmt_num(order.risk_percent)}% депозита",
-        f"Тейк: {fmt_num(order.take_profit)}  RR 1:{fmt_num(order.risk_reward)}",
+        f"Стоп: {fmt_price(order.stop_loss, price_precision)}  (−{fmt_ratio(stop_pct)}%)  "
+        f"риск {fmt_amount(order.risk_amount)} USDT = {fmt_ratio(order.risk_percent)}% депозита",
+        f"Тейк: {fmt_price(order.take_profit, price_precision)}  "
+        f"RR 1:{fmt_ratio(order.risk_reward)}",
         "",
         f"Открытых позиций сейчас: {quote.open_positions_count} из "
         f"{settings.exec_max_open_positions}",
-        f"Суммарный риск после входа: {fmt_num(quote.total_risk_after_percent)}% из "
-        f"{fmt_num(settings.exec_max_total_risk_percent)}%",
+        f"Суммарный риск после входа: {fmt_ratio(quote.total_risk_after_percent)}% из "
+        f"{fmt_ratio(settings.exec_max_total_risk_percent)}%",
     ]
     return "\n".join(lines)
 

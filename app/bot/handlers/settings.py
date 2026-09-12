@@ -15,16 +15,9 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot.formatting import fmt_amount, fmt_num, fmt_price, fmt_qty
 from app.bot.keyboards.main import MenuCallback, back_to, back_to_main, nav_row
-from app.bot.keyboards.trade import (
-    TradeCB,
-    fmt_amount,
-    fmt_money,
-    fmt_num,
-    fmt_qty,
-    fmt_price,
-    side_keyboard,
-)
+from app.bot.keyboards.trade import TradeCB
 from app.bot.states.trade import RiskCalculatorStates, SettingsStates
 from app.core.config import Settings
 from app.core.security import SecretCipher, mask_secret

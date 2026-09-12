@@ -12,8 +12,6 @@
 
 from __future__ import annotations
 
-from decimal import Decimal
-
 from app.analysis.indicators import (
     atr as calc_atr,
     ema,
@@ -26,6 +24,7 @@ from app.analysis.setups import DEFAULT_DETECTORS, SetupDetector
 from app.analysis.signals import MarketContext, Signal, wait_signal
 from app.analysis.structure import detect_structure, find_levels
 from app.core.logging import get_logger
+from app.exchanges.base import SymbolInfo
 from app.market.data import MarketDataService
 from app.trading.enums import SignalDirection, Timeframe
 
@@ -43,6 +42,24 @@ class AnalysisEngine:
     ) -> None:
         self._market = market
         self._detectors = detectors or DEFAULT_DETECTORS
+
+    async def get_symbol_info(self, symbol: str) -> SymbolInfo | None:
+        """Точность цены/объёма символа — для форматирования на выводе.
+
+        Форвард в MarketDataService.get_symbol_info(): список инструментов
+        кэшируется на час (TTL_SYMBOLS), так что вызов на каждый рендер
+        карточки не превращается в отдельный поход на биржу.
+        """
+        return await self._market.get_symbol_info(symbol)
+
+    async def get_symbols(self) -> list[SymbolInfo]:
+        """Полный список инструментов — для сканирования сразу по многим
+        символам: один вызов и локальный dict вместо N обращений к кэшу
+        (сам по себе кэш это тоже не размножит, т.к. ключ один на всю
+        биржу — но так это гарантировано структурой кода, а не поведением
+        TTLCache, которое не должно быть контрактом для вызывающей стороны).
+        """
+        return await self._market.get_symbols()
 
     async def build_context(
         self, symbol: str, timeframe: str, *, with_higher: bool = True
