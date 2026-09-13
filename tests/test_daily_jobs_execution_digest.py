@@ -21,11 +21,19 @@ import pytest_asyncio
 from app.core.config import Settings
 from app.core.security import SecretCipher
 from app.database.models.execution_order import ExecutionOrder
+from app.database.models.signal import SignalRecord
 from app.database.repositories.strategy import MistakeTypeRepository, StrategyRepository
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
 from app.services.user_service import UserService
-from app.trading.enums import OrderRole, OrderSide, OrderStatus, OrderType, TradeSide
+from app.trading.enums import (
+    OrderRole,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    SignalLevel,
+    TradeSide,
+)
 from app.trading.risk import tz_offset_for
 from app.workers.daily import DailyJobs
 
@@ -56,6 +64,24 @@ def _row(user_id: int, status: OrderStatus, **overrides: object) -> ExecutionOrd
     return ExecutionOrder(**fields)  # type: ignore[arg-type]
 
 
+def _signal(
+    user_id: int, level: SignalLevel, *, symbol: str, notified_at: datetime, **overrides: object
+) -> SignalRecord:
+    fields: dict[str, object] = {
+        "user_id": user_id,
+        "symbol": symbol,
+        "timeframe": "1h",
+        "level": level,
+        "setup": "test",
+        "fingerprint": f"fp-{symbol}-{level}",
+        "detail": "test detail",
+        "expires_at": notified_at + timedelta(hours=1),
+        "notified_at": notified_at,
+    }
+    fields.update(overrides)
+    return SignalRecord(**fields)  # type: ignore[arg-type]
+
+
 @pytest_asyncio.fixture
 async def ctx():  # type: ignore[no-untyped-def]
     settings = Settings()  # type: ignore[call-arg]
@@ -83,12 +109,17 @@ def _call_args(user, settings: Settings, *, local_hour: int):
 
 async def test_sends_digest_reflecting_todays_rows(ctx) -> None:  # type: ignore[no-untyped-def]
     daily, session, user, bot, settings = ctx
+    now = datetime.now(UTC)
     session.add(_row(user.id, OrderStatus.DRY_RUN, risk_percent=D("1.0"), risk_reward=D("2.0")))
     session.add(_row(user.id, OrderStatus.DECLINED))
     session.add(_row(user.id, OrderStatus.REFUSED, error_code="MAX_POSITIONS"))
+    # READY-сигнал сегодня — должен попасть в счётчик. FORMING сегодня же —
+    # проверяет, что фильтр по level реально отсекает не-READY.
+    session.add(_signal(user.id, SignalLevel.READY, symbol="BTC-USDT", notified_at=now))
+    session.add(_signal(user.id, SignalLevel.FORMING, symbol="ETH-USDT", notified_at=now))
     await session.flush()
 
-    now, tz_offset, today_local, local_hour = _call_args(
+    _now, tz_offset, today_local, local_hour = _call_args(
         user, settings, local_hour=settings.exec_daily_digest_hour
     )
     await daily._maybe_send_execution_digest(
@@ -97,7 +128,8 @@ async def test_sends_digest_reflecting_todays_rows(ctx) -> None:  # type: ignore
 
     assert len(bot.sent_messages) == 1
     _chat_id, text = bot.sent_messages[0]
-    assert "Сигналов READY: 2" in text
+    assert "Сигналов READY: 1" in text
+    assert "показана карточка: 2" in text
     assert "подтверждено: 1" in text
     assert "отказ пользователя: 1" in text
     assert "MAX_POSITIONS — 1" in text

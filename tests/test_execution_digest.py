@@ -5,6 +5,10 @@ detect_anomalies() читают уже готовые ExecutionOrder (role=ENTRY
 отдаёт ExecutionOrderRepository.list_entries_between()), собранные тут
 вручную, без сессии. Как test_workers.py — те же принципы (Decimal,
 никакого мока сети/БД).
+
+ready_signals (счётчик из таблицы signals) сюда же передаётся готовым
+числом — build_stats() ничего не знает о SignalRepository, поэтому
+никакого мока БД для него не нужно, как и для execution_orders.
 """
 
 from __future__ import annotations
@@ -128,17 +132,35 @@ class TestAnomalies:
 
     def test_average_drift_above_half_threshold_flagged(self) -> None:
         # Допустимый порог 0.3 → в процентах то же самое (30%), половина —
-        # 15%. Средний дрейф 20% > 15% — аномалия.
+        # 15%. Средний дрейф 20% > 15% — аномалия. Три карточки — на грани
+        # PRICE_DRIFT_MIN_CARDS, минимум выполнен.
         rows = [
             _row(OrderStatus.DRY_RUN, price_drift_percent=D("18")),
             _row(OrderStatus.DRY_RUN, price_drift_percent=D("22")),
+            _row(OrderStatus.DRY_RUN, price_drift_percent=D("20")),
         ]
         stats = build_stats(rows, target_risk_percent=None)
         anomalies = detect_anomalies(stats, max_price_drift_ratio=D("0.3"))
         assert any("дрейф" in a for a in anomalies)
 
     def test_average_drift_below_half_threshold_not_flagged(self) -> None:
-        rows = [_row(OrderStatus.DRY_RUN, price_drift_percent=D("5"))]
+        rows = [
+            _row(OrderStatus.DRY_RUN, price_drift_percent=D("5")),
+            _row(OrderStatus.DRY_RUN, price_drift_percent=D("4")),
+            _row(OrderStatus.DRY_RUN, price_drift_percent=D("6")),
+        ]
+        stats = build_stats(rows, target_risk_percent=None)
+        anomalies = detect_anomalies(stats, max_price_drift_ratio=D("0.3"))
+        assert not any("дрейф" in a for a in anomalies)
+
+    def test_average_drift_below_min_cards_not_flagged_even_if_high(self) -> None:
+        # Те же 20% среднего дрейфа, что и в flagged-тесте выше, но только
+        # 2 карточки < PRICE_DRIFT_MIN_CARDS — правило не должно сработать,
+        # сколько бы ни был велик сам дрейф на такой маленькой выборке.
+        rows = [
+            _row(OrderStatus.DRY_RUN, price_drift_percent=D("18")),
+            _row(OrderStatus.DRY_RUN, price_drift_percent=D("22")),
+        ]
         stats = build_stats(rows, target_risk_percent=None)
         anomalies = detect_anomalies(stats, max_price_drift_ratio=D("0.3"))
         assert not any("дрейф" in a for a in anomalies)
@@ -157,15 +179,36 @@ class TestAnomalies:
         assert any("MAX_POSITIONS" in a for a in anomalies)
 
     def test_evenly_spread_guard_codes_not_flagged(self) -> None:
+        # 5 попыток — минимум выполнен, но ни один код не набирает больше
+        # половины (2 из 5 максимум у каждого).
         rows = [
             _row(OrderStatus.REFUSED, error_code="MAX_POSITIONS"),
             _row(OrderStatus.REFUSED, error_code="PRICE_DRIFT"),
             _row(OrderStatus.DRY_RUN, risk_percent=D("1")),
             _row(OrderStatus.DECLINED),
+            _row(OrderStatus.EXPIRED),
         ]
         stats = build_stats(rows, target_risk_percent=None)
         anomalies = detect_anomalies(stats, max_price_drift_ratio=D("0.3"))
         assert not any("срабатывает подозрительно часто" in a for a in anomalies)
+
+    def test_guard_dominance_below_min_attempts_not_flagged(self) -> None:
+        # Вчерашний кейс: один отказ гварда на одну попытку за сутки — доля
+        # 100%, но меньше GUARD_DOMINANCE_MIN_ATTEMPTS, поэтому не аномалия.
+        rows = [_row(OrderStatus.REFUSED, error_code="SYMBOL_NOT_ALLOWED")]
+        stats = build_stats(rows, target_risk_percent=None)
+        assert stats.total_attempts == 1
+        anomalies = detect_anomalies(stats, max_price_drift_ratio=D("0.3"))
+        assert anomalies == []
+
+    def test_guard_dominance_at_min_attempts_flagged(self) -> None:
+        # Тот же перекос (100% одним кодом), но ровно на пороге в 5 попыток —
+        # теперь должен сработать.
+        rows = [_row(OrderStatus.REFUSED, error_code="SYMBOL_NOT_ALLOWED") for _ in range(5)]
+        stats = build_stats(rows, target_risk_percent=None)
+        assert stats.total_attempts == 5
+        anomalies = detect_anomalies(stats, max_price_drift_ratio=D("0.3"))
+        assert any("SYMBOL_NOT_ALLOWED" in a for a in anomalies)
 
 
 # ---------------------------------------------------------------------------
@@ -175,13 +218,14 @@ class TestAnomalies:
 
 class TestRenderExecutionDigest:
     def test_zero_signals_day_renders_without_errors(self) -> None:
-        stats = build_stats([], target_risk_percent=D("2.0"))
+        stats = build_stats([], target_risk_percent=D("2.0"), ready_signals=0)
         text = render_execution_digest(stats, max_price_drift_ratio=D("0.3"))
         assert "Сигналов READY: 0" in text
+        assert "показана карточка: 0" in text
         assert "подтверждено: 0" in text
         assert "отказ пользователя: 0" in text
         assert "истекло по TTL: 0" in text
-        assert "Отказы кода: 0" in text
+        assert "отказ кода до карточки: 0" in text
         assert "Аномалии: нет" in text
         # Средних строк для пустого дня быть не должно — делить не на что.
         assert "Средний" not in text
@@ -205,17 +249,38 @@ class TestRenderExecutionDigest:
         ]
         # target_risk_percent=None — эта проверка про форматирование счётчиков
         # и средних, не про раздел "Аномалии" (у него свой TestAnomalies).
-        stats = build_stats(rows, target_risk_percent=None)
+        # ready_signals=9 — намеренно не равно total_cards(6) и не равно
+        # total_attempts(8): источник другой (signals), сумма карточек и
+        # отказов не обязана с ним совпадать.
+        stats = build_stats(rows, target_risk_percent=None, ready_signals=9)
         text = render_execution_digest(stats, max_price_drift_ratio=D("0.3"))
 
-        assert "Сигналов READY: 6" in text
+        assert "Сигналов READY: 9" in text
+        assert "показана карточка: 6" in text
         assert "подтверждено: 2" in text
         assert "отказ пользователя: 3" in text
         assert "истекло по TTL: 1" in text
-        assert "Отказы кода: 2" in text
+        assert "отказ кода до карточки: 2" in text
         assert "MAX_POSITIONS — 1" in text
         assert "PRICE_DRIFT — 1" in text
         assert "Средний расчётный риск" in text
         assert "Средний RR" in text
         assert "Средний дрейф цены на подтверждении" in text
+        assert "Аномалии: нет" in text
+
+    def test_guard_refusal_before_card_reflected_in_funnel_not_lost(self) -> None:
+        # Вчерашний баг-репорт: 1 READY-сигнал, отказ гварда ещё до карточки
+        # (SYMBOL_NOT_ALLOWED), карточка не показана. Раньше "Сигналов READY"
+        # считался по total_cards и печатал 0 при реальном сигнале — теперь
+        # READY берётся из отдельного счётчика и не занижается отказами.
+        rows = [_row(OrderStatus.REFUSED, error_code="SYMBOL_NOT_ALLOWED")]
+        stats = build_stats(rows, target_risk_percent=None, ready_signals=1)
+        text = render_execution_digest(stats, max_price_drift_ratio=D("0.3"))
+
+        assert "Сигналов READY: 1" in text
+        assert "показана карточка: 0" in text
+        assert "отказ кода до карточки: 1" in text
+        assert "SYMBOL_NOT_ALLOWED — 1" in text
+        # Один отказ на одну попытку — доля 100%, но ниже минимума выборки:
+        # не должно превращаться в "подозрительно часто".
         assert "Аномалии: нет" in text

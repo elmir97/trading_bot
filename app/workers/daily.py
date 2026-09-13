@@ -13,8 +13,8 @@ PlanValidator при сохранении сделки, взять его нео
 есть в PlanValidator.check().
 
 Сводка исполнения на биржу не ходит: она считает уже накопленные строки
-execution_orders (см. app/workers/execution_digest.py), поэтому доступна
-даже пользователям без подключённых ключей.
+execution_orders и signals (см. app/workers/execution_digest.py), поэтому
+доступна даже пользователям без подключённых ключей.
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from app.core.logging import get_logger
 from app.core.security import SecretCipher
 from app.database.models.user import User, UserSettings
 from app.database.repositories.execution_order import ExecutionOrderRepository
+from app.database.repositories.signal import SignalRepository
 from app.database.repositories.trade import TradeRepository
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
@@ -203,9 +204,17 @@ class DailyJobs:
         rows = await ExecutionOrderRepository(session).list_entries_between(
             user.id, day_start, day_end
         )
+        # Отдельный источник (signals, не execution_orders) для "Сигналов
+        # READY" — то же окно day_start/day_end, что и у rows выше, второй
+        # раз day_bounds не считается (раздел 12а, execution_digest.py).
+        ready_signals = await SignalRepository(session).count_ready_notified_between(
+            user.id, day_start, day_end
+        )
         plan = user.trading_plan
         target_risk_percent = plan.risk_per_trade_percent if plan else None
-        stats = build_stats(rows, target_risk_percent=target_risk_percent)
+        stats = build_stats(
+            rows, target_risk_percent=target_risk_percent, ready_signals=ready_signals
+        )
 
         settings_row.execution_digest_last_sent_date = today_local
         text = render_execution_digest(

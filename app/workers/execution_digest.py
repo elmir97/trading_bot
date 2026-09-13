@@ -16,6 +16,14 @@ execution_orders, значит рано или поздно разойтись �
 render_execution_digest() — чистые функции без I/O, поэтому проверяются
 тестами без БД (tests/test_execution_digest.py); DailyJobs (app/workers/daily.py)
 только достаёт строки за сутки и вызывает их.
+
+"Сигналов READY" в шапке сводки — исключение: это count() из signals
+(SignalRepository.count_ready_notified_between()), не из execution_orders,
+потому что отказ гварда происходит до появления карточки, а карточка
+(и, значит, execution_orders-строка) при этом ещё не существует —
+без отдельного источника READY-сигналы, упёршиеся в гвард, были бы не
+видны. build_stats() принимает готовое число ready_signals параметром,
+I/O остаётся в DailyJobs.
 """
 
 from __future__ import annotations
@@ -38,6 +46,12 @@ RISK_UNDERSIZED_RATIO = Decimal("0.50")
 # от ВСЕХ попыток за сутки (показанные карточки + отказы гвардов), не
 # только от отказов.
 GUARD_DOMINANCE_RATIO = Decimal("0.50")
+# Ниже этого числа попыток доля гварда не считается — иначе "1 из 1"
+# печатается как "подозрительно часто" на одном событии.
+GUARD_DOMINANCE_MIN_ATTEMPTS = 5
+# Ниже этого числа карточек с данными о дрейфе средний дрейф не считается —
+# та же защита от вывода по одному-двум наблюдениям.
+PRICE_DRIFT_MIN_CARDS = 3
 
 
 @dataclass(slots=True)
@@ -50,6 +64,12 @@ class RiskDeviation:
 @dataclass(slots=True)
 class ExecutionDigestStats:
     """Итог за сутки — только числа, без форматирования (раздел 12а)."""
+
+    # Из signals (SignalRepository.count_ready_notified_between), не из
+    # execution_orders — сколько раз READY-сетап реально дошёл до
+    # пользователя уведомлением, независимо от того, нажималась ли кнопка
+    # и прошла ли попытка гвардов (раздел 12а).
+    ready_signals: int = 0
 
     confirmed: int = 0
     declined: int = 0
@@ -81,13 +101,19 @@ class ExecutionDigestStats:
 
 
 def build_stats(
-    rows: list[ExecutionOrder], *, target_risk_percent: Decimal | None
+    rows: list[ExecutionOrder],
+    *,
+    target_risk_percent: Decimal | None,
+    ready_signals: int = 0,
 ) -> ExecutionDigestStats:
     """rows — строки execution_orders (role=ENTRY) за сутки одного
     пользователя, см. ExecutionOrderRepository.list_entries_between().
     target_risk_percent — текущий risk_per_trade_percent торгового плана,
-    точка отсчёта для "риск отклонился от заданного" (раздел 12а)."""
-    stats = ExecutionDigestStats()
+    точка отсчёта для "риск отклонился от заданного" (раздел 12а).
+    ready_signals — SignalRepository.count_ready_notified_between() за то
+    же окно: считается отдельно от rows, источник другой (signals, не
+    execution_orders), поэтому передаётся готовым числом, а не строками."""
+    stats = ExecutionDigestStats(ready_signals=ready_signals)
 
     for row in rows:
         if row.status is OrderStatus.DRY_RUN:
@@ -144,7 +170,7 @@ def detect_anomalies(stats: ExecutionDigestStats, *, max_price_drift_ratio: Deci
             f"— меньше половины заданных {fmt_decimal(d.target_percent)}%"
         )
 
-    if stats.confirmed_drift_percents:
+    if len(stats.confirmed_drift_percents) >= PRICE_DRIFT_MIN_CARDS:
         avg_drift = sum(stats.confirmed_drift_percents, ZERO) / len(stats.confirmed_drift_percents)
         # "половина допустимого порога" — половина EXEC_MAX_PRICE_DRIFT_RATIO,
         # выраженного в процентах той же величины, что и сам price_drift_percent
@@ -157,7 +183,7 @@ def detect_anomalies(stats: ExecutionDigestStats, *, max_price_drift_ratio: Deci
             )
 
     total = stats.total_attempts
-    if total > 0:
+    if total >= GUARD_DOMINANCE_MIN_ATTEMPTS:
         for code, count in stats.refusals_by_code.items():
             if Decimal(count) > Decimal(total) * GUARD_DOMINANCE_RATIO:
                 anomalies.append(
@@ -177,15 +203,15 @@ def render_execution_digest(
     lines = [
         "📊 <b>Исполнение за сутки</b>",
         "",
-        f"Сигналов READY: {stats.total_cards}",
-        f"  подтверждено: {stats.confirmed}",
-        f"  отказ пользователя: {stats.declined}",
-        f"  истекло по TTL: {stats.expired}",
-        "",
-        f"Отказы кода: {stats.total_refusals}",
+        f"Сигналов READY: {stats.ready_signals}",
+        f"  показана карточка: {stats.total_cards}",
+        f"    подтверждено: {stats.confirmed}",
+        f"    отказ пользователя: {stats.declined}",
+        f"    истекло по TTL: {stats.expired}",
+        f"  отказ кода до карточки: {stats.total_refusals}",
     ]
     for code, count in sorted(stats.refusals_by_code.items(), key=lambda kv: -kv[1]):
-        lines.append(f"  {code} — {count}")
+        lines.append(f"    {code} — {count}")
 
     has_averages = bool(
         stats.confirmed_risk_percents
