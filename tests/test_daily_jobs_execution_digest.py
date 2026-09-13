@@ -110,20 +110,30 @@ def _call_args(user, settings: Settings, *, local_hour: int):
 async def test_sends_digest_reflecting_todays_rows(ctx) -> None:  # type: ignore[no-untyped-def]
     daily, session, user, bot, settings = ctx
     now = datetime.now(UTC)
-    session.add(_row(user.id, OrderStatus.DRY_RUN, risk_percent=D("1.0"), risk_reward=D("2.0")))
-    session.add(_row(user.id, OrderStatus.DECLINED))
-    session.add(_row(user.id, OrderStatus.REFUSED, error_code="MAX_POSITIONS"))
+    # Окно теперь window_start..now с исключающей верхней границей (как и
+    # раньше у day_bounds) — строки должны лечь строго ДО now, иначе флюш
+    # может сравняться с now до микросекунды и вылететь из окна. В проде
+    # так и есть: данные всегда написаны раньше, чем DailyJobs захватит now.
+    moment = now - timedelta(minutes=1)
+    session.add(
+        _row(
+            user.id, OrderStatus.DRY_RUN, risk_percent=D("1.0"), risk_reward=D("2.0"),
+            created_at=moment,
+        )
+    )
+    session.add(_row(user.id, OrderStatus.DECLINED, created_at=moment))
+    session.add(_row(user.id, OrderStatus.REFUSED, error_code="MAX_POSITIONS", created_at=moment))
     # READY-сигнал сегодня — должен попасть в счётчик. FORMING сегодня же —
     # проверяет, что фильтр по level реально отсекает не-READY.
-    session.add(_signal(user.id, SignalLevel.READY, symbol="BTC-USDT", notified_at=now))
-    session.add(_signal(user.id, SignalLevel.FORMING, symbol="ETH-USDT", notified_at=now))
+    session.add(_signal(user.id, SignalLevel.READY, symbol="BTC-USDT", notified_at=moment))
+    session.add(_signal(user.id, SignalLevel.FORMING, symbol="ETH-USDT", notified_at=moment))
     await session.flush()
 
-    _now, tz_offset, today_local, local_hour = _call_args(
+    _now, _tz_offset, today_local, local_hour = _call_args(
         user, settings, local_hour=settings.exec_daily_digest_hour
     )
     await daily._maybe_send_execution_digest(
-        session, user, user.settings, now, tz_offset, today_local, local_hour
+        session, user, user.settings, now, today_local, local_hour
     )
 
     assert len(bot.sent_messages) == 1
@@ -136,16 +146,66 @@ async def test_sends_digest_reflecting_todays_rows(ctx) -> None:  # type: ignore
     assert user.settings.execution_digest_last_sent_date == today_local
 
 
+async def test_window_is_rolling_24h_not_calendar_day(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Регрессия на баг из разведки: при часе отправки, отличном от локальной
+    полночи, календарные сутки (day_bounds) резали бы события между часом
+    отправки и полночью — они не попадали бы ни в сегодняшнюю сводку (её уже
+    нет), ни в завтрашнюю (окно уже следующего дня). Окно теперь строго
+    "последние 24 часа до now", без оглядки на календарную границу: строка
+    23 часа назад видна, строка 25 часов назад — нет, независимо от того, где
+    по местному времени проходит полночь."""
+    daily, session, user, bot, settings = ctx
+    now = datetime.now(UTC)
+
+    session.add(
+        _row(
+            user.id, OrderStatus.DECLINED, created_at=now - timedelta(hours=23)
+        )
+    )
+    session.add(
+        _row(
+            user.id, OrderStatus.EXPIRED, created_at=now - timedelta(hours=25)
+        )
+    )
+    session.add(
+        _signal(
+            user.id, SignalLevel.READY, symbol="BTC-USDT", notified_at=now - timedelta(hours=23)
+        )
+    )
+    session.add(
+        _signal(
+            user.id, SignalLevel.READY, symbol="ETH-USDT", notified_at=now - timedelta(hours=25)
+        )
+    )
+    await session.flush()
+
+    _now, _tz_offset, today_local, local_hour = _call_args(
+        user, settings, local_hour=settings.exec_daily_digest_hour
+    )
+    await daily._maybe_send_execution_digest(
+        session, user, user.settings, now, today_local, local_hour
+    )
+
+    assert len(bot.sent_messages) == 1
+    text = bot.sent_messages[0][1]
+    # 23ч назад — внутри окна: 1 READY-сигнал, 1 показанная карточка (отказ
+    # пользователя). 25ч назад — вне окна, не должно попасть ни в одно число.
+    assert "Сигналов READY: 1" in text
+    assert "показана карточка: 1" in text
+    assert "отказ пользователя: 1" in text
+    assert "истекло по TTL: 0" in text
+
+
 async def test_zero_signals_day_still_sends_digest(ctx) -> None:  # type: ignore[no-untyped-def]
     """Раздел 12а ТЗ: "пустая строка тут не годится" — нулевой день тоже
     шлёт сводку, а не молчит."""
     daily, session, user, bot, settings = ctx
 
-    now, tz_offset, today_local, local_hour = _call_args(
+    now, _tz_offset, today_local, local_hour = _call_args(
         user, settings, local_hour=settings.exec_daily_digest_hour
     )
     await daily._maybe_send_execution_digest(
-        session, user, user.settings, now, tz_offset, today_local, local_hour
+        session, user, user.settings, now, today_local, local_hour
     )
 
     assert len(bot.sent_messages) == 1
@@ -156,11 +216,11 @@ async def test_zero_signals_day_still_sends_digest(ctx) -> None:  # type: ignore
 
 async def test_skips_before_configured_hour(ctx) -> None:  # type: ignore[no-untyped-def]
     daily, session, user, bot, settings = ctx
-    now, tz_offset, today_local, _ = _call_args(user, settings, local_hour=0)
+    now, _tz_offset, today_local, _ = _call_args(user, settings, local_hour=0)
     local_hour = settings.exec_daily_digest_hour - 1
 
     await daily._maybe_send_execution_digest(
-        session, user, user.settings, now, tz_offset, today_local, local_hour
+        session, user, user.settings, now, today_local, local_hour
     )
 
     assert bot.sent_messages == []
@@ -169,13 +229,13 @@ async def test_skips_before_configured_hour(ctx) -> None:  # type: ignore[no-unt
 
 async def test_skips_when_already_sent_today(ctx) -> None:  # type: ignore[no-untyped-def]
     daily, session, user, bot, settings = ctx
-    now, tz_offset, today_local, local_hour = _call_args(
+    now, _tz_offset, today_local, local_hour = _call_args(
         user, settings, local_hour=settings.exec_daily_digest_hour
     )
     user.settings.execution_digest_last_sent_date = today_local
 
     await daily._maybe_send_execution_digest(
-        session, user, user.settings, now, tz_offset, today_local, local_hour
+        session, user, user.settings, now, today_local, local_hour
     )
 
     assert bot.sent_messages == []
@@ -187,11 +247,11 @@ async def test_respects_notification_toggle(ctx) -> None:  # type: ignore[no-unt
     daily, session, user, bot, settings = ctx
     user.settings.notifications = {**user.settings.notifications, "execution_digest": False}
 
-    now, tz_offset, today_local, local_hour = _call_args(
+    now, _tz_offset, today_local, local_hour = _call_args(
         user, settings, local_hour=settings.exec_daily_digest_hour
     )
     await daily._maybe_send_execution_digest(
-        session, user, user.settings, now, tz_offset, today_local, local_hour
+        session, user, user.settings, now, today_local, local_hour
     )
 
     assert bot.sent_messages == []

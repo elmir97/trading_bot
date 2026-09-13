@@ -15,7 +15,14 @@
 execution_orders, значит рано или поздно разойтись с ним. build_stats() и
 render_execution_digest() — чистые функции без I/O, поэтому проверяются
 тестами без БД (tests/test_execution_digest.py); DailyJobs (app/workers/daily.py)
-только достаёт строки за сутки и вызывает их.
+только достаёт строки за окно сводки и вызывает их.
+
+Окно — скользящие 24 часа до момента отправки, не календарные сутки:
+отправка (EXEC_DAILY_DIGEST_HOUR) почти никогда не совпадает с локальной
+полночью, и календарные сутки резали бы события между часом отправки и
+полночью — они не попадали бы ни в сегодняшнюю сводку, ни в завтрашнюю.
+Само окно считает DailyJobs (window_start = now - 24h), этому модулю
+известны только уже готовые rows/ready_signals.
 
 "Сигналов READY" в шапке сводки — исключение: это count() из signals
 (SignalRepository.count_ready_notified_between()), не из execution_orders,
@@ -43,7 +50,7 @@ RISK_DEVIATION_RATIO = Decimal("0.10")
 # более серьёзная планка внутри той же деформации от округления лота вниз.
 RISK_UNDERSIZED_RATIO = Decimal("0.50")
 # "гвард срабатывает подозрительно часто (более половины сигналов)" — доля
-# от ВСЕХ попыток за сутки (показанные карточки + отказы гвардов), не
+# от ВСЕХ попыток в окне сводки (показанные карточки + отказы гвардов), не
 # только от отказов.
 GUARD_DOMINANCE_RATIO = Decimal("0.50")
 # Ниже этого числа попыток доля гварда не считается — иначе "1 из 1"
@@ -63,7 +70,10 @@ class RiskDeviation:
 
 @dataclass(slots=True)
 class ExecutionDigestStats:
-    """Итог за сутки — только числа, без форматирования (раздел 12а)."""
+    """Итог за окно сводки — только числа, без форматирования (раздел 12а).
+
+    Окно — скользящие 24 часа до отправки (см. докстринг модуля), не
+    календарные сутки."""
 
     # Из signals (SignalRepository.count_ready_notified_between), не из
     # execution_orders — сколько раз READY-сетап реально дошёл до
@@ -106,8 +116,9 @@ def build_stats(
     target_risk_percent: Decimal | None,
     ready_signals: int = 0,
 ) -> ExecutionDigestStats:
-    """rows — строки execution_orders (role=ENTRY) за сутки одного
-    пользователя, см. ExecutionOrderRepository.list_entries_between().
+    """rows — строки execution_orders (role=ENTRY) за окно сводки одного
+    пользователя (скользящие 24 часа, не календарные сутки — см. докстринг
+    модуля), см. ExecutionOrderRepository.list_entries_between().
     target_risk_percent — текущий risk_per_trade_percent торгового плана,
     точка отсчёта для "риск отклонился от заданного" (раздел 12а).
     ready_signals — SignalRepository.count_ready_notified_between() за то
@@ -201,7 +212,7 @@ def render_execution_digest(
     anomalies = detect_anomalies(stats, max_price_drift_ratio=max_price_drift_ratio)
 
     lines = [
-        "📊 <b>Исполнение за сутки</b>",
+        "📊 <b>Исполнение за последние 24 часа</b>",
         "",
         f"Сигналов READY: {stats.ready_signals}",
         f"  показана карточка: {stats.total_cards}",

@@ -4,7 +4,17 @@
 Все три уведомления — не чаще одного раза в локальный календарный день
 пользователя: дата последней отправки хранится в user_settings и
 сравнивается с "сегодня" по местному времени (тот же tz_offset_for, что и
-в интерактивных отчётах — см. app/trading/risk.py).
+в интерактивных отчётах — см. app/trading/risk.py). Это гейтинг отправки —
+когда слать, не про что слать.
+
+Окно данных — другое дело, и у сводки исполнения (раздел 12а) оно не
+совпадает с двумя остальными: час отправки (EXEC_DAILY_DIGEST_HOUR) не
+обязан быть локальной полночью, поэтому day_bounds (календарные сутки)
+резал бы события между часом отправки и полночью — они не попадали бы ни
+в сегодняшнюю сводку (её уже нет), ни в завтрашнюю (окно уже следующего
+дня). Поэтому у сводки исполнения окно — скользящие 24 часа до момента
+отправки, не day_bounds. У дневной сводки сделок и алерта лимита убытка
+окно осталось day_bounds — календарный день им и нужен.
 
 Проверка лимита убытка требует текущего баланса в процентах — как и
 PlanValidator при сохранении сделки, взять его неоткуда, кроме биржи:
@@ -96,7 +106,7 @@ class DailyJobs:
         await self._maybe_send_summary(session, user, settings_row, now, tz_offset, today_local, local_hour)
         await self._maybe_send_loss_alert(session, user, settings_row, now, tz_offset, today_local)
         await self._maybe_send_execution_digest(
-            session, user, settings_row, now, tz_offset, today_local, local_hour
+            session, user, settings_row, now, today_local, local_hour
         )
 
     async def _maybe_send_summary(
@@ -185,14 +195,23 @@ class DailyJobs:
         user: User,
         settings_row: UserSettings,
         now: datetime,
-        tz_offset: int,
         today_local,
         local_hour: int,
     ) -> None:
         """Раздел 12а ТЗ. Час свой (EXEC_DAILY_DIGEST_HOUR), не
         DAILY_SUMMARY_HOUR_LOCAL — переключатель у пользователя отдельный
         ("🔔 Уведомления" → "сводка исполнения"), поэтому и час не завязан
-        на обычную дневную сводку."""
+        на обычную дневную сводку.
+
+        Окно данных — скользящие 24 часа до now, не day_bounds: час отправки
+        почти никогда не совпадает с локальной полночью, и календарные сутки
+        резали бы события между часом отправки и полночью — они не попадали
+        бы ни в сегодняшнюю сводку, ни в завтрашнюю (см. докстринг модуля).
+        tz_offset этому методу не нужен — гейтинг "не чаще раза в локальный
+        день" (today_local/local_hour) уже посчитан вызывающим _process_user,
+        а для самого окна часовой пояс не имеет значения: это фиксированная
+        длительность, а не "начало суток по местному времени".
+        """
         if not notification_enabled(settings_row, "execution_digest"):
             return
         if settings_row.execution_digest_last_sent_date == today_local:
@@ -200,15 +219,15 @@ class DailyJobs:
         if local_hour < self._settings.exec_daily_digest_hour:
             return
 
-        day_start, day_end = day_bounds(now, tz_offset)
+        window_start = now - timedelta(hours=24)
         rows = await ExecutionOrderRepository(session).list_entries_between(
-            user.id, day_start, day_end
+            user.id, window_start, now
         )
         # Отдельный источник (signals, не execution_orders) для "Сигналов
-        # READY" — то же окно day_start/day_end, что и у rows выше, второй
-        # раз day_bounds не считается (раздел 12а, execution_digest.py).
+        # READY" — то же окно window_start..now, что и у rows выше (раздел
+        # 12а, execution_digest.py).
         ready_signals = await SignalRepository(session).count_ready_notified_between(
-            user.id, day_start, day_end
+            user.id, window_start, now
         )
         plan = user.trading_plan
         target_risk_percent = plan.risk_per_trade_percent if plan else None
