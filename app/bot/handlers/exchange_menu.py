@@ -32,6 +32,7 @@ def exchange_menu(has_keys: bool) -> InlineKeyboardBuilder:
             InlineKeyboardButton(
                 text="📊 Позиции", callback_data=ExchangeCB.POSITIONS
             ),
+            InlineKeyboardButton(text="📋 Ордера", callback_data=ExchangeCB.ORDERS),
         )
         builder.row(
             InlineKeyboardButton(

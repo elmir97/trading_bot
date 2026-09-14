@@ -192,6 +192,56 @@ class TpSlSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class AttachedTpSl:
+    """Условный ордер, вложенный в ОТКРЫТЫЙ ордер — GET .../trade/openOrders.
+
+    Не путать с TpSlSpec: та описывает намерение при отправке входа, эта —
+    то, что реально вернула биржа по уже существующему ордеру. Форма другая
+    (есть quantity, нет опционального price) и признак "не задан" другой:
+    BingX всегда кладёт объект (даже когда TP/SL не выставлен), а не
+    опускает поле — пустой отличается от заполненного тем, что stopPrice
+    в нём 0. price и quantity нулевые и у реально прикреплённого условника
+    (проверено живым запросом на TAKE_PROFIT_MARKET/STOP_MARKET — там
+    исполнение по рынку, cена не нужна), поэтому решает только stopPrice.
+    """
+
+    trigger_price: Decimal
+    price: Decimal
+    quantity: Decimal
+    working_type: str
+
+
+@dataclass(frozen=True, slots=True)
+class OpenOrder:
+    """Выставленный, но не исполненный ордер — GET .../trade/openOrders.
+
+    order_type — поле "type" ответа. Поле "orderType" рядом с ним в живом
+    ответе было пустым и назначения не имеет (не документировано, не
+    подтверждено живым запросом) — сюда не берём.
+    """
+
+    order_id: str
+    client_order_id: str
+    symbol: str
+    side: str            # BUY | SELL
+    position_side: str   # LONG | SHORT | BOTH
+    order_type: str
+    quantity: Decimal
+    executed_qty: Decimal
+    price: Decimal
+    stop_price: Decimal
+    status: str
+    leverage: int
+    reduce_only: bool
+    close_position: bool
+    working_type: str
+    created_at: datetime
+    updated_at: datetime
+    take_profit: AttachedTpSl | None
+    stop_loss: AttachedTpSl | None
+
+
+@dataclass(frozen=True, slots=True)
 class ApiRestrictions:
     """Права API-ключа (раздел 8 ТЗ) — GET /openApi/v1/account/apiRestrictions.
 
@@ -297,6 +347,9 @@ class ExchangeClient(ABC):
     async def get_fills(
         self, start_time: datetime, end_time: datetime, symbol: str | None = None
     ) -> list[Fill]: ...
+
+    @abstractmethod
+    async def get_open_orders(self, symbol: str | None = None) -> list[OpenOrder]: ...
 
     # --- Торговые методы (нужен ключ с правом Perpetual Futures Trading) ---
     #

@@ -48,6 +48,7 @@ T = TypeVar("T")
 class ExchangeCB:
     BALANCE = "ex:balance"
     POSITIONS = "ex:positions"
+    ORDERS = "ex:orders"
     IMPORT = "ex:import"
     IMPORT_CONFIRM = "ex:import_go:"
     PRICES = "ex:prices"
@@ -186,6 +187,79 @@ async def show_exchange_positions(
             "<i>Это позиции с биржи. Журнал ведётся отдельно — "
             "импортируй историю, чтобы они попали в статистику.</i>"
         )
+        return "\n".join(lines)
+
+    await _with_exchange(callback, session, user, settings, cipher, action)
+
+
+# ---------------------------------------------------------------------------
+# Открытые (выставленные) ордера на бирже
+# ---------------------------------------------------------------------------
+
+
+def _is_own_order(client_order_id: str) -> bool:
+    """Ордер отправлен ботом по сигналу — см. app/execution/models.py
+    client_order_id(): f"tj{signal_id}{user_id}{role}". Конвенция бота,
+    биржевой клиент про неё ничего не знает — поэтому проверка тут,
+    не в OpenOrder."""
+    return client_order_id.startswith("tj")
+
+
+def _render_open_order(order, precision) -> str:  # type: ignore[no-untyped-def]
+    price_precision = precision.price_precision if precision else None
+    qty_precision = precision.quantity_precision if precision else 8
+
+    icon = "🟢" if order.position_side == "LONG" else "🔴"
+    lines = [
+        f"{icon} <b>{order.symbol}</b> {order.side} {order.order_type} · {order.status}",
+        f"Объём: {fmt_qty(order.quantity, qty_precision)} по "
+        f"{fmt_price(order.price, price_precision)} · плечо {order.leverage}x",
+    ]
+    if order.take_profit is not None:
+        lines.append(f"Тейк: {fmt_price(order.take_profit.trigger_price, price_precision)}")
+    if order.stop_loss is not None:
+        lines.append(f"Стоп: {fmt_price(order.stop_loss.trigger_price, price_precision)}")
+    return "\n".join(lines)
+
+
+@router.callback_query(F.data == ExchangeCB.ORDERS)
+async def show_exchange_orders(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    user: User,
+    settings: Settings,
+    cipher: SecretCipher,
+) -> None:
+    async def action(client) -> str:  # type: ignore[no-untyped-def]
+        orders = await client.get_open_orders()
+        if not orders:
+            return "На бирже нет выставленных ордеров."
+
+        precision_by_symbol = {info.symbol: info for info in await client.get_symbols()}
+
+        own = [o for o in orders if _is_own_order(o.client_order_id)]
+        manual = [o for o in orders if not _is_own_order(o.client_order_id)]
+
+        lines = [f"<b>Ордера на бирже · {user.settings.active_exchange_mode.label}</b>"]
+
+        if own:
+            lines.append("")
+            lines.append("<b>Свои (по сигналам)</b>")
+            for order in own:
+                lines.append("")
+                lines.append(
+                    _render_open_order(order, precision_by_symbol.get(order.symbol))
+                )
+
+        if manual:
+            lines.append("")
+            lines.append("<b>Выставленные вручную</b>")
+            for order in manual:
+                lines.append("")
+                lines.append(
+                    _render_open_order(order, precision_by_symbol.get(order.symbol))
+                )
+
         return "\n".join(lines)
 
     await _with_exchange(callback, session, user, settings, cipher, action)

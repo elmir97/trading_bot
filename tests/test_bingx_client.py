@@ -495,6 +495,129 @@ class TestGetOrder:
         await client.close()
 
 
+class TestGetOpenOrders:
+    """Фикстуры — реальные снимки GET /openApi/swap/v2/trade/openOrders
+    (DEMO), не по документации: один ордер без TP/SL, один с заполненными
+    takeProfit/stopLoss (см. docs/execution-stage-15.md, раздел 16)."""
+
+    # BTC-USDT, выставлен без TP/SL — оба вложенных объекта присутствуют,
+    # но это заглушки (stopPrice=0), а не заданный условник.
+    NO_TPSL_ORDER = {
+        "symbol": "BTC-USDT", "orderId": 2099406229323390976,
+        "side": "BUY", "positionSide": "LONG", "type": "LIMIT",
+        "origQty": "0.2517", "price": "70000.0", "executedQty": "0.0000",
+        "avgPrice": "0.0", "status": "PENDING", "stopPrice": "",
+        "workingType": "CONTRACT_PRICE", "clientOrderId": "",
+        "time": 1789372424000, "updateTime": 1789372424814,
+        "leverage": "20X", "reduceOnly": False, "closePosition": "false",
+        "takeProfit": {
+            "type": "TAKE_PROFIT", "quantity": 0, "stopPrice": 0,
+            "price": 0, "workingType": "", "stopGuaranteed": "false",
+        },
+        "stopLoss": {
+            "type": "STOP", "quantity": 0, "stopPrice": 0,
+            "price": 0, "workingType": "", "stopGuaranteed": "false",
+        },
+    }
+
+    # SOL-USDT, выставлен с заполненными TP/SL — price и quantity внутри
+    # всё равно нулевые (исполнение по рынку), заданность видна только
+    # по stopPrice.
+    WITH_TPSL_ORDER = {
+        "symbol": "SOL-USDT", "orderId": 2099409652890476544,
+        "side": "BUY", "positionSide": "LONG", "type": "LIMIT",
+        "origQty": "205.27", "price": "85.000", "executedQty": "0.00",
+        "avgPrice": "0.000", "status": "PENDING", "stopPrice": "",
+        "workingType": "CONTRACT_PRICE", "clientOrderId": "",
+        "time": 1789373241000, "updateTime": 1789373241072,
+        "leverage": "20X", "reduceOnly": False, "closePosition": "false",
+        "takeProfit": {
+            "type": "TAKE_PROFIT_MARKET", "quantity": 0, "stopPrice": 89.25,
+            "price": 0, "workingType": "", "stopGuaranteed": "false",
+        },
+        "stopLoss": {
+            "type": "STOP_MARKET", "quantity": 0, "stopPrice": 82.45,
+            "price": 0, "workingType": "", "stopGuaranteed": "false",
+        },
+    }
+
+    async def test_parses_known_fields_without_tpsl(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.method == "GET"
+            return ok({"orders": [self.NO_TPSL_ORDER]})
+
+        client = make_client(handler)
+        orders = await client.get_open_orders()
+
+        assert len(orders) == 1
+        order = orders[0]
+        assert order.order_id == "2099406229323390976"
+        assert order.client_order_id == ""
+        assert order.symbol == "BTC-USDT"
+        assert order.side == "BUY"
+        assert order.position_side == "LONG"
+        assert order.order_type == "LIMIT"
+        assert order.quantity == D("0.2517")
+        assert order.executed_qty == D("0.0000")
+        assert order.price == D("70000.0")
+        assert order.stop_price == D(0)  # "" в ответе, не 0 и не null
+        assert order.status == "PENDING"
+        assert order.leverage == 20
+        assert order.reduce_only is False
+        assert order.close_position is False
+        assert order.working_type == "CONTRACT_PRICE"
+        assert order.created_at == datetime.fromtimestamp(
+            1789372424000 / 1000, tz=UTC
+        )
+        assert order.take_profit is None
+        assert order.stop_loss is None
+        await client.close()
+
+    async def test_attached_tp_sl_parsed_when_stop_price_nonzero(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return ok({"orders": [self.WITH_TPSL_ORDER]})
+
+        client = make_client(handler)
+        orders = await client.get_open_orders()
+
+        order = orders[0]
+        assert order.take_profit is not None
+        assert order.take_profit.trigger_price == D("89.25")
+        assert order.take_profit.price == D(0)
+        assert order.take_profit.quantity == D(0)
+        assert order.stop_loss is not None
+        assert order.stop_loss.trigger_price == D("82.45")
+        await client.close()
+
+    async def test_symbol_filter_passed_when_given(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert "symbol=SOL-USDT" in str(request.url)
+            return ok({"orders": []})
+
+        client = make_client(handler)
+        await client.get_open_orders(symbol="SOL-USDT")
+        await client.close()
+
+    async def test_empty_list(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return ok({"orders": []})
+
+        client = make_client(handler)
+        orders = await client.get_open_orders()
+
+        assert orders == []
+        await client.close()
+
+    async def test_unexpected_shape_raises(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return ok({"orders": "не список"})
+
+        client = make_client(handler)
+        with pytest.raises(ExchangeResponseError):
+            await client.get_open_orders()
+        await client.close()
+
+
 class TestErrorHandling:
     async def test_auth_error_is_explicit(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:

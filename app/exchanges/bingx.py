@@ -28,6 +28,7 @@ import httpx
 from app.core.logging import get_logger
 from app.exchanges.base import (
     ApiRestrictions,
+    AttachedTpSl,
     Balance,
     ExchangeAuthError,
     ExchangeClient,
@@ -36,6 +37,7 @@ from app.exchanges.base import (
     ExchangeUnavailableError,
     Fill,
     Kline,
+    OpenOrder,
     OrderResult,
     Position,
     SymbolInfo,
@@ -62,6 +64,7 @@ TRADE_FILL_HISTORY = "/openApi/swap/v2/trade/allFillOrders"
 TRADE_LEVERAGE = "/openApi/swap/v2/trade/leverage"
 # Один и тот же путь: POST размещает ордер, GET — запрашивает его статус.
 TRADE_ORDER = "/openApi/swap/v2/trade/order"
+TRADE_OPEN_ORDERS = "/openApi/swap/v2/trade/openOrders"
 
 # Валюта маржи зависит от контура: LIVE торгует настоящими USDT, DEMO —
 # виртуальными VST (см. app/bot/handlers/settings.py:626). get_balance()
@@ -83,8 +86,12 @@ _FATAL_CODES = {100001, 100004, 100413, 100421}
 
 
 def _to_decimal(value: Any, field: str) -> Decimal:
-    """Числа биржи приходят строками — так и разбираем, минуя float."""
-    if value is None:
+    """Числа биржи приходят строками — так и разбираем, минуя float.
+
+    "" — тоже "нет значения": проверено живым запросом на openOrders,
+    так приходит stopPrice у ордера без стопа (не null, не 0, а пустая
+    строка)."""
+    if value is None or value == "":
         return Decimal(0)
     try:
         return Decimal(str(value))
@@ -101,6 +108,20 @@ def _ms_to_dt(value: Any) -> datetime:
 def _decimal_literal(value: Decimal) -> str:
     """Decimal как литерал числа в JSON — без экспоненциальной записи."""
     return format(value, "f")
+
+
+def _parse_order_leverage(value: Any) -> int:
+    """leverage в openOrders — строка вида "20X" (не int, как в get_positions())."""
+    text = str(value or "").rstrip("Xx")
+    return int(text) if text.isdigit() else 0
+
+
+def _str_bool(value: Any) -> bool:
+    """closePosition приходит строкой "false"/"true", reduceOnly — bool.
+    Разбираем оба одним правилом, проверено живым запросом."""
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() == "true"
 
 
 def _build_tp_sl(order_type: OrderType, spec: TpSlSpec) -> str:
@@ -658,4 +679,56 @@ class BingXClient(ExchangeClient):
             executed_qty=_to_decimal(item.get("executedQty"), "executedQty"),
             fee=abs(_to_decimal(item.get("commission"), "commission")),
             raw=item,
+        )
+
+    async def get_open_orders(self, symbol: str | None = None) -> list[OpenOrder]:
+        params = {"symbol": symbol} if symbol else {}
+        data = await self._request(TRADE_OPEN_ORDERS, params, signed=True)
+        orders = data.get("orders", []) if isinstance(data, dict) else data
+        if not isinstance(orders, list):
+            raise ExchangeResponseError("Ожидался список ордеров в data.orders")
+        return [self._parse_open_order(item) for item in orders if item]
+
+    @staticmethod
+    def _parse_attached_tp_sl(item: Any) -> AttachedTpSl | None:
+        if not isinstance(item, dict):
+            return None
+        stop_price = _to_decimal(item.get("stopPrice"), "stopPrice")
+        if stop_price == 0:
+            # Не задан: BingX всегда кладёт объект-заглушку, а не опускает
+            # поле, — price/quantity нулевые и у реально прикреплённого
+            # условника (проверено живым запросом), поэтому решает только
+            # stopPrice.
+            return None
+        return AttachedTpSl(
+            trigger_price=stop_price,
+            price=_to_decimal(item.get("price"), "price"),
+            quantity=_to_decimal(item.get("quantity"), "quantity"),
+            working_type=str(item.get("workingType", "")),
+        )
+
+    @staticmethod
+    def _parse_open_order(item: dict[str, Any]) -> OpenOrder:
+        return OpenOrder(
+            order_id=str(item.get("orderId") or item.get("orderID") or ""),
+            client_order_id=str(
+                item.get("clientOrderId") or item.get("clientOrderID") or ""
+            ),
+            symbol=item.get("symbol", ""),
+            side=str(item.get("side", "")),
+            position_side=str(item.get("positionSide", "")),
+            order_type=str(item.get("type", "")),
+            quantity=_to_decimal(item.get("origQty"), "origQty"),
+            executed_qty=_to_decimal(item.get("executedQty"), "executedQty"),
+            price=_to_decimal(item.get("price"), "price"),
+            stop_price=_to_decimal(item.get("stopPrice"), "stopPrice"),
+            status=str(item.get("status", "")),
+            leverage=_parse_order_leverage(item.get("leverage")),
+            reduce_only=_str_bool(item.get("reduceOnly")),
+            close_position=_str_bool(item.get("closePosition")),
+            working_type=str(item.get("workingType", "")),
+            created_at=_ms_to_dt(item.get("time") or 0),
+            updated_at=_ms_to_dt(item.get("updateTime") or 0),
+            take_profit=BingXClient._parse_attached_tp_sl(item.get("takeProfit")),
+            stop_loss=BingXClient._parse_attached_tp_sl(item.get("stopLoss")),
         )

@@ -75,6 +75,7 @@ class FakeExchange(ExchangeClient):
     async def set_leverage(self, symbol, leverage, *, position_side=None) -> int: ...  # type: ignore[no-untyped-def]
     async def place_market_order(self, **kwargs) -> OrderResult: ...  # type: ignore[no-untyped-def]
     async def get_order(self, symbol: str, client_order_id: str) -> OrderResult: ...
+    async def get_open_orders(self, symbol: str | None = None) -> list: ...  # type: ignore[no-untyped-def]
     async def close(self) -> None: ...
 
 

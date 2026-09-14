@@ -105,6 +105,9 @@ class FakeExchangeClient(ExchangeClient):
     async def get_order(self, symbol, client_order_id) -> object:  # type: ignore[override]
         raise NotImplementedError
 
+    async def get_open_orders(self, symbol=None) -> list:
+        raise NotImplementedError
+
     async def close(self) -> None:
         self.closed = True
 
