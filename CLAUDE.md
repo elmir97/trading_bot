@@ -47,7 +47,12 @@ docker compose exec bot python -m scripts.check_redis
 ## Деплой
 
 Сервер `root@147.45.111.10`, проект в `/opt/trading_bot`. SSH-ключ на
-машине настроен. Git remote нет и не нужен.
+машине настроен.
+
+Remote `origin` — приватный резервный репозиторий на GitHub
+(`elmir97/trading_bot`), не деплойный канал. После каждого коммита —
+`git push`. Деплой на сервер по-прежнему идёт через `git archive`
+(шаг 2 ниже), push его не заменяет и не запускает.
 
 1. Пред-деплойный снапшот:
    `/opt/backups/trading_bot_pre_deploy_<timestamp>.tar.gz`
