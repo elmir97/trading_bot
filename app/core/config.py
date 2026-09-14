@@ -74,6 +74,16 @@ class Settings(BaseSettings):
     bingx_recv_window: int = 5000
     http_timeout_seconds: float = 10.0
     http_max_retries: int = 3
+    # Троттлинг сканера (см. app/exchanges/bingx.py, раздел
+    # X-RateLimit-Requests-Remain/-Expire): при remaining <= порога клиент
+    # сам ждёт до конца окна ПЕРЕД следующим запросом, не дожидаясь 429.
+    # Лимит у BingX отдельный на каждый путь и сильно разного масштаба
+    # (публичные ~500/10с, приватные вроде trade/openOrders — всего 5/1с) —
+    # один порог не идеален для всех, но раздел ТЗ просит простой порог,
+    # не token bucket. Выключатель — на случай, если порог окажется вреден
+    # для каких-то приватных ручек и понадобится быстро откатить без деплоя.
+    bingx_rate_limit_threshold: int = 20
+    bingx_rate_limit_throttle_enabled: bool = True
 
     # --- Redis (этап 15: блокировка от двойного нажатия «Да», раздел 8) ---
     redis_url: str = "redis://localhost:6379/0"

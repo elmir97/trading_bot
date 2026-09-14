@@ -22,6 +22,7 @@ from app.workers.execution_digest import (
     detect_anomalies,
     render_execution_digest,
 )
+from app.workers.scanner import ScanCycleStats
 
 D = Decimal
 
@@ -284,3 +285,20 @@ class TestRenderExecutionDigest:
         # Один отказ на одну попытку — доля 100%, но ниже минимума выборки:
         # не должно превращаться в "подозрительно часто".
         assert "Аномалии: нет" in text
+
+    def test_scan_cycle_line_printed_when_given(self) -> None:
+        stats = build_stats([], target_risk_percent=None, ready_signals=0)
+        scan_cycle = ScanCycleStats(
+            symbols_scanned=12, requests_made=34, duration_seconds=5.67
+        )
+        text = render_execution_digest(
+            stats, max_price_drift_ratio=D("0.3"), scan_cycle=scan_cycle
+        )
+        assert "Скан рынка: 12 символов, 34 запросов, 5.7 с" in text
+
+    def test_scan_cycle_line_absent_when_not_given(self) -> None:
+        """Сканер мог не отработать ни разу после рестарта — это не "0",
+        строка просто не печатается (не выдумываем данных, которых нет)."""
+        stats = build_stats([], target_risk_percent=None, ready_signals=0)
+        text = render_execution_digest(stats, max_price_drift_ratio=D("0.3"))
+        assert "Скан рынка" not in text

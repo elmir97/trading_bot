@@ -51,6 +51,7 @@ from app.trading.statistics import Statistics, calculate_statistics
 from app.workers.base import fmt_decimal
 from app.workers.execution_digest import build_stats, render_execution_digest
 from app.workers.notifier import notification_enabled, send_notification
+from app.workers.scanner import SetupScanner
 
 logger = get_logger(__name__)
 
@@ -75,11 +76,23 @@ def render_daily_summary(stats: Statistics) -> str:
 
 
 class DailyJobs:
-    def __init__(self, bot: Bot, db: Database, settings: Settings, cipher: SecretCipher) -> None:
+    def __init__(
+        self,
+        bot: Bot,
+        db: Database,
+        settings: Settings,
+        cipher: SecretCipher,
+        *,
+        scanner: SetupScanner | None = None,
+    ) -> None:
         self._bot = bot
         self._db = db
         self._settings = settings
         self._exchange_factory = ExchangeFactory(settings, cipher)
+        # Раздел "троттлинг сканера": последний замер run() для строки в
+        # сводке исполнения. None в тестах/там, где сводка исполнения не
+        # нужна — не обязателен для работы остальных двух уведомлений.
+        self._scanner = scanner
 
     async def run(self) -> None:
         now = datetime.now(UTC)
@@ -236,7 +249,10 @@ class DailyJobs:
         )
 
         settings_row.execution_digest_last_sent_date = today_local
+        scan_cycle = self._scanner.last_cycle if self._scanner else None
         text = render_execution_digest(
-            stats, max_price_drift_ratio=self._settings.exec_max_price_drift_ratio
+            stats,
+            max_price_drift_ratio=self._settings.exec_max_price_drift_ratio,
+            scan_cycle=scan_cycle,
         )
         await send_notification(self._bot, user.telegram_id, text)

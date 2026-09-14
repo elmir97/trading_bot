@@ -41,6 +41,7 @@ from decimal import Decimal
 from app.database.models.execution_order import ExecutionOrder
 from app.trading.enums import OrderStatus
 from app.workers.base import fmt_decimal
+from app.workers.scanner import ScanCycleStats
 
 ZERO = Decimal(0)
 
@@ -205,10 +206,18 @@ def detect_anomalies(stats: ExecutionDigestStats, *, max_price_drift_ratio: Deci
 
 
 def render_execution_digest(
-    stats: ExecutionDigestStats, *, max_price_drift_ratio: Decimal
+    stats: ExecutionDigestStats,
+    *,
+    max_price_drift_ratio: Decimal,
+    scan_cycle: ScanCycleStats | None = None,
 ) -> str:
     """Раздел 12а ТЗ, макет сводки. Корректна и при stats.total_attempts == 0
-    (нули вместо деления на ноль, средние строки просто не печатаются)."""
+    (нули вместо деления на ноль, средние строки просто не печатаются).
+
+    scan_cycle — последний замер SetupScanner.run() (раздел "троттлинг
+    сканера"), чтобы расширение списка символов было измеримым, а не на
+    глаз. None, если сканер ни разу не отработал после старта процесса —
+    это не то же самое, что "0 запросов", строка просто не печатается."""
     anomalies = detect_anomalies(stats, max_price_drift_ratio=max_price_drift_ratio)
 
     lines = [
@@ -252,5 +261,13 @@ def render_execution_digest(
             lines.append(f"  {a}")
     else:
         lines.append("Аномалии: нет")
+
+    if scan_cycle is not None:
+        lines.append("")
+        lines.append(
+            f"Скан рынка: {scan_cycle.symbols_scanned} символов, "
+            f"{scan_cycle.requests_made} запросов, "
+            f"{fmt_decimal(Decimal(str(round(scan_cycle.duration_seconds, 1))))} с"
+        )
 
     return "\n".join(lines)

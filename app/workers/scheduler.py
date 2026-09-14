@@ -31,7 +31,7 @@ class BackgroundJobs:
         self._scheduler = AsyncIOScheduler(timezone="UTC")
         self._scanner = SetupScanner(bot, db, settings)
         self._positions = PositionMonitor(bot, db, settings)
-        self._daily = DailyJobs(bot, db, settings, cipher)
+        self._daily = DailyJobs(bot, db, settings, cipher, scanner=self._scanner)
 
     def start(self) -> None:
         """Требование 8: пока BACKGROUND_JOBS_ENABLED=false — не регистрирует

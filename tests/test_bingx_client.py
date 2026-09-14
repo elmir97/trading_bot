@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -22,7 +23,7 @@ from app.exchanges.base import (
     ExchangeUnavailableError,
     TpSlSpec,
 )
-from app.exchanges.bingx import BingXClient
+from app.exchanges.bingx import QUOTE_TICKER, BingXClient
 from app.trading.enums import ExchangeKeyMode, OrderSide, TradeSide
 
 D = Decimal
@@ -41,8 +42,19 @@ def make_client(handler, **kwargs) -> BingXClient:  # type: ignore[no-untyped-de
     )
 
 
-def ok(payload) -> httpx.Response:  # type: ignore[no-untyped-def]
-    return httpx.Response(200, json={"code": 0, "msg": "", "data": payload})
+def ok(payload, headers=None) -> httpx.Response:  # type: ignore[no-untyped-def]
+    return httpx.Response(
+        200, json={"code": 0, "msg": "", "data": payload}, headers=headers
+    )
+
+
+def rate_limit_headers(remaining: int, expire_ms: int) -> dict:  # type: ignore[no-untyped-def]
+    """Заголовки остатка лимита BingX — см. app/exchanges/bingx.py,
+    _HEADER_RATE_LIMIT_REMAIN/_EXPIRE (снято живым запросом)."""
+    return {
+        "X-RateLimit-Requests-Remain": str(remaining),
+        "X-RateLimit-Requests-Expire": str(expire_ms),
+    }
 
 
 class TestSignature:
@@ -615,6 +627,124 @@ class TestGetOpenOrders:
         client = make_client(handler)
         with pytest.raises(ExchangeResponseError):
             await client.get_open_orders()
+        await client.close()
+
+
+class TestRateLimitThrottle:
+    """См. app/core/config.py bingx_rate_limit_threshold/-_throttle_enabled
+    и app/exchanges/bingx.py _maybe_throttle/_update_rate_limit."""
+
+    async def test_headers_are_parsed_into_state(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return ok({"symbol": "BTC-USDT", "lastPrice": "1"}, rate_limit_headers(499, 10000))
+
+        client = make_client(handler)
+        await client.get_ticker("BTC-USDT")
+
+        state = client._rate_limits[QUOTE_TICKER]  # noqa: SLF001
+        assert state.remaining == 499
+        await client.close()
+
+    async def test_throttles_when_remaining_at_or_below_threshold(self) -> None:
+        calls: list[float] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            # Первый ответ сразу говорит "остаток на пороге" — второй
+            # вызов должен притормозить ПЕРЕД отправкой, не постфактум.
+            return ok({"symbol": "BTC-USDT", "lastPrice": "1"}, rate_limit_headers(5, 4000))
+
+        client = make_client(handler, rate_limit_threshold=20)
+        slept = {"seconds": None}
+
+        async def fake_sleep(seconds: float) -> None:
+            slept["seconds"] = seconds
+
+        client._sleep = fake_sleep  # type: ignore[assignment]
+
+        await client.get_ticker("BTC-USDT")
+        assert slept["seconds"] is None  # состояния ещё не было — не тормозим
+
+        await client.get_ticker("BTC-USDT")
+        assert slept["seconds"] is not None
+        assert 0 < slept["seconds"] <= 4.0
+        await client.close()
+
+    async def test_does_not_throttle_when_remaining_above_threshold(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return ok({"symbol": "BTC-USDT", "lastPrice": "1"}, rate_limit_headers(499, 10000))
+
+        client = make_client(handler, rate_limit_threshold=20)
+        slept = []
+        client._sleep = lambda seconds: slept.append(seconds) or _noop()  # type: ignore[assignment]
+
+        await client.get_ticker("BTC-USDT")  # заполняет state (remaining=499)
+        await client.get_ticker("BTC-USDT")  # 499 > порога 20 — не тормозим
+
+        assert slept == []
+        await client.close()
+
+    async def test_does_not_throttle_when_window_already_expired(self) -> None:
+        """Наш state устарел (окно по расчётам давно кончилось) — не ждём
+        по стухшему числу, оно уже не отражает реальный остаток биржи."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return ok({"symbol": "BTC-USDT", "lastPrice": "1"}, rate_limit_headers(1, 50))
+
+        client = make_client(handler, rate_limit_threshold=20)
+        slept = []
+        client._sleep = lambda seconds: slept.append(seconds) or _noop()  # type: ignore[assignment]
+
+        await client.get_ticker("BTC-USDT")  # remaining=1, окно всего 50мс
+        await asyncio.sleep(0.1)  # ждём дольше окна — оно "истекло"
+        await client.get_ticker("BTC-USDT")
+
+        assert slept == []
+        await client.close()
+
+    async def test_disabled_by_setting(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return ok({"symbol": "BTC-USDT", "lastPrice": "1"}, rate_limit_headers(1, 10000))
+
+        client = make_client(
+            handler, rate_limit_threshold=20, rate_limit_throttle_enabled=False
+        )
+        slept = []
+        client._sleep = lambda seconds: slept.append(seconds) or _noop()  # type: ignore[assignment]
+
+        await client.get_ticker("BTC-USDT")
+        await client.get_ticker("BTC-USDT")
+
+        assert slept == []
+        await client.close()
+
+    async def test_missing_headers_do_not_break_request_or_count_as_zero(self) -> None:
+        """Ответ без заголовков лимита (сторонний прокси, обрыв и т.п.) —
+        запрос не должен падать, и второй вызов не должен неожиданно
+        тормозить, как если бы остаток был 0."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return ok({"symbol": "BTC-USDT", "lastPrice": "1"})  # без headers
+
+        client = make_client(handler, rate_limit_threshold=20)
+        slept = []
+        client._sleep = lambda seconds: slept.append(seconds) or _noop()  # type: ignore[assignment]
+
+        await client.get_ticker("BTC-USDT")
+        await client.get_ticker("BTC-USDT")
+
+        assert QUOTE_TICKER not in client._rate_limits  # noqa: SLF001
+        assert slept == []
+        await client.close()
+
+    async def test_request_count_increments_per_sent_request(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return ok({"symbol": "BTC-USDT", "lastPrice": "1"})
+
+        client = make_client(handler)
+        assert client.request_count == 0
+        await client.get_ticker("BTC-USDT")
+        await client.get_ticker("ETH-USDT")
+        assert client.request_count == 2
         await client.close()
 
 

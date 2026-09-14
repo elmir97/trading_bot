@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import time
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from aiogram import Bot
@@ -48,6 +50,19 @@ logger = get_logger(__name__)
 
 CONFIRMATION_CONDITION_NAME = "Подтверждающий паттерн"
 SCAN_TIMEFRAMES = (Timeframe.H1.value, Timeframe.H4.value)
+
+
+@dataclass(frozen=True, slots=True)
+class ScanCycleStats:
+    """Замер одного полного прогона run() — раздел "троттлинг сканера".
+
+    Нужен, чтобы расширение списка символов было измеримым, а не на глаз
+    (см. docstring SetupScanner.run()). Пишется в лог и попадает строкой в
+    ежедневную сводку исполнения (app/workers/execution_digest.py)."""
+
+    symbols_scanned: int
+    requests_made: int
+    duration_seconds: float
 
 
 def classify_signal(signal: Signal) -> SignalLevel | None:
@@ -114,31 +129,73 @@ class SetupScanner:
         self._bot = bot
         self._db = db
         self._settings = settings
-        client = ExchangeFactory(settings, None).public_client()  # type: ignore[arg-type]
+        # Сохраняем ссылку (раньше терялась в замыкании MarketDataService) —
+        # SetupScanner создаётся один раз в BackgroundJobs и живёт весь
+        # процесс (см. app/workers/scheduler.py), поэтому этот клиент —
+        # единственное место, где троттлинг по остатку лимита (раздел
+        # X-RateLimit в app/exchanges/bingx.py) реально накапливает
+        # состояние между тиками, а не создаётся заново на каждый вызов,
+        # как в интерактивных хендлерах бота.
+        self._client = ExchangeFactory(settings, None).public_client()  # type: ignore[arg-type]
         # Свой кэш, не общий с интерактивными хендлерами — воркеры не
         # зависят от app.bot.handlers, см. app/workers/__init__.py.
-        self._market = MarketDataService(client, TTLCache())
+        self._market = MarketDataService(self._client, TTLCache())
         self._engine = AnalysisEngine(self._market)
+        # Последний замер run() — читает DailyJobs для строки в сводке
+        # исполнения (app/workers/execution_digest.py). None, пока сканер
+        # не отработал ни разу после старта процесса.
+        self.last_cycle: ScanCycleStats | None = None
 
     async def run(self) -> None:
+        """Один полный проход по всем пользователям.
+
+        Замеряет символы/запросы/время цикла (раздел "троттлинг сканера") —
+        request_count берётся diff'ом с self._client до/после: клиент
+        общий и растущий, а не сбрасывается на каждый run() (см. коммент
+        у self._client в __init__)."""
+        started = time.monotonic()
+        requests_before = getattr(self._client, "request_count", 0)
+        symbols_scanned = 0
+
         async with self._db.session() as session:
             users = await UserRepository(session).list_active_with_plan()
             for user in users:
-                await self._scan_user(session, user)
+                symbols_scanned += await self._scan_user(session, user)
             await session.flush()
 
-    async def _scan_user(self, session: AsyncSession, user: User) -> None:
+        requests_made = getattr(self._client, "request_count", 0) - requests_before
+        duration_seconds = time.monotonic() - started
+        self.last_cycle = ScanCycleStats(
+            symbols_scanned=symbols_scanned,
+            requests_made=requests_made,
+            duration_seconds=duration_seconds,
+        )
+        logger.info(
+            "Цикл сканера завершён",
+            extra={
+                "symbols_scanned": symbols_scanned,
+                "requests_made": requests_made,
+                "duration_seconds": round(duration_seconds, 2),
+            },
+        )
+
+    async def _scan_user(self, session: AsyncSession, user: User) -> int:
+        """Возвращает число реально просканированных символов у этого
+        пользователя (0 — нет плана, список пуст, или оба уровня
+        уведомлений выключены) — run() суммирует это в symbols_scanned."""
         plan = user.trading_plan
         if plan is None or not plan.allowed_symbols:
-            return
+            return 0
 
         want_ready = notification_enabled(user.settings, "setup_ready")
         want_forming = notification_enabled(user.settings, "setup_forming")
         if not want_ready and not want_forming:
-            return
+            return 0
 
         repo = SignalRepository(session)
+        symbols_scanned = 0
         for symbol in plan.allowed_symbols:
+            symbols_scanned += 1
             for timeframe in SCAN_TIMEFRAMES:
                 try:
                     # build_context/evaluate вместо analyze(): графику
@@ -162,6 +219,7 @@ class SetupScanner:
                 await self._handle_signal(
                     repo, user, signal, symbol, timeframe, want_ready, want_forming, context
                 )
+        return symbols_scanned
 
     async def _handle_signal(
         self,
