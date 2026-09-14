@@ -5,6 +5,10 @@
 *.pem
 *.key
 
+# Живёт только на сервере — правится там, git не должен видеть локальные
+# правки (см. CLAUDE.md, раздел «Деплой»)
+docker-compose.override.yml
+
 # Python
 __pycache__/
 *.py[cod]
