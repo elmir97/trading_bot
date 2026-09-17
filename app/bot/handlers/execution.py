@@ -190,17 +190,14 @@ async def _build_quote(
     else:
         client = factory.public_client()
 
+    permissions_trustworthy = True
     if has_trading_key and check_permissions:
         outcome = await refresh_permissions(
             session, credentials, client, ttl_hours=settings.exec_permissions_ttl_hours  # type: ignore[arg-type]
         )
-        if not outcome.trustworthy:
-            await client.close()
-            return ExecutionRefusal(
-                ExecutionRefusalCode.PERMISSIONS_UNKNOWN,
-                "Не удалось проверить права ключа.",
-            )
-        key_can_trade_futures = not credentials.is_read_only  # type: ignore[union-attr]
+        permissions_trustworthy = outcome.trustworthy
+        if outcome.trustworthy:
+            key_can_trade_futures = not credentials.is_read_only  # type: ignore[union-attr]
 
     market = MarketDataService(client, _market_cache)
     service = ExecutionService(session=session, settings=settings, client=client, market=market)
@@ -211,6 +208,7 @@ async def _build_quote(
             plan=plan,
             has_trading_key=has_trading_key,
             key_can_trade_futures=key_can_trade_futures,
+            permissions_trustworthy=permissions_trustworthy,
             selected_exchange_mode=selected_mode,
             planned_price=planned_price,
         )

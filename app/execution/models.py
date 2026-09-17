@@ -15,7 +15,10 @@ from app.trading.enums import OrderRole, OrderSide, TradeSide
 
 
 class ExecutionRefusalCode(StrEnum):
-    """Раздел 7 ТЗ. Значение — порядок проверки в run_guards()."""
+    """Раздел 7 ТЗ. Большинство значений — порядок проверки в run_guards();
+    PERMISSIONS_UNKNOWN и SYMBOL_DATA_UNAVAILABLE в него не входят — это
+    отказы, которые ExecutionService.evaluate() строит сам, до/помимо
+    run_guards()."""
 
     EXECUTION_DISABLED = "EXECUTION_DISABLED"
     # Раздел 8 ТЗ: права ключа не удалось проверить (сбой запроса к бирже,
@@ -38,6 +41,10 @@ class ExecutionRefusalCode(StrEnum):
     SIZE_TOO_SMALL = "SIZE_TOO_SMALL"
     INSUFFICIENT_MARGIN = "INSUFFICIENT_MARGIN"
     SYMBOL_NOT_ALLOWED = "SYMBOL_NOT_ALLOWED"
+    # Инструмент в вайтлисте, но биржа не отдала по нему SymbolInfo (список
+    # инструментов пуст/не содержит символ) — не то же самое, что осознанный
+    # отказ вне вайтлиста (SYMBOL_NOT_ALLOWED). См. ExecutionService.evaluate().
+    SYMBOL_DATA_UNAVAILABLE = "SYMBOL_DATA_UNAVAILABLE"
 
 
 @dataclass(frozen=True, slots=True)

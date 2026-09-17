@@ -40,6 +40,7 @@ from app.execution.guards import (
     GuardInputs,
     check_execution_enabled,
     check_mode_allowed,
+    check_permissions_trustworthy,
     check_trading_key,
     run_guards,
 )
@@ -148,6 +149,7 @@ class ExecutionService:
         plan: TradingPlan,
         has_trading_key: bool,
         key_can_trade_futures: bool,
+        permissions_trustworthy: bool = True,
         selected_exchange_mode: ExchangeKeyMode,
         planned_price: Decimal | None = None,
         now: datetime | None = None,
@@ -186,6 +188,14 @@ class ExecutionService:
             execution_enabled=self._settings.trading_execution_enabled
         ):
             return await refuse(refusal)
+        if refusal := check_permissions_trustworthy(trustworthy=permissions_trustworthy):
+            # До check_trading_key: если права не удалось проверить,
+            # key_can_trade_futures мог остаться устаревшим значением
+            # (обновляется только при успешном refresh_permissions) — гонять
+            # его через check_trading_key раньше, чем отказать этим кодом,
+            # значит рисковать пропустить NO_TRADING_KEY вместо честного
+            # "не знаем" или наоборот.
+            return await refuse(refusal)
         if refusal := check_trading_key(
             has_key=has_trading_key, key_can_trade_futures=key_can_trade_futures
         ):
@@ -206,8 +216,8 @@ class ExecutionService:
         if symbol_info is None:
             return await refuse(
                 ExecutionRefusal(
-                    ExecutionRefusalCode.SYMBOL_NOT_ALLOWED,
-                    f"{signal.symbol}: нет данных об инструменте на бирже.",
+                    ExecutionRefusalCode.SYMBOL_DATA_UNAVAILABLE,
+                    f"{signal.symbol}: нет данных инструмента на бирже.",
                 ),
                 price=current_price,
                 drift=drift,

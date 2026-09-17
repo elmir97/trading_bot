@@ -190,8 +190,8 @@ def detect_anomalies(stats: ExecutionDigestStats, *, max_price_drift_ratio: Deci
         allowed_half = max_price_drift_ratio * Decimal(100) / 2
         if avg_drift > allowed_half:
             anomalies.append(
-                f"дрейф цены при подтверждении в среднем {fmt_decimal(avg_drift)}% "
-                f"— выше половины допустимого порога"
+                f"дрейф цены сигнала к моменту подтверждения в среднем "
+                f"{fmt_decimal(avg_drift)}% — выше половины порога гварда PRICE_DRIFT"
             )
 
     total = stats.total_attempts
@@ -252,7 +252,7 @@ def render_execution_digest(
         lines.append(f"Средний RR: {fmt_decimal(avg_rr)}")
     if stats.confirmed_drift_percents:
         avg_drift = sum(stats.confirmed_drift_percents, ZERO) / len(stats.confirmed_drift_percents)
-        lines.append(f"Средний дрейф цены на подтверждении: {fmt_decimal(avg_drift)}%")
+        lines.append(f"Средний дрейф цены сигнала к моменту подтверждения: {fmt_decimal(avg_drift)}%")
 
     lines.append("")
     if anomalies:

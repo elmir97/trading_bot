@@ -20,6 +20,7 @@ from app.execution.guards import (
     check_max_total_risk,
     check_mode_allowed,
     check_no_existing_position,
+    check_permissions_trustworthy,
     check_price_drift,
     check_signal_not_expired,
     check_signal_not_used,
@@ -280,6 +281,31 @@ class TestValidLevels:
         assert refusal is not None
         assert refusal.code is Code.INVALID_LEVELS
 
+    def test_stop_on_wrong_side_names_live_price_and_stop(self) -> None:
+        # Раздел про guards.py: entry_price тут — живая цена биржи, не цена
+        # входа из сигнала, текст обязан называть оба числа явно.
+        refusal = check_valid_levels(
+            entry_price=D("100"), stop_loss=D("105"), take_profit=D("110"),
+            side=TradeSide.LONG, min_risk_reward=D("1.5"),
+        )
+        assert refusal is not None
+        assert "100" in refusal.message
+        assert "105" in refusal.message
+        assert "стоп" in refusal.message.lower()
+
+    def test_take_profit_on_wrong_side_refuses(self) -> None:
+        # Живая цена дрейфанула настолько, что уже прошла тейк из сигнала —
+        # calculate_risk_reward() отказывает по reward<=0, не stop_distance().
+        refusal = check_valid_levels(
+            entry_price=D("112"), stop_loss=D("97"), take_profit=D("110"),
+            side=TradeSide.LONG, min_risk_reward=D("1.5"),
+        )
+        assert refusal is not None
+        assert refusal.code is Code.INVALID_LEVELS
+        assert "112" in refusal.message
+        assert "110" in refusal.message
+        assert "тейк" in refusal.message.lower()
+
     def test_rr_below_minimum_refuses(self) -> None:
         refusal = check_valid_levels(
             entry_price=D("100"), stop_loss=D("99"), take_profit=D("101"),
@@ -288,11 +314,33 @@ class TestValidLevels:
         assert refusal is not None
         assert refusal.code is Code.INVALID_LEVELS
 
+    def test_rr_below_minimum_clarifies_it_is_recalculated_from_live_price(self) -> None:
+        # На карточке сигнала RR посчитан по цене сигнала — этот текст не
+        # должен читаться как "сигнал был плохим": RR здесь пересчитан от
+        # живой цены (entry_price), про это и должно быть сказано явно.
+        refusal = check_valid_levels(
+            entry_price=D("100"), stop_loss=D("99"), take_profit=D("101"),
+            side=TradeSide.LONG, min_risk_reward=D("1.5"),
+        )
+        assert refusal is not None
+        assert "текущей цене" in refusal.message
+        assert "100" in refusal.message
+
     def test_valid_levels_pass(self) -> None:
         assert check_valid_levels(
             entry_price=D("100"), stop_loss=D("97"), take_profit=D("106"),
             side=TradeSide.LONG, min_risk_reward=D("1.5"),
         ) is None
+
+
+class TestPermissionsTrustworthy:
+    def test_untrustworthy_refuses(self) -> None:
+        refusal = check_permissions_trustworthy(trustworthy=False)
+        assert refusal is not None
+        assert refusal.code is Code.PERMISSIONS_UNKNOWN
+
+    def test_trustworthy_passes(self) -> None:
+        assert check_permissions_trustworthy(trustworthy=True) is None
 
 
 class TestSize:

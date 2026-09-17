@@ -414,6 +414,72 @@ async def test_price_drift_refuses_on_second_evaluation(ctx) -> None:  # type: i
     assert second.code is Code.PRICE_DRIFT
 
 
+async def test_permissions_untrustworthy_refuses_before_trading_key_check(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Раздел 8 ТЗ: права проверить не удалось — отказ этим кодом, а не
+    NO_TRADING_KEY по устаревшему key_can_trade_futures (он обновляется
+    только при успешном refresh_permissions — здесь он мог остаться
+    "не может торговать" из старой проверки, хотя реальный вопрос сейчас
+    в другом: мы просто не знаем текущее состояние прав)."""
+    session, user, client, market = ctx
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+
+    service = _service(session, Settings(trading_execution_enabled=True), client, market)  # type: ignore[call-arg]
+    result = await service.evaluate(
+        user=user, signal=signal, plan=user.trading_plan,
+        has_trading_key=True, key_can_trade_futures=False,
+        permissions_trustworthy=False,
+        selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
+    )
+    assert isinstance(result, ExecutionRefusal)
+    assert result.code is Code.PERMISSIONS_UNKNOWN
+    assert client.balance == D("1000")  # до биржи не дошло
+
+    rows = list(
+        await session.scalars(select(ExecutionOrder).where(ExecutionOrder.signal_id == signal.id))
+    )
+    assert len(rows) == 1
+    assert rows[0].status is OrderStatus.REFUSED
+    assert rows[0].error_code == Code.PERMISSIONS_UNKNOWN.value
+    assert rows[0].price is None
+    assert rows[0].client_order_id is None
+
+
+async def test_symbol_data_unavailable_refuses(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Символ в вайтлисте (вайтлист по умолчанию пуст — разрешено всё), но
+    биржа не отдала по нему SymbolInfo — отдельный код от SYMBOL_NOT_ALLOWED,
+    у которого причина другая (символ осознанно вне вайтлиста)."""
+    session, user, client, market = ctx
+    signal = _signal(user.id)  # symbol="BTC-USDT"
+    session.add(signal)
+    await session.flush()
+
+    # Биржа знает только про ETH-USDT — по BTC-USDT данных инструмента нет.
+    client.symbol_info = SymbolInfo(
+        symbol="ETH-USDT", price_precision=1, quantity_precision=3,
+        min_quantity=D("0.001"), max_leverage=50, min_notional=D("5"),
+    )
+
+    settings = Settings(trading_execution_enabled=True, bingx_trading_mode="live")  # type: ignore[call-arg]
+    service = _service(session, settings, client, market)
+    result = await service.evaluate(
+        user=user, signal=signal, plan=user.trading_plan,
+        has_trading_key=True, key_can_trade_futures=True,
+        selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
+    )
+    assert isinstance(result, ExecutionRefusal)
+    assert result.code is Code.SYMBOL_DATA_UNAVAILABLE
+
+    rows = list(
+        await session.scalars(select(ExecutionOrder).where(ExecutionOrder.signal_id == signal.id))
+    )
+    assert len(rows) == 1
+    assert rows[0].error_code == Code.SYMBOL_DATA_UNAVAILABLE.value
+    assert rows[0].price == D("100")  # тикер уже запрошен на этом шаге
+    assert rows[0].client_order_id is None
+
+
 def test_build_execution_orders_creates_entry_stop_take() -> None:
     from app.execution.models import OrderRequest
     from app.trading.enums import OrderSide

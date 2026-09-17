@@ -408,10 +408,15 @@ async def test_open_button_refuses_permissions_unknown_on_stale_check_failure(  
     assert "Не удалось проверить права ключа" in texts[0]
     assert (user.id, signal.id) not in execution._confirmations
 
-    # ДО гвардов и до evaluate() — как и ExchangeAuthError на построении
-    # клиента (_describe), REFUSED-строка здесь не пишется вовсе.
+    # Пакет A (инцидент GRAMTON): PERMISSIONS_UNKNOWN теперь строится внутри
+    # ExecutionService.evaluate(), как и остальные отказы гвардов — строка
+    # в execution_orders пишется, ещё до похода за тикером (price is None).
     orders = await _orders_for_signal(session, signal.id)
-    assert orders == []
+    assert len(orders) == 1
+    assert orders[0].status is OrderStatus.REFUSED
+    assert orders[0].error_code == "PERMISSIONS_UNKNOWN"
+    assert orders[0].client_order_id is None
+    assert orders[0].price is None
 
 
 async def test_open_button_refreshes_stale_permissions_and_proceeds(  # type: ignore[no-untyped-def]

@@ -266,7 +266,7 @@ class TestRenderExecutionDigest:
         assert "PRICE_DRIFT — 1" in text
         assert "Средний расчётный риск" in text
         assert "Средний RR" in text
-        assert "Средний дрейф цены на подтверждении" in text
+        assert "Средний дрейф цены сигнала к моменту подтверждения" in text
         assert "Аномалии: нет" in text
 
     def test_guard_refusal_before_card_reflected_in_funnel_not_lost(self) -> None:

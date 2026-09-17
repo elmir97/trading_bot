@@ -22,7 +22,7 @@ from app.exchanges.base import SymbolInfo
 from app.execution.models import ExecutionRefusal
 from app.execution.models import ExecutionRefusalCode as Code
 from app.execution.sizing import SizingResult, calculate_size
-from app.trading.calculations import CalculationError, calculate_risk_reward
+from app.trading.calculations import CalculationError, calculate_risk_reward, stop_distance
 from app.trading.enums import ExchangeKeyMode, TradeSide
 
 ZERO = Decimal(0)
@@ -49,6 +49,19 @@ def check_trading_key(
         return ExecutionRefusal(
             Code.NO_TRADING_KEY, "Ключ BingX без права на фьючерсную торговлю."
         )
+    return None
+
+
+# --- PERMISSIONS_UNKNOWN (раздел 8 ТЗ) --------------------------------------
+# Не входит в нумерованный раздел 7 и run_guards(): права проверяются один
+# раз в ExecutionService.evaluate(), до похода за тикером, и результат
+# приходит уже готовым булем (см. app/services/permissions.py) — здесь
+# только решение, отказывать или нет.
+
+
+def check_permissions_trustworthy(*, trustworthy: bool) -> ExecutionRefusal | None:
+    if not trustworthy:
+        return ExecutionRefusal(Code.PERMISSIONS_UNKNOWN, "Не удалось проверить права ключа.")
     return None
 
 
@@ -191,6 +204,20 @@ def check_valid_levels(
     side: TradeSide,
     min_risk_reward: Decimal,
 ) -> ExecutionRefusal | None:
+    """entry_price здесь — живая цена биржи на момент проверки, а не цена
+    входа из сигнала (та зафиксирована в signal.entry_low/entry_high и сюда
+    не попадает). calculate_risk_reward() сама формулирует ошибки в терминах
+    "цены входа" — для сигнала это верно, для гварда нет, поэтому её
+    CalculationError не пробрасывается как есть: stop_distance() и сам
+    calculate_risk_reward() зовутся раздельно, каждая ветка отказа получает
+    свой текст с живой ценой и уровнем явными числами."""
+    try:
+        stop_distance(entry_price=entry_price, stop_loss=stop_loss, side=side)
+    except CalculationError:
+        return ExecutionRefusal(
+            Code.INVALID_LEVELS,
+            f"Цена ушла за стоп: сейчас {entry_price:g}, стоп {stop_loss:g}.",
+        )
     try:
         rr = calculate_risk_reward(
             entry_price=entry_price,
@@ -198,12 +225,16 @@ def check_valid_levels(
             take_profit=take_profit,
             side=side,
         )
-    except CalculationError as exc:
-        return ExecutionRefusal(Code.INVALID_LEVELS, str(exc))
+    except CalculationError:
+        return ExecutionRefusal(
+            Code.INVALID_LEVELS,
+            f"Цена уже прошла тейк: сейчас {entry_price:g}, тейк {take_profit:g}.",
+        )
     if rr < min_risk_reward:
         return ExecutionRefusal(
             Code.INVALID_LEVELS,
-            f"RR 1:{rr:g} ниже минимального 1:{min_risk_reward:g}.",
+            f"RR 1:{rr:g} ниже минимального 1:{min_risk_reward:g} "
+            f"(пересчитан по текущей цене {entry_price:g}, не по цене сигнала на карточке).",
         )
     return None
 
