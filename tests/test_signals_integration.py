@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import itertools
 import os
 from datetime import UTC, datetime, timedelta
 
@@ -105,6 +106,9 @@ def _forming_signal() -> Signal:
     )
 
 
+_telegram_id_seq = itertools.count(1)
+
+
 @pytest_asyncio.fixture
 async def ctx():  # type: ignore[no-untyped-def]
     settings = Settings()  # type: ignore[call-arg]
@@ -116,12 +120,19 @@ async def ctx():  # type: ignore[no-untyped-def]
             MistakeTypeRepository(session),
             settings,
         )
-        telegram_id = 800_000 + int(datetime.now(UTC).timestamp() * 1000) % 90_000
+        # Монотонный счётчик вместо timestamp() % 90_000: та версия
+        # циклилась каждые 90 мс и закономерно давала коллизии между
+        # соседними по времени тестами (см. tests/test_exchange_factory.py).
+        telegram_id = 800_000 + next(_telegram_id_seq)
         user = await user_service.get_or_create(telegram_id=telegram_id)
         bot = FakeBot()
         scanner = SetupScanner(bot, db, settings)
         repo = SignalRepository(session)
         yield user, session, repo, scanner, bot, settings
+        # Уборка: каскады FK удалят сигналы и всё остальное на user_id —
+        # без этого база накапливает пользователей от каждого прогона
+        # (застали ~674 строки в users на момент починки).
+        await session.delete(user)
     await db.dispose()
 
 
