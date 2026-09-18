@@ -414,6 +414,53 @@ async def test_price_drift_refuses_on_second_evaluation(ctx) -> None:  # type: i
     assert second.code is Code.PRICE_DRIFT
 
 
+async def test_signal_stale_refuses_on_first_evaluation(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Пакет B: до этого гварда цена, ушедшая далеко от сигнала ЕЩЁ ДО
+    первого показа карточки, не ловилась ничем — PRICE_DRIFT на первом
+    вызове структурно бессилен (planned_price := current_price), а
+    check_valid_levels молчит, пока стоп не пробит и RR не просел.
+    Тейк далеко (200), чтобы RR остался в норме и не замаскировал причину
+    под INVALID_LEVELS."""
+    session, user, client, market = ctx
+    signal = _signal(user.id, take_profit=D("200"))
+    session.add(signal)
+    await session.flush()
+
+    settings = Settings(trading_execution_enabled=True, bingx_trading_mode="live")  # type: ignore[call-arg]
+    service = _service(session, settings, client, market)
+
+    # reference = (100+101)/2 = 100.5, стоп 97 → дистанция 3.5, допустимо
+    # (ratio по умолчанию 1.0) 3.5. Цена 106 — уход на 5.5, за порогом.
+    client.price = D("106")
+    result = await service.evaluate(
+        user=user, signal=signal, plan=user.trading_plan,
+        has_trading_key=True, key_can_trade_futures=True,
+        selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
+    )
+    assert isinstance(result, ExecutionRefusal)
+    assert result.code is Code.SIGNAL_STALE
+
+
+async def test_signal_stale_does_not_refuse_move_toward_stop(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Одностороннее: движение к стопу (не к тейку) SIGNAL_STALE не трогает,
+    даже далеко за тем же порогом — отказать не за что, вход стал выгоднее."""
+    session, user, client, market = ctx
+    signal = _signal(user.id, take_profit=D("200"))
+    session.add(signal)
+    await session.flush()
+
+    settings = Settings(trading_execution_enabled=True, bingx_trading_mode="live")  # type: ignore[call-arg]
+    service = _service(session, settings, client, market)
+
+    client.price = D("98")  # к стопу, дальше допустимых 3.5 от reference 100.5
+    result = await service.evaluate(
+        user=user, signal=signal, plan=user.trading_plan,
+        has_trading_key=True, key_can_trade_futures=True,
+        selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
+    )
+    assert isinstance(result, ExecutionQuote)
+
+
 async def test_permissions_untrustworthy_refuses_before_trading_key_check(ctx) -> None:  # type: ignore[no-untyped-def]
     """Раздел 8 ТЗ: права проверить не удалось — отказ этим кодом, а не
     NO_TRADING_KEY по устаревшему key_can_trade_futures (он обновляется

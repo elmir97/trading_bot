@@ -475,6 +475,35 @@ async def test_open_button_shows_refusal_when_mode_not_allowed(ctx, bot, monkeyp
     assert orders[0].error_code == "MODE_NOT_ALLOWED"
 
 
+async def test_open_button_shows_refusal_when_signal_stale(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Пакет B: цена ушла далеко от сигнала в сторону тейка ещё до первого
+    показа карточки — то, что раньше не ловил ни один гвард (PRICE_DRIFT на
+    первом вызове структурно бессилен, см. ExecutionService.evaluate)."""
+    dp, session, user, client, _redis, _settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+
+    # reference = (100+101)/2 = 100.5, стоп 97 → дистанция 3.5, допустимо
+    # (дефолт ratio=1.0) 3.5. Тейк далеко (200), чтобы RR остался в норме
+    # и карточка не отказала бы под видом INVALID_LEVELS.
+    signal = _signal(user.id, take_profit=D("200"))
+    session.add(signal)
+    await session.flush()
+    client.price = D("106")
+
+    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+
+    texts = bot.recorder.sent_texts()
+    assert len(texts) == 1
+    assert "Не открыл" in texts[0]
+    assert "устарел" in texts[0]
+    assert (user.id, signal.id) not in execution._confirmations
+
+    orders = await _orders_for_signal(session, signal.id)
+    assert len(orders) == 1
+    assert orders[0].status is OrderStatus.REFUSED
+    assert orders[0].error_code == "SIGNAL_STALE"
+
+
 # ---------------------------------------------------------------------------
 # Да
 # ---------------------------------------------------------------------------

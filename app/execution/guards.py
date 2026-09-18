@@ -193,6 +193,51 @@ def check_price_drift(
     return None
 
 
+# --- 9а. SIGNAL_STALE (пакет B) -------------------------------------------------
+#
+# Односторонний: отказывает, только если цена ушла от опорной цены сигнала
+# ДАЛЬШЕ в сторону тейка — сигнал "отработал без пользователя", вход по этой
+# цене уже не та сделка, что планировалась. Движение в сторону стопа гвард
+# не трогает вообще: за стопом отказывает check_valid_levels своим текстом
+# (он точнее — там дело не в устаревании, а в том, что стоп уже пробит), а
+# не дойдя до стопа отказывать не за что — вход стал только выгоднее, объём
+# пересчитается от живой цены на этапе sizing. Дистанция до стопа — как в
+# check_price_drift, просто abs() (side тут не при чём: это масштаб порога,
+# а не позиция стопа); направленность нужна только для самого дрейфа —
+# favorable_drift положителен, только если цена ушла именно к тейку.
+
+
+def check_signal_not_stale(
+    *,
+    reference_price: Decimal | None,
+    current_price: Decimal,
+    stop_loss: Decimal,
+    side: TradeSide,
+    max_staleness_ratio: Decimal,
+) -> ExecutionRefusal | None:
+    if reference_price is None:
+        return None
+
+    favorable_drift = (current_price - reference_price) * side.direction
+    if favorable_drift <= ZERO:
+        return None
+
+    distance = abs(reference_price - stop_loss)
+    if distance == ZERO:
+        return None
+    allowed = distance * max_staleness_ratio
+    if favorable_drift > allowed:
+        percent_ahead = favorable_drift / distance * Decimal(100)
+        allowed_percent = max_staleness_ratio * Decimal(100)
+        return ExecutionRefusal(
+            Code.SIGNAL_STALE,
+            f"Сигнал устарел: был на {reference_price:g}, сейчас {current_price:g} "
+            f"— цена ушла на {percent_ahead:.0f}% дистанции до стопа {stop_loss:g} "
+            f"в сторону тейка (допустимо {allowed_percent:.0f}%).",
+        )
+    return None
+
+
 # --- 10. INVALID_LEVELS ---------------------------------------------------------
 
 
@@ -264,7 +309,9 @@ def check_symbol_allowed(
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class GuardInputs:
-    """Один снимок данных для всех 12 проверок раздела 7, в порядке ТЗ."""
+    """Один снимок данных для всех проверок раздела 7 (плюс добавленные позже
+    вне исходного ТЗ — 2а MODE_NOT_ALLOWED, 9а SIGNAL_STALE), в порядке
+    run_guards()."""
 
     # 1
     execution_enabled: bool
@@ -295,6 +342,9 @@ class GuardInputs:
     planned_price: Decimal
     current_price: Decimal
     max_price_drift_ratio: Decimal
+    # 9а (пакет B) — side берётся из блока 10/11 ниже, там же и stop_loss
+    signal_reference_price: Decimal | None
+    max_signal_staleness_ratio: Decimal
     # 10 и 11 (стоп/тейк/объём считаются от entry_price — фактической цены
     # входа на момент подтверждения, не от planned_price выше)
     entry_price: Decimal
@@ -348,6 +398,14 @@ def run_guards(inputs: GuardInputs) -> ExecutionRefusal | None:
         current_price=inputs.current_price,
         stop_loss=inputs.stop_loss,
         max_drift_ratio=inputs.max_price_drift_ratio,
+    ):
+        return refusal
+    if refusal := check_signal_not_stale(
+        reference_price=inputs.signal_reference_price,
+        current_price=inputs.current_price,
+        stop_loss=inputs.stop_loss,
+        side=inputs.side,
+        max_staleness_ratio=inputs.max_signal_staleness_ratio,
     ):
         return refusal
     if refusal := check_valid_levels(

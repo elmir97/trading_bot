@@ -23,6 +23,7 @@ from app.execution.guards import (
     check_permissions_trustworthy,
     check_price_drift,
     check_signal_not_expired,
+    check_signal_not_stale,
     check_signal_not_used,
     check_size,
     check_symbol_allowed,
@@ -74,6 +75,9 @@ def _valid_inputs(**overrides: object) -> GuardInputs:
         "planned_price": D("100"),
         "current_price": D("100.1"),
         "max_price_drift_ratio": D("0.3"),
+        # Равна current_price: дрейф от сигнала по умолчанию 0, гвард молчит.
+        "signal_reference_price": D("100.1"),
+        "max_signal_staleness_ratio": D("1.0"),
         "entry_price": D("100.1"),
         "stop_loss": D("97"),
         "take_profit": D("106"),
@@ -272,6 +276,77 @@ class TestPriceDrift:
         assert refusal.code is Code.PRICE_DRIFT
 
 
+class TestSignalStale:
+    """Односторонний: только движение в сторону тейка от цены сигнала."""
+
+    def test_drift_toward_take_profit_beyond_threshold_refuses(self) -> None:
+        # Long, reference=100, стоп=97 → дистанция 3, допустимо 0.3*3=0.9.
+        refusal = check_signal_not_stale(
+            reference_price=D("100"), current_price=D("101"),
+            stop_loss=D("97"), side=TradeSide.LONG, max_staleness_ratio=D("0.3"),
+        )
+        assert refusal is not None
+        assert refusal.code is Code.SIGNAL_STALE
+
+    def test_drift_toward_take_profit_within_threshold_passes(self) -> None:
+        assert check_signal_not_stale(
+            reference_price=D("100"), current_price=D("100.5"),
+            stop_loss=D("97"), side=TradeSide.LONG, max_staleness_ratio=D("0.3"),
+        ) is None
+
+    def test_drift_toward_stop_never_refuses(self) -> None:
+        """Движение к стопу не отказывает вообще, даже далеко за порогом —
+        либо его поймает check_valid_levels, либо отказывать не за что."""
+        assert check_signal_not_stale(
+            reference_price=D("100"), current_price=D("95"),
+            stop_loss=D("97"), side=TradeSide.LONG, max_staleness_ratio=D("0.3"),
+        ) is None
+
+    def test_short_side_direction_mirrors_long(self) -> None:
+        # Short, reference=100, стоп=103 → дистанция 3, допустимо 0.9.
+        # Прибыльное направление для шорта — вниз, current_price=99 → drift 1.
+        refusal = check_signal_not_stale(
+            reference_price=D("100"), current_price=D("99"),
+            stop_loss=D("103"), side=TradeSide.SHORT, max_staleness_ratio=D("0.3"),
+        )
+        assert refusal is not None
+        assert refusal.code is Code.SIGNAL_STALE
+
+    def test_short_side_toward_stop_never_refuses(self) -> None:
+        assert check_signal_not_stale(
+            reference_price=D("100"), current_price=D("105"),
+            stop_loss=D("103"), side=TradeSide.SHORT, max_staleness_ratio=D("0.3"),
+        ) is None
+
+    def test_missing_reference_passes(self) -> None:
+        """Сигнал без entry-зоны (только entry_low ИЛИ только entry_high в
+        принципе не встречается, но signal_reference_price() формально может
+        вернуть None) — нечем сверять, гвард не блокирует."""
+        assert check_signal_not_stale(
+            reference_price=None, current_price=D("999"),
+            stop_loss=D("97"), side=TradeSide.LONG, max_staleness_ratio=D("0.3"),
+        ) is None
+
+    def test_zero_distance_to_stop_passes(self) -> None:
+        """reference == stop_loss — дистанция для порога нулевая, делить не
+        на что; такой сигнал в любом случае не пройдёт check_valid_levels."""
+        assert check_signal_not_stale(
+            reference_price=D("100"), current_price=D("105"),
+            stop_loss=D("100"), side=TradeSide.LONG, max_staleness_ratio=D("0.3"),
+        ) is None
+
+    def test_message_names_signal_price_current_price_and_percent(self) -> None:
+        refusal = check_signal_not_stale(
+            reference_price=D("100"), current_price=D("101"),
+            stop_loss=D("97"), side=TradeSide.LONG, max_staleness_ratio=D("0.3"),
+        )
+        assert refusal is not None
+        assert "100" in refusal.message
+        assert "101" in refusal.message
+        assert "97" in refusal.message
+        assert "%" in refusal.message
+
+
 class TestValidLevels:
     def test_stop_on_wrong_side_refuses(self) -> None:
         refusal = check_valid_levels(
@@ -403,9 +478,19 @@ GUARD_ORDER: list[tuple[int, Code, dict[str, object]]] = [
         {"day_loss_percent": D("10"), "max_daily_loss_percent": D("1")},
     ),
     (10, Code.PRICE_DRIFT, {"current_price": D("10000")}),
-    (11, Code.INVALID_LEVELS, {"stop_loss": D("105")}),
-    (12, Code.SIZE_TOO_SMALL, {"symbol_info": _symbol_info(min_quantity=D("1000"))}),
-    (13, Code.SYMBOL_NOT_ALLOWED, {"symbol": "XRP-USDT"}),
+    (
+        11,
+        Code.SIGNAL_STALE,
+        # Не трогает current_price/planned_price (не пересекается с
+        # PRICE_DRIFT) и не trogaет stop_loss: с крошечным ratio дрейф
+        # 100.1-100=0.1 остаётся "слишком большим" при любом stop_loss,
+        # которым можно перекрыть эту запись соседним overrides в
+        # test_order_is_respected_for_every_adjacent_pair.
+        {"signal_reference_price": D("100"), "max_signal_staleness_ratio": D("0.0001")},
+    ),
+    (12, Code.INVALID_LEVELS, {"stop_loss": D("105")}),
+    (13, Code.SIZE_TOO_SMALL, {"symbol_info": _symbol_info(min_quantity=D("1000"))}),
+    (14, Code.SYMBOL_NOT_ALLOWED, {"symbol": "XRP-USDT"}),
 ]
 
 

@@ -177,10 +177,13 @@ margin         = notional / leverage
 7. `MAX_POSITIONS` — превышен лимит одновременных позиций
 8. `MAX_TOTAL_RISK` — суммарный риск открытых позиций + новая превысит лимит
 9. `DAILY_LOSS_LIMIT` — дневной лимит убытка достигнут (логика уже есть в `daily_jobs`)
-10. `PRICE_DRIFT` — цена ушла слишком далеко
-11. `INVALID_LEVELS` — стоп по неверную сторону от входа, RR ниже минимального
-12. `SIZE_TOO_SMALL` / `INSUFFICIENT_MARGIN` — из sizing
-13. `SYMBOL_NOT_ALLOWED` — символ вне белого списка
+10. `PRICE_DRIFT` — цена ушла слишком далеко от цены на карточке подтверждения
+11. `SIGNAL_STALE` (пакет B) — цена ушла от цены сигнала дальше порога в сторону
+    тейка (одностороннее: движение к стопу не отказывает — либо его поймает
+    `INVALID_LEVELS`, либо отказывать не за что)
+12. `INVALID_LEVELS` — стоп по неверную сторону от входа, RR ниже минимального
+13. `SIZE_TOO_SMALL` / `INSUFFICIENT_MARGIN` — из sizing
+14. `SYMBOL_NOT_ALLOWED` — символ вне белого списка
 
 Отдельно и жёстко: **риск после убытка не увеличивается ни при каких условиях**.
 Мартингейла нет. Размер считается только от текущего депозита и фиксированного риск-процента.
@@ -245,6 +248,7 @@ BINGX_DEMO_BASE_URL=https://open-api-vst.bingx.com
 EXEC_MAX_OPEN_POSITIONS=4
 EXEC_MAX_TOTAL_RISK_PERCENT=5
 EXEC_MAX_PRICE_DRIFT_RATIO=0.3       # доля расстояния до стопа
+EXEC_MAX_SIGNAL_STALENESS_RATIO=1.0  # то же, но от цены сигнала, не карточки
 EXEC_CONFIRM_TTL_SECONDS=60
 EXEC_MIN_RR=1.5
 EXEC_SYMBOL_WHITELIST=BTC-USDT,ETH-USDT

@@ -37,6 +37,11 @@ class ExecutionRefusalCode(StrEnum):
     MAX_TOTAL_RISK = "MAX_TOTAL_RISK"
     DAILY_LOSS_LIMIT = "DAILY_LOSS_LIMIT"
     PRICE_DRIFT = "PRICE_DRIFT"
+    # Пакет B: сигнал устарел ценой — рынок ушёл от опорной цены сигнала в
+    # сторону тейка дальше EXEC_MAX_SIGNAL_STALENESS_RATIO. Не то же самое,
+    # что PRICE_DRIFT (тот сравнивает с ценой на карточке, а не с сигналом) —
+    # см. guards.check_signal_not_stale.
+    SIGNAL_STALE = "SIGNAL_STALE"
     INVALID_LEVELS = "INVALID_LEVELS"
     SIZE_TOO_SMALL = "SIZE_TOO_SMALL"
     INSUFFICIENT_MARGIN = "INSUFFICIENT_MARGIN"

@@ -154,9 +154,14 @@ class ExecutionService:
         planned_price: Decimal | None = None,
         now: datetime | None = None,
     ) -> ExecutionQuote | ExecutionRefusal:
-        """planned_price=None — первый показ карточки: дрейф сравнивается
+        """planned_price=None — первый показ карточки: PRICE_DRIFT сравнивается
         сам с собой (0) и не может отказать. При повторном вызове с "Да"
-        planned_price — цена, зафиксированная на карточке (раздел 5)."""
+        planned_price — цена, зафиксированная на карточке (раздел 5).
+
+        Пакет B: гвард SIGNAL_STALE не зависит от planned_price (сравнивает
+        current_price с ценой сигнала, не с ценой карточки), поэтому
+        работает одинаково на обоих вызовах — в т.ч. на первом, где
+        PRICE_DRIFT структурно бессилен."""
         moment = now or datetime.now(UTC)
 
         if signal.direction is None or signal.stop_loss is None or signal.take_profit is None:
@@ -260,6 +265,8 @@ class ExecutionService:
             planned_price=planned_price,
             current_price=current_price,
             max_price_drift_ratio=self._settings.exec_max_price_drift_ratio,
+            signal_reference_price=signal_reference_price(signal),
+            max_signal_staleness_ratio=self._settings.exec_max_signal_staleness_ratio,
             entry_price=current_price,
             stop_loss=signal.stop_loss,
             take_profit=signal.take_profit,
