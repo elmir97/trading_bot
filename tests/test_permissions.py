@@ -22,6 +22,7 @@ from app.exchanges.base import ApiRestrictions, ExchangeAuthError, ExchangeError
 from app.services.permissions import refresh_permissions
 from app.services.user_service import UserService
 from app.trading.enums import ExchangeKeyMode
+from tests.conftest import cleanup_user
 
 pytestmark = pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="Нужен PostgreSQL")
 
@@ -52,7 +53,7 @@ def _restrictions(**overrides: object) -> ApiRestrictions:
 
 
 @pytest_asyncio.fixture
-async def ctx():  # type: ignore[no-untyped-def]
+async def ctx(unique_telegram_id):  # type: ignore[no-untyped-def]
     settings = Settings()  # type: ignore[call-arg]
     db = Database(settings)
     async with db.session() as session:
@@ -60,8 +61,7 @@ async def ctx():  # type: ignore[no-untyped-def]
             UserRepository(session), StrategyRepository(session),
             MistakeTypeRepository(session), settings,
         )
-        telegram_id = 970_000 + int(datetime.now(UTC).timestamp() * 1000) % 20_000
-        user = await user_service.get_or_create(telegram_id=telegram_id)
+        user = await user_service.get_or_create(telegram_id=unique_telegram_id())
         creds = ExchangeCredentials(
             user_id=user.id, exchange="bingx", mode=ExchangeKeyMode.LIVE,
             api_key_encrypted="x", api_secret_encrypted="x", api_key_masked="x",
@@ -70,6 +70,7 @@ async def ctx():  # type: ignore[no-untyped-def]
         session.add(creds)
         await session.flush()
         yield session, creds
+        await cleanup_user(session, user)
     await db.dispose()
 
 

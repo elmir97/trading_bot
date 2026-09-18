@@ -13,7 +13,6 @@ VST-хост; has_credentials/get_credentials/list_credentials различаю�
 
 from __future__ import annotations
 
-import itertools
 import os
 
 import pytest
@@ -30,21 +29,16 @@ from app.exchanges.bingx import BingXClient
 from app.services.exchange_factory import ExchangeFactory
 from app.services.user_service import UserService
 from app.trading.enums import ExchangeKeyMode
+from tests.conftest import cleanup_user
 
 pytestmark = pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="Нужен PostgreSQL")
 
 API_KEY = "bingx_public_key_abcdef123456"
 API_SECRET = "bingx_private_secret_zyxwvu987654"
 
-# Монотонный счётчик в рамках процесса вместо timestamp() % 90_000: та
-# версия циклилась каждые 90 мс независимо от точности множителя, так что
-# соседние по времени тесты (в т.ч. из других файлов) закономерно получали
-# один и тот же telegram_id — не совпадение, а гарантированный период.
-_telegram_id_seq = itertools.count(1)
-
 
 @pytest_asyncio.fixture
-async def ctx():  # type: ignore[no-untyped-def]
+async def ctx(unique_telegram_id):  # type: ignore[no-untyped-def]
     settings = Settings()  # type: ignore[call-arg]
     db = Database(settings)
     async with db.session() as session:
@@ -54,16 +48,11 @@ async def ctx():  # type: ignore[no-untyped-def]
             MistakeTypeRepository(session),
             settings,
         )
-        tg = 700_000 + next(_telegram_id_seq)
-        user = await svc.get_or_create(telegram_id=tg)
+        user = await svc.get_or_create(telegram_id=unique_telegram_id())
         cipher = SecretCipher(settings.encryption_key.get_secret_value())
         factory = ExchangeFactory(settings, cipher)
         yield settings, user, session, cipher, factory
-        # Уборка: каскады FK (ondelete="CASCADE") сами удалят credentials
-        # и всё остальное, привязанное к user_id — без этого тестовая база
-        # накапливает пользователей от каждого прогона (см. test_signals_
-        # integration.py, где их скопилось ~674).
-        await session.delete(user)
+        await cleanup_user(session, user)
     await db.dispose()
 
 

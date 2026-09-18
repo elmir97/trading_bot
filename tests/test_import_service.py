@@ -37,6 +37,7 @@ from app.exchanges.base import (
 from app.services.import_service import HistoryImporter
 from app.services.user_service import UserService
 from app.trading.enums import TradeSide, TradeSource, TradeStatus
+from tests.conftest import cleanup_user
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("DATABASE_URL"), reason="Нужен PostgreSQL"
@@ -94,7 +95,7 @@ def fill(fid: str, minutes: int, *, entry: bool, price: str, qty: str = "0.1") -
 
 
 @pytest_asyncio.fixture
-async def ctx():  # type: ignore[no-untyped-def]
+async def ctx(unique_telegram_id):  # type: ignore[no-untyped-def]
     settings = Settings()  # type: ignore[call-arg]
     db = Database(settings)
     async with db.session() as session:
@@ -104,9 +105,9 @@ async def ctx():  # type: ignore[no-untyped-def]
             MistakeTypeRepository(session),
             settings,
         )
-        tg = 200_000 + int(datetime.now(UTC).timestamp() * 1_000_000) % 90_000
-        user = await svc.get_or_create(telegram_id=tg)
+        user = await svc.get_or_create(telegram_id=unique_telegram_id())
         yield user, TradeRepository(session), session
+        await cleanup_user(session, user)
     await db.dispose()
 
 

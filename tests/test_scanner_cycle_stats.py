@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import UTC, datetime
 
 import pytest
 import pytest_asyncio
@@ -29,6 +28,7 @@ from app.database.repositories.user import UserRepository
 from app.database.session import Database
 from app.services.user_service import UserService
 from app.workers.scanner import SCAN_TIMEFRAMES, SetupScanner
+from tests.conftest import cleanup_user
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("DATABASE_URL"), reason="Нужен PostgreSQL"
@@ -44,7 +44,7 @@ class FakeBot:
 
 
 @pytest_asyncio.fixture
-async def ctx(monkeypatch):  # type: ignore[no-untyped-def]
+async def ctx(monkeypatch, unique_telegram_id):  # type: ignore[no-untyped-def]
     settings = Settings()  # type: ignore[call-arg]
     db = Database(settings)
     async with db.session() as session:
@@ -54,8 +54,7 @@ async def ctx(monkeypatch):  # type: ignore[no-untyped-def]
             MistakeTypeRepository(session),
             settings,
         )
-        telegram_id = 810_000 + int(datetime.now(UTC).timestamp() * 1000) % 90_000
-        user = await user_service.get_or_create(telegram_id=telegram_id)
+        user = await user_service.get_or_create(telegram_id=unique_telegram_id())
 
         async def fake_list_active_with_plan(self):  # type: ignore[no-untyped-def]
             return [user]
@@ -67,6 +66,7 @@ async def ctx(monkeypatch):  # type: ignore[no-untyped-def]
         bot = FakeBot()
         scanner = SetupScanner(bot, db, settings)
         yield user, scanner, settings
+        await cleanup_user(session, user)
     await db.dispose()
 
 

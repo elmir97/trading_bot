@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -24,6 +23,7 @@ from app.database.repositories.user import UserRepository
 from app.database.session import Database
 from app.services.user_service import UserService
 from app.trading.enums import ExchangeKeyMode
+from tests.conftest import cleanup_user
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("DATABASE_URL"), reason="Нужен PostgreSQL"
@@ -35,7 +35,7 @@ API_SECRET = "bingx_private_secret_zyxwvu987654"
 
 
 @pytest_asyncio.fixture
-async def ctx():  # type: ignore[no-untyped-def]
+async def ctx(unique_telegram_id):  # type: ignore[no-untyped-def]
     settings = Settings()  # type: ignore[call-arg]
     db = Database(settings)
     async with db.session() as session:
@@ -45,10 +45,10 @@ async def ctx():  # type: ignore[no-untyped-def]
             MistakeTypeRepository(session),
             settings,
         )
-        tg = 600_000 + int(datetime.now(UTC).timestamp() * 1_000_000) % 90_000
-        user = await svc.get_or_create(telegram_id=tg)
+        user = await svc.get_or_create(telegram_id=unique_telegram_id())
         cipher = SecretCipher(settings.encryption_key.get_secret_value())
         yield user, session, cipher
+        await cleanup_user(session, user)
     await db.dispose()
 
 

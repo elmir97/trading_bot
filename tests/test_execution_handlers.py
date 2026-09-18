@@ -51,6 +51,7 @@ from app.exchanges.base import (
 )
 from app.services.user_service import UserService
 from app.trading.enums import ExchangeKeyMode, OrderRole, OrderStatus, SignalDirection, SignalLevel
+from tests.conftest import cleanup_user
 
 pytestmark = pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="Нужен PostgreSQL")
 
@@ -298,7 +299,7 @@ def make_callback(data: str, message_id: int) -> CallbackQuery:
 
 
 @pytest_asyncio.fixture
-async def ctx():  # type: ignore[no-untyped-def]
+async def ctx(unique_telegram_id):  # type: ignore[no-untyped-def]
     # bingx_trading_mode="live" — совпадает с дефолтом
     # UserSettings.active_exchange_mode=LIVE (этап 15.4в), иначе guard
     # MODE_NOT_ALLOWED отказывал бы во всех «счастливых» тестах ниже.
@@ -309,8 +310,7 @@ async def ctx():  # type: ignore[no-untyped-def]
             UserRepository(session), StrategyRepository(session),
             MistakeTypeRepository(session), settings,
         )
-        telegram_id = 950_000 + int(datetime.now(UTC).timestamp() * 1000) % 90_000
-        user = await user_service.get_or_create(telegram_id=telegram_id)
+        user = await user_service.get_or_create(telegram_id=unique_telegram_id())
         client = FakeExchangeClient(price=D("100"), balance=D("1000"), symbol_info=_symbol_info())
         redis = FakeRedis()
 
@@ -325,6 +325,7 @@ async def ctx():  # type: ignore[no-untyped-def]
 
         yield dp, session, user, client, redis, settings
         execution._confirmations.clear()
+        await cleanup_user(session, user)
     await db.dispose()
 
 

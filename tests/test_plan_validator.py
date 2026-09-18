@@ -22,6 +22,7 @@ from app.services.user_service import UserService
 from app.trading.enums import TradeSide
 from app.trading.journal import TradeJournal
 from app.trading.risk import PlanValidator, ViolationCode, day_bounds, week_bounds
+from tests.conftest import cleanup_user
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("DATABASE_URL"), reason="Нужен PostgreSQL"
@@ -45,7 +46,7 @@ def make_plan() -> TradingPlan:
 
 
 @pytest_asyncio.fixture
-async def validator():  # type: ignore[no-untyped-def]
+async def validator(unique_telegram_id):  # type: ignore[no-untyped-def]
     settings = Settings()  # type: ignore[call-arg]
     db = Database(settings)
     async with db.session() as session:
@@ -55,10 +56,10 @@ async def validator():  # type: ignore[no-untyped-def]
             MistakeTypeRepository(session),
             settings,
         )
-        tg = 800_000 + int(datetime.now(UTC).timestamp() * 1000) % 90_000
-        user = await svc.get_or_create(telegram_id=tg)
+        user = await svc.get_or_create(telegram_id=unique_telegram_id())
         repo = TradeRepository(session)
         yield PlanValidator(repo), user, repo
+        await cleanup_user(session, user)
     await db.dispose()
 
 

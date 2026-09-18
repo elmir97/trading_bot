@@ -40,6 +40,7 @@ from app.trading.enums import (
     TradeSource,
     TradeStatus,
 )
+from tests.conftest import cleanup_user
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("DATABASE_URL"), reason="Нужен PostgreSQL"
@@ -100,7 +101,7 @@ def _order(user_id: int, client_order_id: str, **overrides: object) -> Execution
 
 
 @pytest_asyncio.fixture
-async def ctx():  # type: ignore[no-untyped-def]
+async def ctx(unique_telegram_id):  # type: ignore[no-untyped-def]
     settings = Settings()  # type: ignore[call-arg]
     db = Database(settings)
     async with db.session() as session:
@@ -110,10 +111,10 @@ async def ctx():  # type: ignore[no-untyped-def]
             MistakeTypeRepository(session),
             settings,
         )
-        telegram_id = 700_000 + int(datetime.now(UTC).timestamp() * 1000) % 90_000
-        user = await user_service.get_or_create(telegram_id=telegram_id)
+        user = await user_service.get_or_create(telegram_id=unique_telegram_id())
         repo = ExecutionOrderRepository(session)
         yield user, session, repo
+        await cleanup_user(session, user)
     await db.dispose()
 
 
@@ -138,14 +139,14 @@ async def test_add_and_get_round_trips_fields(ctx) -> None:  # type: ignore[no-u
     assert fetched.status is OrderStatus.PENDING  # дефолт до отправки на биржу
 
 
-async def test_get_scoped_to_user(ctx) -> None:  # type: ignore[no-untyped-def]
+async def test_get_scoped_to_user(ctx, unique_telegram_id) -> None:  # type: ignore[no-untyped-def]
     user, session, repo = ctx
     other = await UserService(
         UserRepository(session),
         StrategyRepository(session),
         MistakeTypeRepository(session),
         Settings(),  # type: ignore[call-arg]
-    ).get_or_create(telegram_id=800_000 + int(datetime.now(UTC).timestamp()))
+    ).get_or_create(telegram_id=unique_telegram_id())
 
     order = _order(other.id, "tj-other")
     repo.add(order)
@@ -153,6 +154,8 @@ async def test_get_scoped_to_user(ctx) -> None:  # type: ignore[no-untyped-def]
 
     assert await repo.get(order.id, user.id) is None
     assert await repo.get(order.id, other.id) is not None
+
+    await cleanup_user(session, other)
 
 
 async def test_get_by_client_order_id(ctx) -> None:  # type: ignore[no-untyped-def]

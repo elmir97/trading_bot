@@ -24,6 +24,7 @@ from app.database.session import Database
 from app.services.user_service import UserService
 from app.trading.enums import FillSide, TradeSide, TradeStatus
 from app.trading.journal import JournalError, TradeJournal
+from tests.conftest import cleanup_user
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("DATABASE_URL"), reason="Нужен PostgreSQL"
@@ -33,7 +34,7 @@ D = Decimal
 
 
 @pytest_asyncio.fixture
-async def ctx():  # type: ignore[no-untyped-def]
+async def ctx(unique_telegram_id):  # type: ignore[no-untyped-def]
     settings = Settings()  # type: ignore[call-arg]
     db = Database(settings)
     async with db.session() as session:
@@ -43,11 +44,10 @@ async def ctx():  # type: ignore[no-untyped-def]
             MistakeTypeRepository(session),
             settings,
         )
-        # Уникальный id на каждый тест: изоляция без очистки таблиц.
-        telegram_id = 900_000 + int(datetime.now(UTC).timestamp() * 1000) % 90_000
-        user = await user_service.get_or_create(telegram_id=telegram_id)
+        user = await user_service.get_or_create(telegram_id=unique_telegram_id())
         repo = TradeRepository(session)
         yield user, TradeJournal(repo), repo, session
+        await cleanup_user(session, user)
     await db.dispose()
 
 

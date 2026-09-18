@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -27,6 +26,7 @@ from app.database.session import Database
 from app.services.user_service import UserService
 from app.trading.enums import TradeSide
 from app.trading.journal import TradeJournal
+from tests.conftest import cleanup_user
 
 D = Decimal
 
@@ -71,7 +71,7 @@ pytestmark_db = pytest.mark.skipif(
 
 
 @pytest_asyncio.fixture
-async def journal_ctx():  # type: ignore[no-untyped-def]
+async def journal_ctx(unique_telegram_id):  # type: ignore[no-untyped-def]
     settings = Settings()  # type: ignore[call-arg]
     db = Database(settings)
     async with db.session() as session:
@@ -81,10 +81,10 @@ async def journal_ctx():  # type: ignore[no-untyped-def]
             MistakeTypeRepository(session),
             settings,
         )
-        tg = 300_000 + int(datetime.now(UTC).timestamp() * 1_000_000) % 90_000
-        user = await svc.get_or_create(telegram_id=tg)
+        user = await svc.get_or_create(telegram_id=unique_telegram_id())
         repo = TradeRepository(session)
         yield user, TradeJournal(repo), session
+        await cleanup_user(session, user)
     await db.dispose()
 
 

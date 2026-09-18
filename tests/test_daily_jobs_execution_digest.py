@@ -36,6 +36,7 @@ from app.trading.enums import (
 )
 from app.trading.risk import tz_offset_for
 from app.workers.daily import DailyJobs
+from tests.conftest import cleanup_user
 
 pytestmark = pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="Нужен PostgreSQL")
 
@@ -83,7 +84,7 @@ def _signal(
 
 
 @pytest_asyncio.fixture
-async def ctx():  # type: ignore[no-untyped-def]
+async def ctx(unique_telegram_id):  # type: ignore[no-untyped-def]
     settings = Settings()  # type: ignore[call-arg]
     db = Database(settings)
     async with db.session() as session:
@@ -91,12 +92,12 @@ async def ctx():  # type: ignore[no-untyped-def]
             UserRepository(session), StrategyRepository(session),
             MistakeTypeRepository(session), settings,
         )
-        telegram_id = 960_000 + int(datetime.now(UTC).timestamp() * 1000) % 90_000
-        user = await user_service.get_or_create(telegram_id=telegram_id)
+        user = await user_service.get_or_create(telegram_id=unique_telegram_id())
         bot = FakeBot()
         cipher = SecretCipher(settings.encryption_key.get_secret_value())
         daily = DailyJobs(bot, db, settings, cipher)
         yield daily, session, user, bot, settings
+        await cleanup_user(session, user)
     await db.dispose()
 
 
