@@ -190,7 +190,8 @@ class PlanValidator:
             result.violations.append(
                 Violation(
                     ViolationCode.SYMBOL_NOT_ALLOWED,
-                    f"{symbol} вне списка разрешённых инструментов.",
+                    f"{symbol} вне списка разрешённых инструментов "
+                    f"({', '.join(plan.allowed_symbols)}).",
                 )
             )
 

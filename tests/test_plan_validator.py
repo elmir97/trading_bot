@@ -20,6 +20,7 @@ from app.database.repositories.user import UserRepository
 from app.database.session import Database
 from app.services.user_service import UserService
 from app.trading.enums import TradeSide
+from app.trading.journal import TradeJournal
 from app.trading.risk import PlanValidator, ViolationCode, day_bounds, week_bounds
 
 pytestmark = pytest.mark.skipif(
@@ -56,12 +57,13 @@ async def validator():  # type: ignore[no-untyped-def]
         )
         tg = 800_000 + int(datetime.now(UTC).timestamp() * 1000) % 90_000
         user = await svc.get_or_create(telegram_id=tg)
-        yield PlanValidator(TradeRepository(session)), user
+        repo = TradeRepository(session)
+        yield PlanValidator(repo), user, repo
     await db.dispose()
 
 
 async def _check(validator, **overrides):  # type: ignore[no-untyped-def]
-    v, user = validator
+    v, user, _repo = validator
     params = {
         "plan": make_plan(),
         "user_id": user.id,
@@ -95,30 +97,76 @@ async def test_excessive_risk_flagged(validator) -> None:  # type: ignore[no-unt
     result = await _check(validator, quantity=D("0.3"))
     codes = {v.code for v in result.violations}
     assert ViolationCode.RISK_TOO_HIGH in codes
+    message = next(v.message for v in result.violations if v.code is ViolationCode.RISK_TOO_HIGH)
+    assert "6.00%" in message
+    assert "2%" in message
 
 
 async def test_low_rr_flagged(validator) -> None:  # type: ignore[no-untyped-def]
     result = await _check(validator, take_profit=D("101000"))
     codes = {v.code for v in result.violations}
     assert ViolationCode.LOW_RISK_REWARD in codes
+    message = next(
+        v.message for v in result.violations if v.code is ViolationCode.LOW_RISK_REWARD
+    )
+    assert "RR 1:0.5" in message
+    assert "1:2" in message
 
 
 async def test_symbol_outside_plan_flagged(validator) -> None:  # type: ignore[no-untyped-def]
     result = await _check(validator, symbol="PEPE-USDT")
     codes = {v.code for v in result.violations}
     assert ViolationCode.SYMBOL_NOT_ALLOWED in codes
+    message = next(
+        v.message for v in result.violations if v.code is ViolationCode.SYMBOL_NOT_ALLOWED
+    )
+    assert "PEPE-USDT" in message
+    assert "BTC-USDT" in message
+    assert "ETH-USDT" in message
 
 
 async def test_timeframe_outside_plan_flagged(validator) -> None:  # type: ignore[no-untyped-def]
     result = await _check(validator, timeframe="5m")
     codes = {v.code for v in result.violations}
     assert ViolationCode.TIMEFRAME_NOT_ALLOWED in codes
+    message = next(
+        v.message for v in result.violations if v.code is ViolationCode.TIMEFRAME_NOT_ALLOWED
+    )
+    assert "5m" in message
+    assert "1h" in message
+    assert "4h" in message
 
 
 async def test_excessive_leverage_flagged(validator) -> None:  # type: ignore[no-untyped-def]
     result = await _check(validator, leverage=50)
     codes = {v.code for v in result.violations}
     assert ViolationCode.LEVERAGE_TOO_HIGH in codes
+    message = next(
+        v.message for v in result.violations if v.code is ViolationCode.LEVERAGE_TOO_HIGH
+    )
+    assert "50x" in message
+    assert "10x" in message
+
+
+async def test_daily_trade_limit_message_has_counter_and_cap(validator) -> None:  # type: ignore[no-untyped-def]
+    """max_trades_per_day=5 в make_plan(): 5 сделок, открытых сегодня, достигают лимита."""
+    _v, user, repo = validator
+    journal = TradeJournal(repo)
+    for _ in range(5):
+        await journal.open_trade(
+            user_id=user.id,
+            symbol="BTC-USDT",
+            side=TradeSide.LONG,
+            entry_price=D("100000"),
+            quantity=D("0.01"),
+        )
+
+    result = await _check(validator)
+    message = next(
+        v.message for v in result.violations if v.code is ViolationCode.DAILY_TRADE_LIMIT
+    )
+    assert "5 сделок" in message
+    assert "лимите 5" in message
 
 
 async def test_violations_are_not_blocking_by_default(validator) -> None:  # type: ignore[no-untyped-def]
