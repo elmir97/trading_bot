@@ -17,7 +17,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.formatting import fmt_amount, fmt_money, fmt_num, fmt_qty
+from app.bot.formatting import fmt_amount, fmt_money, fmt_num, fmt_price, fmt_qty
 from app.bot.keyboards.main import MenuCallback, back_to, nav_row
 from app.core.config import Settings
 from app.core.logging import get_logger

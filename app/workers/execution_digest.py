@@ -252,7 +252,9 @@ def render_execution_digest(
         lines.append(f"Средний RR: {fmt_decimal(avg_rr)}")
     if stats.confirmed_drift_percents:
         avg_drift = sum(stats.confirmed_drift_percents, ZERO) / len(stats.confirmed_drift_percents)
-        lines.append(f"Средний дрейф цены сигнала к моменту подтверждения: {fmt_decimal(avg_drift)}%")
+        lines.append(
+            f"Средний дрейф цены сигнала к моменту подтверждения: {fmt_decimal(avg_drift)}%"
+        )
 
     lines.append("")
     if anomalies:
