@@ -106,7 +106,7 @@ async def _with_exchange(
 
     try:
         text = await action(client)
-    except Exception as exc:  # noqa: BLE001
+    except ExchangeError as exc:
         logger.exception("Ошибка обращения к бирже", extra={"user_id": user.id})
         text = _describe(exc)
     finally:
@@ -293,7 +293,7 @@ async def show_prices(
 
     try:
         prices = await market.get_prices(symbols[:10])
-    except Exception as exc:  # noqa: BLE001
+    except ExchangeError as exc:
         logger.exception("Не удалось получить цены")
         await _reply(event, _describe(exc), back_to(MenuCallback.EXCHANGE))
         return
@@ -399,7 +399,7 @@ async def run_import(
         start, end = default_import_range(days)
         importer = HistoryImporter(client, TradeRepository(session), user.id)
         result = await importer.import_period(start, end, account_balance=balance)
-    except Exception as exc:  # noqa: BLE001
+    except ExchangeError as exc:
         logger.exception("Импорт не удался", extra={"user_id": user.id})
         await _reply(callback, _describe(exc), back)
         return
@@ -515,7 +515,7 @@ async def check_symbols(
     market = MarketDataService(client, _market_cache)
     try:
         available = [info.symbol for info in await market.get_symbols()]
-    except Exception as exc:  # noqa: BLE001
+    except ExchangeError as exc:
         logger.exception("Не удалось получить список инструментов")
         await _reply(callback, _describe(exc), back_to(MenuCallback.EXCHANGE))
         return
@@ -576,7 +576,7 @@ async def fix_symbols(
     market = MarketDataService(client, _market_cache)
     try:
         available = [info.symbol for info in await market.get_symbols()]
-    except Exception as exc:  # noqa: BLE001
+    except ExchangeError as exc:
         await _reply(callback, _describe(exc), back)
         return
     finally:
