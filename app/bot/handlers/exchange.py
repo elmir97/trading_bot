@@ -56,7 +56,7 @@ class ExchangeCB:
     FIX_SYMBOLS = "ex:fix_symbols"
 
 
-def _describe(error: Exception) -> str:
+def _describe(error: ExchangeError) -> str:
     """Переводит сбой биржи в объяснение, с которым можно что-то сделать."""
     if isinstance(error, ExchangeAuthError):
         return f"🔑 {error}"
@@ -70,9 +70,7 @@ def _describe(error: Exception) -> str:
             "📡 Биржа не отвечает. Возможны технические работы "
             "или проблемы со связью — попробуй позже."
         )
-    if isinstance(error, ExchangeError):
-        return f"⚠️ Биржа вернула ошибку: {error}"
-    return "⚠️ Не удалось получить данные с биржи. Подробности в логе."
+    return f"⚠️ Биржа вернула ошибку: {error}"
 
 
 async def _reply(event: Message | CallbackQuery, text: str, keyboard=None) -> None:  # type: ignore[no-untyped-def]

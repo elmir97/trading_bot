@@ -69,7 +69,7 @@ class PositionMonitor:
                     continue
                 try:
                     await self._check_trade(trade, price)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.exception(
                         "Проверка позиции упала",
                         extra={"trade_id": trade.id, "symbol": trade.symbol},

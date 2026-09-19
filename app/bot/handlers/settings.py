@@ -13,6 +13,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.formatting import fmt_amount, fmt_num, fmt_price, fmt_qty
@@ -36,7 +37,6 @@ from app.trading.calculations import (
 )
 from app.trading.enums import ExchangeKeyMode, TradeSide
 from app.workers.notifier import NOTIFICATION_LABELS
-from sqlalchemy import select
 
 router = Router(name="settings")
 

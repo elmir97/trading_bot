@@ -97,7 +97,7 @@ async def send_notification_photo(
             "Уведомление не доставлено: бот заблокирован",
             extra={"telegram_id": telegram_id},
         )
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.exception(
             "Не удалось отправить график, шлём текстом",
             extra={"telegram_id": telegram_id},

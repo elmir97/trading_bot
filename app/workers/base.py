@@ -51,7 +51,7 @@ def job_wrapper(name: str, func: Callable[[], Awaitable[None]]) -> Callable[[], 
         logger.info(f"Фоновый цикл начат: {name}", extra={"job": name})
         try:
             await func()
-        except Exception:  # noqa: BLE001 — здесь и есть граница изоляции
+        except Exception:
             logger.exception(f"Фоновый цикл упал: {name}", extra={"job": name})
         else:
             elapsed_ms = int((time.monotonic() - started) * 1000)

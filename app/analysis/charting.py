@@ -41,7 +41,7 @@ def render_setup_chart(
 ) -> bytes | None:
     try:
         return _render(context, signal, level)
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.exception(
             "Не удалось построить график сетапа",
             extra={"symbol": context.symbol, "timeframe": context.timeframe},

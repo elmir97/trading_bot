@@ -101,7 +101,7 @@ class DailyJobs:
             for user in users:
                 try:
                     await self._process_user(session, user, now)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.exception(
                         "Дневная проверка пользователя упала", extra={"user_id": user.id}
                     )

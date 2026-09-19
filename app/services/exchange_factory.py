@@ -78,7 +78,7 @@ class ExchangeFactory:
             api_key = self._cipher.decrypt(credentials.api_key_encrypted)
             api_secret = self._cipher.decrypt(credentials.api_secret_encrypted)
         except SecretCipherError as exc:
-            logger.error(  # noqa: TRY400 — traceback тут не нужен
+            logger.error(
                 "Ключи не расшифровываются", extra={"user_id": user_id, "mode": mode.value}
             )
             raise ExchangeAuthError(

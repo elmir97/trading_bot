@@ -210,7 +210,7 @@ class SetupScanner:
                             "Недостаточно рыночных данных для анализа.",
                         )
                     )
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.exception(
                         "Скан инструмента упал",
                         extra={"user_id": user.id, "symbol": symbol, "timeframe": timeframe},

@@ -62,7 +62,7 @@ async def cmd_help(message: Message) -> None:
 
 
 @router.message(Command("plan"))
-async def cmd_plan(message: Message, user: User, session) -> None:  # noqa: ANN001
+async def cmd_plan(message: Message, user: User, session) -> None:
     repo = UserRepository(session)
     plan: TradingPlan | None = await repo.get_trading_plan(user.id)
     if plan is None:

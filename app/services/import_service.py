@@ -152,7 +152,7 @@ class HistoryImporter:
                 for fill in batch:
                     if fill.external_id:
                         collected[fill.external_id] = fill
-            except Exception as exc:  # noqa: BLE001 — частичный сбой не должен
+            except Exception as exc:
                 # ронять весь импорт: остальные окна могут пройти успешно.
                 logger.warning(
                     "Окно импорта не загрузилось",

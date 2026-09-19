@@ -263,7 +263,7 @@ async def run_signal(callback: CallbackQuery, settings: Settings) -> None:
         text = render_signal(
             signal, symbol_info.price_precision if symbol_info else None
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.exception("Анализ не удался", extra={"symbol": symbol})
         text = _describe(exc)
     finally:
@@ -299,10 +299,10 @@ async def run_scan(
             symbol_precisions = {
                 info.symbol: info.price_precision for info in await engine.get_symbols()
             }
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.warning("Не удалось получить точность инструментов для сканирования")
             symbol_precisions = {}
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.exception("Сканирование не удалось")
         await _reply(callback, _describe(exc), back_to(MenuCallback.FIND_ENTRY))
         return
@@ -384,7 +384,7 @@ async def show_market(
             )
         else:
             text = "Недостаточно рыночных данных для анализа."
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.exception("Анализ рынка не удался", extra={"symbol": symbol})
         text = _describe(exc)
     finally:

@@ -102,7 +102,7 @@ class MarketDataService:
         for symbol in symbols:
             try:
                 result[symbol] = await self.get_price(symbol)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.warning("Не удалось получить цену", extra={"symbol": symbol})
                 result[symbol] = None
         return result

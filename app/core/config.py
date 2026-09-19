@@ -193,7 +193,7 @@ class Settings(BaseSettings):
 
         try:
             Fernet(value.get_secret_value().encode())
-        except Exception as exc:  # noqa: BLE001 - хотим понятное сообщение
+        except Exception as exc:
             raise ValueError(
                 "ENCRYPTION_KEY невалиден. Сгенерируй: python -m scripts.generate_key"
             ) from exc

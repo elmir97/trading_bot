@@ -14,11 +14,15 @@ from __future__ import annotations
 
 from app.analysis.indicators import (
     atr as calc_atr,
+)
+from app.analysis.indicators import (
     ema,
     last_value,
     macd,
-    rsi as calc_rsi,
     volume_ratio,
+)
+from app.analysis.indicators import (
+    rsi as calc_rsi,
 )
 from app.analysis.setups import DEFAULT_DETECTORS, SetupDetector
 from app.analysis.signals import MarketContext, Signal, wait_signal
@@ -150,7 +154,7 @@ class AnalysisEngine:
         for detector in self._detectors:
             try:
                 signals.append(detector.detect(context))
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception(
                     "Детектор упал",
                     extra={"detector": detector.name, "symbol": context.symbol},
@@ -182,7 +186,7 @@ class AnalysisEngine:
         for symbol in symbols:
             try:
                 results.append(await self.analyze(symbol, timeframe))
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("Ошибка анализа", extra={"symbol": symbol})
                 results.append(
                     wait_signal(symbol, timeframe, "Ошибка при анализе.")
