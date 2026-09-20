@@ -7,10 +7,14 @@ render_setup_chart не должен бросать исключения нар�
 
 from __future__ import annotations
 
+import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+
+import pytest
+from matplotlib.axes import Axes
 
 from app.analysis import charting
 from app.analysis.charting import _nearby_levels, render_analysis_chart, render_setup_chart
@@ -122,6 +126,16 @@ def _level(price: Decimal, *, resistance: bool) -> Level:
     )
 
 
+def _windowed_context(*, wide_at: int = -50) -> MarketContext:
+    """Свечи около 100 и одна широкая [90; 110]: окно видимых свечей — [90; 110],
+    ATR 1.5 → окно уровней [88.5; 111.5]. Цена последней свечи ~100."""
+    candles = _candles()
+    candles[wide_at] = replace(candles[wide_at], high=D("110"), low=D("90"))
+    context = _context(candles)
+    assert D("98") < context.price < D("103")
+    return context
+
+
 class TestRenderAnalysisChart:
     """График экрана «Анализ рынка»: рисуется и при найденном сетапе, и при
     FORMING, и при WAIT — при WAIT видно, чего ждём."""
@@ -142,31 +156,97 @@ class TestRenderAnalysisChart:
         assert png[:8] == PNG_MAGIC
 
     def test_wait_with_nearby_levels_renders(self) -> None:
-        context = _context()
-        price = context.price
-        levels = [
-            _level(price + D("3"), resistance=True),
-            _level(price + D("8"), resistance=True),
-            _level(price - D("4"), resistance=False),
-        ]
-        context = replace(context, levels=levels)
+        context = replace(
+            _windowed_context(),
+            levels=[
+                _level(D("105"), resistance=True),
+                _level(D("108"), resistance=True),
+                _level(D("95"), resistance=False),
+            ],
+        )
         signal = Signal(
             symbol="BTC-USDT", timeframe="1h", direction=SignalDirection.WAIT,
-            setup="Нет сетапа", level_price=price + D("3"),
+            setup="Нет сетапа", level_price=D("105"),
         )
         png = render_analysis_chart(context, signal)
         assert png is not None
         assert png[:8] == PNG_MAGIC
 
     def test_nearby_levels_are_two_per_side_nearest_first(self) -> None:
-        context = _context()
-        p = context.price
+        context = _windowed_context()
         levels = [
-            _level(p + D(offset), resistance=offset > 0)
-            for offset in (9, 2, 5, -1, -6, -12)
+            _level(D(x), resistance=D(x) > context.price)
+            for x in (108, 103, 105, 98, 95, 92)  # все внутри окна [88.5; 111.5]
         ]
         picked = _nearby_levels(replace(context, levels=levels))
-        assert [lv.price - p for lv in picked] == [D(2), D(5), D(-1), D(-6)]
+        assert [lv.price for lv in picked] == [D(103), D(105), D(98), D(95)]
+
+    def test_levels_outside_visible_window_are_dropped(self) -> None:
+        context = _windowed_context()
+        levels = [
+            _level(D("130"), resistance=True),   # выше окна
+            _level(D("105"), resistance=True),
+            _level(D("95"), resistance=False),
+            _level(D("60"), resistance=False),   # ниже окна: как поддержка 1892 у ETH 4H
+        ]
+        picked = _nearby_levels(replace(context, levels=levels))
+        assert [lv.price for lv in picked] == [D("105"), D("95")]
+
+    def test_window_edge_includes_one_atr_margin(self) -> None:
+        context = _windowed_context()  # окно уровней [88.5; 111.5]
+        levels = [
+            _level(D("111.4"), resistance=True),
+            _level(D("111.6"), resistance=True),
+            _level(D("88.6"), resistance=False),
+            _level(D("88.4"), resistance=False),
+        ]
+        picked = _nearby_levels(replace(context, levels=levels))
+        assert [lv.price for lv in picked] == [D("111.4"), D("88.6")]
+
+    def test_window_covers_only_displayed_candles(self) -> None:
+        """Широкая свеча старше CANDLES_DISPLAYED окно не расширяет."""
+        context = _windowed_context(wide_at=-150)
+        shown = context.candles[-charting.CANDLES_DISPLAYED :]
+        high = max(c.high for c in shown)
+        assert high < D("105")  # старая свеча 110 в окно не входит
+        inside = high  # верхняя граница окна свечей
+        outside = high + context.atr + D("1")  # за пределами даже с запасом в 1 ATR
+        levels = [_level(inside, resistance=True), _level(outside, resistance=True)]
+        picked = _nearby_levels(replace(context, levels=levels))
+        assert [lv.price for lv in picked] == [inside]
+
+    def test_no_candles_means_no_levels(self) -> None:
+        context = replace(
+            _windowed_context(), candles=[], levels=[_level(D("100"), resistance=True)]
+        )
+        assert _nearby_levels(context) == []
+
+    def test_missing_atr_means_zero_margin(self) -> None:
+        context = replace(_windowed_context(), atr=None)
+        levels = [_level(D("110.5"), resistance=True), _level(D("109"), resistance=True)]
+        picked = _nearby_levels(replace(context, levels=levels))
+        assert [lv.price for lv in picked] == [D("109")]  # окно [90; 110] без запаса
+
+    def test_far_level_is_not_drawn_on_the_chart(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """Регрессия: ось Y не должна растягиваться до уровня вне окна свечей."""
+        drawn: list[float] = []
+        real = Axes.axhline
+
+        def spy(self, y=0, *args, **kwargs):  # type: ignore[no-untyped-def]
+            drawn.append(float(y))
+            return real(self, y, *args, **kwargs)
+
+        monkeypatch.setattr(Axes, "axhline", spy)
+        context = replace(
+            _windowed_context(),
+            levels=[_level(D("105"), resistance=True), _level(D("60"), resistance=False)],
+        )
+        signal = Signal(
+            symbol="BTC-USDT", timeframe="1h", direction=SignalDirection.WAIT, setup="Нет сетапа"
+        )
+        assert render_analysis_chart(context, signal) is not None
+        assert 105.0 in drawn
+        assert 60.0 not in drawn
 
     def test_title_does_not_claim_scanner_status(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         titles: list[str] = []
@@ -192,3 +272,35 @@ class TestRenderAnalysisChart:
                 pool.map(lambda _: render_analysis_chart(_context(), _signal()), range(6))
             )
         assert all(r is not None and r[:8] == PNG_MAGIC for r in results)
+
+
+class TestTimeAxis:
+    """Подписи оси времени: короткий формат без года и запятой, ограниченное
+    число делений. Одинаково для графика сканера и графика экрана анализа."""
+
+    @staticmethod
+    def _labels(monkeypatch, render) -> list[str]:  # type: ignore[no-untyped-def]
+        figures = []
+        real_close = charting.plt.close
+        monkeypatch.setattr(
+            charting.plt, "close", lambda fig=None: (figures.append(fig), real_close(fig))[1]
+        )
+        assert render() is not None
+        assert figures, "фигура не была закрыта — нечего проверять"
+        axis = figures[0].axes[0]
+        return [t.get_text() for t in axis.get_xticklabels() if t.get_text()]
+
+    @pytest.mark.parametrize(
+        "render",
+        [
+            lambda: render_setup_chart(_context(), _signal(), SignalLevel.READY),
+            lambda: render_analysis_chart(_context(), _signal()),
+        ],
+        ids=["scanner", "analysis"],
+    )
+    def test_short_format_and_tick_limit(self, monkeypatch, render) -> None:  # type: ignore[no-untyped-def]
+        labels = self._labels(monkeypatch, render)
+        assert 2 <= len(labels) <= charting.XAXIS_MAX_TICKS
+        for label in labels:
+            # 17.09 08:00 — без года и запятой
+            assert re.fullmatch(r"\d{2}\.\d{2} \d{2}:\d{2}", label), label

@@ -19,6 +19,7 @@ matplotlib.use("Agg")  # без этого matplotlib в потоке ворке
 import matplotlib.pyplot as plt
 import mplfinance as mpf
 import pandas as pd
+from matplotlib.ticker import MaxNLocator
 
 from app.analysis.classify import classify_signal
 from app.analysis.indicators import ema
@@ -40,6 +41,19 @@ _COLOR_EMA200 = "#7b61ff"
 
 # Ближайших уровней с каждой стороны цены на графике «по запросу».
 NEARBY_LEVELS_PER_SIDE = 2
+
+# Уровень рисуется, только если попадает в диапазон видимых свечей плюс запас
+# в ATR. Уровень вне окна растягивает ось Y (ETH 4H: поддержка на 28% ниже
+# цены сжимала свечи в верхнюю треть), а «чего ждём» обычно рядом с ценой.
+LEVEL_WINDOW_MARGIN_ATR = Decimal(1)
+
+# Подпись оси времени: без года и без запятой. Формат mplfinance по умолчанию
+# '%b %d, %H:%M' слипался на узких экранах. Задаётся для всех графиков модуля,
+# включая сканер.
+XAXIS_DATETIME_FORMAT = "%d.%m %H:%M"
+
+# Потолок числа делений оси времени — чтобы подписи не налезали друг на друга.
+XAXIS_MAX_TICKS = 5
 
 # pyplot держит глобальное состояние (реестр фигур) и не потокобезопасен, а
 # рендер идёт из asyncio.to_thread и из сканера, и из хендлера бота — в одном
@@ -88,12 +102,22 @@ def render_analysis_chart(context: MarketContext, signal: Signal) -> bytes | Non
 
 
 def _nearby_levels(context: MarketContext) -> list[Level]:
-    """Ближайшие к цене уровни: по N сверху и снизу."""
-    above = sorted(
-        (lv for lv in context.levels if lv.price > context.price), key=lambda lv: lv.price
-    )
+    """Ближайшие к цене уровни в окне видимых свечей: по N сверху и снизу.
+
+    Окно — [min(low), max(high)] последних CANDLES_DISPLAYED свечей, расширенное
+    на LEVEL_WINDOW_MARGIN_ATR × ATR с каждой стороны.
+    """
+    window = context.candles[-CANDLES_DISPLAYED:]
+    if not window:
+        return []
+    margin = (context.atr or Decimal(0)) * LEVEL_WINDOW_MARGIN_ATR
+    low = min(c.low for c in window) - margin
+    high = max(c.high for c in window) + margin
+    visible = [lv for lv in context.levels if low <= lv.price <= high]
+
+    above = sorted((lv for lv in visible if lv.price > context.price), key=lambda lv: lv.price)
     below = sorted(
-        (lv for lv in context.levels if lv.price <= context.price),
+        (lv for lv in visible if lv.price <= context.price),
         key=lambda lv: lv.price,
         reverse=True,
     )
@@ -137,9 +161,13 @@ def _render(
         volume=False,
         returnfig=True,
         figsize=(9, 5.5),
+        datetime_format=XAXIS_DATETIME_FORMAT,
         title=f"{context.symbol} · {context.timeframe.upper()} · {label}",
     )
     ax = axes[0]
+    # Позиции по оси X у mplfinance — целые индексы свечей, подпись строит его
+    # же форматтер; лимитируем только число делений.
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=XAXIS_MAX_TICKS, integer=True))
 
     # Уровень (ретест) и середина зоны входа часто оказываются рядом по
     # цене — это и есть суть ретеста. Подписи по цене на графике в этом
