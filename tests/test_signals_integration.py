@@ -359,3 +359,42 @@ async def test_forming_notification_has_no_open_trade_button(ctx) -> None:  # ty
 
     assert len(bot.sent_markups) == 1
     assert bot.sent_markups[0] is None
+
+
+async def test_manual_analysis_writes_nothing_and_does_not_steal_scanner_notification(  # type: ignore[no-untyped-def]
+    ctx, monkeypatch
+) -> None:
+    """Разовый анализ по кнопке не пишет в signals: иначе строка от кнопки
+    заняла бы слот и сканер не прислал бы первое уведомление (existing с тем
+    же fingerprint → should_notify=False), а READY-строка стала бы
+    исполнимой в обход TTL и дедупа."""
+    from sqlalchemy import func, select
+
+    from app.bot.handlers import analysis as screen
+    from app.database.models.signal import SignalRecord
+    from tests.test_analysis_screen import _callback, _Client, _Engine, _message
+
+    user, session, repo, scanner, bot, _ = ctx
+
+    async def count() -> int:
+        result = await session.execute(
+            select(func.count()).select_from(SignalRecord).where(SignalRecord.user_id == user.id)
+        )
+        return int(result.scalar_one())
+
+    async def fake_engine(_settings):  # type: ignore[no-untyped-def]
+        return _Engine(_ready_signal()), _Client()
+
+    monkeypatch.setattr(screen, "_engine", fake_engine)
+    screen._in_flight.clear()
+
+    assert await count() == 0
+    await screen.show_market(_callback(_message()), user, settings=None)  # type: ignore[arg-type]
+    await session.flush()
+    assert await count() == 0  # кнопка «Анализ рынка» ничего не записала
+
+    await scanner._handle_signal(
+        repo, user, _ready_signal(), "BTC-USDT", "4h", want_ready=True, want_forming=True
+    )
+    await session.flush()
+    assert len(bot.sent) == 1  # сканер уведомил как в первый раз

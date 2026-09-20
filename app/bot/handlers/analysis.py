@@ -8,24 +8,42 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import html
+from dataclasses import dataclass
+
 from aiogram import F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
+from aiogram.types import (
+    BufferedInputFile,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaPhoto,
+    Message,
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.analysis.charting import render_analysis_chart
+from app.analysis.classify import SCAN_TIMEFRAMES, classify_signal
 from app.analysis.engine import AnalysisEngine
-from app.analysis.signals import MarketContext, Signal
+from app.analysis.signals import MarketContext, Signal, wait_signal
 from app.bot.formatting import fmt_price, fmt_ratio
 from app.bot.handlers.exchange import _describe, _market_cache
 from app.bot.keyboards.main import MenuCallback, back_to, nav_row
+from app.bot.messaging import edit_or_replace
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.database.models.user import User
 from app.database.repositories.user import UserRepository
+from app.exchanges.base import ExchangeError
 from app.market.data import MarketDataService
 from app.services.exchange_factory import ExchangeFactory
-from app.trading.enums import SignalDirection
+from app.trading.enums import SignalDirection, SignalLevel
+from app.workers.notifier import notification_enabled
 
 router = Router(name="analysis")
 logger = get_logger(__name__)
@@ -36,12 +54,15 @@ class AnalysisCB:
     TIMEFRAME = "an:tf:"
     SCAN = "an:scan:"
     MARKET = "an:market:"
+    MARKET_TF = "an:mtf:"      # + SYMBOL:tf — переключение таймфрейма графика
+    MARKET_REF = "an:mref:"    # + SYMBOL:tf — полная справка отдельным сообщением
+    NOOP = "an:noop"           # кнопка текущего таймфрейма
 
 
 async def _reply(event: Message | CallbackQuery, text: str, keyboard=None) -> None:  # type: ignore[no-untyped-def]
     if isinstance(event, CallbackQuery):
         if isinstance(event.message, Message):
-            await event.message.edit_text(text, reply_markup=keyboard)
+            await edit_or_replace(event.message, text, keyboard)
         await event.answer()
     else:
         await event.answer(text, reply_markup=keyboard)
@@ -355,39 +376,299 @@ async def ask_market_symbol(
     await _reply(
         event,
         "<b>Анализ рынка</b>\n\n"
-        "Покажу тренд, структуру, индикаторы и ближайшие уровни "
-        "без торговых рекомендаций.\n\n"
+        "Покажу график и вердикт по детекторам сканера (H1 и H4): "
+        "сетап найден, формируется или чего не хватает. Тренд, RSI/ATR "
+        "и уровни — по кнопке «Справка».\n\n"
         "Выбери инструмент:",
         _symbols_keyboard(symbols, AnalysisCB.MARKET).as_markup(),
     )
 
 
-@router.callback_query(F.data.startswith(AnalysisCB.MARKET))
-async def show_market(
-    callback: CallbackQuery, session: AsyncSession, user: User, settings: Settings
-) -> None:
-    symbol = str(callback.data).removeprefix(AnalysisCB.MARKET)
-    timeframes = await _plan_timeframes(session, user.id)
-    timeframe = timeframes[-1] if timeframes else "4h"
+# Лимит подписи к фото в Telegram — 1024 символа; берём с запасом.
+CAPTION_LIMIT = 1024
+_CLIP_DETAIL = 200
 
-    if isinstance(callback.message, Message):
-        await callback.message.edit_text(f"⏳ Собираю данные по {symbol}…")
+# (user_id, symbol) → идёт расчёт. Повторный тап по той же кнопке, пока
+# рисуется график, не должен запускать второй рендер.
+_in_flight: set[tuple[int, str]] = set()
+
+
+@dataclass(frozen=True, slots=True)
+class TimeframeResult:
+    timeframe: str
+    context: MarketContext | None
+    signal: Signal
+
+
+async def analyze_timeframes(
+    engine: AnalysisEngine, symbol: str
+) -> dict[str, TimeframeResult]:
+    """Те же build_context + evaluate, что и у сканера, по его таймфреймам.
+
+    Ничего не пишется в БД: разовый расчёт не имеет signal_id, TTL и дедупа
+    (см. docstring render_verdict).
+    """
+    results: dict[str, TimeframeResult] = {}
+    for timeframe in SCAN_TIMEFRAMES:
+        context = await engine.build_context(symbol, timeframe)
+        signal = (
+            engine.evaluate(context)
+            if context is not None
+            else wait_signal(
+                symbol, timeframe, "Недостаточно рыночных данных для анализа."
+            )
+        )
+        results[timeframe] = TimeframeResult(timeframe, context, signal)
+    return results
+
+
+def _failure_text(exc: Exception) -> str:
+    """Сбой биржи объясняем, всё остальное — нейтрально (подробности в логе)."""
+    if isinstance(exc, ExchangeError):
+        return _describe(exc)
+    return "⚠️ Не удалось построить анализ. Попробуй позже."
+
+
+def _clip(text: str, limit: int = _CLIP_DETAIL) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _esc(text: str) -> str:
+    return html.escape(text, quote=False)
+
+
+def _missing(signal: Signal) -> str:
+    """Какого условия не хватает: невыполненное условие, а если условий
+    нет (мало истории и т.п.) — пояснение детектора."""
+    failed = signal.failed_conditions
+    if failed:
+        return _esc(_clip(f"{failed[0].name} — {failed[0].detail}"))
+    return _esc(_clip(signal.note or "условия не выполнены"))
+
+
+def _verdict_line(signal: Signal) -> str:
+    """Короткий вердикт одного таймфрейма."""
+    if signal.is_actionable:
+        icon = "🟢" if signal.direction is SignalDirection.LONG else "🔴"
+        return f"{icon} {signal.direction.value} · сетап найден ({_esc(signal.setup)})"
+    if classify_signal(signal) is SignalLevel.FORMING:
+        return "🌱 формируется · не хватает подтверждающей свечи"
+    failed = signal.failed_conditions
+    reason = _esc(failed[0].name) if failed else _esc(_clip(signal.note or "нет данных", 80))
+    return f"⏸ WAIT · не хватает: {reason}"
+
+
+def render_verdict(
+    symbol: str,
+    results: dict[str, TimeframeResult],
+    selected: str,
+    price_precision: int | None = None,
+    ready_notifications: bool = True,
+) -> str:
+    """Подпись к графику: вердикт по каждому ТФ и детали выбранного.
+
+    Формулировки намеренно не совпадают с уведомлениями сканера: здесь нет
+    слов «READY» и «Сетап готов». У сканера сигнал имеет signal_id, TTL,
+    дедуп и запись в signals, а под ним стоит кнопка входа. Разовый расчёт
+    по кнопке ничего из этого не имеет — поэтому и кнопки входа нет.
+    """
+    lines = [f"<b>{_esc(symbol)}</b> · график {selected.upper()}", ""]
+    for timeframe, result in results.items():
+        lines.append(f"<b>{timeframe.upper()}:</b> {_verdict_line(result.signal)}")
+
+    signal = results[selected].signal
+    lines.append("")
+    if signal.is_actionable:
+        lines += [
+            f"Вход: {fmt_price(signal.entry_zone_low, price_precision)} – "
+            f"{fmt_price(signal.entry_zone_high, price_precision)}",
+            f"Стоп: {fmt_price(signal.stop_loss, price_precision)} · "
+            f"Цель: {fmt_price(signal.take_profit_1, price_precision)}",
+            f"RR 1:{fmt_ratio(signal.risk_reward)} · Качество: {signal.confidence}/10",
+        ]
+        if signal.invalidation:
+            lines.append(f"<i>{_esc(_clip(signal.invalidation))}</i>")
+    else:
+        lines.append(f"<b>Не хватает:</b> {_missing(signal)}")
+        if signal.note:
+            lines.append(f"<i>{_esc(_clip(signal.note))}</i>")
+
+    lines += [
+        "",
+        "<i>Разовый расчёт по кнопке, не сигнал сканера. Карточка входа "
+        "приходит только от сканера.</i>",
+    ]
+    if not ready_notifications:
+        lines.append(
+            "<i>Уведомления о готовых сетапах у тебя выключены — карточка "
+            "входа не придёт.</i>"
+        )
+    return "\n".join(lines)
+
+
+def market_keyboard(symbol: str, selected: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        *[
+            InlineKeyboardButton(
+                text=f"• {tf.upper()}" if tf == selected else tf.upper(),
+                callback_data=AnalysisCB.NOOP
+                if tf == selected
+                else f"{AnalysisCB.MARKET_TF}{symbol}:{tf}",
+            )
+            for tf in SCAN_TIMEFRAMES
+        ]
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="📋 Справка",
+            callback_data=f"{AnalysisCB.MARKET_REF}{symbol}:{selected}",
+        )
+    )
+    builder.row(*nav_row(MenuCallback.ANALYSIS, with_menu=True))
+    return builder.as_markup()
+
+
+async def _set_status(message: Message, text: str) -> None:
+    """Обновляет плейсхолдер «идёт работа»; сбой статуса не критичен."""
+    try:
+        if message.photo:
+            await message.edit_caption(caption=text, reply_markup=None)
+        else:
+            await message.edit_text(text)
+    except TelegramAPIError:
+        logger.debug("Не удалось обновить статус", exc_info=True)
+
+
+async def _chat_action(callback: CallbackQuery, message: Message) -> None:
+    if callback.bot is None:
+        return
+    with contextlib.suppress(TelegramAPIError):
+        await callback.bot.send_chat_action(message.chat.id, "upload_photo")
+
+
+def _parse_symbol_tf(data: str, prefix: str) -> tuple[str, str]:
+    symbol, _, timeframe = data.removeprefix(prefix).partition(":")
+    if timeframe not in SCAN_TIMEFRAMES:
+        timeframe = SCAN_TIMEFRAMES[-1]
+    return symbol, timeframe
+
+
+async def _show_market_screen(
+    callback: CallbackQuery, user: User, settings: Settings, symbol: str, timeframe: str
+) -> None:
+    message = callback.message
+    if not isinstance(message, Message):
+        await callback.answer()
+        return
+
+    key = (user.id, symbol)
+    if key in _in_flight:
+        await callback.answer("Уже считаю…")
+        return
+    _in_flight.add(key)
+    try:
+        await callback.answer()
+        await _set_status(message, f"⏳ Загружаю данные по {symbol}…")
+
+        engine, client = await _engine(settings)
+        try:
+            results = await analyze_timeframes(engine, symbol)
+            symbol_info = await engine.get_symbol_info(symbol)
+        except Exception as exc:
+            logger.exception("Анализ рынка не удался", extra={"symbol": symbol})
+            await _reply(callback, _failure_text(exc), back_to(MenuCallback.ANALYSIS))
+            return
+        finally:
+            await client.close()  # type: ignore[attr-defined]
+
+        caption = render_verdict(
+            symbol,
+            results,
+            timeframe,
+            symbol_info.price_precision if symbol_info else None,
+            notification_enabled(user.settings, "setup_ready"),
+        )
+        keyboard = market_keyboard(symbol, timeframe)
+
+        chosen = results[timeframe]
+        photo: bytes | None = None
+        if chosen.context is not None:
+            await _set_status(message, "🖼 Рисую график…")
+            await _chat_action(callback, message)
+            # В отдельном потоке: matplotlib синхронный и тяжёлый, цикл
+            # событий бота не должен вставать на время рендера.
+            photo = await asyncio.to_thread(
+                render_analysis_chart, chosen.context, chosen.signal
+            )
+
+        await _deliver(message, photo, caption, keyboard)
+    finally:
+        _in_flight.discard(key)
+
+
+async def _deliver(
+    message: Message, photo: bytes | None, caption: str, keyboard: InlineKeyboardMarkup
+) -> None:
+    """Показывает результат. График — не критичный путь: не построился —
+    вердикт всё равно уходит, текстом (как и в уведомлениях сканера)."""
+    if photo is not None and len(caption) <= CAPTION_LIMIT:
+        media = BufferedInputFile(photo, filename="analysis.png")
+        try:
+            if message.photo:
+                await message.edit_media(
+                    InputMediaPhoto(media=media, caption=caption), reply_markup=keyboard
+                )
+            else:
+                await message.answer_photo(media, caption=caption, reply_markup=keyboard)
+                await message.delete()
+            return
+        except TelegramAPIError:
+            logger.exception("Не удалось отправить график анализа, шлём текстом")
+    await edit_or_replace(message, caption, keyboard)
+
+
+@router.callback_query(F.data.startswith(AnalysisCB.MARKET))
+async def show_market(callback: CallbackQuery, user: User, settings: Settings) -> None:
+    symbol = str(callback.data).removeprefix(AnalysisCB.MARKET)
+    await _show_market_screen(callback, user, settings, symbol, SCAN_TIMEFRAMES[-1])
+
+
+@router.callback_query(F.data.startswith(AnalysisCB.MARKET_TF))
+async def switch_market_timeframe(
+    callback: CallbackQuery, user: User, settings: Settings
+) -> None:
+    symbol, timeframe = _parse_symbol_tf(str(callback.data), AnalysisCB.MARKET_TF)
+    await _show_market_screen(callback, user, settings, symbol, timeframe)
+
+
+@router.callback_query(F.data == AnalysisCB.NOOP)
+async def market_noop(callback: CallbackQuery) -> None:
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith(AnalysisCB.MARKET_REF))
+async def show_market_reference(callback: CallbackQuery, settings: Settings) -> None:
+    """Прежняя справка (тренд, структура, RSI/ATR, уровни) — отдельным
+    сообщением, чтобы не выталкивать график: в подпись к фото она не влезает."""
+    symbol, timeframe = _parse_symbol_tf(str(callback.data), AnalysisCB.MARKET_REF)
+    await callback.answer()
+    if not isinstance(callback.message, Message):
+        return
 
     engine, client = await _engine(settings)
     try:
         context = await engine.build_context(symbol, timeframe)
-        if context is not None:
-            symbol_info = await engine.get_symbol_info(symbol)
-            text = render_market(
-                context, symbol_info.price_precision if symbol_info else None
-            )
-        else:
+        if context is None:
             text = "Недостаточно рыночных данных для анализа."
+        else:
+            info = await engine.get_symbol_info(symbol)
+            text = render_market(context, info.price_precision if info else None)
     except Exception as exc:
-        logger.exception("Анализ рынка не удался", extra={"symbol": symbol})
-        text = _describe(exc)
+        logger.exception("Справка по рынку не удалась", extra={"symbol": symbol})
+        text = _failure_text(exc)
     finally:
         await client.close()  # type: ignore[attr-defined]
 
-    await _reply(callback, text, back_to(MenuCallback.ANALYSIS))
+    await callback.message.answer(text)

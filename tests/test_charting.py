@@ -7,11 +7,15 @@ render_setup_chart не должен бросать исключения нар�
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from app.analysis.charting import render_setup_chart
-from app.analysis.signals import MarketContext, Signal
+from app.analysis import charting
+from app.analysis.charting import _nearby_levels, render_analysis_chart, render_setup_chart
+from app.analysis.signals import MarketContext, Signal, SignalCondition
+from app.analysis.structure import Level
 from app.exchanges.base import Kline
 from app.trading.enums import MarketStructure, SignalDirection, SignalLevel
 
@@ -110,3 +114,81 @@ class TestRenderSetupChart:
         broken = _context(candles=[])
         result = render_setup_chart(broken, _signal(), SignalLevel.FORMING)
         assert result is None
+
+
+def _level(price: Decimal, *, resistance: bool) -> Level:
+    return Level(
+        price=price, touches=2, last_touch_index=1, is_resistance=resistance, strength=D("0.5")
+    )
+
+
+class TestRenderAnalysisChart:
+    """График экрана «Анализ рынка»: рисуется и при найденном сетапе, и при
+    FORMING, и при WAIT — при WAIT видно, чего ждём."""
+
+    def test_found_setup_renders(self) -> None:
+        png = render_analysis_chart(_context(), _signal())
+        assert png is not None
+        assert png[:8] == PNG_MAGIC
+
+    def test_forming_renders(self) -> None:
+        signal = Signal(
+            symbol="BTC-USDT", timeframe="1h", direction=SignalDirection.WAIT,
+            setup="Нет сетапа",
+            conditions=[SignalCondition("Подтверждающий паттерн", False, "")],
+        )
+        png = render_analysis_chart(_context(), signal)
+        assert png is not None
+        assert png[:8] == PNG_MAGIC
+
+    def test_wait_with_nearby_levels_renders(self) -> None:
+        context = _context()
+        price = context.price
+        levels = [
+            _level(price + D("3"), resistance=True),
+            _level(price + D("8"), resistance=True),
+            _level(price - D("4"), resistance=False),
+        ]
+        context = replace(context, levels=levels)
+        signal = Signal(
+            symbol="BTC-USDT", timeframe="1h", direction=SignalDirection.WAIT,
+            setup="Нет сетапа", level_price=price + D("3"),
+        )
+        png = render_analysis_chart(context, signal)
+        assert png is not None
+        assert png[:8] == PNG_MAGIC
+
+    def test_nearby_levels_are_two_per_side_nearest_first(self) -> None:
+        context = _context()
+        p = context.price
+        levels = [
+            _level(p + D(offset), resistance=offset > 0)
+            for offset in (9, 2, 5, -1, -6, -12)
+        ]
+        picked = _nearby_levels(replace(context, levels=levels))
+        assert [lv.price - p for lv in picked] == [D(2), D(5), D(-1), D(-6)]
+
+    def test_title_does_not_claim_scanner_status(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        titles: list[str] = []
+        real = charting._render
+
+        def spy(context, signal, label, **kwargs):  # type: ignore[no-untyped-def]
+            titles.append(label)
+            return real(context, signal, label, **kwargs)
+
+        monkeypatch.setattr(charting, "_render", spy)
+        render_analysis_chart(_context(), _signal())
+        assert titles and "READY" not in titles[0]
+        assert "по запросу" in titles[0]
+
+    def test_broken_context_returns_none_not_raises(self) -> None:
+        assert render_analysis_chart(_context(candles=[]), _signal()) is None
+
+    def test_concurrent_renders_do_not_interfere(self) -> None:
+        """Рендеры из разных потоков (сканер + хендлер бота) сериализуются:
+        pyplot держит глобальное состояние и не потокобезопасен."""
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(
+                pool.map(lambda _: render_analysis_chart(_context(), _signal()), range(6))
+            )
+        assert all(r is not None and r[:8] == PNG_MAGIC for r in results)

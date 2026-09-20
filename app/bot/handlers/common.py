@@ -9,6 +9,7 @@ from aiogram.types import CallbackQuery, Message
 
 from app.bot.formatting import fmt_num
 from app.bot.keyboards.main import MenuCallback, back_to_main, main_menu
+from app.bot.messaging import edit_or_replace
 from app.database.models.trading_plan import TradingPlan
 from app.database.models.user import User
 from app.database.repositories.user import UserRepository
@@ -37,7 +38,7 @@ async def back_to_menu(
 ) -> None:
     await state.clear()
     if isinstance(callback.message, Message):
-        await callback.message.edit_text(GREETING, reply_markup=main_menu())
+        await edit_or_replace(callback.message, GREETING, main_menu())
     await callback.answer()
 
 

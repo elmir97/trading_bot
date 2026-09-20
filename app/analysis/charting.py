@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import io
+import threading
 from decimal import Decimal
 
 import matplotlib
@@ -19,8 +20,10 @@ import matplotlib.pyplot as plt
 import mplfinance as mpf
 import pandas as pd
 
+from app.analysis.classify import classify_signal
 from app.analysis.indicators import ema
 from app.analysis.signals import MarketContext, Signal
+from app.analysis.structure import Level
 from app.core.logging import get_logger
 from app.trading.enums import SignalLevel
 
@@ -35,12 +38,22 @@ _COLOR_TARGET = "#43a047"
 _COLOR_EMA50 = "#e6a817"
 _COLOR_EMA200 = "#7b61ff"
 
+# Ближайших уровней с каждой стороны цены на графике «по запросу».
+NEARBY_LEVELS_PER_SIDE = 2
+
+# pyplot держит глобальное состояние (реестр фигур) и не потокобезопасен, а
+# рендер идёт из asyncio.to_thread и из сканера, и из хендлера бота — в одном
+# процессе. Без блокировки два одновременных рендера могут перемешать фигуры.
+_RENDER_LOCK = threading.Lock()
+
 
 def render_setup_chart(
     context: MarketContext, signal: Signal, level: SignalLevel
 ) -> bytes | None:
+    label = "READY" if level is SignalLevel.READY else "FORMING"
     try:
-        return _render(context, signal, level)
+        with _RENDER_LOCK:
+            return _render(context, signal, label)
     except Exception:
         logger.exception(
             "Не удалось построить график сетапа",
@@ -49,7 +62,47 @@ def render_setup_chart(
         return None
 
 
-def _render(context: MarketContext, signal: Signal, level: SignalLevel) -> bytes:
+def render_analysis_chart(context: MarketContext, signal: Signal) -> bytes | None:
+    """График для экрана «Анализ рынка» — разовый расчёт по кнопке.
+
+    В отличие от графика сканера рисуется всегда, и при WAIT тоже: тогда
+    показывает ближайшие уровни и EMA — видно, чего ждём. В заголовке нет
+    слов READY/FORMING: они принадлежат сигналам сканера, у которых есть
+    signal_id и кнопка входа, а здесь их нет.
+    """
+    if signal.is_actionable:
+        label = signal.direction.value
+    elif classify_signal(signal) is SignalLevel.FORMING:
+        label = "FORMING"
+    else:
+        label = "WAIT"
+    try:
+        with _RENDER_LOCK:
+            return _render(context, signal, f"{label} · по запросу", nearby_levels=True)
+    except Exception:
+        logger.exception(
+            "Не удалось построить график анализа",
+            extra={"symbol": context.symbol, "timeframe": context.timeframe},
+        )
+        return None
+
+
+def _nearby_levels(context: MarketContext) -> list[Level]:
+    """Ближайшие к цене уровни: по N сверху и снизу."""
+    above = sorted(
+        (lv for lv in context.levels if lv.price > context.price), key=lambda lv: lv.price
+    )
+    below = sorted(
+        (lv for lv in context.levels if lv.price <= context.price),
+        key=lambda lv: lv.price,
+        reverse=True,
+    )
+    return above[:NEARBY_LEVELS_PER_SIDE] + below[:NEARBY_LEVELS_PER_SIDE]
+
+
+def _render(
+    context: MarketContext, signal: Signal, label: str, *, nearby_levels: bool = False
+) -> bytes:
     candles = context.candles[-CANDLES_DISPLAYED:]
     closes = [c.close for c in context.candles]
     # EMA считается по всей истории (иначе разогрев обрежет линию у левого
@@ -76,7 +129,6 @@ def _render(context: MarketContext, signal: Signal, level: SignalLevel) -> bytes
 
     # Без эмодзи в заголовке: у шрифта matplotlib (DejaVu Sans) нет глифов
     # для них, вместо иконки на графике был бы битый квадрат.
-    label = "READY" if level is SignalLevel.READY else "FORMING"
     fig, axes = mpf.plot(
         df,
         type="candle",
@@ -95,6 +147,16 @@ def _render(context: MarketContext, signal: Signal, level: SignalLevel) -> bytes
     # через одну легенду, а не текстом у каждой линии.
     if signal.level_price is not None:
         _hline(ax, signal.level_price, _COLOR_LEVEL, f"Уровень {signal.level_price:.4f}")
+
+    if nearby_levels:
+        for lv in _nearby_levels(context):
+            if signal.level_price is not None and lv.price == signal.level_price:
+                continue
+            kind = "Сопротивление" if lv.is_resistance else "Поддержка"
+            ax.axhline(
+                y=float(lv.price), color=_COLOR_LEVEL, linestyle=":", linewidth=1,
+                alpha=0.7, label=f"{kind} {lv.price:.4f}",
+            )
 
     if signal.entry_zone_low is not None and signal.entry_zone_high is not None:
         low, high = float(signal.entry_zone_low), float(signal.entry_zone_high)

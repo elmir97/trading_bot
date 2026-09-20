@@ -1,12 +1,7 @@
 """Сканер сетапов (этап 12).
 
-READY — Signal.is_actionable (все условия детектора выполнены). FORMING —
-единственное невыполненное условие во всём Signal.conditions это
-"Подтверждающий паттерн" (см. app/analysis/setups.py: оба детектора
-проверяют его последним, прямо перед расчётом входа). Это единственное
-место, завязанное на конкретные имена условий детекторов — если в
-setups.py появится новый детектор с другим порядком проверок, это тоже
-нужно будет учесть здесь.
+Классификация READY/FORMING — в app/analysis/classify.py (общая с экраном
+«Анализ рынка»); здесь она только применяется.
 
 Дедуп — по "слоту" (user, symbol, timeframe, level) в таблице signals:
 не то же самое, что случалось в прошлом скане, а то, что сейчас активно.
@@ -25,6 +20,11 @@ from aiogram import Bot
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.analysis.charting import render_setup_chart
+from app.analysis.classify import (
+    CONFIRMATION_CONDITION_NAME,
+    SCAN_TIMEFRAMES,
+    classify_signal,
+)
 from app.analysis.engine import AnalysisEngine
 from app.analysis.signals import MarketContext, Signal, wait_signal
 from app.bot.keyboards.execution import open_trade_button
@@ -38,7 +38,7 @@ from app.database.session import Database
 from app.market.cache import TTLCache
 from app.market.data import MarketDataService
 from app.services.exchange_factory import ExchangeFactory
-from app.trading.enums import SignalLevel, SignalRecordStatus, Timeframe
+from app.trading.enums import SignalLevel, SignalRecordStatus
 from app.workers.base import fmt_decimal
 from app.workers.notifier import (
     notification_enabled,
@@ -48,8 +48,15 @@ from app.workers.notifier import (
 
 logger = get_logger(__name__)
 
-CONFIRMATION_CONDITION_NAME = "Подтверждающий паттерн"
-SCAN_TIMEFRAMES = (Timeframe.H1.value, Timeframe.H4.value)
+__all__ = [
+    "CONFIRMATION_CONDITION_NAME",
+    "SCAN_TIMEFRAMES",
+    "ScanCycleStats",
+    "SetupScanner",
+    "build_fingerprint",
+    "classify_signal",
+    "render_detail",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,17 +70,6 @@ class ScanCycleStats:
     symbols_scanned: int
     requests_made: int
     duration_seconds: float
-
-
-def classify_signal(signal: Signal) -> SignalLevel | None:
-    """READY/FORMING/ни один — см. docstring модуля."""
-    if signal.is_actionable:
-        return SignalLevel.READY
-
-    failed = signal.failed_conditions
-    if len(failed) == 1 and failed[0].name == CONFIRMATION_CONDITION_NAME:
-        return SignalLevel.FORMING
-    return None
 
 
 def build_fingerprint(signal: Signal, level: SignalLevel) -> str:
