@@ -30,6 +30,7 @@ from app.bot.handlers.analysis import (
     TimeframeResult,
     analyze_timeframes,
     market_keyboard,
+    render_signal,
     render_verdict,
 )
 from app.database.models.user import UserSettings
@@ -259,6 +260,33 @@ class TestRawNumbers:
         assert "RR 1:1.80 ниже минимального 1:2, 12:30, 15 свечей" in text
 
 
+class TestRenderSignalInvalidation:
+    """Старый экран «Найти вход» (render_signal): инвалидация из текста
+    детектора тоже содержит {stop:.4f}."""
+
+    @staticmethod
+    def _signal() -> Signal:
+        base = _found()
+        return Signal(
+            symbol=base.symbol, timeframe=base.timeframe, direction=base.direction,
+            setup=base.setup, entry_zone_low=base.entry_zone_low,
+            entry_zone_high=base.entry_zone_high, stop_loss=base.stop_loss,
+            take_profit_1=base.take_profit_1, risk_reward=base.risk_reward,
+            confidence=base.confidence, conditions=base.conditions,
+            invalidation="Закрытие ниже 2500.1234 отменяет сценарий",
+        )
+
+    def test_invalidation_goes_through_fmt_price(self) -> None:
+        text = render_signal(self._signal(), 2)
+        line = next(x for x in text.splitlines() if "Инвалидация" in x)
+        assert "ниже 2500.12 отменяет" in line
+        assert not RAW_PRICE.findall(line)
+
+    def test_invalidation_without_symbol_precision(self) -> None:
+        line = next(x for x in render_signal(self._signal()).splitlines() if "Инвалидация" in x)
+        assert "ниже 2500.12 отменяет" in line  # порядок величины: >=1000 → 2 знака
+
+
 class TestKeyboard:
     def test_no_execution_button(self) -> None:
         markup = market_keyboard("BTC-USDT", "4h")
@@ -402,6 +430,19 @@ class TestHandler:
         message.delete.assert_awaited_once()  # плейсхолдер убран
         assert client.closed
         assert not screen._in_flight
+
+    async def test_chart_gets_symbol_price_precision(
+        self, engine_factory, monkeypatch
+    ) -> None:
+        engine_factory(_Engine(_found()))
+        received: list[tuple] = []
+        monkeypatch.setattr(
+            screen, "render_analysis_chart", lambda *args: received.append(args) or None
+        )
+
+        await screen.show_market(_callback(_message()), _user(), settings=None)  # type: ignore[arg-type]
+
+        assert received and received[0][2] == 2  # SymbolInfo.price_precision из _Engine
 
     async def test_shows_progress_while_working(self, engine_factory) -> None:
         engine_factory(_Engine(_found()))

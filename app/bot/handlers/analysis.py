@@ -140,7 +140,7 @@ def render_signal(signal: Signal, price_precision: int | None = None) -> str:
         f"<b>Качество сетапа:</b> {signal.confidence}/10",
         "",
         f"<b>Подтверждение:</b> {signal.confirmation}",
-        f"<b>Инвалидация:</b> {signal.invalidation}",
+        f"<b>Инвалидация:</b> {_prices(signal.invalidation, price_precision)}",
     ]
 
     if signal.note:
@@ -605,11 +605,12 @@ async def _show_market_screen(
         finally:
             await client.close()  # type: ignore[attr-defined]
 
+        price_precision = symbol_info.price_precision if symbol_info else None
         caption = render_verdict(
             symbol,
             results,
             timeframe,
-            symbol_info.price_precision if symbol_info else None,
+            price_precision,
             notification_enabled(user.settings, "setup_ready"),
         )
         keyboard = market_keyboard(symbol, timeframe)
@@ -622,7 +623,7 @@ async def _show_market_screen(
             # В отдельном потоке: matplotlib синхронный и тяжёлый, цикл
             # событий бота не должен вставать на время рендера.
             photo = await asyncio.to_thread(
-                render_analysis_chart, chosen.context, chosen.signal
+                render_analysis_chart, chosen.context, chosen.signal, price_precision
             )
 
         await _deliver(message, photo, caption, keyboard)

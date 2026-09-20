@@ -406,3 +406,74 @@ class TestLegend:
         )
         assert legend_box.y0 >= axes_box.y0
         assert legend_box.x0 <= axes_box.x0 + axes_box.width / 2
+
+
+class TestPriceLabels:
+    """Подписи легенды на картинке: fmt_price по точности символа, а не {x:.4f}."""
+
+    RAW = re.compile(r"(?<![\d.])\d+\.\d{4}(?!\d)")
+
+    @staticmethod
+    def _labels(monkeypatch, render) -> list[str]:  # type: ignore[no-untyped-def]
+        labels: list[str] = []
+        real_hline, real_span = Axes.axhline, Axes.axhspan
+
+        def hline(self, y=0, *args, **kwargs):  # type: ignore[no-untyped-def]
+            labels.append(kwargs.get("label", ""))
+            return real_hline(self, y, *args, **kwargs)
+
+        def span(self, ymin=0, ymax=1, *args, **kwargs):  # type: ignore[no-untyped-def]
+            labels.append(kwargs.get("label", ""))
+            return real_span(self, ymin, ymax, *args, **kwargs)
+
+        monkeypatch.setattr(Axes, "axhline", hline)
+        monkeypatch.setattr(Axes, "axhspan", span)
+        assert render() is not None
+        return labels
+
+    @staticmethod
+    def _signal() -> Signal:
+        return _signal(
+            level_price=D("2668.5432"),
+            entry_zone_low=D("2600.1234"), entry_zone_high=D("2610.9876"),
+            stop_loss=D("2590.5"), take_profit_1=D("2700.0049"),
+        )
+
+    def test_analysis_labels_use_symbol_precision(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        context = replace(_windowed_context(), levels=[_level(D("105.1234"), resistance=True)])
+        labels = self._labels(
+            monkeypatch, lambda: render_analysis_chart(context, self._signal(), 2)
+        )
+        assert "Уровень 2668.54" in labels
+        assert "Вход 2600.12–2610.99" in labels
+        assert "Стоп 2590.5" in labels
+        assert "Цель 2700" in labels
+        assert "Сопротивление 105.12" in labels
+        assert not [x for x in labels if self.RAW.search(x)]
+
+    def test_other_precision_is_respected(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        labels = self._labels(
+            monkeypatch, lambda: render_analysis_chart(_windowed_context(), self._signal(), 3)
+        )
+        assert "Уровень 2668.543" in labels
+        assert "Вход 2600.123–2610.988" in labels
+
+    def test_scanner_labels_are_formatted_too(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        labels = self._labels(
+            monkeypatch,
+            lambda: render_setup_chart(_context(), self._signal(), SignalLevel.READY, 2),
+        )
+        assert "Уровень 2668.54" in labels
+        assert "Вход 2600.12–2610.99" in labels
+        assert not [x for x in labels if self.RAW.search(x)]
+
+    def test_without_precision_falls_back_to_price_magnitude(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """Сканер точность символа не знает: подпись по порядку величины цены
+        (>=1000 — два знака), а не четыре знака с хвостом нулей."""
+        labels = self._labels(
+            monkeypatch,
+            lambda: render_setup_chart(_context(), self._signal(), SignalLevel.READY),
+        )
+        assert "Уровень 2668.54" in labels
+        assert "Цель 2700" in labels
+        assert not [x for x in labels if self.RAW.search(x)]

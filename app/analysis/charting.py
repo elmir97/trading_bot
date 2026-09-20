@@ -25,6 +25,7 @@ from app.analysis.classify import classify_signal
 from app.analysis.indicators import ema
 from app.analysis.signals import MarketContext, Signal
 from app.analysis.structure import Level
+from app.bot.formatting import fmt_price
 from app.core.logging import get_logger
 from app.trading.enums import SignalLevel
 
@@ -63,12 +64,17 @@ _RENDER_LOCK = threading.Lock()
 
 
 def render_setup_chart(
-    context: MarketContext, signal: Signal, level: SignalLevel
+    context: MarketContext,
+    signal: Signal,
+    level: SignalLevel,
+    price_precision: int | None = None,
 ) -> bytes | None:
+    """price_precision — SymbolInfo.price_precision символа для подписей цен;
+    None — подписи по порядку величины цены (см. fmt_price)."""
     label = "READY" if level is SignalLevel.READY else "FORMING"
     try:
         with _RENDER_LOCK:
-            return _render(context, signal, label)
+            return _render(context, signal, label, price_precision=price_precision)
     except Exception:
         logger.exception(
             "Не удалось построить график сетапа",
@@ -77,7 +83,9 @@ def render_setup_chart(
         return None
 
 
-def render_analysis_chart(context: MarketContext, signal: Signal) -> bytes | None:
+def render_analysis_chart(
+    context: MarketContext, signal: Signal, price_precision: int | None = None
+) -> bytes | None:
     """График для экрана «Анализ рынка» — разовый расчёт по кнопке.
 
     В отличие от графика сканера рисуется всегда, и при WAIT тоже: тогда
@@ -94,7 +102,8 @@ def render_analysis_chart(context: MarketContext, signal: Signal) -> bytes | Non
     try:
         with _RENDER_LOCK:
             return _render(
-                context, signal, f"{label} · по запросу", nearby_levels=True, legend_below=True
+                context, signal, f"{label} · по запросу",
+                nearby_levels=True, legend_below=True, price_precision=price_precision,
             )
     except Exception:
         logger.exception(
@@ -151,6 +160,7 @@ def _render(
     *,
     nearby_levels: bool = False,
     legend_below: bool = False,
+    price_precision: int | None = None,
 ) -> bytes:
     candles = context.candles[-CANDLES_DISPLAYED:]
     closes = [c.close for c in context.candles]
@@ -201,7 +211,10 @@ def _render(
     # случае наложились бы друг на друга, поэтому все линии подписаны
     # через одну легенду, а не текстом у каждой линии.
     if signal.level_price is not None:
-        _hline(ax, signal.level_price, _COLOR_LEVEL, f"Уровень {signal.level_price:.4f}")
+        _hline(
+            ax, signal.level_price, _COLOR_LEVEL,
+            f"Уровень {fmt_price(signal.level_price, price_precision)}",
+        )
 
     if nearby_levels:
         for lv in _nearby_levels(context):
@@ -210,21 +223,30 @@ def _render(
             kind = "Сопротивление" if lv.is_resistance else "Поддержка"
             ax.axhline(
                 y=float(lv.price), color=_COLOR_LEVEL, linestyle=":", linewidth=1,
-                alpha=0.7, label=f"{kind} {lv.price:.4f}",
+                alpha=0.7, label=f"{kind} {fmt_price(lv.price, price_precision)}",
             )
 
     if signal.entry_zone_low is not None and signal.entry_zone_high is not None:
         low, high = float(signal.entry_zone_low), float(signal.entry_zone_high)
         ax.axhspan(
             low, high, color=_COLOR_ENTRY, alpha=0.15,
-            label=f"Вход {low:.4f}–{high:.4f}",
+            label=(
+                f"Вход {fmt_price(signal.entry_zone_low, price_precision)}–"
+                f"{fmt_price(signal.entry_zone_high, price_precision)}"
+            ),
         )
 
     if signal.stop_loss is not None:
-        _hline(ax, signal.stop_loss, _COLOR_STOP, f"Стоп {signal.stop_loss:.4f}")
+        _hline(
+            ax, signal.stop_loss, _COLOR_STOP,
+            f"Стоп {fmt_price(signal.stop_loss, price_precision)}",
+        )
 
     if signal.take_profit_1 is not None:
-        _hline(ax, signal.take_profit_1, _COLOR_TARGET, f"Цель {signal.take_profit_1:.4f}")
+        _hline(
+            ax, signal.take_profit_1, _COLOR_TARGET,
+            f"Цель {fmt_price(signal.take_profit_1, price_precision)}",
+        )
 
     if ax.get_legend_handles_labels()[1]:
         if legend_below:
