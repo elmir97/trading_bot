@@ -115,12 +115,12 @@ def render_signal(signal: Signal, price_precision: int | None = None) -> str:
             "",
             "<b>Входа сейчас нет.</b>",
             "",
-            signal.note,
+            _prices(signal.note, price_precision),
         ]
         if signal.conditions:
             lines += ["", "<b>Что проверено:</b>"]
             lines += [
-                f"{'✅' if c.passed else '⬜'} {c.name}: {c.detail}"
+                f"{'✅' if c.passed else '⬜'} {c.name}: {_prices(c.detail, price_precision)}"
                 for c in signal.conditions
             ]
         return "\n".join(lines)
@@ -144,10 +144,12 @@ def render_signal(signal: Signal, price_precision: int | None = None) -> str:
     ]
 
     if signal.note:
-        lines.append(f"<i>{signal.note}</i>")
+        lines.append(f"<i>{_prices(signal.note, price_precision)}</i>")
 
     lines += ["", "<b>Условия сетапа:</b>"]
-    lines += [f"✅ {c.name}: {c.detail}" for c in signal.passed_conditions]
+    lines += [
+        f"✅ {c.name}: {_prices(c.detail, price_precision)}" for c in signal.passed_conditions
+    ]
 
     lines += [
         "",

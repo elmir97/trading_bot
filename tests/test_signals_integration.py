@@ -20,7 +20,7 @@ from app.database.repositories.signal import SignalRepository
 from app.database.repositories.strategy import MistakeTypeRepository, StrategyRepository
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
-from app.exchanges.base import Kline
+from app.exchanges.base import ExchangeUnavailableError, Kline, SymbolInfo
 from app.services.user_service import UserService
 from app.trading.enums import MarketStructure, SignalDirection, SignalLevel, SignalRecordStatus
 from app.workers.scanner import SetupScanner
@@ -53,6 +53,10 @@ class FakeBot:
     async def send_photo(self, chat_id: int, photo, caption: str, reply_markup=None) -> None:  # type: ignore[no-untyped-def]
         self.sent_photos.append((chat_id, caption))
         self.sent_markups.append(reply_markup)
+
+
+async def _fake_symbol_info(symbol: str) -> SymbolInfo:
+    return SymbolInfo(symbol, 2, 4, D("0.0001"), 125)
 
 
 def _context() -> MarketContext:
@@ -120,6 +124,9 @@ async def ctx(unique_telegram_id):  # type: ignore[no-untyped-def]
         user = await user_service.get_or_create(telegram_id=unique_telegram_id())
         bot = FakeBot()
         scanner = SetupScanner(bot, db, settings)
+        # Точность символа сканер берёт у биржи (get_symbol_info) перед рендером
+        # графика; в тестах сеть не участвует — подменяем на фейк.
+        scanner._engine.get_symbol_info = _fake_symbol_info  # type: ignore[method-assign]
         repo = SignalRepository(session)
         yield user, session, repo, scanner, bot, settings
         await cleanup_user(session, user)
@@ -398,3 +405,127 @@ async def test_manual_analysis_writes_nothing_and_does_not_steal_scanner_notific
     )
     await session.flush()
     assert len(bot.sent) == 1  # сканер уведомил как в первый раз
+
+
+async def test_chart_gets_price_precision_from_exchange(ctx, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    user, _, repo, scanner, _, _ = ctx
+    seen: list[tuple] = []
+    monkeypatch.setattr(
+        "app.workers.scanner.render_setup_chart", lambda *a: seen.append(a) or b"png"
+    )
+
+    async def info(symbol: str) -> SymbolInfo:
+        return SymbolInfo(symbol, 3, 4, D("0.0001"), 125)
+
+    scanner._engine.get_symbol_info = info  # type: ignore[method-assign]
+
+    await scanner._handle_signal(
+        repo, user, _forming_signal(), "BTC-USDT", "4h",
+        want_ready=True, want_forming=True, context=_context(),
+    )
+
+    assert len(seen) == 1
+    assert seen[0][3] == 3  # price_precision дошёл до render_setup_chart
+
+
+async def test_symbol_info_failure_falls_back_and_chart_is_still_sent(  # type: ignore[no-untyped-def]
+    ctx, caplog
+) -> None:
+    """Биржа недоступна при запросе списка инструментов: график всё равно
+    строится (реальный рендер), подписи откатываются на fallback, в логе
+    предупреждение — не молчаливая подмена."""
+    user, session, repo, scanner, bot, _ = ctx
+
+    async def down(symbol: str) -> SymbolInfo:
+        raise ExchangeUnavailableError("down")
+
+    scanner._engine.get_symbol_info = down  # type: ignore[method-assign]
+
+    with caplog.at_level("WARNING"):
+        await scanner._handle_signal(
+            repo, user, _forming_signal(), "BTC-USDT", "4h",
+            want_ready=True, want_forming=True, context=_context(),
+        )
+    await session.flush()
+
+    assert len(bot.sent_photos) == 1  # график ушёл, уведомление не потеряно
+    assert bot.sent == []
+    assert "Не удалось получить точность цены" in caplog.text
+
+
+async def test_symbol_info_failure_passes_none_precision(ctx, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    user, _, repo, scanner, _, _ = ctx
+    seen: list[tuple] = []
+    monkeypatch.setattr(
+        "app.workers.scanner.render_setup_chart", lambda *a: seen.append(a) or b"png"
+    )
+
+    async def down(symbol: str) -> SymbolInfo:
+        raise RuntimeError("любой сбой")
+
+    scanner._engine.get_symbol_info = down  # type: ignore[method-assign]
+
+    await scanner._handle_signal(
+        repo, user, _forming_signal(), "BTC-USDT", "4h",
+        want_ready=True, want_forming=True, context=_context(),
+    )
+
+    assert seen[0][3] is None
+
+
+async def test_unknown_symbol_gives_none_precision(ctx, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Символа нет в списке биржи (get_symbol_info вернул None) — fallback."""
+    user, _, repo, scanner, _, _ = ctx
+    seen: list[tuple] = []
+    monkeypatch.setattr(
+        "app.workers.scanner.render_setup_chart", lambda *a: seen.append(a) or b"png"
+    )
+
+    async def missing(symbol: str) -> None:
+        return None
+
+    scanner._engine.get_symbol_info = missing  # type: ignore[method-assign]
+
+    await scanner._handle_signal(
+        repo, user, _forming_signal(), "BTC-USDT", "4h",
+        want_ready=True, want_forming=True, context=_context(),
+    )
+
+    assert seen[0][3] is None
+
+
+async def test_symbol_info_is_not_requested_without_a_chart(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Запрос только когда график реально рисуется: не при выключенных
+    графиках и не при повторе того же сетапа (дедуп — уведомления нет)."""
+    user, session, repo, scanner, _, _ = ctx
+    calls: list[str] = []
+
+    async def counting(symbol: str) -> SymbolInfo:
+        calls.append(symbol)
+        return SymbolInfo(symbol, 2, 4, D("0.0001"), 125)
+
+    scanner._engine.get_symbol_info = counting  # type: ignore[method-assign]
+
+    # 1) первое уведомление с графиком — один запрос
+    await scanner._handle_signal(
+        repo, user, _forming_signal(), "BTC-USDT", "4h",
+        want_ready=True, want_forming=True, context=_context(),
+    )
+    await session.flush()
+    assert calls == ["BTC-USDT"]
+
+    # 2) тот же сетап в пределах TTL — уведомления нет, запроса нет
+    await scanner._handle_signal(
+        repo, user, _forming_signal(), "BTC-USDT", "4h",
+        want_ready=True, want_forming=True, context=_context(),
+    )
+    assert calls == ["BTC-USDT"]
+
+    # 3) графики выключены — запроса нет
+    user.settings.notifications = {**user.settings.notifications, "setup_charts": False}
+    await session.flush()
+    await scanner._handle_signal(
+        repo, user, _ready_signal(), "ETH-USDT", "4h",
+        want_ready=True, want_forming=True, context=_context(),
+    )
+    assert calls == ["BTC-USDT"]

@@ -217,6 +217,26 @@ class SetupScanner:
                 )
         return symbols_scanned
 
+    async def _price_precision(self, symbol: str) -> int | None:
+        """SymbolInfo.price_precision для подписей цен на графике.
+
+        Запрашивается только когда график реально рисуется. Список
+        инструментов кэшируется на час (TTL_SYMBOLS) в кэше сканера — один
+        запрос в час на процесс. Недоступность биржи или отсутствие символа
+        в списке не должны лишать уведомление графика: None откатывает
+        подписи на fmt_price по порядку величины цены. Не молча — в лог."""
+        try:
+            info = await self._engine.get_symbol_info(symbol)
+        except Exception:
+            logger.warning(
+                "Не удалось получить точность цены символа, подписи графика по "
+                "порядку величины",
+                extra={"symbol": symbol},
+                exc_info=True,
+            )
+            return None
+        return info.price_precision if info is not None else None
+
     async def _handle_signal(
         self,
         repo: SignalRepository,
@@ -306,10 +326,13 @@ class SetupScanner:
 
             photo = None
             if context is not None and notification_enabled(user.settings, "setup_charts"):
+                precision = await self._price_precision(symbol)
                 # В отдельном потоке: matplotlib/mplfinance синхронны и
                 # заметно тяжелее текста — рендер не должен задерживать
                 # остальных пользователей в этом цикле сканера.
-                photo = await asyncio.to_thread(render_setup_chart, context, signal, level)
+                photo = await asyncio.to_thread(
+                    render_setup_chart, context, signal, level, precision
+                )
             if photo is not None:
                 await send_notification_photo(
                     self._bot, user.telegram_id, photo, record.detail, reply_markup=keyboard

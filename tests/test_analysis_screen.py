@@ -287,6 +287,59 @@ class TestRenderSignalInvalidation:
         assert "ниже 2500.12 отменяет" in line  # порядок величины: >=1000 → 2 знака
 
 
+class TestRenderSignalDetails:
+    """Остальные строки render_signal, куда попадает текст детектора:
+    заметка и детали условий (и в WAIT, и у найденного сетапа)."""
+
+    @staticmethod
+    def _wait() -> Signal:
+        return Signal(
+            symbol="ETH-USDT", timeframe="4h", direction=SignalDirection.WAIT,
+            setup="Нет сетапа",
+            note="Цена далеко от EMA50 (2529.4926). Ждём отката к динамической поддержке.",
+            conditions=[
+                SignalCondition("Фильтр EMA200", True, "Цена выше EMA200"),
+                SignalCondition(
+                    "Откат к EMA50", False, "Расстояние до EMA50: 102.7574 (допуск 3.4915)"
+                ),
+            ],
+        )
+
+    @staticmethod
+    def _found_with_text() -> Signal:
+        base = _found()
+        return Signal(
+            symbol=base.symbol, timeframe=base.timeframe, direction=base.direction,
+            setup=base.setup, entry_zone_low=base.entry_zone_low,
+            entry_zone_high=base.entry_zone_high, stop_loss=base.stop_loss,
+            take_profit_1=base.take_profit_1, risk_reward=base.risk_reward,
+            confidence=base.confidence, invalidation="Закрытие ниже 98.5030 отменяет сценарий",
+            note="Цель: следующий уровень 2668.5000",
+            conditions=[
+                SignalCondition("Ретест уровня", True, "Цена возвращалась к уровню 2668.5000"),
+            ],
+        )
+
+    def test_wait_note_and_conditions_are_formatted(self) -> None:
+        text = render_signal(self._wait(), 2)
+        assert not RAW_PRICE.findall(text)
+        assert "EMA50 (2529.49)" in text
+        assert "Расстояние до EMA50: 102.76 (допуск 3.49)" in text
+
+    def test_found_note_and_conditions_are_formatted(self) -> None:
+        text = render_signal(self._found_with_text(), 2)
+        assert not RAW_PRICE.findall(text)
+        assert "Цель: следующий уровень 2668.5" in text
+        assert "к уровню 2668.5" in text
+        assert "ниже 98.5 отменяет" in text
+
+    def test_without_precision_uses_price_magnitude(self) -> None:
+        """Точность неизвестна: >=1000 — два знака. Для цен 1..1000 fallback
+        fmt_price оставляет четыре знака, поэтому 102.7574 здесь не меняется."""
+        text = render_signal(self._wait())
+        assert "EMA50 (2529.49)" in text
+
+
 class TestKeyboard:
     def test_no_execution_button(self) -> None:
         markup = market_keyboard("BTC-USDT", "4h")
