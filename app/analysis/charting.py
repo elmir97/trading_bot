@@ -42,10 +42,11 @@ _COLOR_EMA200 = "#7b61ff"
 # Ближайших уровней с каждой стороны цены на графике «по запросу».
 NEARBY_LEVELS_PER_SIDE = 2
 
-# Уровень рисуется, только если попадает в диапазон видимых свечей плюс запас
-# в ATR. Уровень вне окна растягивает ось Y (ETH 4H: поддержка на 28% ниже
-# цены сжимала свечи в верхнюю треть), а «чего ждём» обычно рядом с ценой.
-LEVEL_WINDOW_MARGIN_ATR = Decimal(1)
+# Окно видимых свечей + запас в ATR — единое определение «что попадает на
+# график» для уровней и для линий EMA. Всё, что вне окна, растягивает ось Y
+# (ETH 4H: поддержка на 28% ниже цены и EMA200 сжимали свечи в верхние 40-60%),
+# а «чего ждём» находится рядом с ценой.
+VISIBLE_WINDOW_MARGIN_ATR = Decimal(1)
 
 # Подпись оси времени: без года и без запятой. Формат mplfinance по умолчанию
 # '%b %d, %H:%M' слипался на узких экранах. Задаётся для всех графиков модуля,
@@ -92,7 +93,9 @@ def render_analysis_chart(context: MarketContext, signal: Signal) -> bytes | Non
         label = "WAIT"
     try:
         with _RENDER_LOCK:
-            return _render(context, signal, f"{label} · по запросу", nearby_levels=True)
+            return _render(
+                context, signal, f"{label} · по запросу", nearby_levels=True, legend_below=True
+            )
     except Exception:
         logger.exception(
             "Не удалось построить график анализа",
@@ -101,18 +104,35 @@ def render_analysis_chart(context: MarketContext, signal: Signal) -> bytes | Non
         return None
 
 
-def _nearby_levels(context: MarketContext) -> list[Level]:
-    """Ближайшие к цене уровни в окне видимых свечей: по N сверху и снизу.
-
-    Окно — [min(low), max(high)] последних CANDLES_DISPLAYED свечей, расширенное
-    на LEVEL_WINDOW_MARGIN_ATR × ATR с каждой стороны.
-    """
+def _visible_bounds(context: MarketContext) -> tuple[Decimal, Decimal] | None:
+    """Окно видимых свечей: [min(low), max(high)] последних CANDLES_DISPLAYED
+    свечей, расширенное на VISIBLE_WINDOW_MARGIN_ATR × ATR с каждой стороны.
+    None, если свечей нет."""
     window = context.candles[-CANDLES_DISPLAYED:]
     if not window:
+        return None
+    margin = (context.atr or Decimal(0)) * VISIBLE_WINDOW_MARGIN_ATR
+    return min(c.low for c in window) - margin, max(c.high for c in window) + margin
+
+
+def _clip_to_bounds(
+    values: list[Decimal | None], bounds: tuple[Decimal, Decimal] | None
+) -> list[Decimal | None]:
+    """Значения вне окна заменяются на None: линия остаётся там, где есть
+    свечи, и не растягивает ось Y. Ничего не выключается целиком: если часть
+    линии в окне, она рисуется."""
+    if bounds is None:
+        return values
+    low, high = bounds
+    return [v if v is not None and low <= v <= high else None for v in values]
+
+
+def _nearby_levels(context: MarketContext) -> list[Level]:
+    """Ближайшие к цене уровни в окне видимых свечей: по N сверху и снизу."""
+    bounds = _visible_bounds(context)
+    if bounds is None:
         return []
-    margin = (context.atr or Decimal(0)) * LEVEL_WINDOW_MARGIN_ATR
-    low = min(c.low for c in window) - margin
-    high = max(c.high for c in window) + margin
+    low, high = bounds
     visible = [lv for lv in context.levels if low <= lv.price <= high]
 
     above = sorted((lv for lv in visible if lv.price > context.price), key=lambda lv: lv.price)
@@ -125,14 +145,21 @@ def _nearby_levels(context: MarketContext) -> list[Level]:
 
 
 def _render(
-    context: MarketContext, signal: Signal, label: str, *, nearby_levels: bool = False
+    context: MarketContext,
+    signal: Signal,
+    label: str,
+    *,
+    nearby_levels: bool = False,
+    legend_below: bool = False,
 ) -> bytes:
     candles = context.candles[-CANDLES_DISPLAYED:]
     closes = [c.close for c in context.candles]
     # EMA считается по всей истории (иначе разогрев обрежет линию у левого
     # края) и только потом обрезается под то же окно, что и свечи.
-    ema50 = ema(closes, 50)[-CANDLES_DISPLAYED:]
-    ema200 = ema(closes, 200)[-CANDLES_DISPLAYED:]
+    # Затем линии обрезаются по окну видимых свечей (см. _clip_to_bounds).
+    bounds = _visible_bounds(context)
+    ema50 = _clip_to_bounds(ema(closes, 50)[-CANDLES_DISPLAYED:], bounds)
+    ema200 = _clip_to_bounds(ema(closes, 200)[-CANDLES_DISPLAYED:], bounds)
 
     df = pd.DataFrame(
         {
@@ -200,7 +227,16 @@ def _render(
         _hline(ax, signal.take_profit_1, _COLOR_TARGET, f"Цель {signal.take_profit_1:.4f}")
 
     if ax.get_legend_handles_labels()[1]:
-        ax.legend(loc="upper left", fontsize=8, framealpha=0.85)
+        if legend_below:
+            # Под графиком, а не поверх: в левом верхнем углу легенда с
+            # уровнями закрывала свечи. bbox_inches="tight" ниже расширяет
+            # картинку, чтобы легенда вошла.
+            ax.legend(
+                loc="upper center", bbox_to_anchor=(0.5, -0.2), ncol=2,
+                fontsize=8, framealpha=0.85,
+            )
+        else:
+            ax.legend(loc="upper left", fontsize=8, framealpha=0.85)
 
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=110, bbox_inches="tight")

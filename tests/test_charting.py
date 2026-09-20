@@ -15,6 +15,7 @@ from decimal import Decimal
 
 import pytest
 from matplotlib.axes import Axes
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 
 from app.analysis import charting
 from app.analysis.charting import _nearby_levels, render_analysis_chart, render_setup_chart
@@ -304,3 +305,104 @@ class TestTimeAxis:
         for label in labels:
             # 17.09 08:00 — без года и запятой
             assert re.fullmatch(r"\d{2}\.\d{2} \d{2}:\d{2}", label), label
+
+
+def _stepped_context(low_close: str = "100", high_close: str = "200") -> MarketContext:
+    """Первые 200 свечей у low_close, последние 100 у high_close: EMA200 после
+    скачка отстаёт и остаётся ниже окна видимых свечей, EMA50 догоняет."""
+    now = datetime.now(UTC)
+    candles = []
+    for i in range(300):
+        close = D(low_close) if i < 200 else D(high_close)
+        open_time = now - timedelta(hours=300 - i)
+        candles.append(
+            Kline(
+                open_time=open_time, open=close, high=close + D("1"), low=close - D("1"),
+                close=close, volume=D("1000"), close_time=open_time + timedelta(hours=1),
+            )
+        )
+    return _context(candles)
+
+
+def _spy_addplot(monkeypatch) -> list[list[float]]:  # type: ignore[no-untyped-def]
+    plotted: list[list[float]] = []
+    real = charting.mpf.make_addplot
+
+    def spy(data, *args, **kwargs):  # type: ignore[no-untyped-def]
+        plotted.append(list(data))
+        return real(data, *args, **kwargs)
+
+    monkeypatch.setattr(charting.mpf, "make_addplot", spy)
+    return plotted
+
+
+class TestVisibleWindowLines:
+    def test_clip_replaces_out_of_window_values_with_none(self) -> None:
+        bounds = (D("10"), D("20"))
+        values = [D("9.9"), D("10"), D("15"), D("20"), D("20.1"), None]
+        expected = [None, D("10"), D("15"), D("20"), None, None]
+        assert charting._clip_to_bounds(values, bounds) == expected
+
+    def test_clip_without_window_keeps_values(self) -> None:
+        values = [D("1"), None]
+        assert charting._clip_to_bounds(values, None) == values
+
+    def test_bounds_are_window_plus_one_atr(self) -> None:
+        context = _windowed_context()  # свечи [90; 110], ATR 1.5
+        assert charting._visible_bounds(context) == (D("88.5"), D("111.5"))
+
+    def test_line_below_window_is_dropped_not_stretching_axis(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """EMA200 целиком под окном свечей в mplfinance не передаётся, а
+        EMA50 (частично в окне) передаётся, обрезанная по окну."""
+        plotted = _spy_addplot(monkeypatch)
+        assert render_analysis_chart(_stepped_context(), _signal()) is not None
+
+        assert len(plotted) == 1  # только EMA50; EMA200 (~100..163) ниже окна ~[198; 202]
+        ema50 = plotted[0]
+        assert any(v != v for v in ema50)  # начало обрезано (NaN)
+        assert any(v == v for v in ema50)  # но линия не выключена
+        assert all(v != v or 197 <= v <= 203 for v in ema50)
+
+    def test_lines_inside_window_are_untouched(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        plotted = _spy_addplot(monkeypatch)
+        # 300 свечей: EMA200 прогрета на всём окне, NaN могут дать только обрезка
+        assert render_analysis_chart(_context(_candles(300)), _signal()) is not None
+        assert len(plotted) == 2
+        assert all(v == v for line in plotted for v in line)  # ни одного NaN
+
+    def test_scanner_chart_gets_the_same_clipping(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        plotted = _spy_addplot(monkeypatch)
+        assert render_setup_chart(_stepped_context(), _signal(), SignalLevel.READY) is not None
+        assert len(plotted) == 1
+
+
+class TestLegend:
+    @staticmethod
+    def _geometry(monkeypatch, render):  # type: ignore[no-untyped-def]
+        figures = []
+        real_close = charting.plt.close
+        monkeypatch.setattr(
+            charting.plt, "close", lambda fig=None: (figures.append(fig), real_close(fig))[1]
+        )
+        assert render() is not None
+        fig = figures[0]
+        canvas = FigureCanvasAgg(fig)  # у закрытой фигуры canvas базовый, без рендерера
+        canvas.draw()
+        ax = fig.axes[0]
+        renderer = canvas.get_renderer()
+        return ax.get_window_extent(renderer), ax.get_legend().get_window_extent(renderer)
+
+    def test_analysis_legend_is_below_the_plot(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        context = replace(_windowed_context(), levels=[_level(D("105"), resistance=True)])
+        axes_box, legend_box = self._geometry(
+            monkeypatch, lambda: render_analysis_chart(context, _signal())
+        )
+        assert legend_box.y1 <= axes_box.y0, "легенда не должна перекрывать область свечей"
+
+    def test_scanner_legend_stays_inside_top_left(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        axes_box, legend_box = self._geometry(
+            monkeypatch,
+            lambda: render_setup_chart(_context(), _signal(), SignalLevel.READY),
+        )
+        assert legend_box.y0 >= axes_box.y0
+        assert legend_box.x0 <= axes_box.x0 + axes_box.width / 2

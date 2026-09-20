@@ -8,6 +8,7 @@ signals, не даёт кнопку входа, не путается с READY �
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -19,6 +20,7 @@ from aiogram.types import CallbackQuery, Message
 
 from app.analysis import classify
 from app.analysis.engine import AnalysisEngine
+from app.analysis.setups import EMAPullback
 from app.analysis.signals import MarketContext, Signal, SignalCondition
 from app.bot import messaging
 from app.bot.handlers import analysis as screen
@@ -182,6 +184,79 @@ class TestRenderVerdict:
         )
         text = render_verdict("BTC-USDT", _results(sig, sig), "4h")
         assert "a < b" not in text and "a &lt; b" in text
+
+
+RAW_PRICE = re.compile(r"(?<![\d.])\d+\.\d{4}(?!\d)")
+
+
+class TestRawNumbers:
+    """Детекторы вшивают цены в текст как {x:.4f}; Telegram принимает такие
+    хвосты за номера и подсвечивает ссылками. Экран обязан отдавать их через
+    fmt_price по точности символа."""
+
+    def test_real_detector_output_has_no_raw_decimals(self) -> None:
+        signal = EMAPullback().detect(_context())
+        assert RAW_PRICE.search(signal.note + signal.conditions[-1].detail), (
+            "тест устарел: детектор больше не печатает .4f, проверять нечего"
+        )
+        text = render_verdict("BTC-USDT", _results(signal, signal), "4h", 2)
+        assert not RAW_PRICE.findall(text)
+        assert "Расстояние до EMA50: 2.2 (допуск 0.75)" in text
+        assert "EMA50 (98)" in text
+
+    @pytest.mark.parametrize(
+        "detail",
+        [  # формулировки из app/analysis/setups.py, по одной на каждое место с .4f
+            "Пробит уровень 2668.5000",
+            "Цена возвращалась к уровню 2668.5000 и удержалась",
+            "Возврата к уровню 2668.5000 ещё не было",
+            "Уровень 2668.5000 пробит, но ретеста ещё не было. Ждём возврата цены к уровню.",
+            "Расстояние до EMA50: 102.7574 (допуск 3.4915)",
+            "Цена далеко от EMA50 (2529.4926). Ждём отката к динамической поддержке.",
+        ],
+    )
+    def test_every_detector_wording_is_formatted(self, detail: str) -> None:
+        signal = Signal(
+            symbol="ETH-USDT", timeframe="4h", direction=SignalDirection.WAIT,
+            setup="Нет сетапа", note=detail,
+            conditions=[SignalCondition("Условие", False, detail)],
+        )
+        text = render_verdict("ETH-USDT", _results(signal, signal), "4h", 2)
+        assert not RAW_PRICE.findall(text)
+
+    def test_precision_of_the_symbol_is_used(self) -> None:
+        sig = Signal(
+            symbol="ETH-USDT", timeframe="4h", direction=SignalDirection.WAIT,
+            setup="Нет сетапа", note="Цена далеко от EMA50 (2529.4926).",
+        )
+        two = render_verdict("ETH-USDT", _results(sig, sig), "4h", 2)
+        three = render_verdict("ETH-USDT", _results(sig, sig), "4h", 3)
+        none = render_verdict("ETH-USDT", _results(sig, sig), "4h", None)
+        assert "EMA50 (2529.49)" in two
+        assert "EMA50 (2529.493)" in three
+        assert "EMA50 (2529.49)" in none  # без SymbolInfo: порядок величины (>=1000 → 2 знака)
+
+    def test_invalidation_of_found_setup_is_formatted(self) -> None:
+        base = _found()
+        found = Signal(
+            symbol=base.symbol, timeframe=base.timeframe, direction=base.direction,
+            setup=base.setup, entry_zone_low=base.entry_zone_low,
+            entry_zone_high=base.entry_zone_high, stop_loss=base.stop_loss,
+            take_profit_1=base.take_profit_1, risk_reward=base.risk_reward,
+            confidence=base.confidence, conditions=base.conditions,
+            invalidation="Закрытие ниже 2500.1234 отменяет сценарий",
+        )
+        text = render_verdict("ETH-USDT", _results(_waiting("1h"), found), "4h", 2)
+        assert "ниже 2500.12 отменяет" in text
+        assert not RAW_PRICE.findall(text)
+
+    def test_other_numbers_are_left_alone(self) -> None:
+        sig = Signal(
+            symbol="ETH-USDT", timeframe="4h", direction=SignalDirection.WAIT,
+            setup="Нет сетапа", note="RR 1:1.80 ниже минимального 1:2, 12:30, 15 свечей",
+        )
+        text = render_verdict("ETH-USDT", _results(sig, sig), "4h", 2)
+        assert "RR 1:1.80 ниже минимального 1:2, 12:30, 15 свечей" in text
 
 
 class TestKeyboard:

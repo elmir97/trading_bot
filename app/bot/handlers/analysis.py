@@ -11,7 +11,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import html
+import re
 from dataclasses import dataclass
+from decimal import Decimal
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
@@ -438,16 +440,30 @@ def _esc(text: str) -> str:
     return html.escape(text, quote=False)
 
 
-def _missing(signal: Signal) -> str:
+# Детекторы (app/analysis/setups.py) вшивают цены в текст условий как {x:.4f}:
+# «Расстояние до EMA50: 102.7574», «EMA50 (2529.4926)». Такие хвосты Telegram
+# принимает за номера и подсвечивает ссылками. Тексты детекторов читает и
+# сканер (signal.note входит в fingerprint FORMING), поэтому источник не
+# трогаем, а на выводе экрана прогоняем через fmt_price.
+_RAW_PRICE = re.compile(r"(?<![\d.])\d+\.\d{4}(?!\d)")
+
+
+def _prices(text: str, precision: int | None) -> str:
+    """Числа с четырьмя знаками из текста детектора → fmt_price по точности символа."""
+    return _RAW_PRICE.sub(lambda m: fmt_price(Decimal(m.group()), precision), text)
+
+
+def _missing(signal: Signal, precision: int | None = None) -> str:
     """Какого условия не хватает: невыполненное условие, а если условий
     нет (мало истории и т.п.) — пояснение детектора."""
     failed = signal.failed_conditions
     if failed:
-        return _esc(_clip(f"{failed[0].name} — {failed[0].detail}"))
-    return _esc(_clip(signal.note or "условия не выполнены"))
+        text = f"{failed[0].name} — {failed[0].detail}"
+        return _esc(_clip(_prices(text, precision)))
+    return _esc(_clip(_prices(signal.note or "условия не выполнены", precision)))
 
 
-def _verdict_line(signal: Signal) -> str:
+def _verdict_line(signal: Signal, precision: int | None = None) -> str:
     """Короткий вердикт одного таймфрейма."""
     if signal.is_actionable:
         icon = "🟢" if signal.direction is SignalDirection.LONG else "🔴"
@@ -455,7 +471,11 @@ def _verdict_line(signal: Signal) -> str:
     if classify_signal(signal) is SignalLevel.FORMING:
         return "🌱 формируется · не хватает подтверждающей свечи"
     failed = signal.failed_conditions
-    reason = _esc(failed[0].name) if failed else _esc(_clip(signal.note or "нет данных", 80))
+    reason = (
+        _esc(failed[0].name)
+        if failed
+        else _esc(_clip(_prices(signal.note or "нет данных", precision), 80))
+    )
     return f"⏸ WAIT · не хватает: {reason}"
 
 
@@ -475,7 +495,9 @@ def render_verdict(
     """
     lines = [f"<b>{_esc(symbol)}</b> · график {selected.upper()}", ""]
     for timeframe, result in results.items():
-        lines.append(f"<b>{timeframe.upper()}:</b> {_verdict_line(result.signal)}")
+        lines.append(
+            f"<b>{timeframe.upper()}:</b> {_verdict_line(result.signal, price_precision)}"
+        )
 
     signal = results[selected].signal
     lines.append("")
@@ -488,11 +510,11 @@ def render_verdict(
             f"RR 1:{fmt_ratio(signal.risk_reward)} · Качество: {signal.confidence}/10",
         ]
         if signal.invalidation:
-            lines.append(f"<i>{_esc(_clip(signal.invalidation))}</i>")
+            lines.append(f"<i>{_esc(_clip(_prices(signal.invalidation, price_precision)))}</i>")
     else:
-        lines.append(f"<b>Не хватает:</b> {_missing(signal)}")
+        lines.append(f"<b>Не хватает:</b> {_missing(signal, price_precision)}")
         if signal.note:
-            lines.append(f"<i>{_esc(_clip(signal.note))}</i>")
+            lines.append(f"<i>{_esc(_clip(_prices(signal.note, price_precision)))}</i>")
 
     lines += [
         "",
