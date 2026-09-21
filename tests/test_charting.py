@@ -451,6 +451,24 @@ class TestPriceLabels:
         assert "Сопротивление 105.12" in labels
         assert not [x for x in labels if self.RAW.search(x)]
 
+    def test_role_follows_price_not_detection_flag(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """Подпись — по положению относительно цены (~100): пробитое
+        «сопротивление» ниже цены — поддержка, и наоборот."""
+        context = replace(
+            _windowed_context(),
+            levels=[
+                _level(D("95"), resistance=True),
+                _level(D("105"), resistance=False),
+            ],
+        )
+        labels = self._labels(
+            monkeypatch, lambda: render_analysis_chart(context, _signal(level_price=None), 2)
+        )
+        assert "Поддержка 95" in labels
+        assert "Сопротивление 105" in labels
+        assert "Сопротивление 95" not in labels
+        assert "Поддержка 105" not in labels
+
     def test_other_precision_is_respected(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         labels = self._labels(
             monkeypatch, lambda: render_analysis_chart(_windowed_context(), self._signal(), 3)

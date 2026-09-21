@@ -24,7 +24,7 @@ from matplotlib.ticker import MaxNLocator
 from app.analysis.classify import classify_signal
 from app.analysis.indicators import ema
 from app.analysis.signals import MarketContext, Signal
-from app.analysis.structure import Level
+from app.analysis.structure import Level, level_role
 from app.bot.formatting import fmt_price
 from app.core.logging import get_logger
 from app.trading.enums import SignalLevel
@@ -220,7 +220,9 @@ def _render(
         for lv in _nearby_levels(context):
             if signal.level_price is not None and lv.price == signal.level_price:
                 continue
-            kind = "Сопротивление" if lv.is_resistance else "Поддержка"
+            kind = (
+                "Сопротивление" if level_role(lv, context.price) == "resistance" else "Поддержка"
+            )
             ax.axhline(
                 y=float(lv.price), color=_COLOR_LEVEL, linestyle=":", linewidth=1,
                 alpha=0.7, label=f"{kind} {fmt_price(lv.price, price_precision)}",

@@ -22,8 +22,10 @@ from app.analysis.patterns import (
 from app.analysis.structure import (
     detect_structure,
     find_levels,
+    Level,
     find_swings,
     level_broken,
+    level_role,
     nearest_level,
 )
 from app.exchanges.base import Kline
@@ -315,3 +317,29 @@ class TestBreakout:
         """Классический ложный пробой: хвост вышел, тело вернулось."""
         candle = bar("99", "105", "98", "99.5")
         assert not level_broken(candle, self._resistance(), D("2"), D("0.15"))
+
+
+class TestLevelRole:
+    """Роль уровня на выводе — по положению относительно цены, а не по
+    is_resistance (признаку обнаружения)."""
+
+    @staticmethod
+    def _level(price: str, *, resistance: bool) -> Level:
+        return Level(
+            price=D(price), touches=2, last_touch_index=1,
+            is_resistance=resistance, strength=D("0.5"),
+        )
+
+    def test_level_above_price_is_resistance(self) -> None:
+        assert level_role(self._level("110", resistance=False), D("100")) == "resistance"
+
+    def test_broken_resistance_below_price_is_support(self) -> None:
+        assert level_role(self._level("95", resistance=True), D("100")) == "support"
+
+    def test_price_equal_to_level_is_support(self) -> None:
+        assert level_role(self._level("100", resistance=True), D("100")) == "support"
+
+    def test_detection_flag_is_untouched(self) -> None:
+        level = self._level("95", resistance=True)
+        level_role(level, D("100"))
+        assert level.is_resistance is True

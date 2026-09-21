@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -22,6 +23,7 @@ from app.analysis import classify
 from app.analysis.engine import AnalysisEngine
 from app.analysis.setups import EMAPullback
 from app.analysis.signals import MarketContext, Signal, SignalCondition
+from app.analysis.structure import Level
 from app.bot import messaging
 from app.bot.handlers import analysis as screen
 from app.bot.handlers.analysis import (
@@ -30,6 +32,7 @@ from app.bot.handlers.analysis import (
     TimeframeResult,
     analyze_timeframes,
     market_keyboard,
+    render_market,
     render_signal,
     render_verdict,
 )
@@ -114,6 +117,37 @@ def _results(h1: Signal, h4: Signal) -> dict[str, TimeframeResult]:
         "1h": TimeframeResult("1h", _context("1h"), h1),
         "4h": TimeframeResult("4h", _context("4h"), h4),
     }
+
+
+# --- render_market: роль уровня --------------------------------------------
+
+
+class TestMarketLevelRoles:
+    """Справка печатает роль по положению уровня относительно цены, а не по
+    is_resistance — иначе разойдётся с легендой графика."""
+
+    @staticmethod
+    def _lines(levels: list[Level]) -> list[str]:
+        context = replace(_context(), levels=levels)
+        text = render_market(context, 2)
+        return [line for line in text.splitlines() if "касаний" in line]
+
+    @staticmethod
+    def _level(offset: str, *, resistance: bool, price: Decimal) -> Level:
+        return Level(
+            price=price + D(offset), touches=3, last_touch_index=1,
+            is_resistance=resistance, strength=D("0.5"),
+        )
+
+    def test_broken_resistance_below_price_is_support(self) -> None:
+        price = _context().price
+        (line,) = self._lines([self._level("-5", resistance=True, price=price)])
+        assert "поддержка" in line and "сопротивление" not in line
+
+    def test_support_flag_above_price_is_resistance(self) -> None:
+        price = _context().price
+        (line,) = self._lines([self._level("5", resistance=False, price=price)])
+        assert "сопротивление" in line and "поддержка" not in line
 
 
 # --- render_verdict -------------------------------------------------------

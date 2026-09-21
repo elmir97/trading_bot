@@ -197,6 +197,17 @@ def find_levels(
     return sorted(levels, key=lambda level: level.price)
 
 
+def level_role(level: Level, price: Decimal) -> str:
+    """Текущая роль уровня для вывода: "resistance" выше цены, иначе "support".
+
+    is_resistance описывает, чем уровень был при обнаружении (по касаниям), и
+    после пробоя расходится с реальностью. Подписи на выводе берут роль
+    отсюда; детекторы продолжают читать is_resistance. Равенство цены и уровня
+    относится к поддержке — как в charting._nearby_levels.
+    """
+    return "resistance" if level.price > price else "support"
+
+
 def nearest_level(
     levels: list[Level], price: Decimal, *, above: bool | None = None
 ) -> Level | None:

@@ -33,6 +33,7 @@ from app.analysis.charting import render_analysis_chart
 from app.analysis.classify import SCAN_TIMEFRAMES, classify_signal
 from app.analysis.engine import AnalysisEngine
 from app.analysis.signals import MarketContext, Signal, wait_signal
+from app.analysis.structure import level_role
 from app.bot.formatting import fmt_price, fmt_ratio
 from app.bot.handlers.exchange import _describe, _market_cache
 from app.bot.keyboards.main import MenuCallback, back_to, nav_row
@@ -208,7 +209,8 @@ def render_market(context: MarketContext, price_precision: int | None = None) ->
             context.levels, key=lambda level: level.distance_to(context.price)
         )[:5]
         for level in sorted(nearby, key=lambda level: level.price, reverse=True):
-            kind = "сопротивление" if level.is_resistance else "поддержка"
+            role = level_role(level, context.price)
+            kind = "сопротивление" if role == "resistance" else "поддержка"
             lines.append(
                 f"{fmt_price(level.price, price_precision)} · {kind} · "
                 f"касаний {level.touches}"
