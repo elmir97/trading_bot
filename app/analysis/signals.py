@@ -136,6 +136,33 @@ class Signal:
         return [c for c in self.conditions if c.passed]
 
 
+def validate_geometry(
+    direction: SignalDirection,
+    entry_low: Decimal,
+    entry_high: Decimal,
+    stop_loss: Decimal,
+) -> str | None:
+    """Проверяет, что стоп лежит по правильную сторону всей зоны входа.
+
+    LONG: стоп ниже нижней границы зоны; SHORT: выше верхней. Иначе вход в
+    части зоны даёт стоп с неверной стороны от цены входа. Возвращает текст
+    причины для note WAIT-сигнала или None, если геометрия корректна.
+    Детекторы вызывают её перед сборкой Signal; в is_actionable она не
+    встроена — там проверяется готовность, а не арифметика цен.
+    """
+    if direction is SignalDirection.LONG and stop_loss >= entry_low:
+        return (
+            f"Стоп {stop_loss} не ниже нижней границы зоны входа {entry_low}: "
+            f"вход в нижней части зоны оказался бы за стопом. Сетап не выдан."
+        )
+    if direction is SignalDirection.SHORT and stop_loss <= entry_high:
+        return (
+            f"Стоп {stop_loss} не выше верхней границы зоны входа {entry_high}: "
+            f"вход в верхней части зоны оказался бы за стопом. Сетап не выдан."
+        )
+    return None
+
+
 def wait_signal(
     symbol: str,
     timeframe: str,

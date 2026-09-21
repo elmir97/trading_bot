@@ -11,17 +11,21 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
+from app.analysis import setups
 from app.analysis.engine import AnalysisEngine
 from app.analysis.indicators import atr as calc_atr, ema, last_value, volume_ratio
 from app.analysis.setups import BreakoutRetest, EMAPullback
-from app.analysis.signals import MarketContext, wait_signal
+from app.analysis.signals import MarketContext, validate_geometry, wait_signal
 from app.analysis.structure import detect_structure, find_levels
 from app.exchanges.base import Kline
+from app.execution.service import signal_reference_price
 from app.trading.enums import MarketStructure, SignalDirection
 
 D = Decimal
@@ -302,3 +306,157 @@ class TestSignalStructure:
 
         signal = BreakoutRetest().detect(build_context(breakout_retest_chart()))
         assert signal.side is TradeSide.LONG
+
+
+# --- геометрия стопа относительно зоны входа ---------------------------------
+
+MIRROR = 400.0
+
+
+def mirrored(candles: list[Kline]) -> list[Kline]:
+    """Зеркало графика по цене: рост превращается в падение, лонг в шорт."""
+    return [
+        candle(
+            i, MIRROR - float(c.open), MIRROR - float(c.low),
+            MIRROR - float(c.high), MIRROR - float(c.close), float(c.volume),
+        )
+        for i, c in enumerate(candles)
+    ]
+
+
+def retest_chart_with_high_confirmation(low: float) -> list[Kline]:
+    """Ретест был у уровня 200, а подтверждающая свеча закрылась далеко над
+    ним: минимум свечи (low) выше уровня. Геометрия сигнала BNB-USDT 4H:
+    зона от уровня до закрытия, а стоп «под минимумом свечи» — внутри зоны."""
+    chart = breakout_retest_chart()
+    n = len(chart) - 1
+    prev = candle(n - 1, low + 1.0, low + 1.4, low, low + 0.2)
+    last = candle(n, low + 0.2, low + 5.5, low - 0.2, low + 5.0, volume=2000)
+    return chart[:-2] + [prev, last]
+
+
+class TestStopBelowBrokenLevel:
+    """Вариант B: стоп за пробитым уровнем — инвалидация пробоя это возврат
+    под уровень. Стоп над уровнем выбивался бы ретестом, ради которого сетап."""
+
+    def test_long_stop_goes_below_level_not_candle_low(self) -> None:
+        # Минимум свечи ~203.2 при уровне 200 (как 766.38 против 758.46 у BNB).
+        context = build_context(retest_chart_with_high_confirmation(203.4))
+        signal = BreakoutRetest().detect(context)
+
+        assert signal.direction is SignalDirection.LONG, signal.note
+        assert signal.level_price == D(200)
+        assert signal.stop_loss is not None
+        candle_low_stop = context.candles[-1].low - context.atr * setups.STOP_BUFFER_ATR
+        assert candle_low_stop > D(200), "фикстура должна воспроизводить дефект"
+        assert signal.stop_loss < D(200)
+        assert signal.stop_loss == setups.round_price(
+            D(200) - context.atr * setups.STOP_BUFFER_ATR
+        )
+
+    def test_short_stop_goes_above_level(self) -> None:
+        context = build_context(mirrored(retest_chart_with_high_confirmation(203.4)))
+        signal = BreakoutRetest().detect(context)
+
+        assert signal.direction is SignalDirection.SHORT, signal.note
+        assert signal.stop_loss is not None
+        assert signal.stop_loss > signal.level_price
+
+    @pytest.mark.parametrize("mirror", [False, True])
+    def test_stop_is_outside_whole_entry_zone(self, mirror: bool) -> None:
+        chart = retest_chart_with_high_confirmation(203.4)
+        signal = BreakoutRetest().detect(build_context(mirrored(chart) if mirror else chart))
+        assert signal.is_actionable
+        assert validate_geometry(
+            signal.direction, signal.entry_zone_low, signal.entry_zone_high, signal.stop_loss
+        ) is None
+
+    def test_long_reference_price_is_above_stop(self) -> None:
+        """Геометрия ETH 4H (id 54 на проде): середина зоны лежала НИЖЕ стопа
+        LONG — SIGNAL_STALE и дрейф считались от цены, которой за стопом
+        не бывает. Подтверждающая свеча высоко над уровнем."""
+        signal = BreakoutRetest().detect(build_context(retest_chart_with_high_confirmation(212.5)))
+        assert signal.direction is SignalDirection.LONG, signal.note
+        record = SimpleNamespace(entry_low=signal.entry_zone_low, entry_high=signal.entry_zone_high)
+        assert signal_reference_price(record) > signal.stop_loss  # type: ignore[arg-type]
+
+    def test_short_reference_price_is_below_stop(self) -> None:
+        chart = mirrored(retest_chart_with_high_confirmation(212.5))
+        signal = BreakoutRetest().detect(build_context(chart))
+        assert signal.direction is SignalDirection.SHORT, signal.note
+        record = SimpleNamespace(entry_low=signal.entry_zone_low, entry_high=signal.entry_zone_high)
+        assert signal_reference_price(record) < signal.stop_loss  # type: ignore[arg-type]
+
+    def test_existing_fixture_geometry_unchanged(self) -> None:
+        """Когда минимум свечи и так ниже уровня, стоп прежний."""
+        signal = BreakoutRetest().detect(build_context(breakout_retest_chart()))
+        assert signal.stop_loss == D("198.5030")
+        assert signal.risk_reward == D("2.00")
+
+
+def pullback_context(*, mirror: bool = False) -> MarketContext:
+    """Малая свеча у EMA50: EMA50 ниже минимума свечи с буфером. Контекст
+    собирается вручную — EMAPullback нужна структура тренда, а подобрать её
+    свечами вместе с касанием EMA50 ненадёжно."""
+    chart = breakout_retest_chart()
+    n = len(chart) - 1
+    prev = candle(n - 1, 203.0, 203.3, 202.4, 202.5)
+    last = candle(n, 202.5, 203.6, 202.4, 203.5, volume=2000)
+    candles = chart[:-2] + [prev, last]
+    if mirror:
+        return replace(
+            build_context(mirrored(candles)),
+            ema50=D(str(MIRROR - 201.2)), structure=MarketStructure.DOWNTREND,
+        )
+    return replace(
+        build_context(candles), ema50=D("201.2"), structure=MarketStructure.UPTREND
+    )
+
+
+class TestEMAPullbackStopBeyondEma50:
+    def test_long_stop_goes_below_ema50(self) -> None:
+        context = pullback_context()
+        signal = EMAPullback().detect(context)
+        assert signal.direction is SignalDirection.LONG, signal.note
+        candle_low_stop = context.candles[-1].low - context.atr * setups.STOP_BUFFER_ATR
+        assert candle_low_stop > context.ema50, "фикстура должна воспроизводить дефект"
+        assert signal.stop_loss < context.ema50
+        assert signal.stop_loss < signal.entry_zone_low
+
+    def test_short_stop_goes_above_ema50(self) -> None:
+        context = pullback_context(mirror=True)
+        signal = EMAPullback().detect(context)
+        assert signal.direction is SignalDirection.SHORT, signal.note
+        assert signal.stop_loss > context.ema50
+        assert signal.stop_loss > signal.entry_zone_high
+
+
+class TestValidateGeometry:
+    L, S = SignalDirection.LONG, SignalDirection.SHORT
+
+    def test_long_ok_when_stop_below_zone(self) -> None:
+        assert validate_geometry(self.L, D(100), D(105), D(99)) is None
+
+    @pytest.mark.parametrize("stop", ["100", "102", "105", "110"])
+    def test_long_violated_when_stop_not_below_zone_low(self, stop: str) -> None:
+        assert validate_geometry(self.L, D(100), D(105), D(stop)) is not None
+
+    def test_short_ok_when_stop_above_zone(self) -> None:
+        assert validate_geometry(self.S, D(100), D(105), D(106)) is None
+
+    @pytest.mark.parametrize("stop", ["105", "103", "100", "95"])
+    def test_short_violated_when_stop_not_above_zone_high(self, stop: str) -> None:
+        assert validate_geometry(self.S, D(100), D(105), D(stop)) is not None
+
+    @pytest.mark.parametrize("which", ["breakout", "pullback"])
+    def test_detector_returns_wait_with_note_on_violation(
+        self, monkeypatch: pytest.MonkeyPatch, which: str
+    ) -> None:
+        monkeypatch.setattr(setups, "validate_geometry", lambda *a: "геометрия нарушена")
+        if which == "breakout":
+            signal = BreakoutRetest().detect(build_context(breakout_retest_chart()))
+        else:
+            signal = EMAPullback().detect(pullback_context())
+        assert signal.direction is SignalDirection.WAIT
+        assert signal.note == "геометрия нарушена"
+        assert not signal.is_actionable

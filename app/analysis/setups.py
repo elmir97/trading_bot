@@ -27,6 +27,7 @@ from app.analysis.signals import (
     MarketContext,
     Signal,
     SignalCondition,
+    validate_geometry,
     wait_signal,
 )
 from app.analysis.structure import Level, nearest_level
@@ -101,7 +102,8 @@ class BreakoutRetest(SetupDetector):
     Правило методологии, ради которого всё и затевалось: никогда не
     входить в момент пробоя. Сначала уверенное закрытие за уровнем,
     затем возврат к нему, затем подтверждающая свеча — и только потом
-    вход, со стопом за хвост подтверждающей свечи.
+    вход, со стопом за хвост подтверждающей свечи и за пробитым уровнем
+    (что дальше от входа).
 
     Короткий стоп на ретесте — не побочный эффект, а смысл: он
     позволяет взять больший объём при том же риске в процентах.
@@ -226,11 +228,19 @@ class BreakoutRetest(SetupDetector):
         signal_candle = context.candles[-1]
         entry = signal_candle.close
 
+        # Стоп — за экстремум подтверждающей свечи И за пробитый уровень:
+        # инвалидация пробоя — возврат под уровень (для шорта — над ним).
+        # Зона входа включает уровень, и стоп над ним выбивался бы тем самым
+        # ретестом, ради которого сетап существует.
         if looking_long:
-            stop = round_price(signal_candle.low - atr * STOP_BUFFER_ATR)
+            stop = round_price(
+                min(signal_candle.low, level.price) - atr * STOP_BUFFER_ATR
+            )
             target_level = nearest_level(context.levels, entry, above=True)
         else:
-            stop = round_price(signal_candle.high + atr * STOP_BUFFER_ATR)
+            stop = round_price(
+                max(signal_candle.high, level.price) + atr * STOP_BUFFER_ATR
+            )
             target_level = nearest_level(context.levels, entry, above=False)
 
         # После пробоя цена часто оказывается там, где исторических
@@ -262,13 +272,22 @@ class BreakoutRetest(SetupDetector):
                 conditions,
             )
 
+        zone_low = round_price(min(entry, level.price))
+        zone_high = round_price(max(entry, level.price))
+        direction = SignalDirection.LONG if looking_long else SignalDirection.SHORT
+        if problem := validate_geometry(direction, zone_low, zone_high, stop):
+            return wait_signal(
+                context.symbol, context.timeframe, problem, conditions,
+                level_price=level.price,
+            )
+
         return Signal(
             symbol=context.symbol,
             timeframe=context.timeframe,
-            direction=SignalDirection.LONG if looking_long else SignalDirection.SHORT,
+            direction=direction,
             setup=self.name,
-            entry_zone_low=round_price(min(entry, level.price)),
-            entry_zone_high=round_price(max(entry, level.price)),
+            entry_zone_low=zone_low,
+            entry_zone_high=zone_high,
             stop_loss=stop,
             take_profit_1=target_price,
             risk_reward=risk_reward,
@@ -502,11 +521,17 @@ class EMAPullback(SetupDetector):
         signal_candle = context.candles[-1]
         entry = signal_candle.close
 
+        # Стоп — за экстремум свечи И за EMA50: зона входа включает EMA50, и
+        # стоп над ней (для шорта — под ней) выбивался бы отскоком от неё.
         if looking_long:
-            stop = round_price(signal_candle.low - atr * STOP_BUFFER_ATR)
+            stop = round_price(
+                min(signal_candle.low, context.ema50) - atr * STOP_BUFFER_ATR
+            )
             target_level = nearest_level(context.levels, entry, above=True)
         else:
-            stop = round_price(signal_candle.high + atr * STOP_BUFFER_ATR)
+            stop = round_price(
+                max(signal_candle.high, context.ema50) + atr * STOP_BUFFER_ATR
+            )
             target_level = nearest_level(context.levels, entry, above=False)
 
         # Если уровня впереди нет, целью становится кратное риску
@@ -534,13 +559,21 @@ class EMAPullback(SetupDetector):
                 conditions,
             )
 
+        zone_low = round_price(min(entry, context.ema50))
+        zone_high = round_price(max(entry, context.ema50))
+        direction = SignalDirection.LONG if looking_long else SignalDirection.SHORT
+        if problem := validate_geometry(direction, zone_low, zone_high, stop):
+            return wait_signal(
+                context.symbol, context.timeframe, problem, conditions
+            )
+
         return Signal(
             symbol=context.symbol,
             timeframe=context.timeframe,
-            direction=SignalDirection.LONG if looking_long else SignalDirection.SHORT,
+            direction=direction,
             setup=self.name,
-            entry_zone_low=round_price(min(entry, context.ema50)),
-            entry_zone_high=round_price(max(entry, context.ema50)),
+            entry_zone_low=zone_low,
+            entry_zone_high=zone_high,
             stop_loss=stop,
             take_profit_1=target_price,
             risk_reward=risk_reward,
