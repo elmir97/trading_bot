@@ -147,6 +147,42 @@ class TestFingerprint:
         assert "Цена на ретесте" in detail
 
 
+class TestRenderDetailPrices:
+    """Цены на карточке — по точности символа, а не «как есть»: цена сигнала
+    имеет 4 знака (round_price), у BNB точность цены меньше."""
+
+    @staticmethod
+    def _signal() -> Signal:
+        return _ready_signal(
+            entry_zone_low=D("758.46"), entry_zone_high=D("790.63"),
+            stop_loss=D("766.3835"), take_profit_1=D("839.123"),
+        )
+
+    def test_prices_rounded_to_symbol_precision(self) -> None:
+        detail = render_detail(self._signal(), SignalLevel.READY, 2)
+        assert "Стоп: 766.38\n" in detail
+        assert "Цель: 839.12\n" in detail
+        assert "Вход: 758.46 – 790.63" in detail
+
+    def test_without_precision_falls_back_to_magnitude(self) -> None:
+        detail = render_detail(self._signal(), SignalLevel.READY)
+        assert "Стоп: 766.3835\n" in detail
+        assert "Цель: 839.123\n" in detail
+
+    def test_fingerprint_is_independent_of_precision_change(self) -> None:
+        """build_fingerprint не трогали: хэш прежний, повторных уведомлений
+        от смены формата карточки не будет."""
+        signal = self._signal()
+        import hashlib
+        expected = hashlib.sha256(
+            "|".join([
+                signal.setup, signal.direction.value, "758.46", "790.63",
+                "766.3835", "839.123",
+            ]).encode()
+        ).hexdigest()
+        assert build_fingerprint(signal, SignalLevel.READY) == expected
+
+
 class TestProgressFraction:
     def test_long_take_profit_progress(self) -> None:
         # Вход 100, цель 110, цена 109 — пройдено 90% пути.

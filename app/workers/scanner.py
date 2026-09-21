@@ -30,6 +30,7 @@ from app.analysis.signals import MarketContext, Signal, wait_signal
 from app.bot.keyboards.execution import open_trade_button
 from app.core.config import Settings
 from app.core.logging import get_logger
+from app.core.numfmt import fmt_price
 from app.database.models.signal import SignalRecord
 from app.database.models.user import User
 from app.database.repositories.signal import SignalRepository
@@ -100,14 +101,21 @@ def build_fingerprint(signal: Signal, level: SignalLevel) -> str:
     return hashlib.sha256("|".join(parts).encode()).hexdigest()
 
 
-def render_detail(signal: Signal, level: SignalLevel) -> str:
+def render_detail(
+    signal: Signal, level: SignalLevel, price_precision: int | None = None
+) -> str:
+    """price_precision — SymbolInfo.price_precision; None — по порядку
+    величины цены (см. fmt_price). Цены на карточке округляются, а не режутся
+    по нулям: цена сигнала — round_price с 4 знаками, а у символа точность
+    может быть меньше."""
     if level is SignalLevel.READY:
         return (
             f"🎯 <b>Сетап готов: {signal.symbol} · {signal.timeframe.upper()}</b>\n\n"
             f"{signal.setup} — {signal.direction.value}\n"
-            f"Вход: {fmt_decimal(signal.entry_zone_low)} – {fmt_decimal(signal.entry_zone_high)}\n"
-            f"Стоп: {fmt_decimal(signal.stop_loss)}\n"
-            f"Цель: {fmt_decimal(signal.take_profit_1)}\n"
+            f"Вход: {fmt_price(signal.entry_zone_low, price_precision)} – "
+            f"{fmt_price(signal.entry_zone_high, price_precision)}\n"
+            f"Стоп: {fmt_price(signal.stop_loss, price_precision)}\n"
+            f"Цель: {fmt_price(signal.take_profit_1, price_precision)}\n"
             f"RR: 1:{fmt_decimal(signal.risk_reward)} · Качество: {signal.confidence}/10\n\n"
             f"<i>Проверь актуальность перед входом — рынок мог уйти с момента скана.</i>"
         )
@@ -309,7 +317,12 @@ class SetupScanner:
         record.stop_loss = signal.stop_loss
         record.take_profit = signal.take_profit_1
         record.confidence = signal.confidence if level is SignalLevel.READY else None
-        record.detail = render_detail(signal, level)
+        # Точность нужна и карточке, и графику — запрашивается один раз (кэш
+        # символов живёт час). FORMING цен в тексте не показывает.
+        precision = (
+            await self._price_precision(symbol) if level is SignalLevel.READY else None
+        )
+        record.detail = render_detail(signal, level, precision)
         record.expires_at = now + ttl
         if should_notify:
             record.notified_at = now
@@ -326,7 +339,8 @@ class SetupScanner:
 
             photo = None
             if context is not None and notification_enabled(user.settings, "setup_charts"):
-                precision = await self._price_precision(symbol)
+                if precision is None:
+                    precision = await self._price_precision(symbol)
                 # В отдельном потоке: matplotlib/mplfinance синхронны и
                 # заметно тяжелее текста — рендер не должен задерживать
                 # остальных пользователей в этом цикле сканера.

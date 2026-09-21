@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
+from app.core.numfmt import fmt_num, fmt_price
 from app.exchanges.base import SymbolInfo
 from app.execution.models import ExecutionRefusal
 from app.execution.models import ExecutionRefusalCode as Code
@@ -153,7 +154,7 @@ def check_max_total_risk(
     if total > max_total_risk_percent:
         return ExecutionRefusal(
             Code.MAX_TOTAL_RISK,
-            f"Суммарный риск {total:g}% превысит лимит {max_total_risk_percent:g}%.",
+            f"Суммарный риск {fmt_num(total)}% превысит лимит {fmt_num(max_total_risk_percent)}%.",
         )
     return None
 
@@ -167,7 +168,7 @@ def check_daily_loss_limit(
     if day_loss_percent is not None and day_loss_percent >= max_daily_loss_percent:
         return ExecutionRefusal(
             Code.DAILY_LOSS_LIMIT,
-            f"Дневной лимит убытка достигнут: -{day_loss_percent:g}%.",
+            f"Дневной лимит убытка достигнут: -{fmt_num(day_loss_percent)}%.",
         )
     return None
 
@@ -181,14 +182,16 @@ def check_price_drift(
     current_price: Decimal,
     stop_loss: Decimal,
     max_drift_ratio: Decimal,
+    price_precision: int | None = None,
 ) -> ExecutionRefusal | None:
     drift = abs(current_price - planned_price)
     allowed = abs(planned_price - stop_loss) * max_drift_ratio
     if drift > allowed:
         return ExecutionRefusal(
             Code.PRICE_DRIFT,
-            f"Цена ушла на {drift:g} от расчётной {planned_price:g} "
-            f"(допустимо {allowed:g}).",
+            f"Цена ушла на {fmt_price(drift, price_precision)} от расчётной "
+            f"{fmt_price(planned_price, price_precision)} "
+            f"(допустимо {fmt_price(allowed, price_precision)}).",
         )
     return None
 
@@ -214,6 +217,7 @@ def check_signal_not_stale(
     stop_loss: Decimal,
     side: TradeSide,
     max_staleness_ratio: Decimal,
+    price_precision: int | None = None,
 ) -> ExecutionRefusal | None:
     if reference_price is None:
         return None
@@ -231,8 +235,10 @@ def check_signal_not_stale(
         allowed_percent = max_staleness_ratio * Decimal(100)
         return ExecutionRefusal(
             Code.SIGNAL_STALE,
-            f"Сигнал устарел: был на {reference_price:g}, сейчас {current_price:g} "
-            f"— цена ушла на {percent_ahead:.0f}% дистанции до стопа {stop_loss:g} "
+            f"Сигнал устарел: был на {fmt_price(reference_price, price_precision)}, "
+            f"сейчас {fmt_price(current_price, price_precision)} "
+            f"— цена ушла на {percent_ahead:.0f}% дистанции до стопа "
+            f"{fmt_price(stop_loss, price_precision)} "
             f"в сторону тейка (допустимо {allowed_percent:.0f}%).",
         )
     return None
@@ -248,6 +254,7 @@ def check_valid_levels(
     take_profit: Decimal,
     side: TradeSide,
     min_risk_reward: Decimal,
+    price_precision: int | None = None,
 ) -> ExecutionRefusal | None:
     """entry_price здесь — живая цена биржи на момент проверки, а не цена
     входа из сигнала (та зафиксирована в signal.entry_low/entry_high и сюда
@@ -261,7 +268,8 @@ def check_valid_levels(
     except CalculationError:
         return ExecutionRefusal(
             Code.INVALID_LEVELS,
-            f"Цена ушла за стоп: сейчас {entry_price:g}, стоп {stop_loss:g}.",
+            f"Цена ушла за стоп: сейчас {fmt_price(entry_price, price_precision)}, "
+            f"стоп {fmt_price(stop_loss, price_precision)}.",
         )
     try:
         rr = calculate_risk_reward(
@@ -273,13 +281,15 @@ def check_valid_levels(
     except CalculationError:
         return ExecutionRefusal(
             Code.INVALID_LEVELS,
-            f"Цена уже прошла тейк: сейчас {entry_price:g}, тейк {take_profit:g}.",
+            f"Цена уже прошла тейк: сейчас {fmt_price(entry_price, price_precision)}, "
+            f"тейк {fmt_price(take_profit, price_precision)}.",
         )
     if rr < min_risk_reward:
         return ExecutionRefusal(
             Code.INVALID_LEVELS,
-            f"RR 1:{rr:g} ниже минимального 1:{min_risk_reward:g} "
-            f"(пересчитан по текущей цене {entry_price:g}, не по цене сигнала на карточке).",
+            f"RR 1:{fmt_num(rr)} ниже минимального 1:{fmt_num(min_risk_reward)} "
+            f"(пересчитан по текущей цене {fmt_price(entry_price, price_precision)}, "
+            f"не по цене сигнала на карточке).",
         )
     return None
 
@@ -398,6 +408,7 @@ def run_guards(inputs: GuardInputs) -> ExecutionRefusal | None:
         current_price=inputs.current_price,
         stop_loss=inputs.stop_loss,
         max_drift_ratio=inputs.max_price_drift_ratio,
+        price_precision=inputs.symbol_info.price_precision,
     ):
         return refusal
     if refusal := check_signal_not_stale(
@@ -406,6 +417,7 @@ def run_guards(inputs: GuardInputs) -> ExecutionRefusal | None:
         stop_loss=inputs.stop_loss,
         side=inputs.side,
         max_staleness_ratio=inputs.max_signal_staleness_ratio,
+        price_precision=inputs.symbol_info.price_precision,
     ):
         return refusal
     if refusal := check_valid_levels(
@@ -414,6 +426,7 @@ def run_guards(inputs: GuardInputs) -> ExecutionRefusal | None:
         take_profit=inputs.take_profit,
         side=inputs.side,
         min_risk_reward=inputs.min_risk_reward,
+        price_precision=inputs.symbol_info.price_precision,
     ):
         return refusal
     if refusal := check_size(

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -495,8 +496,10 @@ async def test_unknown_symbol_gives_none_precision(ctx, monkeypatch) -> None:  #
 
 
 async def test_symbol_info_is_not_requested_without_a_chart(ctx) -> None:  # type: ignore[no-untyped-def]
-    """Запрос только когда график реально рисуется: не при выключенных
-    графиках и не при повторе того же сетапа (дедуп — уведомления нет)."""
+    """FORMING: запрос только когда график реально рисуется — не при
+    выключенных графиках и не при повторе того же сетапа (дедуп). У READY
+    точность нужна ещё и тексту карточки (цены), поэтому там запрос идёт
+    независимо от графика — см. test_ready_card_requests_precision_without_chart."""
     user, session, repo, scanner, _, _ = ctx
     calls: list[str] = []
 
@@ -521,11 +524,33 @@ async def test_symbol_info_is_not_requested_without_a_chart(ctx) -> None:  # typ
     )
     assert calls == ["BTC-USDT"]
 
-    # 3) графики выключены — запроса нет
+    # 3) графики выключены — у FORMING запроса нет
     user.settings.notifications = {**user.settings.notifications, "setup_charts": False}
     await session.flush()
     await scanner._handle_signal(
-        repo, user, _ready_signal(), "ETH-USDT", "4h",
+        repo, user, _forming_signal(), "ETH-USDT", "4h",
         want_ready=True, want_forming=True, context=_context(),
     )
     assert calls == ["BTC-USDT"]
+
+
+async def test_ready_card_requests_precision_without_chart(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Цены карточки READY округляются по точности символа — запрос нужен
+    и при выключенных графиках."""
+    user, session, repo, scanner, _, _ = ctx
+
+    async def info(symbol: str) -> SymbolInfo:
+        return SymbolInfo(symbol, 2, 4, D("0.0001"), 125)
+
+    scanner._engine.get_symbol_info = info  # type: ignore[method-assign]
+    user.settings.notifications = {**user.settings.notifications, "setup_charts": False}
+    await session.flush()
+
+    signal = replace(_ready_signal(), stop_loss=D("97.1234"), take_profit_1=D("106.5678"))
+    await scanner._handle_signal(
+        repo, user, signal, "ETH-USDT", "4h",
+        want_ready=True, want_forming=True, context=_context(),
+    )
+    record = await repo.get_active_slot(user.id, "ETH-USDT", "4h", SignalLevel.READY)
+    assert record is not None
+    assert "Стоп: 97.12\n" in record.detail and "Цель: 106.57\n" in record.detail

@@ -408,6 +408,87 @@ class TestValidLevels:
         ) is None
 
 
+class TestRefusalTextsUseFmtPrice:
+    """Цены из БД приходят с 12 знаками (PriceNumeric); формат :g оставлял
+    их в тексте отказа: «774.545000000000». Теперь — fmt_price по точности
+    символа, а без неё — по порядку величины."""
+
+    STORED = D("774.545000000000")
+    STOP = D("766.383500000000")
+
+    def test_signal_stale_rounds_to_symbol_precision(self) -> None:
+        refusal = check_signal_not_stale(
+            reference_price=self.STORED, current_price=D("790.000000000000"),
+            stop_loss=self.STOP, side=TradeSide.LONG, max_staleness_ratio=D("0.3"),
+            price_precision=2,
+        )
+        assert refusal is not None
+        assert refusal.code is Code.SIGNAL_STALE
+        assert "774.55" in refusal.message
+        assert "766.38" in refusal.message
+        assert "790" in refusal.message
+        assert "0000" not in refusal.message
+
+    def test_signal_stale_without_precision_uses_magnitude_fallback(self) -> None:
+        refusal = check_signal_not_stale(
+            reference_price=self.STORED, current_price=D("790.000000000000"),
+            stop_loss=self.STOP, side=TradeSide.LONG, max_staleness_ratio=D("0.3"),
+        )
+        assert refusal is not None
+        assert "774.545" in refusal.message and "0000" not in refusal.message
+
+    def test_price_drift_text_has_no_trailing_zeros(self) -> None:
+        refusal = check_price_drift(
+            planned_price=self.STORED, current_price=D("790.000000000000"),
+            stop_loss=self.STOP, max_drift_ratio=D("0.3"), price_precision=2,
+        )
+        assert refusal is not None
+        assert "774.55" in refusal.message and "0000" not in refusal.message
+
+    def test_invalid_levels_texts_have_no_trailing_zeros(self) -> None:
+        wrong_stop = check_valid_levels(
+            entry_price=D("760.000000000000"), stop_loss=self.STOP,
+            take_profit=D("839.123000000000"), side=TradeSide.LONG,
+            min_risk_reward=D("1.5"), price_precision=2,
+        )
+        assert wrong_stop is not None
+        assert "766.38" in wrong_stop.message and "0000" not in wrong_stop.message
+        passed_tp = check_valid_levels(
+            entry_price=D("850.000000000000"), stop_loss=self.STOP,
+            take_profit=D("839.123000000000"), side=TradeSide.LONG,
+            min_risk_reward=D("1.5"), price_precision=2,
+        )
+        assert passed_tp is not None
+        assert "839.12" in passed_tp.message and "0000" not in passed_tp.message
+
+    def test_low_rr_text_has_no_trailing_zeros(self) -> None:
+        refusal = check_valid_levels(
+            entry_price=D("774.545000000000"), stop_loss=self.STOP,
+            take_profit=D("780.000000000000"), side=TradeSide.LONG,
+            min_risk_reward=D("2.000000000000"), price_precision=2,
+        )
+        assert refusal is not None
+        assert "минимального 1:2 " in refusal.message
+        assert "0000" not in refusal.message
+
+    def test_run_guards_passes_symbol_precision(self) -> None:
+        refusal = run_guards(
+            _valid_inputs(
+                symbol_info=_symbol_info(price_precision=2),
+                signal_reference_price=self.STORED,
+                current_price=D("790.000000000000"),
+                planned_price=D("790.000000000000"),
+                entry_price=D("790.000000000000"),
+                stop_loss=self.STOP,
+                take_profit=D("839.123000000000"),
+                max_signal_staleness_ratio=D("0.3"),
+            )
+        )
+        assert refusal is not None
+        assert refusal.code is Code.SIGNAL_STALE
+        assert "774.55" in refusal.message and "0000" not in refusal.message
+
+
 class TestPermissionsTrustworthy:
     def test_untrustworthy_refuses(self) -> None:
         refusal = check_permissions_trustworthy(trustworthy=False)
