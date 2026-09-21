@@ -105,6 +105,12 @@ class ExecutionOrder(IntPKMixin, TimestampMixin, Base):
     # отказ биржи, оба смысла не пересекаются на одной строке.
     error_code: Mapped[str | None] = mapped_column(String(64))
     error_message: Mapped[str | None] = mapped_column(Text)
+    # Раздел 12а: на каком вызове evaluate() возникла строка REFUSED/ERROR —
+    # "card" (строится карточка) или "confirm" (повторный вызов на «Да»),
+    # см. ObservationStage. Отдельная колонка, а не raw_response: там на 15.5
+    # будет ответ биржи, два смысла в одном поле не держим. NULL — старые
+    # строки и статусы, где стадия не нужна (DRY_RUN/DECLINED/EXPIRED).
+    stage: Mapped[str | None] = mapped_column(String(16))
 
     # --- Раздел 12а ТЗ: снимок расчёта на момент карточки/попытки --------
     # Заполняются только на ENTRY-строке (для SL/TP-ног обычного входа —

@@ -550,3 +550,34 @@ def test_build_execution_orders_creates_entry_stop_take() -> None:
     assert stop.side is OrderSide.SELL and take.side is OrderSide.SELL  # закрытие лонга — SELL
     assert stop.trigger_price == D("97")
     assert take.trigger_price == D("110")
+
+
+async def test_refusal_stage_card_without_planned_price_confirm_with_it(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Раздел 12а: planned_price=None — построение карточки (stage=card),
+    planned_price задан — вызов на «Да» (stage=confirm)."""
+    session, user, client, market = ctx
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    service = ExecutionService(
+        session=session,
+        settings=Settings(trading_execution_enabled=False),  # type: ignore[call-arg]
+        client=client,
+        market=market,
+    )
+    kwargs = {
+        "user": user, "signal": signal, "plan": user.trading_plan,
+        "has_trading_key": True, "key_can_trade_futures": True,
+        "selected_exchange_mode": ExchangeKeyMode.LIVE, "now": NOW,
+    }
+    await service.evaluate(**kwargs)
+    await service.evaluate(planned_price=D("100"), **kwargs)
+
+    rows = list(
+        await session.scalars(
+            select(ExecutionOrder)
+            .where(ExecutionOrder.signal_id == signal.id)
+            .order_by(ExecutionOrder.id)
+        )
+    )
+    assert [r.stage for r in rows] == ["card", "confirm"]

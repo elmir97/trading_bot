@@ -49,6 +49,7 @@ from app.execution.models import ExecutionRefusal, ExecutionRefusalCode
 from app.execution.service import (
     ExecutionQuote,
     ExecutionService,
+    build_exchange_error_order,
     build_execution_orders,
     build_observation_order_from_quote,
     price_drift_percent,
@@ -57,7 +58,7 @@ from app.execution.service import (
 from app.market.data import MarketDataService
 from app.services.exchange_factory import ExchangeFactory
 from app.services.permissions import refresh_permissions
-from app.trading.enums import OrderStatus, SignalLevel, SignalRecordStatus
+from app.trading.enums import ObservationStage, OrderStatus, SignalLevel, SignalRecordStatus
 
 router = Router(name="execution")
 logger = get_logger(__name__)
@@ -149,6 +150,44 @@ def render_confirmation(quote: ExecutionQuote, signal: SignalRecord, settings: S
 # ---------------------------------------------------------------------------
 
 
+async def _record_exchange_error(
+    session: AsyncSession,
+    user: User,
+    signal: SignalRecord,
+    error: ExchangeError,
+    *,
+    at_confirm: bool,
+) -> None:
+    """Раздел 12а: сбой биржи на пути входа не теряется — строка ERROR с
+    классом исключения. Запись идёт в SAVEPOINT и не должна ронять ответ
+    пользователю: если БД недоступна, текст об ошибке биржи всё равно уйдёт,
+    а сбой записи — в лог (не молча)."""
+    if signal.direction is None:
+        logger.error(
+            "Сбой биржи по сигналу без направления — наблюдение не записано",
+            extra={"user_id": user.id, "signal_id": signal.id},
+        )
+        return
+    stage = ObservationStage.CONFIRM if at_confirm else ObservationStage.CARD
+    try:
+        async with session.begin_nested():
+            session.add(
+                build_exchange_error_order(
+                    user_id=user.id,
+                    signal_id=signal.id,
+                    symbol=signal.symbol,
+                    direction=signal.direction,
+                    error=error,
+                    stage=stage,
+                )
+            )
+    except Exception:
+        logger.exception(
+            "Не удалось записать сбой биржи в execution_orders",
+            extra={"user_id": user.id, "signal_id": signal.id},
+        )
+
+
 async def _build_quote(
     session: AsyncSession,
     user: User,
@@ -186,6 +225,9 @@ async def _build_quote(
         try:
             client = await factory.for_user(session, user.id, mode=allowed_mode)
         except ExchangeAuthError as exc:
+            await _record_exchange_error(
+                session, user, signal, exc, at_confirm=planned_price is not None
+            )
             return _describe(exc)
     else:
         client = factory.public_client()
@@ -214,6 +256,9 @@ async def _build_quote(
         )
     except ExchangeError as exc:
         logger.warning("Биржа недоступна при оценке исполнения", extra={"user_id": user.id})
+        await _record_exchange_error(
+            session, user, signal, exc, at_confirm=planned_price is not None
+        )
         return _describe(exc)
     finally:
         await client.close()

@@ -302,3 +302,172 @@ class TestRenderExecutionDigest:
         stats = build_stats([], target_risk_percent=None, ready_signals=0)
         text = render_execution_digest(stats, max_price_drift_ratio=D("0.3"))
         assert "Скан рынка" not in text
+
+
+# ---------------------------------------------------------------------------
+# Пакет C: стадии отказов и сбои биржи
+# ---------------------------------------------------------------------------
+
+
+def _stage_row(status: OrderStatus, stage: str | None, code: str | None = None) -> ExecutionOrder:
+    return _row(status, stage=stage, error_code=code)
+
+
+class TestStages:
+    def test_refusals_split_by_stage(self) -> None:
+        rows = [
+            _stage_row(OrderStatus.REFUSED, "card", "MAX_POSITIONS"),
+            _stage_row(OrderStatus.REFUSED, "confirm", "PRICE_DRIFT"),
+            _stage_row(OrderStatus.REFUSED, "confirm", "PRICE_DRIFT"),
+        ]
+        stats = build_stats(rows, target_risk_percent=None)
+        assert stats.refusals_card_by_code == {"MAX_POSITIONS": 1}
+        assert stats.refusals_confirm_by_code == {"PRICE_DRIFT": 2}
+        assert stats.refusals_by_code == {"MAX_POSITIONS": 1, "PRICE_DRIFT": 2}
+
+    def test_null_stage_keeps_old_semantics_before_card(self) -> None:
+        """Строки до появления колонки — «до карточки», без эвристик: даже
+        PRICE_DRIFT (который на карточке отказать не может) без стадии
+        остаётся в прежней категории."""
+        rows = [_stage_row(OrderStatus.REFUSED, None, "PRICE_DRIFT")]
+        stats = build_stats(rows, target_risk_percent=None)
+        assert stats.refusals_card_by_code == {"PRICE_DRIFT": 1}
+        assert stats.refused_confirm == 0
+
+    def test_confirm_stage_refusal_counts_as_shown_card(self) -> None:
+        rows = [
+            _row(OrderStatus.DRY_RUN),
+            _stage_row(OrderStatus.REFUSED, "confirm", "SIGNAL_STALE"),
+            _stage_row(OrderStatus.ERROR, "confirm", "ExchangeUnavailableError"),
+            _stage_row(OrderStatus.REFUSED, "card", "MAX_POSITIONS"),
+            _stage_row(OrderStatus.ERROR, "card", "ExchangeAuthError"),
+        ]
+        stats = build_stats(rows, target_risk_percent=None)
+        assert stats.total_cards == 3       # DRY_RUN + отказ на «Да» + сбой на «Да»
+        assert stats.refused_card == 1
+        assert stats.errors_card == 1
+        assert stats.total_attempts == 5    # одна строка — одна попытка
+
+    def test_errors_counted_by_stage_and_class(self) -> None:
+        rows = [
+            _stage_row(OrderStatus.ERROR, "card", "ExchangeAuthError"),
+            _stage_row(OrderStatus.ERROR, "confirm", "ExchangeAuthError"),
+            _stage_row(OrderStatus.ERROR, None, "ExchangeUnavailableError"),
+        ]
+        stats = build_stats(rows, target_risk_percent=None)
+        assert (stats.errors_card, stats.errors_confirm) == (2, 1)
+        assert stats.errors_by_code == {"ExchangeAuthError": 2, "ExchangeUnavailableError": 1}
+        assert stats.refusals_by_code == {}
+
+    def test_error_rows_do_not_leak_into_averages(self) -> None:
+        rows = [_row(OrderStatus.ERROR, risk_percent=D("5"), risk_reward=D("9"))]
+        stats = build_stats(rows, target_risk_percent=D("1"))
+        assert stats.confirmed_risk_percents == []
+        assert stats.risk_deviations == []
+
+
+class TestErrorAnomalies:
+    def test_any_exchange_error_is_an_anomaly(self) -> None:
+        rows = [_stage_row(OrderStatus.ERROR, "card", "ExchangeAuthError")]
+        stats = build_stats(rows, target_risk_percent=None)
+        anomalies = detect_anomalies(stats, max_price_drift_ratio=D("0.3"))
+        assert anomalies == ["сбои биржи при попытках входа: 1 из 1 (ExchangeAuthError — 1)"]
+
+    def test_no_errors_no_anomaly(self) -> None:
+        stats = build_stats([_row(OrderStatus.DRY_RUN)], target_risk_percent=None)
+        assert detect_anomalies(stats, max_price_drift_ratio=D("0.3")) == []
+
+    def test_errors_are_excluded_from_guard_dominance_denominator(self) -> None:
+        """4 отказа MAX_POSITIONS, 4 сбоя биржи, 1 подтверждение: со сбоями в
+        знаменателе было бы 4 из 9 (меньше половины) — правило молчало бы
+        ровно во время сбоя биржи. Без них — 4 из 5."""
+        rows = [_stage_row(OrderStatus.REFUSED, "card", "MAX_POSITIONS") for _ in range(4)]
+        rows += [_stage_row(OrderStatus.ERROR, "card", "ExchangeAuthError") for _ in range(4)]
+        rows += [_stage_row(OrderStatus.DRY_RUN, None)]
+        stats = build_stats(rows, target_risk_percent=None)
+        assert stats.total_attempts == 9
+        assert stats.guard_attempts == 5
+        anomalies = detect_anomalies(stats, max_price_drift_ratio=D("0.3"))
+        assert "гвард MAX_POSITIONS срабатывает подозрительно часто: 4 из 5 попыток" in anomalies
+
+    def test_guard_rule_sums_both_stages(self) -> None:
+        rows = [
+            _stage_row(OrderStatus.REFUSED, "card", "SIGNAL_STALE"),
+            _stage_row(OrderStatus.REFUSED, "card", "SIGNAL_STALE"),
+            _stage_row(OrderStatus.REFUSED, "confirm", "SIGNAL_STALE"),
+            _stage_row(OrderStatus.REFUSED, "confirm", "SIGNAL_STALE"),
+            _row(OrderStatus.DRY_RUN),
+            _row(OrderStatus.DECLINED),
+        ]
+        stats = build_stats(rows, target_risk_percent=None)
+        anomalies = detect_anomalies(stats, max_price_drift_ratio=D("0.3"))
+        assert any("SIGNAL_STALE" in a and "4 из 6" in a for a in anomalies)
+
+    def test_denominator_still_equals_row_count_without_errors(self) -> None:
+        """Инвариант: без ERROR-строк знаменатель правила такой же, как до
+        пакета C (число строк), — разделение стадий его не меняет."""
+        rows = [
+            _row(OrderStatus.DRY_RUN),
+            _stage_row(OrderStatus.REFUSED, "card", "A"),
+            _stage_row(OrderStatus.REFUSED, "confirm", "B"),
+            _stage_row(OrderStatus.REFUSED, None, "C"),
+            _row(OrderStatus.EXPIRED),
+        ]
+        stats = build_stats(rows, target_risk_percent=None)
+        assert stats.guard_attempts == stats.total_attempts == len(rows)
+
+
+class TestFunnelRender:
+    def _text(self, rows: list[ExecutionOrder], ready: int = 0) -> str:
+        stats = build_stats(rows, target_risk_percent=None, ready_signals=ready)
+        return render_execution_digest(stats, max_price_drift_ratio=D("0.3"))
+
+    def test_funnel_lines_printed_even_when_zero(self) -> None:
+        text = self._text([])
+        for line in (
+            "Сигналов READY: 0",
+            "  показана карточка: 0",
+            "    подтверждено: 0",
+            "    отказ пользователя: 0",
+            "    истекло по TTL: 0",
+            "    отказ кода при подтверждении: 0",
+            "    сбой биржи при подтверждении: 0",
+            "  отказ кода до карточки: 0",
+            "  сбой биржи до карточки: 0",
+        ):
+            assert line in text.splitlines(), line
+
+    def test_code_breakdown_only_for_nonzero(self) -> None:
+        rows = [
+            _stage_row(OrderStatus.REFUSED, "confirm", "PRICE_DRIFT"),
+            _stage_row(OrderStatus.REFUSED, "card", "MAX_POSITIONS"),
+            _stage_row(OrderStatus.REFUSED, "card", "MAX_POSITIONS"),
+        ]
+        lines = self._text(rows, ready=3).splitlines()
+        i = lines.index("    отказ кода при подтверждении: 1")
+        assert lines[i + 1] == "      PRICE_DRIFT — 1"
+        j = lines.index("  отказ кода до карточки: 2")
+        assert lines[j + 1] == "    MAX_POSITIONS — 2"
+        assert not any(" — 0" in line for line in lines)
+
+    def test_layout_order_matches_spec(self) -> None:
+        rows = [_row(OrderStatus.DRY_RUN)]
+        lines = self._text(rows, ready=1).splitlines()
+        order = [
+            "Сигналов READY: 1",
+            "  показана карточка: 1",
+            "    подтверждено: 1",
+            "    отказ пользователя: 0",
+            "    истекло по TTL: 0",
+            "    отказ кода при подтверждении: 0",
+            "    сбой биржи при подтверждении: 0",
+            "  отказ кода до карточки: 0",
+            "  сбой биржи до карточки: 0",
+        ]
+        idx = [lines.index(x) for x in order]
+        assert idx == sorted(idx)
+
+    def test_error_anomaly_is_rendered(self) -> None:
+        text = self._text([_stage_row(OrderStatus.ERROR, "confirm", "ExchangeAuthError")])
+        assert "сбои биржи при попытках входа: 1 из 1 (ExchangeAuthError — 1)" in text
+        assert "Аномалии: нет" not in text

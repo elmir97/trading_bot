@@ -257,3 +257,44 @@ async def test_respects_notification_toggle(ctx) -> None:  # type: ignore[no-unt
 
     assert bot.sent_messages == []
     assert user.settings.execution_digest_last_sent_date is None
+
+
+async def test_stage_and_error_rows_reach_the_digest_through_the_db(ctx) -> None:  # type: ignore[no-untyped-def]
+    """stage и статус ERROR доезжают из БД до текста сводки: колонка stage
+    читается моделью, ERROR не роняет загрузку строк."""
+    daily, session, user, bot, settings = ctx
+    now, _tz_offset, today_local, local_hour = _call_args(
+        user, settings, local_hour=settings.exec_daily_digest_hour
+    )
+    moment = now - timedelta(minutes=1)
+    session.add(
+        _row(
+            user.id, OrderStatus.REFUSED, error_code="PRICE_DRIFT", stage="confirm",
+            created_at=moment,
+        )
+    )
+    session.add(
+        _row(
+            user.id, OrderStatus.REFUSED, error_code="MAX_POSITIONS", stage="card",
+            created_at=moment,
+        )
+    )
+    session.add(
+        _row(
+            user.id, OrderStatus.ERROR, error_code="ExchangeAuthError", stage="card",
+            created_at=moment,
+        )
+    )
+    await session.flush()
+
+    await daily._maybe_send_execution_digest(
+        session, user, user.settings, now, today_local, local_hour
+    )
+
+    _chat_id, text = bot.sent_messages[0]
+    lines = text.splitlines()
+    assert "  показана карточка: 1" in lines
+    assert "    отказ кода при подтверждении: 1" in lines
+    assert "  отказ кода до карточки: 1" in lines
+    assert "  сбой биржи до карточки: 1" in lines
+    assert "сбои биржи при попытках входа: 1 из 3 (ExchangeAuthError — 1)" in text

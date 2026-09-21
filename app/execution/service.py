@@ -50,10 +50,12 @@ from app.market.data import MarketDataService
 from app.trading.calculations import PERCENT_PRECISION, calculate_risk_reward
 from app.trading.enums import (
     ExchangeKeyMode,
+    ObservationStage,
     OrderRole,
     OrderSide,
     OrderStatus,
     OrderType,
+    SignalDirection,
     TradeSide,
 )
 from app.trading.risk import day_bounds, tz_offset_for
@@ -122,9 +124,12 @@ class ExecutionService:
         position_side: TradeSide,
         price: Decimal | None,
         drift: Decimal | None,
+        stage: ObservationStage,
     ) -> ExecutionRefusal:
         """Раздел 12а ТЗ: одна строка-наблюдение на каждый отказ гварда,
-        независимо от того, успел ли код добраться до цены/дрейфа."""
+        независимо от того, успел ли код добраться до цены/дрейфа. stage —
+        на каком вызове evaluate() отказ случился (карточка ещё строится или
+        уже показана и пришло «Да»)."""
         row = build_observation_order(
             user_id=user_id,
             signal_id=signal_id,
@@ -136,6 +141,7 @@ class ExecutionService:
             price_drift_percent=drift,
             error_code=refusal.code.value,
             error_message=refusal.message,
+            stage=stage,
         )
         self._orders.add(row)
         await self._orders.flush()
@@ -161,8 +167,14 @@ class ExecutionService:
         Пакет B: гвард SIGNAL_STALE не зависит от planned_price (сравнивает
         current_price с ценой сигнала, не с ценой карточки), поэтому
         работает одинаково на обоих вызовах — в т.ч. на первом, где
-        PRICE_DRIFT структурно бессилен."""
+        PRICE_DRIFT структурно бессилен.
+
+        Раздел 12а: planned_price не None — это вызов на «Да» (карточка уже
+        показана), строки отказов получают stage=CONFIRM, иначе CARD.
+        Пересчёт после PRICE_DRIFT идёт с planned_price=None — это
+        построение новой карточки, то есть CARD."""
         moment = now or datetime.now(UTC)
+        stage = ObservationStage.CONFIRM if planned_price is not None else ObservationStage.CARD
 
         if signal.direction is None or signal.stop_loss is None or signal.take_profit is None:
             # Кнопка показывается только под READY (см. handlers/execution.py),
@@ -187,6 +199,7 @@ class ExecutionService:
                 position_side=side,
                 price=price,
                 drift=drift,
+                stage=stage,
             )
 
         if refusal := check_execution_enabled(
@@ -420,6 +433,7 @@ def build_observation_order(
     risk_reward: Decimal | None = None,
     error_code: str | None = None,
     error_message: str | None = None,
+    stage: ObservationStage | None = None,
 ) -> ExecutionOrder:
     """Раздел 12а ТЗ: одна строка на исход попытки входа, которая не
     дошла до полноценной тройки build_execution_orders() — отказ гварда
@@ -446,6 +460,33 @@ def build_observation_order(
         risk_reward=risk_reward,
         error_code=error_code,
         error_message=error_message,
+        stage=stage.value if stage is not None else None,
+    )
+
+
+def build_exchange_error_order(
+    *,
+    user_id: int,
+    signal_id: int,
+    symbol: str,
+    direction: SignalDirection,
+    error: Exception,
+    stage: ObservationStage,
+) -> ExecutionOrder:
+    """Раздел 12а: сбой биржи на пути входа (статус ERROR). error_code —
+    имя класса исключения; error_message намеренно пуст: в str(exc) может
+    быть тело ответа биржи (одна из ручек BingX отдаёт apiKey эхом), полный
+    текст остаётся в логе."""
+    position_side = TradeSide(direction.value)
+    return build_observation_order(
+        user_id=user_id,
+        signal_id=signal_id,
+        symbol=symbol,
+        side=OrderSide.BUY if position_side is TradeSide.LONG else OrderSide.SELL,
+        position_side=position_side,
+        status=OrderStatus.ERROR,
+        error_code=type(error).__name__,
+        stage=stage,
     )
 
 

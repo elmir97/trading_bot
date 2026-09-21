@@ -44,13 +44,22 @@ from app.database.session import Database
 from app.exchanges.base import (
     ApiRestrictions,
     Balance,
+    ExchangeAuthError,
     ExchangeClient,
+    ExchangeError,
     ExchangeUnavailableError,
     SymbolInfo,
     Ticker,
 )
 from app.services.user_service import UserService
-from app.trading.enums import ExchangeKeyMode, OrderRole, OrderStatus, SignalDirection, SignalLevel
+from app.trading.enums import (
+    ExchangeKeyMode,
+    ObservationStage,
+    OrderRole,
+    OrderStatus,
+    SignalDirection,
+    SignalLevel,
+)
 from tests.conftest import cleanup_user
 
 pytestmark = pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="Нужен PostgreSQL")
@@ -384,6 +393,7 @@ async def test_open_button_shows_refusal_when_execution_disabled(ctx, bot, monke
     assert len(orders) == 1
     assert orders[0].status is OrderStatus.REFUSED
     assert orders[0].error_code == "EXECUTION_DISABLED"
+    assert orders[0].stage == ObservationStage.CARD
     assert orders[0].client_order_id is None
 
 
@@ -669,6 +679,7 @@ async def test_confirm_yes_price_drift_sends_recalculated_card(ctx, bot, monkeyp
     assert len(orders) == 1
     assert orders[0].status is OrderStatus.REFUSED
     assert orders[0].error_code == "PRICE_DRIFT"
+    assert orders[0].stage == ObservationStage.CONFIRM
     await session.refresh(signal)
     assert signal.trade_opened_at is None
 
@@ -677,3 +688,187 @@ async def test_confirm_yes_price_drift_sends_recalculated_card(ctx, bot, monkeyp
     assert (user.id, signal.id) in execution._confirmations
     new_state = execution._confirmations[(user.id, signal.id)]
     assert new_state.planned_price == D("101")
+
+
+# ---------------------------------------------------------------------------
+# Пакет C: стадия отказа и сбои биржи (раздел 12а)
+# ---------------------------------------------------------------------------
+
+
+def _patch_factory_auth_error(monkeypatch, client: FakeExchangeClient, error: Exception) -> None:
+    """Ключ есть, но for_user падает (ExchangeAuthError и т.п.) — сбой до
+    гвардов, ещё до похода за ценой."""
+
+    class FailingFactory:
+        def __init__(self, settings, cipher) -> None:
+            pass
+
+        async def get_credentials(self, session, user_id, exchange="bingx", mode=None):
+            return FakeCredentials(is_read_only=False)
+
+        async def for_user(self, session, user_id, exchange="bingx", mode=None):
+            raise error
+
+        def public_client(self):
+            return client
+
+    monkeypatch.setattr(execution, "ExchangeFactory", FailingFactory)
+
+
+def _make_ticker_fail(monkeypatch, client: FakeExchangeClient, error: Exception) -> None:
+    async def failing(symbol: str):
+        raise error
+
+    monkeypatch.setattr(client, "get_ticker", failing)
+
+
+async def test_card_stage_refusal_is_marked_card(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    dp, session, user, client, _redis, settings = ctx
+    settings.trading_execution_enabled = False
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+
+    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+
+    (row,) = await _orders_for_signal(session, signal.id)
+    assert row.status is OrderStatus.REFUSED
+    assert row.stage == ObservationStage.CARD
+
+
+async def test_confirm_stage_refusal_is_marked_confirm(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Карточка показана, на «Да» отказал гвард (тут — SIGNAL_ALREADY_USED
+    невозможен, поэтому выключаем исполнение между показом и «Да»)."""
+    dp, session, user, client, _redis, settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+
+    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+    state = execution._confirmations[(user.id, signal.id)]
+    settings.trading_execution_enabled = False
+
+    await _feed(dp, bot, 2, make_callback(f"exec:yes:{signal.id}", message_id=state.message_id))
+
+    (row,) = await _orders_for_signal(session, signal.id)
+    assert row.status is OrderStatus.REFUSED
+    assert row.error_code == "EXECUTION_DISABLED"
+    assert row.stage == ObservationStage.CONFIRM
+
+
+async def test_price_drift_refusal_on_yes_is_confirm_and_recalculated_card_is_card(  # type: ignore[no-untyped-def]
+    ctx, bot, monkeypatch
+) -> None:
+    dp, session, user, client, _redis, _settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+
+    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+    state = execution._confirmations[(user.id, signal.id)]
+    client.price = D("101")
+    await _feed(dp, bot, 2, make_callback(f"exec:yes:{signal.id}", message_id=state.message_id))
+
+    (row,) = await _orders_for_signal(session, signal.id)
+    assert row.error_code == "PRICE_DRIFT"
+    assert row.stage == ObservationStage.CONFIRM
+
+
+async def test_auth_error_on_card_is_recorded_as_error_card(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    dp, session, user, client, _redis, _settings = ctx
+    _patch_factory_auth_error(monkeypatch, client, ExchangeAuthError("ключ отозван"))
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+
+    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+
+    texts = bot.recorder.sent_texts()
+    assert len(texts) == 1 and "ключ отозван" in texts[0]
+    (row,) = await _orders_for_signal(session, signal.id)
+    assert row.status is OrderStatus.ERROR
+    assert row.stage == ObservationStage.CARD
+    assert row.error_code == "ExchangeAuthError"
+    assert row.role is OrderRole.ENTRY
+    assert row.client_order_id is None
+
+
+async def test_exchange_error_in_evaluate_on_card_is_recorded(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    dp, session, user, client, _redis, _settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    _make_ticker_fail(monkeypatch, client, ExchangeUnavailableError("timeout"))
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+
+    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+
+    assert len(bot.recorder.sent_texts()) == 1
+    (row,) = await _orders_for_signal(session, signal.id)
+    assert row.status is OrderStatus.ERROR
+    assert row.stage == ObservationStage.CARD
+    assert row.error_code == "ExchangeUnavailableError"
+
+
+async def test_exchange_error_on_yes_is_recorded_as_error_confirm(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    dp, session, user, client, _redis, _settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+
+    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+    state = execution._confirmations[(user.id, signal.id)]
+    _make_ticker_fail(monkeypatch, client, ExchangeUnavailableError("timeout"))
+
+    await _feed(dp, bot, 2, make_callback(f"exec:yes:{signal.id}", message_id=state.message_id))
+
+    (row,) = await _orders_for_signal(session, signal.id)
+    assert row.status is OrderStatus.ERROR
+    assert row.stage == ObservationStage.CONFIRM
+    assert (user.id, signal.id) not in execution._confirmations
+    await session.refresh(signal)
+    assert signal.trade_opened_at is None
+
+
+async def test_error_row_never_stores_exception_text(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """В str(exc) может быть тело ответа биржи (одна из ручек эхом отдаёт
+    apiKey): в БД — только класс исключения."""
+    dp, session, user, client, _redis, _settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    _make_ticker_fail(monkeypatch, client, ExchangeError("body: apiKey=SECRET-KEY-123"))
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+
+    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+
+    (row,) = await _orders_for_signal(session, signal.id)
+    assert row.status is OrderStatus.ERROR
+    assert row.error_message is None
+    assert row.raw_response is None
+    assert "SECRET-KEY-123" not in f"{row.error_code}{row.error_message}{row.raw_response}"
+
+
+async def test_failed_observation_write_does_not_swallow_user_message(  # type: ignore[no-untyped-def]
+    ctx, bot, monkeypatch, caplog
+) -> None:
+    dp, session, user, client, _redis, _settings = ctx
+    _patch_factory_auth_error(monkeypatch, client, ExchangeAuthError("ключ отозван"))
+
+    def boom(**kwargs):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(execution, "build_exchange_error_order", boom)
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+
+    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+
+    texts = bot.recorder.sent_texts()
+    assert len(texts) == 1 and "ключ отозван" in texts[0]
+    assert await _orders_for_signal(session, signal.id) == []

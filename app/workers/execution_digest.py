@@ -8,7 +8,11 @@
     DRY_RUN   — подтверждено ("Да", прошло все guard-ы)
     DECLINED  — пользователь нажал "Нет"
     EXPIRED   — карточка прожила 60 секунд без ответа
-    REFUSED   — отказал guard ещё до показа карточки (error_code — какой)
+    REFUSED   — отказал guard (error_code — какой): на построении карточки
+                (stage=card, карточки нет) или на «Да» (stage=confirm, карточка
+                уже была показана)
+    ERROR     — сбой обращения к бирже на пути входа (error_code — класс
+                исключения), тоже на одной из двух стадий
 
 Этот модуль только читает эти строки и считает: отдельной таблицы под
 статистику нет и не заводится — дублировать то, что уже пишется в
@@ -39,7 +43,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 from app.database.models.execution_order import ExecutionOrder
-from app.trading.enums import OrderStatus
+from app.trading.enums import ObservationStage, OrderStatus
 from app.workers.base import fmt_decimal
 from app.workers.scanner import ScanCycleStats
 
@@ -85,7 +89,15 @@ class ExecutionDigestStats:
     confirmed: int = 0
     declined: int = 0
     expired: int = 0
-    refusals_by_code: dict[str, int] = field(default_factory=dict)
+    # Отказы гвардов по стадии evaluate(): "card" (карточки ещё нет) и
+    # "confirm" (карточка показана, пришло «Да»). Строки без стадии (записаны
+    # до её появления) — прежняя семантика «до карточки».
+    refusals_card_by_code: dict[str, int] = field(default_factory=dict)
+    refusals_confirm_by_code: dict[str, int] = field(default_factory=dict)
+    # Сбои биржи (статус ERROR) по стадии и по классу исключения.
+    errors_card: int = 0
+    errors_confirm: int = 0
+    errors_by_code: dict[str, int] = field(default_factory=dict)
 
     # Только у подтверждённых (DRY_RUN) есть реальный объём/маржа/RR —
     # только по ним считаются "средние" в сводке.
@@ -97,18 +109,56 @@ class ExecutionDigestStats:
     undersized: list[RiskDeviation] = field(default_factory=list)
 
     @property
-    def total_cards(self) -> int:
-        """Показанных карточек — сумма трёх исходов. Отказы гвардов сюда
-        не входят: карточка при них ещё не появляется (раздел 7 ТЗ)."""
-        return self.confirmed + self.declined + self.expired
+    def refusals_by_code(self) -> dict[str, int]:
+        """Отказы гвардов по коду за обе стадии — для правила «гвард
+        срабатывает подозрительно часто»: один гвард не должен прятаться от
+        правила за разбивкой на стадии."""
+        merged = dict(self.refusals_card_by_code)
+        for code, count in self.refusals_confirm_by_code.items():
+            merged[code] = merged.get(code, 0) + count
+        return merged
+
+    @property
+    def refused_card(self) -> int:
+        return sum(self.refusals_card_by_code.values())
+
+    @property
+    def refused_confirm(self) -> int:
+        return sum(self.refusals_confirm_by_code.values())
 
     @property
     def total_refusals(self) -> int:
-        return sum(self.refusals_by_code.values())
+        return self.refused_card + self.refused_confirm
+
+    @property
+    def total_errors(self) -> int:
+        return self.errors_card + self.errors_confirm
+
+    @property
+    def total_cards(self) -> int:
+        """Показанных карточек. Кроме трёх исходов самой карточки сюда входят
+        попытки, оборвавшиеся на «Да» (отказ гварда или сбой биржи на втором
+        вызове evaluate()): карточка при них уже была показана. Отказы и сбои
+        на построении карточки не входят — карточка при них не рисуется
+        (раздел 7 ТЗ)."""
+        return (
+            self.confirmed + self.declined + self.expired
+            + self.refused_confirm + self.errors_confirm
+        )
 
     @property
     def total_attempts(self) -> int:
-        return self.total_cards + self.total_refusals
+        """Одна строка = одна попытка входа: карточки + отказы и сбои до
+        карточки."""
+        return self.total_cards + self.refused_card + self.errors_card
+
+    @property
+    def guard_attempts(self) -> int:
+        """Попытки, дошедшие до гвардов — знаменатель правила «гвард
+        срабатывает подозрительно часто». Сбои биржи не входят: сбой в
+        for_user случается до гвардов, и с ними в знаменателе правило
+        замолкало бы как раз во время сбоя биржи."""
+        return self.total_attempts - self.total_errors
 
 
 def build_stats(
@@ -143,7 +193,22 @@ def build_stats(
             stats.expired += 1
         elif row.status is OrderStatus.REFUSED:
             code = row.error_code or "?"
-            stats.refusals_by_code[code] = stats.refusals_by_code.get(code, 0) + 1
+            # Только явный "confirm" — всё остальное (NULL у старых строк,
+            # "card") это «до карточки». Эвристик по коду нет: окно сводки —
+            # скользящие 24 часа, старые строки быстро уходят из него.
+            by_code = (
+                stats.refusals_confirm_by_code
+                if row.stage == ObservationStage.CONFIRM
+                else stats.refusals_card_by_code
+            )
+            by_code[code] = by_code.get(code, 0) + 1
+        elif row.status is OrderStatus.ERROR:
+            if row.stage == ObservationStage.CONFIRM:
+                stats.errors_confirm += 1
+            else:
+                stats.errors_card += 1
+            code = row.error_code or "?"
+            stats.errors_by_code[code] = stats.errors_by_code.get(code, 0) + 1
 
     return stats
 
@@ -194,7 +259,7 @@ def detect_anomalies(stats: ExecutionDigestStats, *, max_price_drift_ratio: Deci
                 f"{fmt_decimal(avg_drift)}% — выше половины порога гварда PRICE_DRIFT"
             )
 
-    total = stats.total_attempts
+    total = stats.guard_attempts
     if total >= GUARD_DOMINANCE_MIN_ATTEMPTS:
         for code, count in stats.refusals_by_code.items():
             if Decimal(count) > Decimal(total) * GUARD_DOMINANCE_RATIO:
@@ -202,7 +267,26 @@ def detect_anomalies(stats: ExecutionDigestStats, *, max_price_drift_ratio: Deci
                     f"гвард {code} срабатывает подозрительно часто: {count} из {total} попыток"
                 )
 
+    if stats.total_errors:
+        by_class = ", ".join(
+            f"{code} — {count}"
+            for code, count in sorted(stats.errors_by_code.items(), key=lambda kv: -kv[1])
+        )
+        anomalies.append(
+            f"сбои биржи при попытках входа: {stats.total_errors} из "
+            f"{stats.total_attempts} ({by_class})"
+        )
+
     return anomalies
+
+
+def _append_codes(lines: list[str], by_code: dict[str, int], *, indent: int) -> None:
+    """Разбивка по кодам — только ненулевая: строки самой воронки печатаются
+    всегда (человек должен видеть, что проверка была), а нули по кодам —
+    шум."""
+    for code, count in sorted(by_code.items(), key=lambda kv: -kv[1]):
+        if count:
+            lines.append(f"{' ' * indent}{code} — {count}")
 
 
 def render_execution_digest(
@@ -228,10 +312,13 @@ def render_execution_digest(
         f"    подтверждено: {stats.confirmed}",
         f"    отказ пользователя: {stats.declined}",
         f"    истекло по TTL: {stats.expired}",
-        f"  отказ кода до карточки: {stats.total_refusals}",
+        f"    отказ кода при подтверждении: {stats.refused_confirm}",
     ]
-    for code, count in sorted(stats.refusals_by_code.items(), key=lambda kv: -kv[1]):
-        lines.append(f"    {code} — {count}")
+    _append_codes(lines, stats.refusals_confirm_by_code, indent=6)
+    lines.append(f"    сбой биржи при подтверждении: {stats.errors_confirm}")
+    lines.append(f"  отказ кода до карточки: {stats.refused_card}")
+    _append_codes(lines, stats.refusals_card_by_code, indent=4)
+    lines.append(f"  сбой биржи до карточки: {stats.errors_card}")
 
     has_averages = bool(
         stats.confirmed_risk_percents
