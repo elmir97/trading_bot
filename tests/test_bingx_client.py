@@ -494,6 +494,68 @@ class TestPrivateData:
         await client.close()
 
 
+class TestGetLeverage:
+    """Раздел 16 ТЗ, шаг 15.5.1: GET на тот же путь, что и set_leverage
+    ниже — читает текущее и максимальное плечо по символу, раздельно
+    по long/short (значения из живого запроса на демо-хосте, разведка
+    раздела 16)."""
+
+    async def test_parses_current_and_max_leverage_by_side(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.method == "GET"
+            assert "symbol=BTC-USDT" in str(request.url)
+            return ok({
+                "symbol": "BTC-USDT",
+                "longLeverage": 20, "shortLeverage": 20,
+                "maxLongLeverage": 150, "maxShortLeverage": 150,
+                "availableLongVal": 1762415.2, "availableLongVol": 20.4655,
+                "availableShortVal": 1762415.2, "availableShortVol": 20.4655,
+                "maxPositionLongVal": 100000000.0, "maxPositionShortVal": 100000000.0,
+            })
+
+        client = make_client(handler)
+        info = await client.get_leverage("BTC-USDT")
+
+        assert info.symbol == "BTC-USDT"
+        assert info.long_leverage == 20
+        assert info.short_leverage == 20
+        assert info.max_long_leverage == 150
+        assert info.max_short_leverage == 150
+        await client.close()
+
+    async def test_missing_field_raises_explicit_error_not_default(self) -> None:
+        """Раздел 16 ТЗ: живой /quote/contracts не отдаёт максимум плеча
+        вовсе — SymbolInfo.max_leverage убрали из-за молчаливого дефолта
+        20 именно по этой причине (см. коммит рефакторинга). get_leverage()
+        не должен повторить тот же баг для своего собственного ответа:
+        отсутствие поля — явная ошибка, не подставленное число."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return ok({"symbol": "BTC-USDT", "longLeverage": 20, "shortLeverage": 20})
+
+        client = make_client(handler)
+        with pytest.raises(ExchangeResponseError, match="maxLongLeverage"):
+            await client.get_leverage("BTC-USDT")
+        await client.close()
+
+    async def test_max_retries_override_does_not_retry(self) -> None:
+        """Путь подтверждения («Да») держит Redis-лок — как и у остальных
+        чтений (get_ticker/get_balance/get_symbol_info), max_retries=1
+        не должен ретраить."""
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            raise httpx.TimeoutException("timeout")
+
+        client = make_client(handler, max_retries=3)
+        client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
+
+        with pytest.raises(ExchangeUnavailableError):
+            await client.get_leverage("BTC-USDT", max_retries=1)
+        assert calls["n"] == 1
+        await client.close()
+
+
 class TestSetLeverage:
     async def test_sends_symbol_side_and_leverage_as_post(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:

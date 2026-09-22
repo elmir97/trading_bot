@@ -106,6 +106,9 @@ class FakeExchangeClient(ExchangeClient):
     async def get_fills(self, start_time, end_time, symbol=None) -> list[Fill]:
         return []
 
+    async def get_leverage(self, symbol, *, max_retries=None) -> object:  # type: ignore[override]
+        raise NotImplementedError
+
     async def set_leverage(self, symbol, leverage, *, position_side=None) -> int:
         raise NotImplementedError
 

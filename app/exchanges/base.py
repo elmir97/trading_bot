@@ -259,6 +259,26 @@ class ApiRestrictions:
 
 
 @dataclass(frozen=True, slots=True)
+class LeverageInfo:
+    """Текущее и максимальное плечо по символу — GET /openApi/swap/v2/
+    trade/leverage (раздел 16 ТЗ, шаг 15.5.1).
+
+    Не то же самое, что SymbolInfo: контрактная ручка (/quote/contracts)
+    максимум плеча не отдаёт вовсе (проверено живым запросом на демо-
+    хосте) — единственный источник и текущего, и максимального плеча
+    для аккаунта — эта ручка. Текущее и максимум идут раздельно по
+    сторонам (long/short): в хедж-режиме плечо LONG и SHORT независимо,
+    сравнивать значение "не по той стороне" — значит сравнивать не то,
+    что реально спросят при входе (см. app/execution/leverage.py)."""
+
+    symbol: str
+    long_leverage: int
+    short_leverage: int
+    max_long_leverage: int
+    max_short_leverage: int
+
+
+@dataclass(frozen=True, slots=True)
 class OrderResult:
     """Ответ биржи на размещение или запрос ордера.
 
@@ -360,6 +380,16 @@ class ExchangeClient(ABC):
 
     @abstractmethod
     async def get_open_orders(self, symbol: str | None = None) -> list[OpenOrder]: ...
+
+    @abstractmethod
+    async def get_leverage(
+        self, symbol: str, *, max_retries: int | None = None
+    ) -> LeverageInfo:
+        """Текущее и максимальное плечо по символу (раздел 16 ТЗ, шаг
+        15.5.1) — GET, чтение, а не следующий за ним, отдельный set_leverage
+        (POST) ниже. max_retries — см. get_ticker: путь подтверждения
+        читает с max_retries=1, путь карточки — обычным ретраем."""
+        ...
 
     # --- Торговые методы (нужен ключ с правом Perpetual Futures Trading) ---
     #

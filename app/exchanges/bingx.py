@@ -38,6 +38,7 @@ from app.exchanges.base import (
     ExchangeUnavailableError,
     Fill,
     Kline,
+    LeverageInfo,
     OpenOrder,
     OrderResult,
     Position,
@@ -62,6 +63,9 @@ USER_POSITIONS = "/openApi/swap/v2/user/positions"
 # приватных методов ниже.
 API_RESTRICTIONS = "/openApi/v1/account/apiRestrictions"
 TRADE_FILL_HISTORY = "/openApi/swap/v2/trade/allFillOrders"
+# Один и тот же путь: GET читает текущее/максимальное плечо по символу
+# (раздел 16 ТЗ, шаг 15.5.1, проверено живым запросом на демо-хосте),
+# POST выставляет.
 TRADE_LEVERAGE = "/openApi/swap/v2/trade/leverage"
 # Один и тот же путь: POST размещает ордер, GET — запрашивает его статус.
 TRADE_ORDER = "/openApi/swap/v2/trade/order"
@@ -729,6 +733,36 @@ class BingXClient(ExchangeClient):
     # client_order_id, а транспортный retry этой сверки не делает. Чтение
     # (get_order, set_leverage — идемпотентная по своей природе операция)
     # обычный retry сохраняет.
+
+    async def get_leverage(
+        self, symbol: str, *, max_retries: int | None = None
+    ) -> LeverageInfo:
+        """Раздел 16 ТЗ, шаг 15.5.1: GET на тот же путь, что и set_leverage
+        ниже — чтение, не изменение состояния, поэтому обычный retry
+        (max_retries=None по умолчанию), а не max_retries=1, как у POST-
+        методов этого блока. Поля без дефолтов: если maxLongLeverage/
+        maxShortLeverage/longLeverage/shortLeverage нет в ответе —
+        ExchangeResponseError, не подставленное число (раздел 16: живой
+        ответ /quote/contracts вообще не отдаёт максимум плеча — молчаливый
+        дефолт по этой же причине убран у SymbolInfo)."""
+        data = await self._request(
+            TRADE_LEVERAGE, {"symbol": symbol}, signed=True, max_retries=max_retries
+        )
+        if not isinstance(data, dict):
+            raise ExchangeResponseError("Ожидался объект с данными о плече")
+        required = ("longLeverage", "shortLeverage", "maxLongLeverage", "maxShortLeverage")
+        missing = [field for field in required if data.get(field) is None]
+        if missing:
+            raise ExchangeResponseError(
+                f"В ответе {TRADE_LEVERAGE} нет полей: {', '.join(missing)}"
+            )
+        return LeverageInfo(
+            symbol=data.get("symbol", symbol),
+            long_leverage=int(data["longLeverage"]),
+            short_leverage=int(data["shortLeverage"]),
+            max_long_leverage=int(data["maxLongLeverage"]),
+            max_short_leverage=int(data["maxShortLeverage"]),
+        )
 
     async def set_leverage(
         self, symbol: str, leverage: int, *, position_side: str | None = None

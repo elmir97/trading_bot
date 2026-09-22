@@ -138,6 +138,9 @@ class FakeExchangeClient(ExchangeClient):
     async def get_fills(self, start_time, end_time, symbol=None):
         return []
 
+    async def get_leverage(self, symbol, *, max_retries=None):
+        raise NotImplementedError
+
     async def set_leverage(self, symbol, leverage, *, position_side=None):
         raise NotImplementedError
 
