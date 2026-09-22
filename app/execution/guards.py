@@ -38,6 +38,25 @@ def check_execution_enabled(*, execution_enabled: bool) -> ExecutionRefusal | No
     return None
 
 
+# --- 1а. LIVE_ORDERS_NOT_ALLOWED (раздел 16 ТЗ, шаг 15.5.1) -----------------
+# Сразу после EXECUTION_DISABLED, до похода за правами ключа — реальные
+# деньги на LIVE обязаны быть отдельным, явным включением
+# (EXEC_ALLOW_LIVE_MODE_ORDERS), а не побочным следствием того, что
+# EXECUTION_DISABLED уже False.
+
+
+def check_live_orders_allowed(
+    *, trading_mode: str, allow_live_mode_orders: bool
+) -> ExecutionRefusal | None:
+    if trading_mode == "live" and not allow_live_mode_orders:
+        return ExecutionRefusal(
+            Code.LIVE_ORDERS_NOT_ALLOWED,
+            "Отправка реальных ордеров на LIVE выключена конфигом "
+            "(EXEC_ALLOW_LIVE_MODE_ORDERS).",
+        )
+    return None
+
+
 # --- 2. NO_TRADING_KEY -------------------------------------------------------
 
 
@@ -336,11 +355,14 @@ def check_symbol_allowed(
 @dataclass(frozen=True, slots=True, kw_only=True)
 class GuardInputs:
     """Один снимок данных для всех проверок раздела 7 (плюс добавленные позже
-    вне исходного ТЗ — 2а MODE_NOT_ALLOWED, 9а SIGNAL_STALE), в порядке
-    run_guards()."""
+    вне исходного ТЗ — 1а LIVE_ORDERS_NOT_ALLOWED, 2а MODE_NOT_ALLOWED,
+    9а SIGNAL_STALE), в порядке run_guards()."""
 
     # 1
     execution_enabled: bool
+    # 1а (раздел 16 ТЗ, шаг 15.5.1)
+    bingx_trading_mode: str
+    exec_allow_live_mode_orders: bool
     # 2
     has_trading_key: bool
     key_can_trade_futures: bool
@@ -388,6 +410,11 @@ class GuardInputs:
 
 def run_guards(inputs: GuardInputs) -> ExecutionRefusal | None:
     if refusal := check_execution_enabled(execution_enabled=inputs.execution_enabled):
+        return refusal
+    if refusal := check_live_orders_allowed(
+        trading_mode=inputs.bingx_trading_mode,
+        allow_live_mode_orders=inputs.exec_allow_live_mode_orders,
+    ):
         return refusal
     if refusal := check_trading_key(
         has_key=inputs.has_trading_key, key_can_trade_futures=inputs.key_can_trade_futures

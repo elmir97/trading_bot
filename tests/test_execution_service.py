@@ -261,7 +261,8 @@ async def test_max_positions_refused_observation_captures_price_and_drift(ctx) -
     signal = _signal(user.id)
     session.add(signal)
     settings = Settings(  # type: ignore[call-arg]
-        trading_execution_enabled=True, exec_max_open_positions=2, bingx_trading_mode="live"
+        trading_execution_enabled=True, exec_max_open_positions=2,
+        bingx_trading_mode="live", exec_allow_live_mode_orders=True,
     )
     for i in range(2):
         session.add(_open_trade(user.id, symbol=f"ALT{i}-USDT"))
@@ -323,13 +324,42 @@ async def test_mode_not_allowed_refuses(ctx) -> None:  # type: ignore[no-untyped
     assert client.balance == D("1000")  # до биржи не дошло — как и NO_TRADING_KEY
 
 
+async def test_live_orders_not_allowed_refuses_before_trading_key_check(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Раздел 16 ТЗ, шаг 15.5.1: сразу после EXECUTION_DISABLED, до похода
+    за правами ключа — has_trading_key=False тоже, но отказ должен быть
+    именно этим кодом, не NO_TRADING_KEY."""
+    session, user, client, market = ctx
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+
+    settings = Settings(  # type: ignore[call-arg]
+        trading_execution_enabled=True,
+        bingx_trading_mode="live",
+        exec_allow_live_mode_orders=False,
+    )
+    service = _service(session, settings, client, market)
+    result = await service.evaluate(
+        user=user, signal=signal, plan=user.trading_plan,
+        has_trading_key=False, key_can_trade_futures=False,
+        selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
+    )
+    assert isinstance(result, ExecutionRefusal)
+    assert result.code is Code.LIVE_ORDERS_NOT_ALLOWED
+    assert client.balance == D("1000")  # до биржи не дошло
+
+
 async def test_valid_ready_signal_returns_quote(ctx) -> None:  # type: ignore[no-untyped-def]
     session, user, client, market = ctx
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
 
-    settings = Settings(trading_execution_enabled=True, bingx_trading_mode="live")  # type: ignore[call-arg]
+    settings = Settings(  # type: ignore[call-arg]
+        trading_execution_enabled=True,
+        bingx_trading_mode="live",
+        exec_allow_live_mode_orders=True,
+    )
     service = _service(session, settings, client, market)
     result = await service.evaluate(
         user=user, signal=signal, plan=user.trading_plan,
@@ -356,7 +386,11 @@ async def test_signal_already_used_refuses(ctx) -> None:  # type: ignore[no-unty
     session.add(signal)
     await session.flush()
 
-    settings = Settings(trading_execution_enabled=True, bingx_trading_mode="live")  # type: ignore[call-arg]
+    settings = Settings(  # type: ignore[call-arg]
+        trading_execution_enabled=True,
+        bingx_trading_mode="live",
+        exec_allow_live_mode_orders=True,
+    )
     service = _service(session, settings, client, market)
     result = await service.evaluate(
         user=user, signal=signal, plan=user.trading_plan,
@@ -375,7 +409,11 @@ async def test_existing_position_on_symbol_refuses(ctx) -> None:  # type: ignore
     session.add(_open_trade(user.id, symbol="BTC-USDT"))
     await session.flush()
 
-    settings = Settings(trading_execution_enabled=True, bingx_trading_mode="live")  # type: ignore[call-arg]
+    settings = Settings(  # type: ignore[call-arg]
+        trading_execution_enabled=True,
+        bingx_trading_mode="live",
+        exec_allow_live_mode_orders=True,
+    )
     service = _service(session, settings, client, market)
     result = await service.evaluate(
         user=user, signal=signal, plan=user.trading_plan,
@@ -392,7 +430,8 @@ async def test_max_positions_refuses(ctx) -> None:  # type: ignore[no-untyped-de
     signal = _signal(user.id)
     session.add(signal)
     settings = Settings(  # type: ignore[call-arg]
-        trading_execution_enabled=True, exec_max_open_positions=2, bingx_trading_mode="live"
+        trading_execution_enabled=True, exec_max_open_positions=2,
+        bingx_trading_mode="live", exec_allow_live_mode_orders=True,
     )
     for i in range(2):
         session.add(_open_trade(user.id, symbol=f"ALT{i}-USDT"))
@@ -417,7 +456,11 @@ async def test_price_drift_refuses_on_second_evaluation(ctx) -> None:  # type: i
     session.add(signal)
     await session.flush()
 
-    settings = Settings(trading_execution_enabled=True, bingx_trading_mode="live")  # type: ignore[call-arg]
+    settings = Settings(  # type: ignore[call-arg]
+        trading_execution_enabled=True,
+        bingx_trading_mode="live",
+        exec_allow_live_mode_orders=True,
+    )
     service = _service(session, settings, client, market)
 
     first = await service.evaluate(
@@ -453,7 +496,11 @@ async def test_signal_stale_refuses_on_first_evaluation(ctx) -> None:  # type: i
     session.add(signal)
     await session.flush()
 
-    settings = Settings(trading_execution_enabled=True, bingx_trading_mode="live")  # type: ignore[call-arg]
+    settings = Settings(  # type: ignore[call-arg]
+        trading_execution_enabled=True,
+        bingx_trading_mode="live",
+        exec_allow_live_mode_orders=True,
+    )
     service = _service(session, settings, client, market)
 
     # reference = (100+101)/2 = 100.5, стоп 97 → дистанция 3.5, допустимо
@@ -477,7 +524,11 @@ async def test_signal_stale_does_not_refuse_move_toward_stop(ctx) -> None:  # ty
     session.add(signal)
     await session.flush()
 
-    settings = Settings(trading_execution_enabled=True, bingx_trading_mode="live")  # type: ignore[call-arg]
+    settings = Settings(  # type: ignore[call-arg]
+        trading_execution_enabled=True,
+        bingx_trading_mode="live",
+        exec_allow_live_mode_orders=True,
+    )
     service = _service(session, settings, client, market)
 
     client.price = D("98")  # к стопу, дальше допустимых 3.5 от reference 100.5
@@ -552,7 +603,11 @@ async def test_valid_signal_carries_dual_side_position_on_quote(ctx) -> None:  #
     session.add(signal)
     await session.flush()
 
-    settings = Settings(trading_execution_enabled=True, bingx_trading_mode="live")  # type: ignore[call-arg]
+    settings = Settings(  # type: ignore[call-arg]
+        trading_execution_enabled=True,
+        bingx_trading_mode="live",
+        exec_allow_live_mode_orders=True,
+    )
     service = _service(session, settings, client, market)
     result = await service.evaluate(
         user=user, signal=signal, plan=user.trading_plan,
@@ -579,7 +634,11 @@ async def test_symbol_data_unavailable_refuses(ctx) -> None:  # type: ignore[no-
         min_quantity=D("0.001"), min_notional=D("5"),
     )
 
-    settings = Settings(trading_execution_enabled=True, bingx_trading_mode="live")  # type: ignore[call-arg]
+    settings = Settings(  # type: ignore[call-arg]
+        trading_execution_enabled=True,
+        bingx_trading_mode="live",
+        exec_allow_live_mode_orders=True,
+    )
     service = _service(session, settings, client, market)
     result = await service.evaluate(
         user=user, signal=signal, plan=user.trading_plan,
@@ -672,7 +731,11 @@ async def test_confirm_stage_uses_fail_fast_reads_card_stage_does_not(ctx) -> No
     session.add(signal)
     await session.flush()
 
-    settings = Settings(trading_execution_enabled=True, bingx_trading_mode="live")  # type: ignore[call-arg]
+    settings = Settings(  # type: ignore[call-arg]
+        trading_execution_enabled=True,
+        bingx_trading_mode="live",
+        exec_allow_live_mode_orders=True,
+    )
     kwargs = {
         "user": user, "signal": signal, "plan": user.trading_plan,
         "has_trading_key": True, "key_can_trade_futures": True,

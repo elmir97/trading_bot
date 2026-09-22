@@ -21,6 +21,11 @@ class ExecutionRefusalCode(StrEnum):
     строит сам, до/помимо run_guards()."""
 
     EXECUTION_DISABLED = "EXECUTION_DISABLED"
+    # Раздел 16 ТЗ, шаг 15.5.1: LIVE запрещён конфигом (EXEC_ALLOW_LIVE_
+    # MODE_ORDERS=false, дефолт) — сразу после EXECUTION_DISABLED, до
+    # похода за правами ключа. В run_guards() входит (см. "1а" в guards.py),
+    # в отличие от PERMISSIONS_UNKNOWN/POSITION_MODE_UNKNOWN ниже.
+    LIVE_ORDERS_NOT_ALLOWED = "LIVE_ORDERS_NOT_ALLOWED"
     # Раздел 8 ТЗ: права ключа не удалось проверить (сбой запроса к бирже,
     # отметка отсутствует или протухла) — отдельно от NO_TRADING_KEY, у
     # которого права ИЗВЕСТНЫ и они недостаточны. См. app/services/permissions.py.

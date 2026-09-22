@@ -39,6 +39,7 @@ from app.exchanges.base import ExchangeClient, SymbolInfo
 from app.execution.guards import (
     GuardInputs,
     check_execution_enabled,
+    check_live_orders_allowed,
     check_mode_allowed,
     check_permissions_trustworthy,
     check_position_mode_known,
@@ -222,6 +223,15 @@ class ExecutionService:
             execution_enabled=self._settings.trading_execution_enabled
         ):
             return await refuse(refusal)
+        if refusal := check_live_orders_allowed(
+            trading_mode=self._settings.bingx_trading_mode,
+            allow_live_mode_orders=self._settings.exec_allow_live_mode_orders,
+        ):
+            # Сразу после EXECUTION_DISABLED, до похода за правами ключа
+            # (раздел 16 ТЗ, шаг 15.5.1): LIVE без явного разрешения
+            # конфигом отказан раньше, чем код успеет спросить биржу
+            # хоть о чём-то.
+            return await refuse(refusal)
         if refusal := check_permissions_trustworthy(trustworthy=permissions_trustworthy):
             # До check_trading_key: если права не удалось проверить,
             # key_can_trade_futures мог остаться устаревшим значением
@@ -282,6 +292,8 @@ class ExecutionService:
 
         guard_inputs = GuardInputs(
             execution_enabled=self._settings.trading_execution_enabled,
+            bingx_trading_mode=self._settings.bingx_trading_mode,
+            exec_allow_live_mode_orders=self._settings.exec_allow_live_mode_orders,
             has_trading_key=has_trading_key,
             key_can_trade_futures=key_can_trade_futures,
             selected_exchange_mode=selected_exchange_mode,

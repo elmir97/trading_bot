@@ -571,7 +571,17 @@ async def _process_confirm(
             await callback.message.edit_text(render_refusal(result), reply_markup=None)
         return
 
-    # Успех: этап 15.4 — реального ордера не будет, только сухой прогон.
+    # Успех: раздел 16 ТЗ, шаг 15.5.1 — состояние сервиса, не зашитый
+    # литерал (было: OrderStatus.DRY_RUN безусловно). exec_dry_run=False
+    # сегодня недостижим (Settings._dry_run_supported_only_when_true роняет
+    # процесс на старте раньше) — ветка ниже на случай обхода валидатора,
+    # не тихое повторение DRY_RUN. Путь реальной отправки — шаг 15.5.2.
+    if not settings.exec_dry_run:
+        raise NotImplementedError(
+            "EXEC_DRY_RUN=false не поддерживается до шага 15.5.2"
+        )
+    status = OrderStatus.DRY_RUN
+
     _confirmations.pop(key, None)
     order = result.order
     # Дрейф — от свежей цены подтверждения (order.entry_price), не от цены
@@ -584,9 +594,7 @@ async def _process_confirm(
         # SAVEPOINT: та же техника, что и в _record_exchange_error — если
         # ловим гонку, откатываем только эту вставку, не всю сессию.
         async with session.begin_nested():
-            for row in build_execution_orders(
-                order, OrderStatus.DRY_RUN, price_drift_percent=drift
-            ):
+            for row in build_execution_orders(order, status, price_drift_percent=drift):
                 orders_repo.add(row)
             await orders_repo.flush()
     except IntegrityError as exc:

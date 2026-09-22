@@ -357,7 +357,14 @@ async def ctx(unique_telegram_id):  # type: ignore[no-untyped-def]
     # bingx_trading_mode="live" — совпадает с дефолтом
     # UserSettings.active_exchange_mode=LIVE (этап 15.4в), иначе guard
     # MODE_NOT_ALLOWED отказывал бы во всех «счастливых» тестах ниже.
-    settings = Settings(trading_execution_enabled=True, bingx_trading_mode="live")  # type: ignore[call-arg]
+    # exec_allow_live_mode_orders=True — раздел 16 ТЗ, шаг 15.5.1: без
+    # этого LIVE_ORDERS_NOT_ALLOWED отказывал бы во всех тех же тестах,
+    # раньше даже MODE_NOT_ALLOWED.
+    settings = Settings(  # type: ignore[call-arg]
+        trading_execution_enabled=True,
+        bingx_trading_mode="live",
+        exec_allow_live_mode_orders=True,
+    )
     db = Database(settings)
     async with db.session() as session:
         user_service = UserService(
@@ -592,6 +599,35 @@ async def test_confirm_yes_creates_dry_run_orders(ctx, bot, monkeypatch) -> None
     dry_run_texts = [t for t in bot.recorder.sent_texts() if "Сухой прогон" in t]
     assert len(dry_run_texts) == 1
     assert (user.id, signal.id) not in execution._confirmations
+
+
+async def test_confirm_yes_raises_when_dry_run_disabled(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Раздел 16 ТЗ, шаг 15.5.1: Settings._dry_run_supported_only_when_true
+    роняет процесс на старте при EXEC_DRY_RUN=false — этот путь недостижим
+    штатно. Тест бьёт по защите на случай обхода валидатора (мутация
+    settings.exec_dry_run после конструктора, тот же приём, что и для
+    trading_execution_enabled в остальных тестах файла): падать явным
+    NotImplementedError, не тихо повторять DRY_RUN и не отправлять
+    недостроенный путь."""
+    dp, session, user, client, _redis, settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+
+    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+    state = execution._confirmations[(user.id, signal.id)]
+    settings.exec_dry_run = False  # обходим валидатор конструктора, как и трогающие его тесты выше
+
+    with pytest.raises(NotImplementedError, match="не поддерживается"):
+        await _feed(
+            dp, bot, 2,
+            make_callback(f"exec:yes:{signal.id}", message_id=state.message_id),
+        )
+
+    orders = await _orders_for_signal(session, signal.id)
+    assert orders == []
 
 
 async def test_position_mode_read_on_card_not_reread_on_confirm(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]

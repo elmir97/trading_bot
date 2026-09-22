@@ -146,6 +146,17 @@ class Settings(BaseSettings):
     )
     # Час по местному времени пользователя для сводки исполнения (раздел 12а).
     exec_daily_digest_hour: int = 21
+    # Раздел 16 ТЗ, шаг 15.5.1: дефолт True сохраняет сегодняшнее поведение
+    # (только DRY_RUN) без изменений. False пока не поддерживается — см.
+    # валидатор _dry_run_supported_only_when_true ниже: путь реальной
+    # отправки (PENDING-запись до HTTP, place_market_order) появится
+    # только в 15.5.2, а не в этом шаге.
+    exec_dry_run: bool = True
+    # Раздел 16 ТЗ, шаг 15.5.1: второй, более узкий выключатель поверх
+    # trading_execution_enabled — реальные ордера на LIVE только по
+    # явному включению, не как побочный эффект общего рубильника. См.
+    # guards.check_live_orders_allowed.
+    exec_allow_live_mode_orders: bool = False
 
     # --- Дефолты торгового плана ------------------------------------------
     # Реальные значения хранятся в БД per-user; это лишь начальные значения
@@ -186,6 +197,21 @@ class Settings(BaseSettings):
     position_monitor_approach_percent: Decimal = Decimal("10")
     daily_jobs_interval_minutes: int = 15
     daily_summary_hour_local: int = 20
+
+    @field_validator("exec_dry_run")
+    @classmethod
+    def _dry_run_supported_only_when_true(cls, value: bool) -> bool:
+        """Раздел 16 ТЗ, шаг 15.5.1: узнавать о недостроенном пути реальной
+        отправки в момент нажатия «Да» — с уже взятым Redis-локом и уже
+        помеченным signal.trade_opened_at — недопустимо. EXEC_DRY_RUN=false
+        роняет запуск процесса, а не ждёт первого подтверждения. Валидацию
+        снимает шаг 15.5.2, когда путь реальной отправки появится."""
+        if not value:
+            raise ValueError(
+                "EXEC_DRY_RUN=false не поддерживается до шага 15.5.2 — "
+                "путь реальной отправки ордера ещё не реализован."
+            )
+        return value
 
     @field_validator("ai_model")
     @classmethod

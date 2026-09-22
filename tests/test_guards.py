@@ -16,6 +16,7 @@ from app.execution.guards import (
     GuardInputs,
     check_daily_loss_limit,
     check_execution_enabled,
+    check_live_orders_allowed,
     check_max_positions,
     check_max_total_risk,
     check_mode_allowed,
@@ -57,6 +58,8 @@ def _valid_inputs(**overrides: object) -> GuardInputs:
     """Снимок, на котором ни один из 12 guard-ов не срабатывает."""
     fields: dict[str, object] = {
         "execution_enabled": True,
+        "bingx_trading_mode": "live",
+        "exec_allow_live_mode_orders": True,
         "has_trading_key": True,
         "key_can_trade_futures": True,
         "selected_exchange_mode": ExchangeKeyMode.LIVE,
@@ -104,6 +107,30 @@ class TestExecutionEnabled:
 
     def test_enabled_passes(self) -> None:
         assert check_execution_enabled(execution_enabled=True) is None
+
+
+class TestLiveOrdersAllowed:
+    """Раздел 16 ТЗ, шаг 15.5.1."""
+
+    def test_live_without_flag_refuses(self) -> None:
+        refusal = check_live_orders_allowed(
+            trading_mode="live", allow_live_mode_orders=False
+        )
+        assert refusal is not None
+        assert refusal.code is Code.LIVE_ORDERS_NOT_ALLOWED
+
+    def test_live_with_flag_passes(self) -> None:
+        assert (
+            check_live_orders_allowed(trading_mode="live", allow_live_mode_orders=True)
+            is None
+        )
+
+    def test_demo_without_flag_passes(self) -> None:
+        """Флаг вообще не при чём на demo — ограничение только про LIVE."""
+        assert (
+            check_live_orders_allowed(trading_mode="demo", allow_live_mode_orders=False)
+            is None
+        )
 
 
 class TestTradingKey:
@@ -555,25 +582,30 @@ class TestSymbolAllowed:
 # в порядке раздела 7 ТЗ.
 GUARD_ORDER: list[tuple[int, Code, dict[str, object]]] = [
     (1, Code.EXECUTION_DISABLED, {"execution_enabled": False}),
-    (2, Code.NO_TRADING_KEY, {"has_trading_key": False}),
-    (3, Code.MODE_NOT_ALLOWED, {"selected_exchange_mode": ExchangeKeyMode.DEMO}),
-    (4, Code.SIGNAL_EXPIRED, {"signal_expires_at": NOW - timedelta(seconds=1)}),
-    (5, Code.SIGNAL_ALREADY_USED, {"signal_trade_opened_at": NOW}),
-    (6, Code.POSITION_EXISTS, {"has_open_position": True}),
-    (7, Code.MAX_POSITIONS, {"open_positions_count": 4, "max_positions": 4}),
     (
-        8,
+        2,
+        Code.LIVE_ORDERS_NOT_ALLOWED,
+        {"bingx_trading_mode": "live", "exec_allow_live_mode_orders": False},
+    ),
+    (3, Code.NO_TRADING_KEY, {"has_trading_key": False}),
+    (4, Code.MODE_NOT_ALLOWED, {"selected_exchange_mode": ExchangeKeyMode.DEMO}),
+    (5, Code.SIGNAL_EXPIRED, {"signal_expires_at": NOW - timedelta(seconds=1)}),
+    (6, Code.SIGNAL_ALREADY_USED, {"signal_trade_opened_at": NOW}),
+    (7, Code.POSITION_EXISTS, {"has_open_position": True}),
+    (8, Code.MAX_POSITIONS, {"open_positions_count": 4, "max_positions": 4}),
+    (
+        9,
         Code.MAX_TOTAL_RISK,
         {"current_total_risk_percent": D("10"), "max_total_risk_percent": D("1")},
     ),
     (
-        9,
+        10,
         Code.DAILY_LOSS_LIMIT,
         {"day_loss_percent": D("10"), "max_daily_loss_percent": D("1")},
     ),
-    (10, Code.PRICE_DRIFT, {"current_price": D("10000")}),
+    (11, Code.PRICE_DRIFT, {"current_price": D("10000")}),
     (
-        11,
+        12,
         Code.SIGNAL_STALE,
         # Не трогает current_price/planned_price (не пересекается с
         # PRICE_DRIFT) и не trogaет stop_loss: с крошечным ratio дрейф
@@ -582,9 +614,9 @@ GUARD_ORDER: list[tuple[int, Code, dict[str, object]]] = [
         # test_order_is_respected_for_every_adjacent_pair.
         {"signal_reference_price": D("100"), "max_signal_staleness_ratio": D("0.0001")},
     ),
-    (12, Code.INVALID_LEVELS, {"stop_loss": D("105")}),
-    (13, Code.SIZE_TOO_SMALL, {"symbol_info": _symbol_info(min_quantity=D("1000"))}),
-    (14, Code.SYMBOL_NOT_ALLOWED, {"symbol": "XRP-USDT"}),
+    (13, Code.INVALID_LEVELS, {"stop_loss": D("105")}),
+    (14, Code.SIZE_TOO_SMALL, {"symbol_info": _symbol_info(min_quantity=D("1000"))}),
+    (15, Code.SYMBOL_NOT_ALLOWED, {"symbol": "XRP-USDT"}),
 ]
 
 

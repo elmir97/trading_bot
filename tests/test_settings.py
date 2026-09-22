@@ -10,6 +10,7 @@ from decimal import Decimal
 
 import pytest
 import pytest_asyncio
+from pydantic import ValidationError
 from sqlalchemy import select, text
 
 from app.core.config import Settings
@@ -273,6 +274,23 @@ class TestPositionModeTtl:
 
     def test_default_is_300_seconds(self) -> None:
         assert _minimal_settings().exec_position_mode_ttl_seconds == 300
+
+
+class TestExecutionGates:
+    """Раздел 16 ТЗ, шаг 15.5.1: EXEC_DRY_RUN и EXEC_ALLOW_LIVE_MODE_ORDERS."""
+
+    def test_dry_run_default_is_true(self) -> None:
+        assert _minimal_settings().exec_dry_run is True
+
+    def test_dry_run_false_fails_at_startup(self) -> None:
+        """Раздел 16 ТЗ: узнавать об этом в момент «Да» недопустимо —
+        Settings() обязан упасть на старте процесса, раньше первого
+        апдейта."""
+        with pytest.raises(ValidationError, match="не поддерживается"):
+            _minimal_settings(exec_dry_run=False)
+
+    def test_allow_live_mode_orders_default_is_false(self) -> None:
+        assert _minimal_settings().exec_allow_live_mode_orders is False
 
 
 def _minimal_settings(**overrides: object) -> Settings:
