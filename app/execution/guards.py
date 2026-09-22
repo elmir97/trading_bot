@@ -66,6 +66,22 @@ def check_permissions_trustworthy(*, trustworthy: bool) -> ExecutionRefusal | No
     return None
 
 
+# --- POSITION_MODE_UNKNOWN (раздел 16 ТЗ, шаг 15.5.1) -----------------------
+# Не входит в нумерованный раздел 7 и run_guards() — по тому же образцу, что
+# и PERMISSIONS_UNKNOWN выше: режим позиций читается один раз в
+# ExecutionService.evaluate(), результат приходит уже готовым булем-или-None
+# (см. app/services/position_mode.py) — здесь только решение, отказывать
+# или нет.
+
+
+def check_position_mode_known(*, known: bool) -> ExecutionRefusal | None:
+    if not known:
+        return ExecutionRefusal(
+            Code.POSITION_MODE_UNKNOWN, "Не удалось проверить режим позиций аккаунта."
+        )
+    return None
+
+
 # --- 2а. MODE_NOT_ALLOWED (этап 15.4в) ---------------------------------------
 
 _ACCOUNT_LABEL = {

@@ -89,12 +89,20 @@ class FakeExchangeClient(ExchangeClient):
         symbol_info: SymbolInfo,
         restrictions: ApiRestrictions | None = None,
         restrictions_error: Exception | None = None,
+        dual_side_position: bool = True,
+        position_mode_error: Exception | None = None,
     ) -> None:
         self.price = price
         self.balance = balance
         self.symbol_info = symbol_info
         self.restrictions = restrictions
         self.restrictions_error = restrictions_error
+        # Раздел 16 ТЗ, шаг 15.5.1: дефолт True — как реальный демо-
+        # аккаунт (хедж, снято живым запросом разведки раздела 16), не
+        # произвольное значение.
+        self.dual_side_position = dual_side_position
+        self.position_mode_error = position_mode_error
+        self.get_position_mode_calls = 0
         # Раздел 8 ТЗ: подтверждение (стадия CONFIRM) обязано звать эти
         # методы с max_retries=1, карточка (CARD) — без ограничения.
         self.ticker_retries_seen: list[int | None] = []
@@ -140,6 +148,12 @@ class FakeExchangeClient(ExchangeClient):
 
     async def get_leverage(self, symbol, *, max_retries=None):
         raise NotImplementedError
+
+    async def get_position_mode(self, *, max_retries=None):
+        self.get_position_mode_calls += 1
+        if self.position_mode_error is not None:
+            raise self.position_mode_error
+        return self.dual_side_position
 
     async def set_leverage(self, symbol, leverage, *, position_side=None):
         raise NotImplementedError
@@ -578,6 +592,61 @@ async def test_confirm_yes_creates_dry_run_orders(ctx, bot, monkeypatch) -> None
     dry_run_texts = [t for t in bot.recorder.sent_texts() if "Сухой прогон" in t]
     assert len(dry_run_texts) == 1
     assert (user.id, signal.id) not in execution._confirmations
+
+
+async def test_position_mode_read_on_card_not_reread_on_confirm(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Раздел 16 ТЗ, шаг 15.5.1: чтение — только на построении карточки
+    (как refresh_permissions). По нажатию «Да» не перезапрашивается —
+    значение несётся в ExecutionQuote.dual_side_position."""
+    dp, session, user, client, _redis, _settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+
+    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+    assert client.get_position_mode_calls == 1
+    state = execution._confirmations[(user.id, signal.id)]
+    assert state.quote.dual_side_position is True  # дефолт фейка
+
+    await _feed(
+        dp, bot, 2,
+        make_callback(f"exec:yes:{signal.id}", message_id=state.message_id),
+    )
+
+    assert client.get_position_mode_calls == 1  # не переспросили на "Да"
+    orders = await _orders_for_signal(session, signal.id)
+    assert len(orders) == 3
+
+
+async def test_open_button_refuses_position_mode_unknown_on_fetch_failure(  # type: ignore[no-untyped-def]
+    ctx, bot, monkeypatch
+) -> None:
+    """По образцу test_open_button_refuses_permissions_unknown_on_stale_
+    check_failure выше: сбой чтения режима позиций — отказ этим кодом,
+    не "открыл бы" вслепую."""
+    dp, session, user, client, _redis, _settings = ctx
+    client.position_mode_error = ExchangeUnavailableError("BingX не ответил")
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+
+    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+
+    texts = bot.recorder.sent_texts()
+    assert len(texts) == 1
+    assert "Не удалось проверить режим позиций" in texts[0]
+    assert (user.id, signal.id) not in execution._confirmations
+
+    orders = await _orders_for_signal(session, signal.id)
+    assert len(orders) == 1
+    assert orders[0].status is OrderStatus.REFUSED
+    assert orders[0].error_code == "POSITION_MODE_UNKNOWN"
+    assert orders[0].client_order_id is None
+    assert orders[0].price is None
 
 
 async def test_confirm_yes_lock_ttl_comes_from_settings(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]

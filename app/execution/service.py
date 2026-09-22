@@ -41,6 +41,7 @@ from app.execution.guards import (
     check_execution_enabled,
     check_mode_allowed,
     check_permissions_trustworthy,
+    check_position_mode_known,
     check_trading_key,
     run_guards,
 )
@@ -91,6 +92,11 @@ class ExecutionQuote:
     open_positions_count: int
     current_total_risk_percent: Decimal
     symbol_info: SymbolInfo
+    # Раздел 16 ТЗ, шаг 15.5.1: снят один раз при построении карточки
+    # (см. app/bot/handlers/execution.py:_build_quote), на «Да» не
+    # перезапрашивается — несётся отсюда дальше, тем же принципом, что
+    # planned_price в _ConfirmationState.
+    dual_side_position: bool
 
     @property
     def total_risk_after_percent(self) -> Decimal:
@@ -156,6 +162,7 @@ class ExecutionService:
         has_trading_key: bool,
         key_can_trade_futures: bool,
         permissions_trustworthy: bool = True,
+        dual_side_position: bool | None = None,
         selected_exchange_mode: ExchangeKeyMode,
         planned_price: Decimal | None = None,
         now: datetime | None = None,
@@ -223,6 +230,12 @@ class ExecutionService:
             # значит рисковать пропустить NO_TRADING_KEY вместо честного
             # "не знаем" или наоборот.
             return await refuse(refusal)
+        if refusal := check_position_mode_known(known=dual_side_position is not None):
+            return await refuse(refusal)
+        # Гвард выше уже отказал бы на None — сюда доходим только со
+        # значением. assert вместо cast: реальная проверка, а не просто
+        # подсказка mypy, если инвариант вдруг нарушится выше.
+        assert dual_side_position is not None
         if refusal := check_trading_key(
             has_key=has_trading_key, key_can_trade_futures=key_can_trade_futures
         ):
@@ -355,6 +368,7 @@ class ExecutionService:
             open_positions_count=open_positions_count,
             current_total_risk_percent=current_total_risk_percent,
             symbol_info=symbol_info,
+            dual_side_position=dual_side_position,
         )
 
 

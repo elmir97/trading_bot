@@ -132,6 +132,13 @@ class Settings(BaseSettings):
     # Раздел 8 ТЗ: как часто перепроверять права ключа (GET .../apiRestrictions)
     # при построении карточки подтверждения — см. app/services/permissions.py.
     exec_permissions_ttl_hours: int = 6
+    # Раздел 16 ТЗ, шаг 15.5.1: как часто перепроверять режим позиций
+    # (GET .../positionSide/dual) при построении карточки — см.
+    # app/services/position_mode.py. Короче, чем exec_permissions_ttl_hours:
+    # режим позиций меняется на стороне биржи не так инертно, как права
+    # ключа, и промах кэша здесь дешевле (один лишний GET, не поход за
+    # apiRestrictions с более тяжёлыми последствиями отказа).
+    exec_position_mode_ttl_seconds: int = 300
     exec_min_rr: Decimal = Decimal("1.5")
     exec_symbol_whitelist: str = Field(
         default="BTC-USDT,ETH-USDT",

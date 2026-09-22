@@ -70,6 +70,12 @@ TRADE_LEVERAGE = "/openApi/swap/v2/trade/leverage"
 # Один и тот же путь: POST размещает ордер, GET — запрашивает его статус.
 TRADE_ORDER = "/openApi/swap/v2/trade/order"
 TRADE_OPEN_ORDERS = "/openApi/swap/v2/trade/openOrders"
+# Раздел 16 ТЗ, шаг 15.5.1: путь v1, НЕ v2 — /openApi/swap/v2/trade/
+# positionSide/dual отвечает code 100404 "this api is not exist"
+# (проверено дважды живым запросом на демо-хосте, не по документации:
+# страница bingx-api.github.io отдаёт только SPA-шелл). Версия отдельно
+# от остальных путей этого файла, не переиспользуем v2 по аналогии.
+POSITION_SIDE_DUAL = "/openApi/swap/v1/positionSide/dual"
 
 # Валюта маржи зависит от контура: LIVE торгует настоящими USDT, DEMO —
 # виртуальными VST (см. app/bot/handlers/settings.py:626). get_balance()
@@ -763,6 +769,20 @@ class BingXClient(ExchangeClient):
             max_long_leverage=int(data["maxLongLeverage"]),
             max_short_leverage=int(data["maxShortLeverage"]),
         )
+
+    async def get_position_mode(self, *, max_retries: int | None = None) -> bool:
+        """Раздел 16 ТЗ, шаг 15.5.1: GET POSITION_SIDE_DUAL (v1 — см.
+        комментарий у константы). Чтение, обычный retry по умолчанию.
+        dualSidePosition — под data (проверено живым запросом), значит
+        _request()/_parse() уже развернули её сюда; отсутствие поля —
+        явная ошибка, не молчаливый дефолт (тот же принцип, что и в
+        get_leverage выше)."""
+        data = await self._request(POSITION_SIDE_DUAL, signed=True, max_retries=max_retries)
+        if not isinstance(data, dict) or "dualSidePosition" not in data:
+            raise ExchangeResponseError(
+                f"В ответе {POSITION_SIDE_DUAL} нет поля dualSidePosition"
+            )
+        return bool(data["dualSidePosition"])
 
     async def set_leverage(
         self, symbol: str, leverage: int, *, position_side: str | None = None

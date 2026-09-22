@@ -494,6 +494,56 @@ class TestPrivateData:
         await client.close()
 
 
+class TestGetPositionMode:
+    """Раздел 16 ТЗ, шаг 15.5.1: путь v1 (не v2 — тот отвечает code 100404,
+    проверено дважды живым запросом на демо-хосте), значение под data."""
+
+    async def test_parses_dual_side_position_from_data(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.method == "GET"
+            assert "/openApi/swap/v1/positionSide/dual" in str(request.url)
+            return ok({"dualSidePosition": True})
+
+        client = make_client(handler)
+        assert await client.get_position_mode() is True
+        await client.close()
+
+    async def test_false_value_parsed_correctly(self) -> None:
+        """bool(data["dualSidePosition"]) не должен молча стать True для
+        любого непустого значения — сам JSON true/false уже bool, но
+        проверяем явно, раз от этого зависит positionSide."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return ok({"dualSidePosition": False})
+
+        client = make_client(handler)
+        assert await client.get_position_mode() is False
+        await client.close()
+
+    async def test_missing_field_raises_explicit_error_not_default(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return ok({})
+
+        client = make_client(handler)
+        with pytest.raises(ExchangeResponseError, match="dualSidePosition"):
+            await client.get_position_mode()
+        await client.close()
+
+    async def test_max_retries_override_does_not_retry(self) -> None:
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            raise httpx.TimeoutException("timeout")
+
+        client = make_client(handler, max_retries=3)
+        client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
+
+        with pytest.raises(ExchangeUnavailableError):
+            await client.get_position_mode(max_retries=1)
+        assert calls["n"] == 1
+        await client.close()
+
+
 class TestGetLeverage:
     """Раздел 16 ТЗ, шаг 15.5.1: GET на тот же путь, что и set_leverage
     ниже — читает текущее и максимальное плечо по символу, раздельно

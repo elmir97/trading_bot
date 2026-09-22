@@ -268,6 +268,13 @@ class TestConfirmLockTtl:
         assert isinstance(settings.confirm_lock_ttl_seconds, int)
 
 
+class TestPositionModeTtl:
+    """Раздел 16 ТЗ, шаг 15.5.1 — новая настройка."""
+
+    def test_default_is_300_seconds(self) -> None:
+        assert _minimal_settings().exec_position_mode_ttl_seconds == 300
+
+
 def _minimal_settings(**overrides: object) -> Settings:
     fields: dict[str, object] = {
         "bot_token": "t",

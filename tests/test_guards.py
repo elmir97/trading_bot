@@ -21,6 +21,7 @@ from app.execution.guards import (
     check_mode_allowed,
     check_no_existing_position,
     check_permissions_trustworthy,
+    check_position_mode_known,
     check_price_drift,
     check_signal_not_expired,
     check_signal_not_stale,
@@ -496,6 +497,19 @@ class TestPermissionsTrustworthy:
 
     def test_trustworthy_passes(self) -> None:
         assert check_permissions_trustworthy(trustworthy=True) is None
+
+
+class TestPositionModeKnown:
+    """Раздел 16 ТЗ, шаг 15.5.1 — по образцу TestPermissionsTrustworthy
+    выше: тот же принцип (сбой не значит "можно"), другой источник."""
+
+    def test_unknown_refuses(self) -> None:
+        refusal = check_position_mode_known(known=False)
+        assert refusal is not None
+        assert refusal.code is Code.POSITION_MODE_UNKNOWN
+
+    def test_known_passes(self) -> None:
+        assert check_position_mode_known(known=True) is None
 
 
 class TestSize:

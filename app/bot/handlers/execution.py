@@ -56,9 +56,11 @@ from app.execution.service import (
     price_drift_percent,
     signal_reference_price,
 )
+from app.market.cache import TTLCache
 from app.market.data import MarketDataService
 from app.services.exchange_factory import ExchangeFactory
 from app.services.permissions import refresh_permissions
+from app.services.position_mode import refresh_position_mode
 from app.trading.enums import ObservationStage, OrderStatus, SignalLevel, SignalRecordStatus
 
 router = Router(name="execution")
@@ -93,6 +95,11 @@ _confirmations: dict[tuple[int, int], _ConfirmationState] = {}
 # Сильные ссылки на фоновые задачи TTL: без этого asyncio может собрать
 # задачу сборщиком мусора до того, как она успеет доспать (RUF006).
 _background_tasks: set[asyncio.Task[None]] = set()
+
+# Раздел 16 ТЗ, шаг 15.5.1: режим позиций — приватные, подписанные данные
+# аккаунта, отдельный кэш от _market_cache (тот публичный и общий на
+# процесс по конструкции) — см. app/services/position_mode.py.
+_position_mode_cache = TTLCache()
 
 
 def _parse_signal_id(data: str | None, prefix: str) -> int | None:
@@ -224,6 +231,7 @@ async def _build_quote(
     *,
     planned_price: Decimal | None,
     check_permissions: bool,
+    known_dual_side_position: bool | None = None,
 ) -> _EvaluationResult:
     """guards.NO_TRADING_KEY срабатывает до сетевого похода на биржу — поэтому
     без ключа безопасно использовать публичный клиент: ExecutionService.evaluate()
@@ -238,7 +246,13 @@ async def _build_quote(
     check_permissions: раздел 8 ТЗ — обязан быть False на вызовах внутри
     RedisLock (confirm_yes/"Да"): лишний поход на биржу там не нужен, права
     уже проверены при показе карточки. True только при первом построении
-    карточки (open_confirmation)."""
+    карточки (open_confirmation).
+
+    known_dual_side_position: раздел 16 ТЗ, шаг 15.5.1 — тот же принцип,
+    что и check_permissions, но для режима позиций: на «Да» не
+    перезапрашиваем, несём значение из ExecutionQuote карточки, которая
+    уже была показана (state.quote.dual_side_position в _process_confirm).
+    При check_permissions=True игнорируется — там читаем заново."""
     allowed_mode = settings.bingx_allowed_exchange_mode
     selected_mode = user.settings.active_exchange_mode
 
@@ -267,6 +281,14 @@ async def _build_quote(
         if outcome.trustworthy:
             key_can_trade_futures = not credentials.is_read_only  # type: ignore[union-attr]
 
+    dual_side_position = known_dual_side_position
+    if has_trading_key and check_permissions:
+        position_mode_outcome = await refresh_position_mode(
+            _position_mode_cache, client, user.id,
+            ttl_seconds=settings.exec_position_mode_ttl_seconds,
+        )
+        dual_side_position = position_mode_outcome.dual_side_position
+
     market = MarketDataService(client, _market_cache)
     service = ExecutionService(session=session, settings=settings, client=client, market=market)
     try:
@@ -277,6 +299,7 @@ async def _build_quote(
             has_trading_key=has_trading_key,
             key_can_trade_futures=key_can_trade_futures,
             permissions_trustworthy=permissions_trustworthy,
+            dual_side_position=dual_side_position,
             selected_exchange_mode=selected_mode,
             planned_price=planned_price,
         )
@@ -519,6 +542,7 @@ async def _process_confirm(
     result = await _build_quote(
         session, user, signal, plan, settings, cipher,
         planned_price=state.planned_price, check_permissions=False,
+        known_dual_side_position=state.quote.dual_side_position,
     )
 
     if isinstance(result, str):
@@ -535,6 +559,7 @@ async def _process_confirm(
             new_result = await _build_quote(
                 session, user, signal, plan, settings, cipher,
                 planned_price=None, check_permissions=False,
+                known_dual_side_position=state.quote.dual_side_position,
             )
             await callback.message.answer(
                 "↻ Цена ушла дальше допустимого. Пересчитал карточку:"

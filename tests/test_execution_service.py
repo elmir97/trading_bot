@@ -109,6 +109,9 @@ class FakeExchangeClient(ExchangeClient):
     async def get_leverage(self, symbol, *, max_retries=None) -> object:  # type: ignore[override]
         raise NotImplementedError
 
+    async def get_position_mode(self, *, max_retries=None) -> bool:
+        raise NotImplementedError
+
     async def set_leverage(self, symbol, leverage, *, position_side=None) -> int:
         raise NotImplementedError
 
@@ -208,6 +211,7 @@ async def test_execution_disabled_refuses_without_touching_exchange(ctx) -> None
     result = await service.evaluate(
         user=user, signal=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
+        dual_side_position=True,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
     )
     assert isinstance(result, ExecutionRefusal)
@@ -232,6 +236,7 @@ async def test_execution_disabled_writes_refused_observation_without_price(ctx) 
     result = await service.evaluate(
         user=user, signal=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
+        dual_side_position=True,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
     )
     assert isinstance(result, ExecutionRefusal)
@@ -266,6 +271,7 @@ async def test_max_positions_refused_observation_captures_price_and_drift(ctx) -
     result = await service.evaluate(
         user=user, signal=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
+        dual_side_position=True,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
     )
     assert isinstance(result, ExecutionRefusal)
@@ -290,6 +296,7 @@ async def test_no_trading_key_refuses(ctx) -> None:  # type: ignore[no-untyped-d
     result = await service.evaluate(
         user=user, signal=signal, plan=user.trading_plan,
         has_trading_key=False, key_can_trade_futures=False,
+        dual_side_position=True,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
     )
     assert isinstance(result, ExecutionRefusal)
@@ -308,6 +315,7 @@ async def test_mode_not_allowed_refuses(ctx) -> None:  # type: ignore[no-untyped
     result = await service.evaluate(
         user=user, signal=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
+        dual_side_position=True,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
     )
     assert isinstance(result, ExecutionRefusal)
@@ -326,6 +334,7 @@ async def test_valid_ready_signal_returns_quote(ctx) -> None:  # type: ignore[no
     result = await service.evaluate(
         user=user, signal=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
+        dual_side_position=True,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
     )
     assert isinstance(result, ExecutionQuote)
@@ -352,6 +361,7 @@ async def test_signal_already_used_refuses(ctx) -> None:  # type: ignore[no-unty
     result = await service.evaluate(
         user=user, signal=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
+        dual_side_position=True,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
     )
     assert isinstance(result, ExecutionRefusal)
@@ -370,6 +380,7 @@ async def test_existing_position_on_symbol_refuses(ctx) -> None:  # type: ignore
     result = await service.evaluate(
         user=user, signal=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
+        dual_side_position=True,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
     )
     assert isinstance(result, ExecutionRefusal)
@@ -391,6 +402,7 @@ async def test_max_positions_refuses(ctx) -> None:  # type: ignore[no-untyped-de
     result = await service.evaluate(
         user=user, signal=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
+        dual_side_position=True,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
     )
     assert isinstance(result, ExecutionRefusal)
@@ -411,6 +423,7 @@ async def test_price_drift_refuses_on_second_evaluation(ctx) -> None:  # type: i
     first = await service.evaluate(
         user=user, signal=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
+        dual_side_position=True,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
     )
     assert isinstance(first, ExecutionQuote)
@@ -420,6 +433,7 @@ async def test_price_drift_refuses_on_second_evaluation(ctx) -> None:  # type: i
     second = await service.evaluate(
         user=user, signal=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
+        dual_side_position=True,
         selected_exchange_mode=ExchangeKeyMode.LIVE,
         planned_price=planned_price, now=NOW,
     )
@@ -448,6 +462,7 @@ async def test_signal_stale_refuses_on_first_evaluation(ctx) -> None:  # type: i
     result = await service.evaluate(
         user=user, signal=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
+        dual_side_position=True,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
     )
     assert isinstance(result, ExecutionRefusal)
@@ -469,6 +484,7 @@ async def test_signal_stale_does_not_refuse_move_toward_stop(ctx) -> None:  # ty
     result = await service.evaluate(
         user=user, signal=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
+        dual_side_position=True,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
     )
     assert isinstance(result, ExecutionQuote)
@@ -506,6 +522,48 @@ async def test_permissions_untrustworthy_refuses_before_trading_key_check(ctx) -
     assert rows[0].client_order_id is None
 
 
+async def test_position_mode_unknown_refuses_before_trading_key_check(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Раздел 16 ТЗ, шаг 15.5.1 — по образцу теста PERMISSIONS_UNKNOWN
+    выше: dual_side_position=None (не передан/не удалось узнать) —
+    отказ этим кодом, до похода на биржу."""
+    session, user, client, market = ctx
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+
+    service = _service(session, Settings(trading_execution_enabled=True), client, market)  # type: ignore[call-arg]
+    result = await service.evaluate(
+        user=user, signal=signal, plan=user.trading_plan,
+        has_trading_key=True, key_can_trade_futures=True,
+        dual_side_position=None,
+        selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
+    )
+    assert isinstance(result, ExecutionRefusal)
+    assert result.code is Code.POSITION_MODE_UNKNOWN
+    assert client.balance == D("1000")  # до биржи не дошло
+
+
+async def test_valid_signal_carries_dual_side_position_on_quote(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Раздел 16 ТЗ, шаг 15.5.1: значение несётся дальше в ExecutionQuote —
+    на «Да» подхватывается оттуда, не перезапрашивается (см. handlers/
+    execution.py:_build_quote, known_dual_side_position)."""
+    session, user, client, market = ctx
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+
+    settings = Settings(trading_execution_enabled=True, bingx_trading_mode="live")  # type: ignore[call-arg]
+    service = _service(session, settings, client, market)
+    result = await service.evaluate(
+        user=user, signal=signal, plan=user.trading_plan,
+        has_trading_key=True, key_can_trade_futures=True,
+        dual_side_position=False,
+        selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
+    )
+    assert isinstance(result, ExecutionQuote)
+    assert result.dual_side_position is False
+
+
 async def test_symbol_data_unavailable_refuses(ctx) -> None:  # type: ignore[no-untyped-def]
     """Символ в вайтлисте (вайтлист по умолчанию пуст — разрешено всё), но
     биржа не отдала по нему SymbolInfo — отдельный код от SYMBOL_NOT_ALLOWED,
@@ -526,6 +584,7 @@ async def test_symbol_data_unavailable_refuses(ctx) -> None:  # type: ignore[no-
     result = await service.evaluate(
         user=user, signal=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
+        dual_side_position=True,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
     )
     assert isinstance(result, ExecutionRefusal)
@@ -580,6 +639,7 @@ async def test_refusal_stage_card_without_planned_price_confirm_with_it(ctx) -> 
     kwargs = {
         "user": user, "signal": signal, "plan": user.trading_plan,
         "has_trading_key": True, "key_can_trade_futures": True,
+        "dual_side_position": True,
         "selected_exchange_mode": ExchangeKeyMode.LIVE, "now": NOW,
     }
     await service.evaluate(**kwargs)
@@ -616,6 +676,7 @@ async def test_confirm_stage_uses_fail_fast_reads_card_stage_does_not(ctx) -> No
     kwargs = {
         "user": user, "signal": signal, "plan": user.trading_plan,
         "has_trading_key": True, "key_can_trade_futures": True,
+        "dual_side_position": True,
         "selected_exchange_mode": ExchangeKeyMode.LIVE, "now": NOW,
     }
 

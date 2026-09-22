@@ -16,15 +16,21 @@ from app.trading.enums import OrderRole, OrderSide, TradeSide
 
 class ExecutionRefusalCode(StrEnum):
     """Раздел 7 ТЗ. Большинство значений — порядок проверки в run_guards();
-    PERMISSIONS_UNKNOWN и SYMBOL_DATA_UNAVAILABLE в него не входят — это
-    отказы, которые ExecutionService.evaluate() строит сам, до/помимо
-    run_guards()."""
+    PERMISSIONS_UNKNOWN, POSITION_MODE_UNKNOWN и SYMBOL_DATA_UNAVAILABLE
+    в него не входят — это отказы, которые ExecutionService.evaluate()
+    строит сам, до/помимо run_guards()."""
 
     EXECUTION_DISABLED = "EXECUTION_DISABLED"
     # Раздел 8 ТЗ: права ключа не удалось проверить (сбой запроса к бирже,
     # отметка отсутствует или протухла) — отдельно от NO_TRADING_KEY, у
     # которого права ИЗВЕСТНЫ и они недостаточны. См. app/services/permissions.py.
     PERMISSIONS_UNKNOWN = "PERMISSIONS_UNKNOWN"
+    # Раздел 16 ТЗ, шаг 15.5.1: режим позиций (хедж/односторонний) не
+    # удалось прочитать (сбой запроса к бирже) — по тому же принципу, что
+    # и PERMISSIONS_UNKNOWN: сбой не означает "можно", positionSide без
+    # известного режима невозможно собрать правильно. См.
+    # app/services/position_mode.py.
+    POSITION_MODE_UNKNOWN = "POSITION_MODE_UNKNOWN"
     NO_TRADING_KEY = "NO_TRADING_KEY"
     # Этап 15.4в: показанный в настройках счёт (LIVE/DEMO) не совпадает с
     # тем, что разрешён конфигом (Settings.bingx_trading_mode) — см.
