@@ -39,6 +39,7 @@ from app.core.config import Settings
 from app.core.locks import confirm_lock_key
 from app.database.models.execution_order import ExecutionOrder
 from app.database.models.signal import SignalRecord
+from app.database.repositories.signal import SignalRepository
 from app.database.repositories.strategy import MistakeTypeRepository, StrategyRepository
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
@@ -659,15 +660,24 @@ async def test_two_parallel_confirms_one_signal_race_is_caught(ctx, bot, monkeyp
     сессиями на один сигнал — как в проде два разных апдейта получают
     каждый свою сессию.
 
-    Какая из двух защит поймает конкретно эту гонку — не детерминировано
-    (реальные асинхронные round-trip'ы к Postgres, порядок переключения
-    корутин не фиксирован): либо UNIQUE на client_order_id (проигравший
-    падает на flush строк заказа, откатывается по SAVEPOINT, ничего не
-    оставляет), либо гвард SIGNAL_ALREADY_USED, если signal.trade_opened_at
-    победителя успел закоммититься раньше, чем проигравший его прочитал
-    (тогда проигравший получает REFUSED-строку с этим кодом). Важен не
-    конкретный путь, а инвариант: ровно одна тройка DRY_RUN, второй попытке
-    пройти нельзя, необработанных исключений нет."""
+    Где на самом деле расходятся два процесса: `signal = await
+    SignalRepository(session).get(signal_id, user.id)` (execution.py:501)
+    читает `trade_opened_at` в объект ORM ОДИН раз за вызов; всё, что
+    дальше (guards → sizing → запись execution_orders → `signal.
+    trade_opened_at = now`) — это уже работа с этим объектом в памяти,
+    без повторного похода в БД. Победитель коммитит `trade_opened_at`
+    только в самом конце, когда `async with db.session()` в run_confirm()
+    закрывается. Без синхронизации это окно достаточно широкое, чтобы
+    планировщик asyncio иногда прогонял один _process_confirm целиком
+    (включая commit) раньше, чем второй вообще доходил до своего
+    SignalRepository.get() — тогда гонку ловил гвард SIGNAL_ALREADY_USED,
+    а не UNIQUE, и тест с "любой из двух" проходил зелёным, даже когда
+    ветка IntegrityError ни разу не исполнялась (обнаружено флейком:
+    ~1 провал на 5 прогонов). Барьер ниже держит оба вызова
+    SignalRepository.get() ровно на этой точке, пока не отработают ОБА —
+    это гарантирует, что оба видят trade_opened_at=None и оба проходят
+    SIGNAL_ALREADY_USED, а расходятся заведомо позже, на UNIQUE
+    client_order_id при записи execution_orders."""
     dp, session, user, client, _redis, settings = ctx
     _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
 
@@ -678,6 +688,22 @@ async def test_two_parallel_confirms_one_signal_race_is_caught(ctx, bot, monkeyp
 
     await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
     state = execution._confirmations[(user.id, signal.id)]
+
+    # Барьер ставим ПОСЛЕ open_confirmation: у него свой, одиночный вызов
+    # SignalRepository.get() (execution.py:388, до гонки) — если бы барьер
+    # ждал двоих уже тогда, тест завис бы там навсегда.
+    barrier = asyncio.Barrier(2)
+    original_get = SignalRepository.get
+
+    async def synced_get(self, sid: int, uid: int):  # type: ignore[no-untyped-def]
+        result = await original_get(self, sid, uid)
+        # Оба процесса дошли до чтения сигнала (и оба ещё видят его
+        # trade_opened_at=None, раз ни один не проходил дальше этой
+        # точки) — только теперь отпускаем обоих дальше.
+        await barrier.wait()
+        return result
+
+    monkeypatch.setattr(SignalRepository, "get", synced_get)
 
     db = Database(settings)
     try:
@@ -697,23 +723,17 @@ async def test_two_parallel_confirms_one_signal_race_is_caught(ctx, bot, monkeyp
         await db.dispose()
 
     orders = await _orders_for_signal(session, signal.id)
-    dry_run = [o for o in orders if o.status is OrderStatus.DRY_RUN]
-    other = [o for o in orders if o.status is not OrderStatus.DRY_RUN]
-
-    assert len(dry_run) == 3, "должна остаться ровно одна тройка DRY_RUN"
-    assert {o.role for o in dry_run} == {
+    assert len(orders) == 3, "дубля тройки ордеров или REFUSED-строки быть не должно"
+    assert {o.role for o in orders} == {
         OrderRole.ENTRY, OrderRole.STOP_LOSS, OrderRole.TAKE_PROFIT,
     }
+    assert all(o.status is OrderStatus.DRY_RUN for o in orders)
 
-    # Проигравший либо вообще не оставляет строк (поймало UNIQUE на
-    # client_order_id — SAVEPOINT откатил вставку), либо оставляет ровно
-    # одну REFUSED-строку с кодом SIGNAL_ALREADY_USED (поймал гвард) —
-    # см. докстринг выше. Второй тройки DRY_RUN и любого другого исхода
-    # быть не должно.
-    assert len(other) <= 1
-    if other:
-        assert other[0].status is OrderStatus.REFUSED
-        assert other[0].error_code == "SIGNAL_ALREADY_USED"
+    edit_texts = [m.text for m in bot.recorder.calls if isinstance(m, EditMessageText)]
+    success_texts = [t for t in edit_texts if t and "Подтверждено" in t]
+    race_texts = [t for t in edit_texts if t and "уже обрабатывается" in t]
+    assert len(success_texts) == 1
+    assert len(race_texts) == 1
 
     edit_texts = [m.text for m in bot.recorder.calls if isinstance(m, EditMessageText)]
     success_texts = [t for t in edit_texts if t and "Подтверждено" in t]
