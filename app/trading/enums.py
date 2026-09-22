@@ -165,6 +165,17 @@ class OrderRole(StrEnum):
     STOP_LOSS = "STOP_LOSS"
     TAKE_PROFIT = "TAKE_PROFIT"
 
+    @property
+    def letter(self) -> str:
+        """Однобуквенный код роли для client_order_id (раздел 16 ТЗ, шаг
+        15.5.2) — .value содержит "_", не годится для формата "только
+        ASCII буквы и цифры". См. app/execution/models.py::client_order_id."""
+        return {
+            OrderRole.ENTRY: "E",
+            OrderRole.STOP_LOSS: "S",
+            OrderRole.TAKE_PROFIT: "T",
+        }[self]
+
 
 class OrderStatus(StrEnum):
     """Статус исполнения ордера на бирже.

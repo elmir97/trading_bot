@@ -71,12 +71,24 @@ class ExecutionRefusal:
 
 def client_order_id(*, signal_id: int, user_id: int, role: OrderRole) -> str:
     """Детерминированный ключ идемпотентности (раздел 8 ТЗ):
-    f"tj{signal_id}{user_id}{role}". Один и тот же вызов с теми же
+    f"tj{signal_id}u{user_id}{role.letter}". Один и тот же вызов с теми же
     аргументами всегда даёт одну и ту же строку — этим и обеспечивается
     "повторной отправки нет, пока сверка по client_order_id не подтвердит
     обратное" (раздел 8, шаг 5), а не полагается на память процесса.
+
+    Раздел 16 ТЗ, шаг 15.5.2: разделитель "u" перед user_id обязателен —
+    без него f"tj{signal_id}{user_id}..." неоднозначен: (signal_id=12,
+    user_id=3) и (signal_id=1, user_id=23) склеивались бы в одну и ту же
+    строку "tj123...", а UNIQUE на client_order_id — глобальный по всей
+    таблице, не по паре (signal_id, user_id). role.letter — не role.value:
+    тот содержит "_" ("STOP_LOSS"), это не только ASCII буквы и цифры.
+    Длина на максимумах Integer-колонок id (2**31-1 = 10 цифр у обоих):
+    2 ("tj") + 10 + 1 ("u") + 10 + 1 (буква роли) = 24 символа — с запасом
+    от кода в BingXClient.place_market_order (1-40, раздел 16 ТЗ) и от
+    более консервативных лимитов, встречающихся у бирж этого семейства
+    API; точный лимит BingX живьём не снят (раздел 16, открыто до 15.5.5).
     """
-    return f"tj{signal_id}{user_id}{role.value}"
+    return f"tj{signal_id}u{user_id}{role.letter}"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
