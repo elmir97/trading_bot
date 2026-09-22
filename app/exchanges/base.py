@@ -16,6 +16,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 from app.trading.enums import OrderSide, TradeSide
 
@@ -37,7 +38,7 @@ class ExchangeError(RuntimeError):
     см. app/execution/service.py, ExecutionService.submit_entry_order()."""
 
     def __init__(
-        self, message: str, *, code: int | None = None, payload: dict | None = None
+        self, message: str, *, code: int | None = None, payload: dict[str, Any] | None = None
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -57,7 +58,7 @@ class ExchangeRateLimitError(ExchangeError):
         retry_after: float = 1.0,
         *,
         code: int | None = None,
-        payload: dict | None = None,
+        payload: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message, code=code, payload=payload)
         self.retry_after = retry_after

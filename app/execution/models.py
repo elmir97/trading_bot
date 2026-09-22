@@ -18,7 +18,9 @@ class ExecutionRefusalCode(StrEnum):
     """Раздел 7 ТЗ. Большинство значений — порядок проверки в run_guards();
     PERMISSIONS_UNKNOWN, POSITION_MODE_UNKNOWN и SYMBOL_DATA_UNAVAILABLE
     в него не входят — это отказы, которые ExecutionService.evaluate()
-    строит сам, до/помимо run_guards()."""
+    строит сам, до/помимо run_guards(). LEVERAGE_FAILED — ещё дальше:
+    не evaluate(), а ExecutionService.adjust_leverage() на фазе отправки
+    (раздел 16 ТЗ, шаг 15.5.2), после того как карточка уже подтверждена."""
 
     EXECUTION_DISABLED = "EXECUTION_DISABLED"
     # Раздел 16 ТЗ, шаг 15.5.1: LIVE запрещён конфигом (EXEC_ALLOW_LIVE_
@@ -61,6 +63,12 @@ class ExecutionRefusalCode(StrEnum):
     # инструментов пуст/не содержит символ) — не то же самое, что осознанный
     # отказ вне вайтлиста (SYMBOL_NOT_ALLOWED). См. ExecutionService.evaluate().
     SYMBOL_DATA_UNAVAILABLE = "SYMBOL_DATA_UNAVAILABLE"
+    # Раздел 16 ТЗ, шаг 15.5.2: не удалось убедиться в текущем плече или
+    # выставить нужное (get_leverage/set_leverage) — третья категория
+    # рядом с PERMISSIONS_UNKNOWN/POSITION_MODE_UNKNOWN, но не времени
+    # evaluate(), а фазы отправки, уже после того, как карточка
+    # подтверждена. См. ExecutionService.adjust_leverage().
+    LEVERAGE_FAILED = "LEVERAGE_FAILED"
 
 
 @dataclass(frozen=True, slots=True)

@@ -180,6 +180,20 @@ def _build_tp_sl(order_type: OrderType, spec: TpSlSpec) -> str:
     return "{" + ",".join(fields) + "}"
 
 
+def bingx_position_side(side: TradeSide, dual_side_position: bool) -> str:
+    """Переводит сторону позиции в значение параметра positionSide BingX
+    (раздел 16 ТЗ, шаг 15.5.2) — для set_leverage и place_market_order.
+
+    dual_side_position=True — хедж, LONG и SHORT раздельные позиции,
+    positionSide обязан называть сторону явно. dual_side_position=False —
+    односторонний режим счёта, BingX ждёт "BOTH" (см. докстринг
+    ExchangeClient.set_leverage): нет двух раздельных позиций, называть
+    сторону нечем и не нужно."""
+    if not dual_side_position:
+        return "BOTH"
+    return side.value
+
+
 class BingXClient(ExchangeClient):
     name = "bingx"
     # Подтверждено живым запросом: тот же ключ аутентифицируется и на

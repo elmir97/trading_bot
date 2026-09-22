@@ -29,13 +29,14 @@ from decimal import Decimal
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
+from app.core.logging import get_logger
 from app.database.models.execution_order import ExecutionOrder
 from app.database.models.signal import SignalRecord
 from app.database.models.trading_plan import TradingPlan
 from app.database.models.user import User
 from app.database.repositories.execution_order import ExecutionOrderRepository
 from app.database.repositories.trade import TradeRepository
-from app.exchanges.base import ExchangeClient, SymbolInfo
+from app.exchanges.base import ExchangeClient, ExchangeError, SymbolInfo, TpSlSpec
 from app.execution.guards import (
     GuardInputs,
     check_execution_enabled,
@@ -46,6 +47,7 @@ from app.execution.guards import (
     check_trading_key,
     run_guards,
 )
+from app.execution.leverage import leverage_needs_update
 from app.execution.models import ExecutionRefusal, ExecutionRefusalCode, OrderRequest
 from app.execution.sizing import calculate_size
 from app.market.data import MarketDataService
@@ -63,6 +65,7 @@ from app.trading.enums import (
 from app.trading.risk import day_bounds, tz_offset_for
 
 ZERO = Decimal(0)
+logger = get_logger(__name__)
 
 
 def signal_reference_price(signal: SignalRecord) -> Decimal | None:
@@ -153,6 +156,106 @@ class ExecutionService:
         self._orders.add(row)
         await self._orders.flush()
         return refusal
+
+    async def adjust_leverage(
+        self, *, order: OrderRequest, position_side: str
+    ) -> ExecutionRefusal | None:
+        """Раздел 16 ТЗ, шаг 15.5.2: плечо перед реальной отправкой — читает
+        текущее (get_leverage) и, только при расхождении по нужной стороне
+        (leverage_needs_update — раздел 16, шаг 15.5.1), меняет его
+        (set_leverage). И чтение, и запись — в одном try/except: без
+        надёжного текущего плеча дальше идти нельзя по той же причине, что
+        и при сбое самой смены — план 15.5.2 называл явно только
+        set_leverage, но то же рассуждение относится и к чтению, которое
+        ему предшествует.
+
+        Вызывается только на confirm-пути (после «Да», карточка уже
+        показана) — stage всегда CONFIRM. Сырой текст ошибки биржи — только
+        в лог, не в ExecutionRefusal.message: то идёт в чат пользователю
+        (render_refusal), внешним текстам там не место."""
+        try:
+            current = await self._client.get_leverage(order.symbol, max_retries=1)
+            if leverage_needs_update(current, order.leverage, order.position_side):
+                await self._client.set_leverage(
+                    order.symbol, order.leverage, position_side=position_side
+                )
+        except ExchangeError as exc:
+            logger.warning(
+                "Не удалось выставить плечо перед отправкой ордера",
+                extra={
+                    "user_id": order.user_id,
+                    "signal_id": order.signal_id,
+                    "symbol": order.symbol,
+                    "error": str(exc),
+                },
+            )
+            refusal = ExecutionRefusal(
+                ExecutionRefusalCode.LEVERAGE_FAILED,
+                "Не удалось выставить плечо перед входом. Ордер не отправлен.",
+            )
+            return await self._refuse(
+                refusal,
+                user_id=order.user_id,
+                signal_id=order.signal_id,
+                symbol=order.symbol,
+                side=order.side,
+                position_side=order.position_side,
+                price=order.entry_price,
+                drift=None,
+                stage=ObservationStage.CONFIRM,
+            )
+        return None
+
+    async def submit_entry_order(
+        self, *, order: OrderRequest, position_side: str, entry_row: ExecutionOrder
+    ) -> ExecutionOrder:
+        """Раздел 16 ТЗ, шаг 15.5.2. entry_row уже вставлена и закоммичена
+        ДО вызова этого метода (раздел 8 ТЗ: PENDING до HTTP) —
+        build_entry_order_pending() строит её, вызывающий код
+        (app/bot/handlers/execution.py) вставляет и коммитит явно, коммит
+        после HTTP — тоже явно в вызывающем коде: раздел 8 ТЗ требует
+        коммит и до, и после отправки, порядок нагляднее держать в
+        хендлере, а не прятать внутри одного метода.
+
+        REJECTED только когда exc.code задан и не 0 — биржа ответила
+        явным отказом, ответ определённо получен. Иначе (ExchangeUnavailableError
+        — ответа не было вовсе; или code отсутствует, например сбой разбора
+        уже после code=0 в _parse_order/_to_decimal) — UNKNOWN: ордер мог
+        пройти, мы не знаем и не притворяемся, что знаем."""
+        try:
+            result = await self._client.place_market_order(
+                symbol=order.symbol,
+                side=order.side,
+                position_side=position_side,
+                quantity=order.quantity,
+                client_order_id=order.entry_client_order_id,
+                take_profit=TpSlSpec(trigger_price=order.take_profit),
+                stop_loss=TpSlSpec(trigger_price=order.stop_loss),
+            )
+        except ExchangeError as exc:
+            logger.warning(
+                "Ответ BingX на отправку ордера — отказ или сбой",
+                extra={
+                    "user_id": order.user_id,
+                    "signal_id": order.signal_id,
+                    "symbol": order.symbol,
+                    "error": str(exc),
+                    "code": exc.code,
+                },
+            )
+            if exc.code is not None and exc.code != 0:
+                entry_row.status = OrderStatus.REJECTED
+                entry_row.error_code = str(exc.code)
+            else:
+                entry_row.status = OrderStatus.UNKNOWN
+                entry_row.error_code = type(exc).__name__
+            entry_row.raw_response = exc.payload
+            return entry_row
+
+        entry_row.status = OrderStatus.SUBMITTED
+        entry_row.exchange_order_id = result.order_id
+        entry_row.raw_response = result.raw
+        return entry_row
 
     async def evaluate(
         self,
@@ -447,6 +550,41 @@ def build_execution_orders(
             status=status,
         ),
     ]
+
+
+def build_entry_order_pending(
+    order: OrderRequest, *, price_drift_percent: Decimal | None = None
+) -> ExecutionOrder:
+    """Раздел 16 ТЗ, шаг 15.5.2 / раздел 8 ТЗ: ENTRY-строка со статусом
+    PENDING для реальной отправки — вызывающий код обязан вставить и
+    закоммитить её ДО HTTP-запроса на биржу (единственная гарантия
+    идемпотентности — UNIQUE на client_order_id, раздел 8 ТЗ).
+
+    В отличие от build_execution_orders() (DRY_RUN — сразу три строки)
+    здесь только ENTRY: STOP_LOSS/TAKE_PROFIT execution_orders-строки в
+    этот шаг не входят, появятся при read-back (15.5.3), когда станет
+    известно, прикрепился ли стоп реально (stopPrice != 0) — раньше
+    писать их нечем и не о чем."""
+    return ExecutionOrder(
+        user_id=order.user_id,
+        signal_id=order.signal_id,
+        client_order_id=order.entry_client_order_id,
+        symbol=order.symbol,
+        side=order.side,
+        position_side=order.position_side,
+        order_type=OrderType.MARKET,
+        role=OrderRole.ENTRY,
+        quantity=order.quantity,
+        price=order.entry_price,
+        status=OrderStatus.PENDING,
+        price_drift_percent=price_drift_percent,
+        notional=order.notional,
+        margin=order.margin,
+        leverage=order.leverage,
+        risk_amount=order.risk_amount,
+        risk_percent=order.risk_percent,
+        risk_reward=order.risk_reward,
+    )
 
 
 def build_observation_order(
