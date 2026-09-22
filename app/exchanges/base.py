@@ -169,7 +169,6 @@ class SymbolInfo:
     price_precision: int
     quantity_precision: int
     min_quantity: Decimal
-    max_leverage: int
     # Минимальный нотионал (tradeMinUSDT у BingX). По умолчанию 0 — сохраняет
     # обратную совместимость с позиционным конструктором, которым эту
     # dataclass уже создают в тестах.

@@ -49,7 +49,7 @@ def _order(**overrides) -> OpenOrder:
 def test_renders_price_take_profit_and_stop_loss_with_symbol_precision() -> None:
     precision = SymbolInfo(
         symbol="BTC-USDT", price_precision=1, quantity_precision=3,
-        min_quantity=D("0.001"), max_leverage=125,
+        min_quantity=D("0.001"),
     )
     order = _order(
         take_profit=AttachedTpSl(

@@ -57,7 +57,7 @@ class FakeBot:
 
 
 async def _fake_symbol_info(symbol: str) -> SymbolInfo:
-    return SymbolInfo(symbol, 2, 4, D("0.0001"), 125)
+    return SymbolInfo(symbol, 2, 4, D("0.0001"))
 
 
 def _context() -> MarketContext:
@@ -416,7 +416,7 @@ async def test_chart_gets_price_precision_from_exchange(ctx, monkeypatch) -> Non
     )
 
     async def info(symbol: str) -> SymbolInfo:
-        return SymbolInfo(symbol, 3, 4, D("0.0001"), 125)
+        return SymbolInfo(symbol, 3, 4, D("0.0001"))
 
     scanner._engine.get_symbol_info = info  # type: ignore[method-assign]
 
@@ -505,7 +505,7 @@ async def test_symbol_info_is_not_requested_without_a_chart(ctx) -> None:  # typ
 
     async def counting(symbol: str) -> SymbolInfo:
         calls.append(symbol)
-        return SymbolInfo(symbol, 2, 4, D("0.0001"), 125)
+        return SymbolInfo(symbol, 2, 4, D("0.0001"))
 
     scanner._engine.get_symbol_info = counting  # type: ignore[method-assign]
 
@@ -540,7 +540,7 @@ async def test_ready_card_requests_precision_without_chart(ctx) -> None:  # type
     user, session, repo, scanner, _, _ = ctx
 
     async def info(symbol: str) -> SymbolInfo:
-        return SymbolInfo(symbol, 2, 4, D("0.0001"), 125)
+        return SymbolInfo(symbol, 2, 4, D("0.0001"))
 
     scanner._engine.get_symbol_info = info  # type: ignore[method-assign]
     user.settings.notifications = {**user.settings.notifications, "setup_charts": False}

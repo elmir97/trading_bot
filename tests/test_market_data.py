@@ -46,7 +46,7 @@ class FakeClient:
         return list(self._candles)
 
     async def get_symbols(self, *, max_retries: int | None = None) -> list[SymbolInfo]:
-        return [SymbolInfo("BTC-USDT", 2, 4, D("0.0001"), 125)]
+        return [SymbolInfo("BTC-USDT", 2, 4, D("0.0001"))]
 
     async def get_funding_rate(self, symbol: str) -> Decimal | None:
         return D("0.0001")
@@ -176,5 +176,5 @@ class TestMarketData:
         market = MarketDataService(FakeClient())
         info = await market.get_symbol_info("BTC-USDT")
         assert info is not None
-        assert info.max_leverage == 125
+        assert info.quantity_precision == 4
         assert await market.get_symbol_info("UNKNOWN") is None

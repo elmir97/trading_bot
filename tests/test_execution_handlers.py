@@ -211,7 +211,7 @@ class FakeRedis:
 def _symbol_info() -> SymbolInfo:
     return SymbolInfo(
         symbol="BTC-USDT", price_precision=1, quantity_precision=3,
-        min_quantity=D("0.001"), max_leverage=50, min_notional=D("5"),
+        min_quantity=D("0.001"), min_notional=D("5"),
     )
 
 

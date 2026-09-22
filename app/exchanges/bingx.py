@@ -548,7 +548,6 @@ class BingXClient(ExchangeClient):
                     min_quantity=_to_decimal(
                         item.get("tradeMinQuantity"), "tradeMinQuantity"
                     ),
-                    max_leverage=int(item.get("maxLongLeverage", 20) or 20),
                     min_notional=_to_decimal(
                         item.get("tradeMinUSDT"), "tradeMinUSDT"
                     ),

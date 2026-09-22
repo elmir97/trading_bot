@@ -46,7 +46,6 @@ def _symbol_info(**overrides: object) -> SymbolInfo:
         "price_precision": 1,
         "quantity_precision": 3,
         "min_quantity": D("0.001"),
-        "max_leverage": 50,
         "min_notional": D("5"),
     }
     fields.update(overrides)
