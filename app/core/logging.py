@@ -23,6 +23,16 @@ _REDACTED = "***REDACTED***"
 _LOG_FILE_MAX_BYTES = 10 * 1024 * 1024
 _LOG_FILE_BACKUP_COUNT = 5
 
+# Единый источник "что считать полем extra={...}", а не отдельный список у
+# каждого потребителя (SecretRedactingFilter/JsonFormatter/TextFormatter) —
+# три копии одного и того же неизбежно разойдутся. "message"/"asctime" не
+# из LogRecord.__init__, их пишет сам Formatter.format() как побочный
+# эффект на record.__dict__ (и оба хендлера делят один и тот же record) —
+# без явного исключения они попали бы в хвост как псевдо-extra.
+_RESERVED_LOG_RECORD_KEYS = frozenset(
+    logging.LogRecord("", 0, "", 0, "", None, None).__dict__
+) | {"message", "asctime"}
+
 
 class SecretRedactingFilter(logging.Filter):
     """Заменяет секреты на плейсхолдер в сообщении и аргументах записи."""
@@ -73,15 +83,13 @@ class SecretRedactingFilter(logging.Filter):
 
         return True
 
-    _RESERVED_KEYS = frozenset(
-        logging.LogRecord("", 0, "", 0, "", None, None).__dict__
-    )
+    _RESERVED_KEYS = _RESERVED_LOG_RECORD_KEYS
 
 
 class JsonFormatter(logging.Formatter):
     """Однострочный JSON — удобно грепать и скармливать в лог-коллектор."""
 
-    _RESERVED = frozenset(logging.LogRecord("", 0, "", 0, "", None, None).__dict__)
+    _RESERVED = _RESERVED_LOG_RECORD_KEYS
 
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
@@ -100,10 +108,46 @@ class JsonFormatter(logging.Formatter):
 
         # Всё, что передали через extra={...}, попадает в структурированный вывод.
         for key, value in record.__dict__.items():
-            if key not in self._RESERVED and key not in ("message", "asctime"):
+            if key not in self._RESERVED:
                 payload[key] = value
 
         return orjson.dumps(payload, default=str).decode()
+
+
+def _quote_if_needed(text: str) -> str:
+    return f'"{text}"' if (" " in text or "=" in text) else text
+
+
+def _format_extra(record: logging.LogRecord) -> str:
+    """` | key=value key2=value2` для полей extra={...}, отсортировано по
+    ключу — стабильно между запусками, не зависит от порядка вставки.
+    Пусто, если extra не было."""
+    extras = {
+        key: value
+        for key, value in record.__dict__.items()
+        if key not in _RESERVED_LOG_RECORD_KEYS
+    }
+    if not extras:
+        return ""
+    rendered = " ".join(
+        f"{key}={_quote_if_needed(str(extras[key]))}" for key in sorted(extras)
+    )
+    return f" | {rendered}"
+
+
+class TextFormatter(logging.Formatter):
+    """Человекочитаемый однострочный формат для LOG_JSON=false.
+
+    Раздел 16 ТЗ, шаг 15.5.1а: базовый logging.Formatter не знает про
+    extra={...} и просто теряет эти поля — на проде (LOG_JSON=false) это
+    касалось всех строк с extra, не только новой про TTL лока. К 15.5.2
+    это дорого: при сбое реальной отправки ордера лог — единственная
+    запись о произошедшем. SecretRedactingFilter extra уже вычищает
+    (запись в record.__dict__ до format(), см. filter() выше) — дописать
+    сюда нужно было только рендер, не редактирование."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return super().format(record) + _format_extra(record)
 
 
 def setup_logging(
@@ -124,7 +168,7 @@ def setup_logging(
     formatter = (
         JsonFormatter()
         if json_output
-        else logging.Formatter(
+        else TextFormatter(
             "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
             datefmt="%H:%M:%S",
         )

@@ -108,6 +108,55 @@ class TestTracebackRedaction:
         assert TOKEN not in buffer.getvalue()
 
 
+class TestTextFormatterExtra:
+    """Раздел 16 ТЗ, шаг 15.5.1а: до правки TextFormatter не существовал —
+    extra={...} в текстовом режиме (LOG_JSON=false, боевой конфиг) терялся
+    молча, потому что обычный logging.Formatter про extra не знает."""
+
+    @staticmethod
+    def _capture(**extra: object) -> str:
+        import io
+        import logging as std_logging
+
+        from app.core.logging import setup_logging
+
+        buffer = io.StringIO()
+        setup_logging(level="INFO", json_output=False, secrets=(TOKEN,))
+        std_logging.getLogger().handlers[0].stream = buffer
+
+        std_logging.getLogger("probe").info("событие", extra=extra)
+        return buffer.getvalue()
+
+    def test_extra_field_appears_as_key_value(self) -> None:
+        output = self._capture(confirm_lock_ttl_seconds=80)
+        assert "confirm_lock_ttl_seconds=80" in output
+
+    def test_no_extra_means_no_suffix(self) -> None:
+        output = self._capture()
+        assert output.strip().endswith("событие")
+
+    def test_multiple_extra_fields_sorted_by_key(self) -> None:
+        output = self._capture(zeta=1, alpha=2)
+        # Порядок вставки — zeta раньше alpha; в выводе должен быть
+        # алфавитный, иначе формат нестабилен между вызовами.
+        assert output.index("alpha=2") < output.index("zeta=1")
+
+    def test_extra_secret_is_redacted_in_rendered_line(self) -> None:
+        """Секрет в extra доходит до текстового вывода уже вычищенным —
+        SecretRedactingFilter мутирует record.__dict__ до format()."""
+        output = self._capture(url=f"https://api.telegram.org/bot{TOKEN}/getMe")
+        assert "url=" in output
+        assert TOKEN not in output
+        assert "REDACTED" in output
+
+    def test_message_and_asctime_are_not_duplicated_as_extra(self) -> None:
+        """Formatter.format() сам пишет record.message/record.asctime —
+        без явного исключения они попали бы в хвост вторым разом."""
+        output = self._capture()
+        assert output.count("message=") == 0
+        assert output.count("asctime=") == 0
+
+
 class TestExtraKeysAreSafe:
     """Регрессия: logging роняет вызов, если extra перекрывает поля LogRecord.
 
