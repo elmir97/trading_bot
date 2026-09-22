@@ -12,6 +12,7 @@ ExecutionOrder — как test_execution_service.py.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -317,6 +318,20 @@ def make_callback(data: str, message_id: int) -> CallbackQuery:
         id=str(message_id), from_user=TgUser(id=USER_TG_ID, is_bot=False, first_name="Tester"),
         chat_instance="ci", data=data, message=message,
     )
+
+
+def make_bound_callback(bot: Bot, data: str, message_id: int) -> CallbackQuery:
+    """Как make_callback, но с привязкой к bot — нужно тестам, которые
+    зовут execution._process_confirm() напрямую, в обход dp.feed_update()
+    (тот привязывает bot ко всем вложенным объектам через context при
+    парсинге Update, чего прямой конструктор CallbackQuery(...) не делает —
+    без этого callback.answer()/callback.message.edit_text() падают с
+    "not mounted to any bot instance")."""
+    callback = make_callback(data, message_id)
+    callback.as_(bot)
+    if isinstance(callback.message, Message):
+        callback.message.as_(bot)
+    return callback
 
 
 @pytest_asyncio.fixture
@@ -632,6 +647,143 @@ async def test_confirm_yes_busy_lock_answers_and_creates_nothing(ctx, bot, monke
     assert any("уже обрабатывается" in a.lower() for a in bot.recorder.alerts())
     orders = await _orders_for_signal(session, signal.id)
     assert orders == []
+
+
+async def test_two_parallel_confirms_one_signal_race_is_caught(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Раздел 8 ТЗ: разведка перед 15.5 показала, что при реалистичных
+    таймаутах биржи путь подтверждения способен занять дольше TTL лока —
+    ключ в Redis гаснет по таймеру, пока обработка ещё легитимно идёт.
+    Второе нажатие в этом окне успешно берёт лок и запускает второй,
+    полностью параллельный _process_confirm. SIGNAL_ALREADY_USED эту гонку
+    не ловит (signal.trade_opened_at проставляется только после успешной
+    записи строк заказа — позже, чем может успеть стартовать второй
+    процесс). Ловит UNIQUE на client_order_id: воспроизводим это напрямую,
+    в обход RedisLock (как если бы TTL уже истёк), двумя независимыми
+    сессиями на один сигнал — как в проде два разных апдейта получают
+    каждый свою сессию."""
+    dp, session, user, client, _redis, settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    await session.commit()  # видно другим сессиям/соединениям
+
+    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+    state = execution._confirmations[(user.id, signal.id)]
+
+    db = Database(settings)
+    try:
+        async def run_confirm() -> None:
+            async with db.session() as own_session:
+                callback = make_bound_callback(
+                    bot, f"exec:yes:{signal.id}", message_id=state.message_id
+                )
+                await execution._process_confirm(
+                    callback, own_session, user, signal.id, settings, None, db
+                )
+
+        # asyncio.gather без RedisLock: оба процесса реально параллельны,
+        # как если бы каждый уже прошёл (или в обход) проверку лока.
+        await asyncio.gather(run_confirm(), run_confirm())
+    finally:
+        await db.dispose()
+
+    orders = await _orders_for_signal(session, signal.id)
+    assert len(orders) == 3, "дубля тройки ордеров быть не должно"
+    assert {o.role for o in orders} == {OrderRole.ENTRY, OrderRole.STOP_LOSS, OrderRole.TAKE_PROFIT}
+    assert all(o.status is OrderStatus.DRY_RUN for o in orders)
+
+    edit_texts = [m.text for m in bot.recorder.calls if isinstance(m, EditMessageText)]
+    success_texts = [t for t in edit_texts if t and "Подтверждено" in t]
+    race_texts = [t for t in edit_texts if t and "уже обрабатывается" in t]
+    assert len(success_texts) == 1
+    assert len(race_texts) == 1
+
+    await session.refresh(signal)
+    assert signal.trade_opened_at is not None
+
+
+class _FakeAsyncpgCauseError(Exception):
+    """Подобие настоящего asyncpg.exceptions.*Error — только он несёт
+    .constraint_name (проверено живым запросом к тестовой БД, см. докстринг
+    execution._is_client_order_id_collision)."""
+
+    def __init__(self, constraint_name: str) -> None:
+        super().__init__("fake asyncpg error")
+        self.constraint_name = constraint_name
+
+
+class _FakeOrigError(Exception):
+    """Подобие sqlalchemy.dialects.postgresql.asyncpg.AsyncAdapt_asyncpg_dbapi
+    .IntegrityError — обёртки SQLAlchemy без .constraint_name на себе,
+    настоящая ошибка asyncpg лежит в .__cause__."""
+
+    def __init__(self, constraint_name: str) -> None:
+        super().__init__("fake db error")
+        self.__cause__ = _FakeAsyncpgCauseError(constraint_name)
+
+
+def _fake_integrity_error(constraint_name: str):  # type: ignore[no-untyped-def]
+    from sqlalchemy.exc import IntegrityError
+
+    return IntegrityError("INSERT", {}, _FakeOrigError(constraint_name))
+
+
+class TestIsClientOrderIdCollision:
+    """Юнит-тест предиката напрямую, без похода в БД/диспетчер: отличает
+    гонку по client_order_id от IntegrityError другого происхождения
+    (NOT NULL, FK и т.п.) — второй не должен выглядеть как «сигнал уже
+    обрабатывается» (баг кода, не гонка)."""
+
+    def test_true_for_client_order_id_unique_violation(self) -> None:
+        exc = _fake_integrity_error("uq_execution_orders_client_order_id")
+        assert execution._is_client_order_id_collision(exc) is True
+
+    def test_false_for_other_constraint(self) -> None:
+        exc = _fake_integrity_error("fk_execution_orders_user_id_users")
+        assert execution._is_client_order_id_collision(exc) is False
+
+    def test_false_when_cause_missing(self) -> None:
+        """orig без __cause__ (не asyncpg-ошибка вовсе) — не считаем
+        совпадением по умолчанию, не притворяемся, что знаем происхождение."""
+        from sqlalchemy.exc import IntegrityError
+
+        exc = IntegrityError("INSERT", {}, Exception("нет __cause__"))
+        assert execution._is_client_order_id_collision(exc) is False
+
+
+async def test_integrity_error_other_than_client_order_id_propagates(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Сквозной прогон через _process_confirm: IntegrityError другого
+    происхождения не превращается в «уже обрабатывается» и не глотается —
+    выходит наружу как есть."""
+    from sqlalchemy.exc import IntegrityError
+
+    dp, session, user, client, _redis, settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+
+    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+    state = execution._confirmations[(user.id, signal.id)]
+
+    async def fake_flush(self) -> None:  # type: ignore[no-untyped-def]
+        raise _fake_integrity_error("fk_execution_orders_user_id_users")
+
+    from app.database.repositories.execution_order import ExecutionOrderRepository
+
+    monkeypatch.setattr(ExecutionOrderRepository, "flush", fake_flush)
+
+    callback = make_bound_callback(bot, f"exec:yes:{signal.id}", message_id=state.message_id)
+    with pytest.raises(IntegrityError):
+        await execution._process_confirm(
+            callback, session, user, signal.id, settings, None, dp["db"]
+        )
+
+    edit_texts = [m.text for m in bot.recorder.calls if isinstance(m, EditMessageText)]
+    assert not any(t and "уже обрабатывается" in t for t in edit_texts)
 
 
 async def test_confirm_yes_after_ttl_shows_expired(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]

@@ -29,6 +29,7 @@ from decimal import Decimal
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Message
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.formatting import fmt_amount, fmt_price, fmt_qty, fmt_ratio
@@ -148,6 +149,31 @@ def render_confirmation(quote: ExecutionQuote, signal: SignalRecord, settings: S
 # ---------------------------------------------------------------------------
 # Сбор контекста и вызов ExecutionService
 # ---------------------------------------------------------------------------
+
+# Раздел 8 ТЗ: имя UNIQUE-констрейнта на execution_orders.client_order_id
+# (см. alembic/versions/ddace081d9fb_execution_orders.py). Это единственная
+# настоящая гарантия единственности входа при гонке двух параллельных
+# _process_confirm на один сигнал (например, если Redis-лок протух посреди
+# легитимной обработки — TTL лока лишь предохранитель, не гарантия, см.
+# Settings.confirm_lock_ttl_seconds). Redis-лок сам по себе даёт только
+# быстрый отказ при обычном двойном тапе, пока он ещё держится.
+_CLIENT_ORDER_ID_UNIQUE_CONSTRAINT = "uq_execution_orders_client_order_id"
+
+
+def _is_client_order_id_collision(exc: IntegrityError) -> bool:
+    """True — это гонка по client_order_id (ожидаемо, ловим и отвечаем
+    по-человечески). False — IntegrityError другого происхождения (NOT
+    NULL, FK и т.п.) — это баг кода, не гонка, пробрасывать дальше как
+    есть, а не маскировать текстом «уже обрабатывается».
+
+    exc.orig — не сам asyncpg-эксепшен, а обёртка SQLAlchemy
+    (AsyncAdapt_asyncpg_dbapi.IntegrityError) для совместимости с
+    DBAPI-интерфейсом; у неё самой .constraint_name нет. Реальный
+    asyncpg.exceptions.UniqueViolationError/ForeignKeyViolationError/… —
+    в exc.orig.__cause__, только там есть .constraint_name (проверено
+    живым запросом к тестовой БД, не по документации asyncpg)."""
+    cause = getattr(exc.orig, "__cause__", None)
+    return getattr(cause, "constraint_name", None) == _CLIENT_ORDER_ID_UNIQUE_CONSTRAINT
 
 
 async def _record_exchange_error(
@@ -529,9 +555,32 @@ async def _process_confirm(
     drift = price_drift_percent(order.entry_price, signal)
 
     orders_repo = ExecutionOrderRepository(session)
-    for row in build_execution_orders(order, OrderStatus.DRY_RUN, price_drift_percent=drift):
-        orders_repo.add(row)
-    await orders_repo.flush()
+    try:
+        # SAVEPOINT: та же техника, что и в _record_exchange_error — если
+        # ловим гонку, откатываем только эту вставку, не всю сессию.
+        async with session.begin_nested():
+            for row in build_execution_orders(
+                order, OrderStatus.DRY_RUN, price_drift_percent=drift
+            ):
+                orders_repo.add(row)
+            await orders_repo.flush()
+    except IntegrityError as exc:
+        if not _is_client_order_id_collision(exc):
+            raise
+        # Гонка: два параллельных _process_confirm по одному сигналу
+        # (двойной тап после протухшего лока, раздел 8 ТЗ) — второй
+        # проигрывает на UNIQUE client_order_id. Не помечаем signal.trade_
+        # opened_at: это уже сделал победитель.
+        logger.info(
+            "Гонка на подтверждении: client_order_id уже занят",
+            extra={"user_id": user.id, "signal_id": signal.id},
+        )
+        await callback.message.edit_text(
+            "⏳ Сигнал уже обрабатывается — похоже, вход уже отправлен "
+            "другим запросом.",
+            reply_markup=None,
+        )
+        return
 
     # Тот же guard SIGNAL_ALREADY_USED (раздел 7, п.4), что и для реального
     # входа: повторное подтверждение того же сигнала после сухого прогона
