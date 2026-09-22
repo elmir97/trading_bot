@@ -167,6 +167,10 @@ async def main() -> None:
         print(f"\nПРОБЛЕМЫ ({len(problems)}):")
         for p in problems:
             print(f"  • {p}")
+        # check() только копит `problems` и печатает "✗" — без этого exit
+        # code всегда 0, и упавшая проверка (например, execution_orders не
+        # DRY_RUN) тонет в выводе, а не останавливает деплой/CI.
+        sys.exit(1)
     else:
         print("Проблем не найдено.")
 
