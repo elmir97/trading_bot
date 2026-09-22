@@ -347,51 +347,60 @@ async def _run_scenarios(sim, tg, db, redis, settings) -> None:  # type: ignore[
 #
 # ExecutionService.evaluate() (app/execution/service.py) трогает биржу в
 # трёх местах: get_ticker (цена), get_symbols→get_symbol_info (лот/тик),
-# get_balance. Подставляем все три на уровне готовых типизированных
-# методов BingXClient — то же, что делает FakeExchangeClient в
-# tests/test_execution_service.py, но там клиент подставляется через
-# конструктор ExecutionService, а здесь настоящий хендлер сам строит
-# BingXClient внутри ExchangeFactory.for_user(), поэтому патчим три
-# leaf-метода на классе на время сценария и возвращаем оригиналы в finally.
-# ExchangeFactory и MarketDataService не подменяются: расшифровка ключей,
-# выбор режима/хоста, кэш — всё настоящее.
+# get_balance. _build_quote() (app/bot/handlers/execution.py) добавляет
+# четвёртое место сама, ДО evaluate(): get_position_mode() — раздел 16 ТЗ,
+# шаг 15.5.1, гвард POSITION_MODE_UNKNOWN. Подставляем все четыре на уровне
+# готовых типизированных методов BingXClient — то же, что делает
+# FakeExchangeClient в tests/test_execution_service.py, но там клиент
+# подставляется через конструктор ExecutionService, а здесь настоящий
+# хендлер сам строит BingXClient внутри ExchangeFactory.for_user(), поэтому
+# патчим четыре leaf-метода на классе на время сценария и возвращаем
+# оригиналы в finally. ExchangeFactory и MarketDataService не подменяются:
+# расшифровка ключей, выбор режима/хоста, кэш — всё настоящее.
 
 # Снято вручную: GET https://open-api.bingx.com/openApi/swap/v2/quote/contracts
 # 2026-09-11, запись для symbol="BTC-USDT". price_precision/quantity_precision/
 # min_quantity/min_notional — поля pricePrecision/quantityPrecision/
 # tradeMinQuantity/tradeMinUSDT из ответа биржи (влияют на округление объёма,
-# выдумывать их нельзя). max_leverage=20 — не выдумано и не "реальное значение
-# с биржи": BingX для этого контракта вообще не отдаёт maxLongLeverage, и
-# get_symbols() (app/exchanges/bingx.py) в этом случае сама подставляет тот
-# же дефолт 20 — то есть это фактическое поведение прод-кода для BTC-USDT.
+# выдумывать их нельзя). max_leverage поля больше нет вовсе (раздел 16 ТЗ,
+# шаг 15.5.1): BingX для этого контракта не отдаёт maxLongLeverage, а
+# get_symbols() (app/exchanges/bingx.py) раньше молча подставляла дефолт 20 —
+# убрано как тихий фолбэк; реальный источник максимума плеча теперь
+# BingXClient.get_leverage(), не эта ручка.
 _FAKE_SYMBOL_INFO = SymbolInfo(
     symbol="BTC-USDT",
     price_precision=1,
     quantity_precision=4,
     min_quantity=D("0.0001"),
-    max_leverage=20,
     min_notional=D("2"),
 )
 _FAKE_PRICE = D("100250")  # середина зоны входа сигнала ниже — дрейф ровно 0%
 _FAKE_BALANCE = D("10000")
 
 
-async def _fake_get_ticker(self, symbol: str) -> Ticker:  # type: ignore[no-untyped-def]
+async def _fake_get_ticker(self, symbol: str, *, max_retries=None) -> Ticker:  # type: ignore[no-untyped-def]
     return Ticker(
         symbol=symbol, last_price=_FAKE_PRICE, volume_24h=D("0"),
         price_change_percent=D("0"), timestamp=datetime.now(UTC),
     )
 
 
-async def _fake_get_symbols(self) -> list[SymbolInfo]:  # type: ignore[no-untyped-def]
+async def _fake_get_symbols(self, *, max_retries=None) -> list[SymbolInfo]:  # type: ignore[no-untyped-def]
     return [_FAKE_SYMBOL_INFO]
 
 
-async def _fake_get_balance(self) -> Balance:  # type: ignore[no-untyped-def]
+async def _fake_get_balance(self, *, max_retries=None) -> Balance:  # type: ignore[no-untyped-def]
     return Balance(
         asset="USDT", available=_FAKE_BALANCE, used_margin=D("0"),
         unrealized_pnl=D("0"), equity=_FAKE_BALANCE,
     )
+
+
+async def _fake_get_position_mode(self, *, max_retries=None) -> bool:  # type: ignore[no-untyped-def]
+    # True = hedge mode. Тот же дефолт, что демо-аккаунт BingX отдаёт в
+    # реальной проверке раздела 16 ТЗ (recon, 2026-09) — не выдумка, а
+    # согласованная во всех фейках этого шага величина.
+    return True
 
 
 async def _seed_execution_fixtures(db: Database, settings) -> SignalRecord:  # type: ignore[no-untyped-def]
@@ -482,10 +491,16 @@ async def _run_execution_scenario(sim, tg, db, redis, settings) -> None:  # type
         str(list(buttons)),
     )
 
-    originals = (BingXClient.get_ticker, BingXClient.get_symbols, BingXClient.get_balance)
+    originals = (
+        BingXClient.get_ticker,
+        BingXClient.get_symbols,
+        BingXClient.get_balance,
+        BingXClient.get_position_mode,
+    )
     BingXClient.get_ticker = _fake_get_ticker
     BingXClient.get_symbols = _fake_get_symbols
     BingXClient.get_balance = _fake_get_balance
+    BingXClient.get_position_mode = _fake_get_position_mode
     try:
         text = await sim.tap_data(f"exec:open:{signal_id}")
         check("карточка: объём", has(text, "объём"), text[:300])
@@ -533,7 +548,12 @@ async def _run_execution_scenario(sim, tg, db, redis, settings) -> None:  # type
             str(last_alert),
         )
     finally:
-        BingXClient.get_ticker, BingXClient.get_symbols, BingXClient.get_balance = originals
+        (
+            BingXClient.get_ticker,
+            BingXClient.get_symbols,
+            BingXClient.get_balance,
+            BingXClient.get_position_mode,
+        ) = originals
 
 
 if __name__ == "__main__":
