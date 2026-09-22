@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import httpx
 
@@ -154,7 +154,12 @@ def _build_tp_sl(order_type: OrderType, spec: TpSlSpec) -> str:
     Не вложенный объект, а JSON, упакованный в строку — так это принимает
     /openApi/swap/v2/trade/order (проверено по живой документации BingX,
     см. docs/execution-stage-15.md, раздел 16).
-    """
+
+    Строка собирается вручную (не json.dumps), без пробелов после ":" и
+    ",": это уже эквивалент separators=(",", ":") — важно, потому что
+    сервер пересчитывает подпись по сырой строке параметров (см.
+    _build_signed_query), и лишний пробел внутри значения обязан совпасть
+    у нас и у BingX посимвольно, а не только после URL-кодирования."""
     fields = [
         f'"type":"{order_type.value}"',
         f'"stopPrice":{_decimal_literal(spec.trigger_price)}',
@@ -231,15 +236,43 @@ class BingXClient(ExchangeClient):
     def _build_signed_query(self, params: dict[str, Any]) -> str:
         """Собирает подписанную строку запроса.
 
-        Порядок параметров фиксируется здесь и больше не меняется:
-        подпись считается по той же строке, что уходит на сервер.
-        """
+        Раздел "Signature Description" официальной документации BingX
+        (https://bingx-api.github.io/docs/#/en-us/swapV2/authentication.html
+        #Signature%20Description; детальный пример со значением-JSON —
+        раздел "Place multiple orders", .../trade-api.html#Bulk%20order):
+        подпись считается по СЫРОЙ, ещё не закодированной строке параметров;
+        URL-кодирование (только значений, не ключей и не строки целиком)
+        применяется отдельно, уже после подписи, только к тому, что уходит
+        в запрос. До этой правки код кодировал строку целиком (urlencode())
+        и подписывал уже закодированный результат — для простых значений
+        (BTC-USDT, BUY, числа) кодирование ничего не меняет, поэтому
+        расхождения не было видно нигде, кроме takeProfit/stopLoss: их
+        значение — JSON-строка со спецсимволами {"":,, которые кодирование
+        меняет, и получавшаяся подпись переставала совпадать с тем, что
+        пересчитывает сервер по сырой строке (раздел 16 ТЗ, docs/
+        execution-stage-15.md).
+
+        Порядок параметров фиксируется здесь и больше не меняется — важно
+        не для подписи как таковой (BingX подписывает конкатенацию как
+        есть, без сортировки), а чтобы raw- и encoded-версии ниже были
+        построены по одним и тем же парам."""
         payload = {k: v for k, v in params.items() if v is not None}
         payload["timestamp"] = int(time.time() * 1000)
         payload["recvWindow"] = self._recv_window
 
-        query = urlencode(payload)
-        return f"{query}&signature={self._sign(query)}"
+        pairs = [(k, str(v)) for k, v in payload.items()]
+        raw_query = "&".join(f"{k}={v}" for k, v in pairs)
+        signature = self._sign(raw_query)
+
+        # quote(), не quote_plus(): документация BingX кодирует только
+        # значения (не ключи, не строку целиком) — quote_plus дополнительно
+        # превращал бы пробел в "+", а не "%20", как в примерах документации.
+        # safe="" — без исключений: экранируем всё, что не входит в
+        # "always safe" по RFC 3986 (буквы/цифры/"_.-~" quote не трогает
+        # в любом случае), включая "/", если он когда-нибудь появится
+        # в значении.
+        encoded_query = "&".join(f"{k}={quote(v, safe='')}" for k, v in pairs)
+        return f"{encoded_query}&signature={signature}"
 
     # --- Транспорт ---------------------------------------------------------
 

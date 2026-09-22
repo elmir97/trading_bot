@@ -89,6 +89,149 @@ class TestSignature:
             client._sign("anything")
 
 
+def _old_build_signed_query(params: dict, recv_window: int, secret: str, ts_ms: int) -> str:
+    """Алгоритм _build_signed_query() ДО правки signature mismatch:
+    кодирование урл-строки целиком (urlencode) перед подписью. Эталон для
+    сравнения "ручка не изменилась" — встроен как есть, а не импортирован
+    из продакшн-кода, чтобы тест сравнивал именно со старым поведением,
+    а не с самим собой."""
+    import hashlib
+    import hmac as hmac_
+    from urllib.parse import urlencode as urlencode_
+
+    payload = dict(params)
+    payload["timestamp"] = ts_ms
+    payload["recvWindow"] = recv_window
+    query = urlencode_(payload)
+    signature = hmac_.new(secret.encode(), query.encode(), hashlib.sha256).hexdigest()
+    return f"{query}&signature={signature}"
+
+
+class TestSignedQueryEncodingOrder:
+    """Раздел 8 ТЗ / разведка signature mismatch (docs/execution-stage-15.md,
+    раздел 16): BingX подписывает СЫРУЮ строку параметров, URL-кодирование
+    значений — отдельным шагом, уже после подписи (официальная документация,
+    раздел "Signature Description" и детальный пример "Place multiple
+    orders" — см. докстринг app/exchanges/bingx.py:_build_signed_query).
+    До правки код кодировал строку целиком (urlencode()) и подписывал уже
+    закодированный результат — расхождение было незаметно для простых
+    значений (encode() их не меняет), но ломало любой JSON-значение
+    параметр (takeProfit/stopLoss)."""
+
+    async def test_place_market_order_with_tp_sl_signs_raw_value_not_encoded(self) -> None:
+        """Раньше сигнатура для этого запроса считалась по URL-кодированной
+        строке (спецсимволы JSON — %7B, %22, %3A, %2C, %7D), а не по сырой —
+        падало бы здесь до правки."""
+        captured: dict[str, httpx.Request] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["request"] = request
+            return ok({"order": {"symbol": "BTC-USDT", "status": "FILLED"}})
+
+        client = make_client(handler)
+
+        signed_over: dict[str, str] = {}
+        original_sign = client._sign
+
+        def spying_sign(query: str) -> str:
+            signed_over["query"] = query
+            return original_sign(query)
+
+        client._sign = spying_sign  # type: ignore[method-assign]
+
+        await client.place_market_order(
+            symbol="BTC-USDT",
+            side=OrderSide.BUY,
+            position_side="LONG",
+            quantity=D("0.014"),
+            client_order_id="probe-1",
+            take_profit=TpSlSpec(trigger_price=D("65100")),
+            stop_loss=TpSlSpec(trigger_price=D("62400")),
+        )
+
+        raw_signed = signed_over["query"]
+        sent_query = str(captured["request"].url.query, "ascii")
+
+        # 1. Строка, по которой считалась подпись, содержит СЫРОЙ JSON —
+        # буквальные {, ", :, , — не %7B/%22/%3A/%2C.
+        assert (
+            'takeProfit={"type":"TAKE_PROFIT_MARKET","stopPrice":65100,'
+            '"workingType":"MARK_PRICE"}' in raw_signed
+        )
+        assert '"stopPrice":62400' in raw_signed  # stopLoss тем же образом
+        assert "%7B" not in raw_signed and "%22" not in raw_signed
+
+        # 2. А реально отправленный URL содержит УЖЕ закодированные значения.
+        assert (
+            "takeProfit=%7B%22type%22%3A%22TAKE_PROFIT_MARKET%22%2C"
+            "%22stopPrice%22%3A65100%2C%22workingType%22%3A%22MARK_PRICE%22%7D"
+            in sent_query
+        )
+        assert '{"type"' not in sent_query  # сырого JSON в URL быть не должно
+
+        # 3. Подпись в отправленном URL — это действительно HMAC от сырой
+        # (не закодированной) строки, а не от того, что реально ушло в URL.
+        sent_signature = sent_query.rpartition("&signature=")[2]
+        assert client._sign(raw_signed) == sent_signature
+        await client.close()
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            pytest.param({}, id="get_balance/get_positions/get_api_restrictions"),
+            pytest.param({"symbol": "BTC-USDT"}, id="get_open_orders(symbol=...)"),
+            pytest.param(
+                {"symbol": "BTC-USDT", "leverage": 10, "side": "LONG"}, id="set_leverage"
+            ),
+        ],
+    )
+    def test_simple_signed_endpoints_unchanged_by_fix(self, monkeypatch, params) -> None:  # type: ignore[no-untyped-def]
+        """Для параметров без спецсимволов (как у get_balance, get_positions,
+        get_open_orders, get_api_restrictions, set_leverage) urlencode()
+        целиком и "сырая строка + кодирование значений по одному" дают
+        байт-в-байт одинаковый результат — правка эти ручки не трогает.
+        Должен проходить и на старом, и на новом коде: сравнивает текущую
+        _build_signed_query() с эталонной реализацией "как было", встроенной
+        в тест (_old_build_signed_query), а не наоборот."""
+        import time as time_module
+
+        fixed_ts = 1700000000000
+        monkeypatch.setattr(time_module, "time", lambda: fixed_ts / 1000)
+
+        client = BingXClient(api_key="k", api_secret=DOC_SECRET, recv_window=5000)
+
+        actual = client._build_signed_query(dict(params))
+        expected = _old_build_signed_query(
+            params, recv_window=5000, secret=DOC_SECRET, ts_ms=fixed_ts
+        )
+
+        assert actual == expected
+
+
+class TestBuildTpSl:
+    """docs/execution-stage-15.md, раздел 16: значение takeProfit/stopLoss —
+    JSON, упакованный в строку параметра, подписывается СЫРЫМ (см.
+    TestSignedQueryEncodingOrder выше) — лишний пробел внутри изменил бы
+    подписываемую строку. _build_tp_sl собирает JSON вручную, без пробелов
+    (эквивалент separators=(",", ":")), но не через json.dumps — фиксируем
+    инвариант тестом, чтобы будущий рефакторинг на json.dumps() по
+    умолчанию (который пробелы как раз вставляет) не вернул баг."""
+
+    def test_no_whitespace_in_tp_sl_json(self) -> None:
+        from app.exchanges.bingx import _build_tp_sl
+        from app.trading.enums import OrderType
+
+        rendered = _build_tp_sl(
+            OrderType.TAKE_PROFIT_MARKET,
+            TpSlSpec(trigger_price=D("65100"), price=D("65050")),
+        )
+        assert " " not in rendered
+        assert rendered == (
+            '{"type":"TAKE_PROFIT_MARKET","stopPrice":65100,"price":65050,'
+            '"workingType":"MARK_PRICE"}'
+        )
+
+
 class TestPublicData:
     async def test_ticker(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:

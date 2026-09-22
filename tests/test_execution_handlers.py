@@ -654,13 +654,20 @@ async def test_two_parallel_confirms_one_signal_race_is_caught(ctx, bot, monkeyp
     таймаутах биржи путь подтверждения способен занять дольше TTL лока —
     ключ в Redis гаснет по таймеру, пока обработка ещё легитимно идёт.
     Второе нажатие в этом окне успешно берёт лок и запускает второй,
-    полностью параллельный _process_confirm. SIGNAL_ALREADY_USED эту гонку
-    не ловит (signal.trade_opened_at проставляется только после успешной
-    записи строк заказа — позже, чем может успеть стартовать второй
-    процесс). Ловит UNIQUE на client_order_id: воспроизводим это напрямую,
+    полностью параллельный _process_confirm. Воспроизводим это напрямую,
     в обход RedisLock (как если бы TTL уже истёк), двумя независимыми
     сессиями на один сигнал — как в проде два разных апдейта получают
-    каждый свою сессию."""
+    каждый свою сессию.
+
+    Какая из двух защит поймает конкретно эту гонку — не детерминировано
+    (реальные асинхронные round-trip'ы к Postgres, порядок переключения
+    корутин не фиксирован): либо UNIQUE на client_order_id (проигравший
+    падает на flush строк заказа, откатывается по SAVEPOINT, ничего не
+    оставляет), либо гвард SIGNAL_ALREADY_USED, если signal.trade_opened_at
+    победителя успел закоммититься раньше, чем проигравший его прочитал
+    (тогда проигравший получает REFUSED-строку с этим кодом). Важен не
+    конкретный путь, а инвариант: ровно одна тройка DRY_RUN, второй попытке
+    пройти нельзя, необработанных исключений нет."""
     dp, session, user, client, _redis, settings = ctx
     _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
 
@@ -690,13 +697,30 @@ async def test_two_parallel_confirms_one_signal_race_is_caught(ctx, bot, monkeyp
         await db.dispose()
 
     orders = await _orders_for_signal(session, signal.id)
-    assert len(orders) == 3, "дубля тройки ордеров быть не должно"
-    assert {o.role for o in orders} == {OrderRole.ENTRY, OrderRole.STOP_LOSS, OrderRole.TAKE_PROFIT}
-    assert all(o.status is OrderStatus.DRY_RUN for o in orders)
+    dry_run = [o for o in orders if o.status is OrderStatus.DRY_RUN]
+    other = [o for o in orders if o.status is not OrderStatus.DRY_RUN]
+
+    assert len(dry_run) == 3, "должна остаться ровно одна тройка DRY_RUN"
+    assert {o.role for o in dry_run} == {
+        OrderRole.ENTRY, OrderRole.STOP_LOSS, OrderRole.TAKE_PROFIT,
+    }
+
+    # Проигравший либо вообще не оставляет строк (поймало UNIQUE на
+    # client_order_id — SAVEPOINT откатил вставку), либо оставляет ровно
+    # одну REFUSED-строку с кодом SIGNAL_ALREADY_USED (поймал гвард) —
+    # см. докстринг выше. Второй тройки DRY_RUN и любого другого исхода
+    # быть не должно.
+    assert len(other) <= 1
+    if other:
+        assert other[0].status is OrderStatus.REFUSED
+        assert other[0].error_code == "SIGNAL_ALREADY_USED"
 
     edit_texts = [m.text for m in bot.recorder.calls if isinstance(m, EditMessageText)]
     success_texts = [t for t in edit_texts if t and "Подтверждено" in t]
-    race_texts = [t for t in edit_texts if t and "уже обрабатывается" in t]
+    race_texts = [
+        t for t in edit_texts
+        if t and ("уже обрабатывается" in t or "уже открывали сделку" in t)
+    ]
     assert len(success_texts) == 1
     assert len(race_texts) == 1
 
