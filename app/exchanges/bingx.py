@@ -455,12 +455,24 @@ class BingXClient(ExchangeClient):
         code = payload.get("code", 0)
         if code not in (0, "0", None):
             message = payload.get("msg") or "без описания"
-            code_int = int(code) if str(code).lstrip("-").isdigit() else 0
+            # None, а не 0, если код не разобрался в число — раздел 16 ТЗ,
+            # шаг 15.5.2: 0 у ExchangeError.code теперь означает не "код не
+            # взялся", а "биржа его не назвала совсем", что здесь не так —
+            # code присутствовал, просто не int. Смешивать эти два случая
+            # значило бы ронять REJECTED-классификацию на пути отправки
+            # ордера (см. ExecutionService.submit_entry_order()).
+            code_int = int(code) if str(code).lstrip("-").isdigit() else None
             if code_int in _FATAL_CODES:
-                raise ExchangeAuthError(f"BingX: {message} (код {code})")
+                raise ExchangeAuthError(
+                    f"BingX: {message} (код {code})", code=code_int, payload=payload
+                )
             if code_int == 100410:
-                raise ExchangeRateLimitError(f"BingX: {message}", 2.0)
-            raise ExchangeResponseError(f"BingX: {message} (код {code})")
+                raise ExchangeRateLimitError(
+                    f"BingX: {message}", 2.0, code=code_int, payload=payload
+                )
+            raise ExchangeResponseError(
+                f"BingX: {message} (код {code})", code=code_int, payload=payload
+            )
 
         return payload.get("data", payload)
 

@@ -25,7 +25,23 @@ from app.trading.enums import OrderSide, TradeSide
 
 
 class ExchangeError(RuntimeError):
-    """Базовая ошибка работы с биржей."""
+    """Базовая ошибка работы с биржей.
+
+    code/payload — раздел 16 ТЗ, шаг 15.5.2: числовой код и сырой JSON
+    ответа биржи, когда он реально пришёл (BingXClient._parse() отдаёт их
+    при code != 0). None у обоих — ответа не было вовсе (транспортный сбой)
+    или код был 0, но что-то не разобралось уже после него (см.
+    BingXClient._parse_order()/_to_decimal). Это различие и есть граница
+    между REJECTED (биржа явно отказала — code не None и не 0) и UNKNOWN
+    (мы не знаем, что произошло на её стороне) на пути отправки ордера —
+    см. app/execution/service.py, ExecutionService.submit_entry_order()."""
+
+    def __init__(
+        self, message: str, *, code: int | None = None, payload: dict | None = None
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.payload = payload
 
 
 class ExchangeAuthError(ExchangeError):
@@ -35,13 +51,23 @@ class ExchangeAuthError(ExchangeError):
 class ExchangeRateLimitError(ExchangeError):
     """Превышен лимит запросов. Содержит рекомендуемую паузу."""
 
-    def __init__(self, message: str, retry_after: float = 1.0) -> None:
-        super().__init__(message)
+    def __init__(
+        self,
+        message: str,
+        retry_after: float = 1.0,
+        *,
+        code: int | None = None,
+        payload: dict | None = None,
+    ) -> None:
+        super().__init__(message, code=code, payload=payload)
         self.retry_after = retry_after
 
 
 class ExchangeUnavailableError(ExchangeError):
-    """Биржа недоступна: таймаут, обрыв связи, технические работы."""
+    """Биржа недоступна: таймаут, обрыв связи, технические работы.
+
+    code/payload здесь всегда None — по определению: этот класс как раз
+    и означает, что ответа не было (см. докстринг ExchangeError выше)."""
 
 
 class ExchangeResponseError(ExchangeError):

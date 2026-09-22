@@ -1044,6 +1044,37 @@ class TestErrorHandling:
             await client.get_balance()
         await client.close()
 
+    async def test_business_error_carries_code_and_payload(self) -> None:
+        """Раздел 16 ТЗ, шаг 15.5.2: путь отправки ордера различает REJECTED
+        (биржа явно отказала) и UNKNOWN (мы не знаем) по exc.code — без
+        структурных code/payload на исключении пришлось бы парсить текст
+        сообщения. См. ExecutionService.submit_entry_order()."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, json={"code": 80001, "msg": "insufficient margin"}
+            )
+
+        client = make_client(handler, max_retries=1)
+        with pytest.raises(ExchangeResponseError) as excinfo:
+            await client.get_balance()
+        assert excinfo.value.code == 80001
+        assert excinfo.value.payload == {"code": 80001, "msg": "insufficient margin"}
+        await client.close()
+
+    async def test_unparseable_code_is_none_not_zero(self) -> None:
+        """code_int раньше по умолчанию был 0 при нечисловом code — после
+        этой правки 0 означает "биржа вернула ровно 0", а не "не смогли
+        разобрать", иначе REJECTED/UNKNOWN спутали бы неразобранный код
+        с успехом-но-не-совсем."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"code": "oops", "msg": "weird"})
+
+        client = make_client(handler, max_retries=1)
+        with pytest.raises(ExchangeResponseError) as excinfo:
+            await client.get_balance()
+        assert excinfo.value.code is None
+        await client.close()
+
     async def test_rate_limit_retries_then_raises(self) -> None:
         calls = {"n": 0}
 
