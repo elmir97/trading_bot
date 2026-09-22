@@ -1,10 +1,16 @@
-"""Карточка подтверждения входа по сигналу (этап 15.4, разделы 1 и 5 ТЗ).
+"""Карточка подтверждения входа по сигналу (этап 15.4-15.5, разделы 1 и 5 ТЗ).
 
 Хендлер только собирает контекст и рисует кнопки — вся торговая логика
-(guards → sizing → OrderRequest) живёт в app/execution/service.py, сюда
-не переносится. Отправки ордера здесь нет и не будет: при «Да» — только
-запись в execution_orders со статусом DRY_RUN и сообщение с полным
-содержимым OrderRequest (появится в 15.5).
+(guards → sizing → OrderRequest → плечо → отправка) живёт в
+app/execution/service.py, сюда не переносится. При «Да»: EXEC_DRY_RUN=true
+(дефолт) — запись в execution_orders со статусом DRY_RUN и сообщение с
+полным содержимым OrderRequest, без похода на биржу. EXEC_DRY_RUN=false
+(раздел 16 ТЗ, шаг 15.5.2) — реальная отправка: ExecutionService.
+adjust_leverage()/submit_entry_order(), PENDING-строка коммитится до
+HTTP-запроса и обновляется коммитом после ответа (раздел 8 ТЗ). Валидатор
+Settings._dry_run_supported_only_when_true по-прежнему не пускает
+EXEC_DRY_RUN=false на прод — снимается явным решением владельца на 15.5.5,
+после read-back (15.5.3) и записи сделки в журнал (15.5.4).
 
 Состояние карточки (цена на момент показа, TTL) живёт в памяти процесса,
 как и _market_cache в exchange.py — рестарт бота теряет незавершённые
@@ -46,12 +52,16 @@ from app.database.repositories.execution_order import ExecutionOrderRepository
 from app.database.repositories.signal import SignalRepository
 from app.database.session import Database
 from app.exchanges.base import ExchangeAuthError, ExchangeError
+from app.exchanges.bingx import bingx_position_side
+from app.execution.guards import check_live_orders_allowed
 from app.execution.models import ExecutionRefusal, ExecutionRefusalCode
 from app.execution.service import (
     ExecutionQuote,
     ExecutionService,
+    build_entry_order_pending,
     build_exchange_error_order,
     build_execution_orders,
+    build_observation_order,
     build_observation_order_from_quote,
     price_drift_percent,
     signal_reference_price,
@@ -114,6 +124,22 @@ def _parse_signal_id(data: str | None, prefix: str) -> int | None:
 def render_refusal(refusal: ExecutionRefusal) -> str:
     """Раздел 12 ТЗ: человеческим текстом, без stack trace."""
     return f"🚫 Не открыл: {refusal.message}"
+
+
+# Раздел 16 ТЗ, шаг 15.5.2, п.7 плана: коды BingX для отказа ордера живьём
+# не собраны (раздел 16 — открыто до 15.5.5), наполняется по мере появления
+# живых REJECTED. Ключ — ExecutionOrder.error_code (строка числового кода).
+_KNOWN_REJECTION_CODES: dict[str, str] = {}
+
+
+def _render_rejection_message(error_code: str | None) -> str:
+    """Раздел 16 ТЗ, шаг 15.5.2, п.7 плана: сырой msg биржи сюда не
+    попадает — error_code это число (ExecutionService.submit_entry_order)
+    или имя класса исключения, не текст ответа."""
+    known = _KNOWN_REJECTION_CODES.get(error_code or "")
+    if known is not None:
+        return f"🚫 {known}"
+    return f"🚫 BingX отклонил ордер, код {error_code}"
 
 
 def render_confirmation(quote: ExecutionQuote, signal: SignalRecord, settings: Settings) -> str:
@@ -571,18 +597,20 @@ async def _process_confirm(
             await callback.message.edit_text(render_refusal(result), reply_markup=None)
         return
 
-    # Успех: раздел 16 ТЗ, шаг 15.5.1 — состояние сервиса, не зашитый
-    # литерал (было: OrderStatus.DRY_RUN безусловно). exec_dry_run=False
-    # сегодня недостижим (Settings._dry_run_supported_only_when_true роняет
-    # процесс на старте раньше) — ветка ниже на случай обхода валидатора,
-    # не тихое повторение DRY_RUN. Путь реальной отправки — шаг 15.5.2.
-    if not settings.exec_dry_run:
-        raise NotImplementedError(
-            "EXEC_DRY_RUN=false не поддерживается до шага 15.5.2"
-        )
-    status = OrderStatus.DRY_RUN
-
+    # Успех. Раздел 16 ТЗ, шаг 15.5.2: exec_dry_run — состояние сервиса,
+    # не зашитый литерал (было: OrderStatus.DRY_RUN безусловно). Валидатор
+    # Settings._dry_run_supported_only_when_true сегодня не пускает
+    # EXEC_DRY_RUN=false на прод — ветка ниже реализована и покрыта тестами
+    # заранее, снимается явным решением владельца на 15.5.5.
     _confirmations.pop(key, None)
+
+    if not settings.exec_dry_run:
+        await _submit_real_order(
+            callback.message, session, user, signal, result, settings, cipher, now
+        )
+        return
+
+    status = OrderStatus.DRY_RUN
     order = result.order
     # Дрейф — от свежей цены подтверждения (order.entry_price), не от цены
     # первого показа карточки (state.drift_percent): раздел 5 ТЗ запрашивает
@@ -632,3 +660,148 @@ async def _process_confirm(
     await callback.message.answer(
         f"🧪 <b>Сухой прогон: ушёл бы такой ордер</b>\n\n<code>{order.render()}</code>"
     )
+
+
+async def _submit_real_order(
+    message: Message,
+    session: AsyncSession,
+    user: User,
+    signal: SignalRecord,
+    result: ExecutionQuote,
+    settings: Settings,
+    cipher: SecretCipher,
+    now: datetime,
+) -> None:
+    """Раздел 16 ТЗ, шаг 15.5.2 — реальная отправка ордера на биржу.
+
+    Второй клиент, не тот, что использовал _build_quote() для evaluate():
+    тот уже закрыт в своём finally к этому моменту. Цена — одна лишняя
+    локальная расшифровка ключа (ExchangeFactory.get_credentials — запрос
+    к своей БД, не к бирже), не лишний HTTP-вызов к BingX — на
+    _CONFIRM_PATH_HTTP_CALLS (app/core/config.py) не влияет."""
+    order = result.order
+    drift = price_drift_percent(order.entry_price, signal)
+
+    # Раздел 16 ТЗ, шаг 15.5.2, п.3 плана: тот же LIVE_ORDERS_NOT_ALLOWED,
+    # что уже проверен в evaluate()/run_guards() при построении карточки —
+    # перепроверяется здесь ещё раз, прямо перед HTTP. Клиент ниже строится
+    # от settings.bingx_allowed_exchange_mode — вычисляемого свойства над
+    # той же настройкой bingx_trading_mode, что смотрит этот гвард
+    # (app/core/config.py: bingx_allowed_exchange_mode), не отдельной
+    # сущностью. Разойтись им сегодня неоткуда (settings — один объект на
+    # весь запрос), но проверка ничего не стоит и не полагается на это.
+    mode_refusal = check_live_orders_allowed(
+        trading_mode=settings.bingx_trading_mode,
+        allow_live_mode_orders=settings.exec_allow_live_mode_orders,
+    )
+    if mode_refusal is not None:
+        row = build_observation_order(
+            user_id=user.id,
+            signal_id=signal.id,
+            symbol=order.symbol,
+            side=order.side,
+            position_side=order.position_side,
+            status=OrderStatus.REFUSED,
+            price=order.entry_price,
+            price_drift_percent=drift,
+            error_code=mode_refusal.code.value,
+            error_message=mode_refusal.message,
+            stage=ObservationStage.CONFIRM,
+        )
+        session.add(row)
+        await session.flush()
+        await message.edit_text(render_refusal(mode_refusal), reply_markup=None)
+        return
+
+    factory = ExchangeFactory(settings, cipher)
+    allowed_mode = settings.bingx_allowed_exchange_mode
+    try:
+        client = await factory.for_user(session, user.id, mode=allowed_mode)
+    except ExchangeAuthError as exc:
+        await _record_exchange_error(session, user, signal, exc, at_confirm=True)
+        await message.edit_text(_describe(exc), reply_markup=None)
+        return
+
+    try:
+        market = MarketDataService(client, _market_cache)
+        service = ExecutionService(
+            session=session, settings=settings, client=client, market=market
+        )
+        position_side = bingx_position_side(order.position_side, result.dual_side_position)
+
+        leverage_refusal = await service.adjust_leverage(order=order, position_side=position_side)
+        if leverage_refusal is not None:
+            await message.edit_text(render_refusal(leverage_refusal), reply_markup=None)
+            return
+
+        entry_row = build_entry_order_pending(order, price_drift_percent=drift)
+        orders_repo = ExecutionOrderRepository(session)
+        try:
+            # SAVEPOINT — та же техника, что у DRY_RUN выше: если ловим
+            # гонку по client_order_id, откатываем только эту вставку.
+            async with session.begin_nested():
+                orders_repo.add(entry_row)
+                await orders_repo.flush()
+        except IntegrityError as exc:
+            if not _is_client_order_id_collision(exc):
+                raise
+            logger.info(
+                "Гонка на подтверждении (реальная отправка): "
+                "client_order_id уже занят",
+                extra={"user_id": user.id, "signal_id": signal.id},
+            )
+            await message.edit_text(
+                "⏳ Сигнал уже обрабатывается — похоже, вход уже отправлен "
+                "другим запросом.",
+                reply_markup=None,
+            )
+            return
+
+        # Раздел 8 ТЗ: запись PENDING обязана быть закоммичена ДО
+        # HTTP-запроса — настоящий commit(), не flush(). flush() делает
+        # строку видимой только внутри этой же незакоммиченной транзакции:
+        # если процесс упадёт между этой строкой и обработкой ответа
+        # биржи, откатится и сама PENDING-строка вместе с попыткой —
+        # именно та амбигуity, от которой раздел 8 защищает. Дальше по
+        # тому же сигналу нельзя ни отправить снова (детерминированный
+        # client_order_id упрётся в UNIQUE), ни считать вход не
+        # случившимся — reconciler (15.6) обязан разбирать такую строку
+        # так же, как UNKNOWN (см. docs/execution-stage-15.md, раздел 8).
+        signal.trade_opened_at = now
+        await session.commit()
+
+        entry_row = await service.submit_entry_order(
+            order=order, position_side=position_side, entry_row=entry_row
+        )
+        # И после HTTP-ответа — тоже настоящий commit(), не flush(): если
+        # что-то упадёт дальше (например, при отрисовке сообщения), уже
+        # известный биржевой исход (SUBMITTED/REJECTED/UNKNOWN) не должен
+        # откатиться обратно в PENDING.
+        await session.commit()
+    finally:
+        await client.close()
+
+    logger.info(
+        "Реальная отправка ордера",
+        extra={
+            "user_id": user.id,
+            "signal_id": signal.id,
+            "status": entry_row.status.value,
+            "order": order.render(),
+        },
+    )
+
+    if entry_row.status is OrderStatus.SUBMITTED:
+        await message.edit_text(
+            f"✅ Ордер отправлен, id {entry_row.exchange_order_id}", reply_markup=None
+        )
+    elif entry_row.status is OrderStatus.REJECTED:
+        await message.edit_text(
+            _render_rejection_message(entry_row.error_code), reply_markup=None
+        )
+    else:
+        await message.edit_text(
+            "⚠️ Биржа не ответила. Ордер мог пройти — проверь позиции в "
+            "BingX. Повторно не отправляю.",
+            reply_markup=None,
+        )

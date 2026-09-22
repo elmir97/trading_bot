@@ -30,9 +30,11 @@ from app.exchanges.base import (
     ApiRestrictions,
     Balance,
     ExchangeClient,
+    ExchangeResponseError,
     ExchangeUnavailableError,
     Fill,
     LeverageInfo,
+    OrderResult,
     Position,
     SymbolInfo,
 )
@@ -66,13 +68,17 @@ class FakeSubmitClient(ExchangeClient):
     def __init__(
         self,
         *,
-        current_leverage: LeverageInfo,
+        current_leverage: LeverageInfo | None = None,
         leverage_error: Exception | None = None,
         set_leverage_error: Exception | None = None,
+        place_order_result: OrderResult | None = None,
+        place_order_error: Exception | None = None,
     ) -> None:
         self.current_leverage = current_leverage
         self.leverage_error = leverage_error
         self.set_leverage_error = set_leverage_error
+        self.place_order_result = place_order_result
+        self.place_order_error = place_order_error
         self.calls: list[tuple[str, dict]] = []
         self.closed = False
 
@@ -120,7 +126,10 @@ class FakeSubmitClient(ExchangeClient):
 
     async def place_market_order(self, **kwargs):  # type: ignore[no-untyped-def]
         self.calls.append(("place_market_order", kwargs))
-        raise NotImplementedError
+        if self.place_order_error is not None:
+            raise self.place_order_error
+        assert self.place_order_result is not None, "тест не задал place_order_result"
+        return self.place_order_result
 
     async def get_order(self, symbol, client_order_id):  # type: ignore[no-untyped-def]
         raise NotImplementedError
@@ -341,3 +350,146 @@ class TestBuildEntryOrderPending:
             )
         )
         assert len(rows) == 1
+
+
+def _order_result(**overrides: object) -> OrderResult:
+    fields: dict[str, object] = {
+        "order_id": "9001",
+        "client_order_id": "tj1u1E",
+        "symbol": "BTC-USDT",
+        "side": "BUY",
+        "position_side": "LONG",
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "price": D("0"),
+        "avg_price": D("100.1"),
+        "quantity": D("0.01"),
+        "executed_qty": D("0.01"),
+        "fee": D("0.05"),
+        "raw": {"orderId": "9001", "status": "FILLED"},
+    }
+    fields.update(overrides)
+    return OrderResult(**fields)  # type: ignore[arg-type]
+
+
+class TestSubmitEntryOrder:
+    """Раздел 16 ТЗ, шаг 15.5.2, п.1 плана: REJECTED только если
+    exc.code is not None и exc.code != 0 — биржа явно отказала. Всё
+    остальное (ExchangeUnavailableError, ExchangeResponseError с
+    code=None) — UNKNOWN: при code=0 и неразобранном ответе ордер мог
+    пройти, REJECTED сказал бы пользователю обратное."""
+
+    async def test_success_marks_submitted(self, ctx) -> None:  # type: ignore[no-untyped-def]
+        session, user, signal, settings = ctx
+        order = _order(user.id, signal.id)
+        entry_row = build_entry_order_pending(order)
+        session.add(entry_row)
+        await session.flush()
+
+        client = FakeSubmitClient(
+            place_order_result=_order_result(order_id="777", raw={"orderId": "777"})
+        )
+        service = _service(session, settings, client)
+
+        updated = await service.submit_entry_order(
+            order=order, position_side="LONG", entry_row=entry_row
+        )
+
+        assert updated.status is OrderStatus.SUBMITTED
+        assert updated.exchange_order_id == "777"
+        assert updated.raw_response == {"orderId": "777"}
+
+    async def test_explicit_rejection_code_marks_rejected(self, ctx) -> None:  # type: ignore[no-untyped-def]
+        """Биржа ответила (HTTP 200, JSON с кодом) и явно отказала — ответ
+        определённо получен, ордер определённо не прошёл."""
+        session, user, signal, settings = ctx
+        order = _order(user.id, signal.id)
+        entry_row = build_entry_order_pending(order)
+        session.add(entry_row)
+        await session.flush()
+
+        payload = {"code": 80001, "msg": "insufficient margin"}
+        client = FakeSubmitClient(
+            place_order_error=ExchangeResponseError(
+                "BingX: insufficient margin (код 80001)", code=80001, payload=payload
+            )
+        )
+        service = _service(session, settings, client)
+
+        updated = await service.submit_entry_order(
+            order=order, position_side="LONG", entry_row=entry_row
+        )
+
+        assert updated.status is OrderStatus.REJECTED
+        assert updated.error_code == "80001"
+        assert updated.raw_response == payload
+        # Сырой msg биржи не должен попасть в error_message.
+        assert updated.error_message is None or "insufficient margin" not in (
+            updated.error_message or ""
+        )
+
+    async def test_timeout_marks_unknown_not_rejected(self, ctx) -> None:  # type: ignore[no-untyped-def]
+        """Ответа не было вовсе — ордер мог пройти, REJECTED здесь был бы
+        ложью пользователю."""
+        session, user, signal, settings = ctx
+        order = _order(user.id, signal.id)
+        entry_row = build_entry_order_pending(order)
+        session.add(entry_row)
+        await session.flush()
+
+        client = FakeSubmitClient(
+            place_order_error=ExchangeUnavailableError("BingX не ответил вовремя")
+        )
+        service = _service(session, settings, client)
+
+        updated = await service.submit_entry_order(
+            order=order, position_side="LONG", entry_row=entry_row
+        )
+
+        assert updated.status is OrderStatus.UNKNOWN
+        assert updated.error_code == "ExchangeUnavailableError"
+
+    async def test_code_zero_with_unparsed_field_marks_unknown_not_rejected(self, ctx) -> None:  # type: ignore[no-untyped-def]
+        """Раздел 16 ТЗ, шаг 15.5.2, п.1 плана — сценарий, явно названный
+        в правках: code=0 (успех по коду), но что-то дальше не
+        разобралось (типично — BingXClient._parse_order()/_to_decimal
+        на кривом поле). exc.code=None в этом случае, не 0 и не то же
+        самое, что явный отказ — обязана быть UNKNOWN, не REJECTED."""
+        session, user, signal, settings = ctx
+        order = _order(user.id, signal.id)
+        entry_row = build_entry_order_pending(order)
+        session.add(entry_row)
+        await session.flush()
+
+        client = FakeSubmitClient(
+            place_order_error=ExchangeResponseError(
+                "Не удалось разобрать поле avgPrice: 'oops'", code=None, payload=None
+            )
+        )
+        service = _service(session, settings, client)
+
+        updated = await service.submit_entry_order(
+            order=order, position_side="LONG", entry_row=entry_row
+        )
+
+        assert updated.status is OrderStatus.UNKNOWN
+        assert updated.error_code == "ExchangeResponseError"
+
+    async def test_only_one_place_market_order_call(self, ctx) -> None:  # type: ignore[no-untyped-def]
+        session, user, signal, settings = ctx
+        order = _order(user.id, signal.id)
+        entry_row = build_entry_order_pending(order)
+        session.add(entry_row)
+        await session.flush()
+
+        client = FakeSubmitClient(place_order_result=_order_result())
+        service = _service(session, settings, client)
+
+        await service.submit_entry_order(order=order, position_side="LONG", entry_row=entry_row)
+
+        calls = [c for c in client.calls if c[0] == "place_market_order"]
+        assert len(calls) == 1
+        kwargs = calls[0][1]
+        assert kwargs["stop_loss"].trigger_price == order.stop_loss
+        assert kwargs["take_profit"].trigger_price == order.take_profit
+        assert kwargs["client_order_id"] == order.entry_client_order_id

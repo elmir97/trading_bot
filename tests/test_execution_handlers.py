@@ -49,7 +49,10 @@ from app.exchanges.base import (
     ExchangeAuthError,
     ExchangeClient,
     ExchangeError,
+    ExchangeResponseError,
     ExchangeUnavailableError,
+    LeverageInfo,
+    OrderResult,
     SymbolInfo,
     Ticker,
 )
@@ -91,6 +94,11 @@ class FakeExchangeClient(ExchangeClient):
         restrictions_error: Exception | None = None,
         dual_side_position: bool = True,
         position_mode_error: Exception | None = None,
+        current_leverage: object = None,
+        leverage_error: Exception | None = None,
+        set_leverage_error: Exception | None = None,
+        place_order_result: object = None,
+        place_order_error: Exception | None = None,
     ) -> None:
         self.price = price
         self.balance = balance
@@ -103,6 +111,13 @@ class FakeExchangeClient(ExchangeClient):
         self.dual_side_position = dual_side_position
         self.position_mode_error = position_mode_error
         self.get_position_mode_calls = 0
+        # Раздел 16 ТЗ, шаг 15.5.2: плечо и реальная отправка.
+        self.current_leverage = current_leverage
+        self.leverage_error = leverage_error
+        self.set_leverage_error = set_leverage_error
+        self.place_order_result = place_order_result
+        self.place_order_error = place_order_error
+        self.submit_calls: list[tuple[str, dict]] = []
         # Раздел 8 ТЗ: подтверждение (стадия CONFIRM) обязано звать эти
         # методы с max_retries=1, карточка (CARD) — без ограничения.
         self.ticker_retries_seen: list[int | None] = []
@@ -147,7 +162,11 @@ class FakeExchangeClient(ExchangeClient):
         return []
 
     async def get_leverage(self, symbol, *, max_retries=None):
-        raise NotImplementedError
+        self.submit_calls.append(("get_leverage", {"symbol": symbol, "max_retries": max_retries}))
+        if self.leverage_error is not None:
+            raise self.leverage_error
+        assert self.current_leverage is not None, "тест не задал current_leverage"
+        return self.current_leverage
 
     async def get_position_mode(self, *, max_retries=None):
         self.get_position_mode_calls += 1
@@ -156,10 +175,20 @@ class FakeExchangeClient(ExchangeClient):
         return self.dual_side_position
 
     async def set_leverage(self, symbol, leverage, *, position_side=None):
-        raise NotImplementedError
+        self.submit_calls.append((
+            "set_leverage",
+            {"symbol": symbol, "leverage": leverage, "position_side": position_side},
+        ))
+        if self.set_leverage_error is not None:
+            raise self.set_leverage_error
+        return leverage
 
     async def place_market_order(self, **kwargs):
-        raise NotImplementedError
+        self.submit_calls.append(("place_market_order", kwargs))
+        if self.place_order_error is not None:
+            raise self.place_order_error
+        assert self.place_order_result is not None, "тест не задал place_order_result"
+        return self.place_order_result
 
     async def get_order(self, symbol, client_order_id):
         raise NotImplementedError
@@ -239,6 +268,27 @@ def _restrictions(**overrides: object) -> ApiRestrictions:
     }
     fields.update(overrides)
     return ApiRestrictions(**fields)  # type: ignore[arg-type]
+
+
+def _leverage_info(**overrides: object) -> LeverageInfo:
+    fields: dict[str, object] = {
+        "symbol": "BTC-USDT", "long_leverage": 10, "short_leverage": 10,
+        "max_long_leverage": 125, "max_short_leverage": 125,
+    }
+    fields.update(overrides)
+    return LeverageInfo(**fields)  # type: ignore[arg-type]
+
+
+def _order_result(**overrides: object) -> OrderResult:
+    fields: dict[str, object] = {
+        "order_id": "9001", "client_order_id": "tj1u1E", "symbol": "BTC-USDT",
+        "side": "BUY", "position_side": "LONG", "order_type": "MARKET",
+        "status": "FILLED", "price": D("0"), "avg_price": D("100.1"),
+        "quantity": D("0.01"), "executed_qty": D("0.01"), "fee": D("0.05"),
+        "raw": {"orderId": "9001", "status": "FILLED"},
+    }
+    fields.update(overrides)
+    return OrderResult(**fields)  # type: ignore[arg-type]
 
 
 def _signal(user_id: int, **overrides: object) -> SignalRecord:
@@ -601,16 +651,151 @@ async def test_confirm_yes_creates_dry_run_orders(ctx, bot, monkeypatch) -> None
     assert (user.id, signal.id) not in execution._confirmations
 
 
-async def test_confirm_yes_raises_when_dry_run_disabled(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """Раздел 16 ТЗ, шаг 15.5.1: Settings._dry_run_supported_only_when_true
-    роняет процесс на старте при EXEC_DRY_RUN=false — этот путь недостижим
-    штатно. Тест бьёт по защите на случай обхода валидатора (мутация
-    settings.exec_dry_run после конструктора, тот же приём, что и для
-    trading_execution_enabled в остальных тестах файла): падать явным
-    NotImplementedError, не тихо повторять DRY_RUN и не отправлять
-    недостроенный путь."""
+async def _open_and_confirm(dp, bot, signal, user) -> None:  # type: ignore[no-untyped-def]
+    """Общий пролог для тестов реальной отправки ниже: открыть карточку,
+    нажать «Да»."""
+    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+    state = execution._confirmations[(user.id, signal.id)]
+    await _feed(
+        dp, bot, 2,
+        make_callback(f"exec:yes:{signal.id}", message_id=state.message_id),
+    )
+
+
+async def test_confirm_yes_submits_real_order(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Раздел 16 ТЗ, шаг 15.5.2: EXEC_DRY_RUN=false — счастливый путь.
+    Одна ENTRY-строка SUBMITTED (не три, как у DRY_RUN — SL/TP-строки
+    появятся на read-back, 15.5.3), сообщение "Ордер отправлен, id …"
+    (раздел 16 ТЗ, шаг 15.5.2, п.7 плана)."""
     dp, session, user, client, _redis, settings = ctx
+    client.current_leverage = _leverage_info(long_leverage=10)  # совпадает с plan.max_leverage=10
+    client.place_order_result = _order_result(order_id="555555")
     _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    settings.exec_dry_run = False  # обходим валидатор конструктора, как и другие тесты файла
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+
+    await _open_and_confirm(dp, bot, signal, user)
+
+    orders = await _orders_for_signal(session, signal.id)
+    assert len(orders) == 1
+    assert orders[0].role is OrderRole.ENTRY
+    assert orders[0].status is OrderStatus.SUBMITTED
+    assert orders[0].exchange_order_id == "555555"
+    assert orders[0].client_order_id is not None
+
+    await session.refresh(signal)
+    assert signal.trade_opened_at is not None
+
+    submit_calls = [c[0] for c in client.submit_calls]
+    # плечо совпало — set_leverage не вызывается
+    assert submit_calls == ["get_leverage", "place_market_order"]
+
+    edits = [m.text for m in bot.recorder.calls if isinstance(m, EditMessageText)]
+    assert any("Ордер отправлен, id 555555" in t for t in edits)
+
+
+async def test_confirm_yes_real_order_leverage_mismatch_calls_set_leverage(  # type: ignore[no-untyped-def]
+    ctx, bot, monkeypatch
+) -> None:
+    dp, session, user, client, _redis, settings = ctx
+    client.current_leverage = _leverage_info(long_leverage=5)  # расходится с plan.max_leverage=10
+    client.place_order_result = _order_result()
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    settings.exec_dry_run = False
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+
+    await _open_and_confirm(dp, bot, signal, user)
+
+    submit_calls = {c[0]: c[1] for c in client.submit_calls}
+    assert "set_leverage" in submit_calls
+    assert submit_calls["set_leverage"]["position_side"] == "LONG"
+    assert submit_calls["set_leverage"]["position_side"] is not None
+    assert submit_calls["set_leverage"]["position_side"] != "BOTH"
+
+
+async def test_confirm_yes_real_order_rejected_shows_known_code_not_raw_msg(  # type: ignore[no-untyped-def]
+    ctx, bot, monkeypatch
+) -> None:
+    """Раздел 16 ТЗ, шаг 15.5.2, п.1 и п.7 плана: биржа явно отказала
+    (code задан и не 0) → REJECTED, текст пользователю — по известным
+    кодам, иначе общий фолбэк; сырой msg биржи в чат не попадает."""
+    dp, session, user, client, _redis, settings = ctx
+    client.current_leverage = _leverage_info(long_leverage=10)
+    client.place_order_error = ExchangeResponseError(
+        "BingX: insufficient margin, no leaking (код 80001)",
+        code=80001,
+        payload={"code": 80001, "msg": "insufficient margin, no leaking"},
+    )
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    settings.exec_dry_run = False
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+
+    await _open_and_confirm(dp, bot, signal, user)
+
+    orders = await _orders_for_signal(session, signal.id)
+    assert len(orders) == 1
+    assert orders[0].status is OrderStatus.REJECTED
+    assert orders[0].error_code == "80001"
+
+    edits = [m.text for m in bot.recorder.calls if isinstance(m, EditMessageText)]
+    assert any("BingX отклонил ордер, код 80001" in t for t in edits)
+    assert not any("insufficient margin" in t for t in edits)
+
+
+async def test_confirm_yes_real_order_timeout_shows_unknown_text(  # type: ignore[no-untyped-def]
+    ctx, bot, monkeypatch
+) -> None:
+    """Раздел 16 ТЗ, шаг 15.5.2, п.1 и п.7 плана: ответа не было —
+    UNKNOWN, не REJECTED, текст без ссылок на шаги разработки."""
+    dp, session, user, client, _redis, settings = ctx
+    client.current_leverage = _leverage_info(long_leverage=10)
+    client.place_order_error = ExchangeUnavailableError("BingX не ответил вовремя")
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    settings.exec_dry_run = False
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+
+    await _open_and_confirm(dp, bot, signal, user)
+
+    orders = await _orders_for_signal(session, signal.id)
+    assert len(orders) == 1
+    assert orders[0].status is OrderStatus.UNKNOWN
+
+    edits = [m.text for m in bot.recorder.calls if isinstance(m, EditMessageText)]
+    assert any(
+        "Биржа не ответила. Ордер мог пройти — проверь позиции в BingX. "
+        "Повторно не отправляю." in t
+        for t in edits
+    )
+    assert not any("15.5" in t for t in edits)
+
+
+async def test_confirm_yes_live_orders_not_allowed_blocks_before_http(  # type: ignore[no-untyped-def]
+    ctx, bot, monkeypatch
+) -> None:
+    """Раздел 16 ТЗ, шаг 15.5.2, п.3 плана: bingx_trading_mode="live" и
+    exec_allow_live_mode_orders=False — place_market_order не вызывается
+    ни при каких значениях остальных настроек режима. Этот путь в теории
+    недостижим (тот же LIVE_ORDERS_NOT_ALLOWED уже отказал бы в
+    evaluate()/run_guards() раньше, до _submit_real_order) — тест бьёт по
+    отдельной защите фазы отправки на случай, если evaluate() когда-нибудь
+    обойдут."""
+    dp, session, user, client, _redis, settings = ctx
+    client.current_leverage = _leverage_info(long_leverage=10)
+    client.place_order_result = _order_result()
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    settings.exec_dry_run = False
 
     signal = _signal(user.id)
     session.add(signal)
@@ -618,16 +803,62 @@ async def test_confirm_yes_raises_when_dry_run_disabled(ctx, bot, monkeypatch) -
 
     await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
     state = execution._confirmations[(user.id, signal.id)]
-    settings.exec_dry_run = False  # обходим валидатор конструктора, как и трогающие его тесты выше
+    # Обходим evaluate()/run_guards() тем же приёмом, что и остальные
+    # тесты файла (мутация settings после сборки dp): гвард уже пропустил
+    # запрос на "Да" (значения были верными при открытии карточки), эта
+    # защита — вторая, в самой фазе отправки, а не подмена первой.
+    settings.exec_allow_live_mode_orders = False
 
-    with pytest.raises(NotImplementedError, match="не поддерживается"):
-        await _feed(
-            dp, bot, 2,
-            make_callback(f"exec:yes:{signal.id}", message_id=state.message_id),
-        )
+    await _feed(
+        dp, bot, 2,
+        make_callback(f"exec:yes:{signal.id}", message_id=state.message_id),
+    )
 
+    assert client.submit_calls == []
     orders = await _orders_for_signal(session, signal.id)
-    assert orders == []
+    assert any(
+        o.status is OrderStatus.REFUSED and o.error_code == "LIVE_ORDERS_NOT_ALLOWED"
+        for o in orders
+    )
+
+
+async def test_confirm_yes_real_order_commit_survives_later_exception(  # type: ignore[no-untyped-def]
+    ctx, bot, monkeypatch
+) -> None:
+    """Раздел 16 ТЗ, шаг 15.5.2, п.4 плана: коммит после ответа биржи —
+    не flush(). Падение ПОСЛЕ submit_entry_order() (здесь — в logger.info
+    сразу за вторым commit()) не должно откатить уже известный биржевой
+    статус обратно в PENDING. Проверка — вторым соединением к той же
+    тестовой БД, не той же (ещё не закоммиченной снаружи) сессией."""
+    dp, session, user, client, _redis, settings = ctx
+    client.current_leverage = _leverage_info(long_leverage=10)
+    client.place_order_result = _order_result(order_id="424242")
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    settings.exec_dry_run = False
+
+    def _boom(*args, **kwargs):  # type: ignore[no-untyped-def]
+        if args and args[0] == "Реальная отправка ордера":
+            raise RuntimeError("boom-after-commit")
+
+    monkeypatch.setattr(execution.logger, "info", _boom)
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    signal_id = signal.id
+
+    with pytest.raises(RuntimeError, match="boom-after-commit"):
+        await _open_and_confirm(dp, bot, signal, user)
+
+    db2 = Database(settings)
+    async with db2.session() as session2:
+        row = await session2.scalar(
+            select(ExecutionOrder).where(ExecutionOrder.signal_id == signal_id)
+        )
+        assert row is not None
+        assert row.status is OrderStatus.SUBMITTED
+        assert row.exchange_order_id == "424242"
+    await db2.dispose()
 
 
 async def test_position_mode_read_on_card_not_reread_on_confirm(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
