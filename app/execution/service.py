@@ -175,6 +175,15 @@ class ExecutionService:
         построение новой карточки, то есть CARD."""
         moment = now or datetime.now(UTC)
         stage = ObservationStage.CONFIRM if planned_price is not None else ObservationStage.CARD
+        # Раздел 8 ТЗ: путь подтверждения («Да») держит Redis-лок — там
+        # транспортный повтор только удлиняет удержание лока и приближает
+        # его к TTL без пользы (см. Settings.confirm_lock_ttl_seconds).
+        # Сбой биржи там должен явиться быстро, как ExchangeError (пакет C
+        # запишет ERROR и подберёт человеческий текст), а не после трёх
+        # попыток. Путь построения карточки (CARD, включая пересчёт после
+        # PRICE_DRIFT) лока не держит — там обычный повтор клиента уместен,
+        # call_retries=None оставляет его как есть.
+        call_retries = 1 if stage is ObservationStage.CONFIRM else None
 
         if signal.direction is None or signal.stop_loss is None or signal.take_profit is None:
             # Кнопка показывается только под READY (см. handlers/execution.py),
@@ -224,13 +233,13 @@ class ExecutionService:
         ):
             return await refuse(refusal)
 
-        ticker = await self._client.get_ticker(signal.symbol)
+        ticker = await self._client.get_ticker(signal.symbol, max_retries=call_retries)
         current_price = ticker.last_price
         if planned_price is None:
             planned_price = current_price
         drift = price_drift_percent(current_price, signal)
 
-        symbol_info = await self._market.get_symbol_info(signal.symbol)
+        symbol_info = await self._market.get_symbol_info(signal.symbol, max_retries=call_retries)
         if symbol_info is None:
             return await refuse(
                 ExecutionRefusal(
@@ -241,7 +250,7 @@ class ExecutionService:
                 drift=drift,
             )
 
-        balance = (await self._client.get_balance()).equity
+        balance = (await self._client.get_balance(max_retries=call_retries)).equity
 
         open_trades = await self._trades.list_open(user.id)
         open_positions_count = len(open_trades)

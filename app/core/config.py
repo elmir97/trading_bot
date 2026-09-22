@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import math
 from decimal import Decimal
 from functools import lru_cache
 from typing import Literal
@@ -15,6 +16,19 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.analysis.ai.pricing import is_known, pricing_for
 from app.trading.enums import ExchangeKeyMode
+
+# Раздел 8 ТЗ: число HTTP-вызовов на пути подтверждения («Да»), каждый
+# max_retries=1 (не путать с картой карточки — там обычный ретрай клиента,
+# см. ExecutionService.evaluate()). Меняется этот список — меняй и число:
+#   get_ticker       — app/exchanges/bingx.py (BingXClient.get_ticker)
+#   get_balance      — app/exchanges/bingx.py (BingXClient.get_balance)
+#   get_symbol_info  — app/exchanges/bingx.py (BingXClient.get_symbols)
+#   set_leverage     — app/exchanges/bingx.py (BingXClient.set_leverage)
+#   place_market_order — app/exchanges/bingx.py (BingXClient.place_market_order)
+# Последние два — часть этапа 15.5 (ещё не отправляют реальный ордер), но
+# TTL лока обязан учитывать их заранее, иначе 15.5 добавит вызовы, а лок
+# останется рассчитан на путь без них.
+_CONFIRM_PATH_HTTP_CALLS = 5
 
 
 class Settings(BaseSettings):
@@ -109,6 +123,12 @@ class Settings(BaseSettings):
     # сравнивает с ценой сигнала и работает уже на первом показе.
     exec_max_signal_staleness_ratio: Decimal = Decimal("1.0")
     exec_confirm_ttl_seconds: int = 60
+    # Запас поверх расчётного худшего случая пути подтверждения — см.
+    # Settings.confirm_lock_ttl_seconds ниже. Покрывает локальную часть
+    # (запись в БД, планировщик event loop), не сеть — сетевая часть уже
+    # взята с запасом самой формулой (расчёт по timeout, не по типовой
+    # длительности ответа).
+    exec_confirm_lock_margin_seconds: int = 10
     # Раздел 8 ТЗ: как часто перепроверять права ключа (GET .../apiRestrictions)
     # при построении карточки подтверждения — см. app/services/permissions.py.
     exec_permissions_ttl_hours: int = 6
@@ -198,6 +218,35 @@ class Settings(BaseSettings):
                 "ENCRYPTION_KEY невалиден. Сгенерируй: python -m scripts.generate_key"
             ) from exc
         return value
+
+    @property
+    def confirm_lock_ttl_seconds(self) -> int:
+        """TTL Redis-лока подтверждения (раздел 8 ТЗ), выведенный из реальных
+        таймаутов, а не литерал.
+
+        ttl = ceil(http_timeout_seconds × _CONFIRM_PATH_HTTP_CALLS)
+              + exec_confirm_lock_margin_seconds
+
+        При max_retries=1 на каждом из этих вызовов (см. п.1-2 разведки)
+        бэкофф между попытками не наступает — цикл в BingXClient._request
+        не спит перед последней попыткой, поэтому в сумме нет ничего, кроме
+        самих таймаутов.
+
+        Это ОЦЕНКА, не гарантия: httpx.AsyncClient(timeout=X) применяет X
+        отдельно к фазам connect и read (и к write/pool) одного HTTP-вызова,
+        а не как общий потолок на весь вызов — один запрос в патологическом
+        случае (например, connect почти прошёл, потом завис read) способен
+        занять заметно больше http_timeout_seconds. TTL не пытается это
+        поймать явным множителем: он существует только как предохранитель
+        на случай, если процесс умрёт до RedisLock.__aexit__ (см. app/core/
+        locks.py) — единственная настоящая гарантия единственности входа
+        это UNIQUE на execution_orders.client_order_id (раздел 8 ТЗ), не
+        этот TTL и не сам факт удержания лока.
+        """
+        return (
+            math.ceil(self.http_timeout_seconds * _CONFIRM_PATH_HTTP_CALLS)
+            + self.exec_confirm_lock_margin_seconds
+        )
 
     @property
     def allowed_ids(self) -> frozenset[int]:

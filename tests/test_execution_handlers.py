@@ -93,8 +93,14 @@ class FakeExchangeClient(ExchangeClient):
         self.symbol_info = symbol_info
         self.restrictions = restrictions
         self.restrictions_error = restrictions_error
+        # Раздел 8 ТЗ: подтверждение (стадия CONFIRM) обязано звать эти
+        # методы с max_retries=1, карточка (CARD) — без ограничения.
+        self.ticker_retries_seen: list[int | None] = []
+        self.balance_retries_seen: list[int | None] = []
+        self.symbols_retries_seen: list[int | None] = []
 
-    async def get_ticker(self, symbol: str) -> Ticker:
+    async def get_ticker(self, symbol: str, *, max_retries: int | None = None) -> Ticker:
+        self.ticker_retries_seen.append(max_retries)
         return Ticker(
             symbol=symbol, last_price=self.price, volume_24h=D("0"),
             price_change_percent=D("0"), timestamp=NOW,
@@ -103,13 +109,15 @@ class FakeExchangeClient(ExchangeClient):
     async def get_klines(self, symbol, interval, limit=500, end_time=None):
         raise NotImplementedError
 
-    async def get_symbols(self) -> list[SymbolInfo]:
+    async def get_symbols(self, *, max_retries: int | None = None) -> list[SymbolInfo]:
+        self.symbols_retries_seen.append(max_retries)
         return [self.symbol_info]
 
     async def get_funding_rate(self, symbol: str) -> Decimal | None:
         return None
 
-    async def get_balance(self) -> Balance:
+    async def get_balance(self, *, max_retries: int | None = None) -> Balance:
+        self.balance_retries_seen.append(max_retries)
         return Balance(
             asset="USDT", available=self.balance, used_margin=D("0"),
             unrealized_pnl=D("0"), equity=self.balance,
@@ -179,8 +187,12 @@ class FakeRedis:
 
     def __init__(self) -> None:
         self.store: dict[str, str] = {}
+        # Раздел 8 ТЗ: TTL берётся из Settings.confirm_lock_ttl_seconds, не
+        # литерала — тест сверяет это по факту переданного `ex`.
+        self.set_calls: list[tuple[str, int | None]] = []
 
     async def set(self, name, value, *, nx=False, ex=None):  # type: ignore[no-untyped-def]
+        self.set_calls.append((name, ex))
         if nx and name in self.store:
             return None
         self.store[name] = value
@@ -549,6 +561,31 @@ async def test_confirm_yes_creates_dry_run_orders(ctx, bot, monkeypatch) -> None
     assert (user.id, signal.id) not in execution._confirmations
 
 
+async def test_confirm_yes_lock_ttl_comes_from_settings(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Раздел 8 ТЗ: TTL лока — settings.confirm_lock_ttl_seconds, не
+    литерал 15."""
+    dp, session, user, client, redis, settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+
+    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+    state = execution._confirmations[(user.id, signal.id)]
+
+    await _feed(
+        dp, bot, 2,
+        make_callback(f"exec:yes:{signal.id}", message_id=state.message_id),
+    )
+
+    lock_calls = [
+        ex for name, ex in redis.set_calls if name == confirm_lock_key(user.id, signal.id)
+    ]
+    assert lock_calls == [settings.confirm_lock_ttl_seconds]
+    assert settings.confirm_lock_ttl_seconds != 15
+
+
 async def test_confirm_no_cancels_without_orders(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     dp, session, user, client, _redis, _settings = ctx
     _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
@@ -716,7 +753,7 @@ def _patch_factory_auth_error(monkeypatch, client: FakeExchangeClient, error: Ex
 
 
 def _make_ticker_fail(monkeypatch, client: FakeExchangeClient, error: Exception) -> None:
-    async def failing(symbol: str):
+    async def failing(symbol: str, *, max_retries: int | None = None):
         raise error
 
     monkeypatch.setattr(client, "get_ticker", failing)

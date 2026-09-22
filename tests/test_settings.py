@@ -240,3 +240,45 @@ async def test_plan_rejects_invalid_risk(ctx) -> None:  # type: ignore[no-untype
     with pytest.raises(IntegrityError):
         await session.flush()
     await session.rollback()
+
+
+class TestConfirmLockTtl:
+    """Раздел 8 ТЗ: TTL Redis-лока подтверждения выведен из Settings, не
+    литерал. Не трогает БД, но живёт в этом файле — тут же остальные тесты
+    Settings; module-level skipif без DATABASE_URL пропускает и его вместе
+    с остальными, это не отдельный источник правды о конфиге."""
+
+    def test_default_settings_give_60_seconds(self) -> None:
+        settings = _minimal_settings()
+        assert settings.http_timeout_seconds == 10.0
+        assert settings.exec_confirm_lock_margin_seconds == 10
+        # ceil(10.0 × 5) + 10 = 60
+        assert settings.confirm_lock_ttl_seconds == 60
+
+    def test_formula_follows_timeout_and_margin(self) -> None:
+        settings = _minimal_settings(
+            http_timeout_seconds=7.5, exec_confirm_lock_margin_seconds=5
+        )
+        # ceil(7.5 × 5) + 5 = ceil(37.5) + 5 = 38 + 5 = 43
+        assert settings.confirm_lock_ttl_seconds == 43
+
+    def test_ttl_is_int_for_redislock(self) -> None:
+        """RedisLock.__init__ ждёт ttl_seconds: int (app/core/locks.py)."""
+        settings = _minimal_settings()
+        assert isinstance(settings.confirm_lock_ttl_seconds, int)
+
+
+def _minimal_settings(**overrides: object) -> Settings:
+    fields: dict[str, object] = {
+        "bot_token": "t",
+        "database_url": "postgresql+asyncpg://x/y",
+        "encryption_key": _fernet_key(),
+    }
+    fields.update(overrides)
+    return Settings(**fields)  # type: ignore[arg-type]
+
+
+def _fernet_key() -> str:
+    from cryptography.fernet import Fernet
+
+    return Fernet.generate_key().decode()

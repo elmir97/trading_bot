@@ -312,7 +312,14 @@ class ExchangeClient(ABC):
     # --- Публичные данные (ключи не требуются) ----------------------------
 
     @abstractmethod
-    async def get_ticker(self, symbol: str) -> Ticker: ...
+    async def get_ticker(self, symbol: str, *, max_retries: int | None = None) -> Ticker:
+        """max_retries=None — обычное поведение (self._max_retries клиента,
+        см. BingXClient). Явное значение переопределяет его для этого
+        вызова, не трогая остальных потребителей клиента — нужно пути
+        подтверждения «Да» (раздел 8 ТЗ): там повтор транспортного слоя
+        только удлиняет удержание лока, решение "повторять или нет"
+        обязан принимать вызывающий код, не клиент."""
+        ...
 
     @abstractmethod
     async def get_klines(
@@ -324,7 +331,9 @@ class ExchangeClient(ABC):
     ) -> list[Kline]: ...
 
     @abstractmethod
-    async def get_symbols(self) -> list[SymbolInfo]: ...
+    async def get_symbols(self, *, max_retries: int | None = None) -> list[SymbolInfo]:
+        """max_retries — см. get_ticker."""
+        ...
 
     @abstractmethod
     async def get_funding_rate(self, symbol: str) -> Decimal | None: ...
@@ -332,7 +341,9 @@ class ExchangeClient(ABC):
     # --- Приватные данные (нужны ключи) -----------------------------------
 
     @abstractmethod
-    async def get_balance(self) -> Balance: ...
+    async def get_balance(self, *, max_retries: int | None = None) -> Balance:
+        """max_retries — см. get_ticker."""
+        ...
 
     @abstractmethod
     async def get_positions(self) -> list[Position]: ...

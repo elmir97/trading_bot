@@ -424,7 +424,8 @@ async def confirm_yes(
     # Раздел 8 ТЗ: защита от двойного нажатия. Занятый ключ — мгновенный
     # ответ "уже обрабатывается", без ожидания и без повторной попытки.
     try:
-        async with RedisLock(redis, confirm_lock_key(user.id, signal_id), ttl_seconds=15):
+        ttl = settings.confirm_lock_ttl_seconds
+        async with RedisLock(redis, confirm_lock_key(user.id, signal_id), ttl_seconds=ttl):
             await _process_confirm(callback, session, user, signal_id, settings, cipher, db)
     except LockBusyError:
         await callback.answer("Уже обрабатывается…", show_alert=True)

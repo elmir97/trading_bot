@@ -66,8 +66,15 @@ class FakeExchangeClient(ExchangeClient):
         self.balance = balance
         self.symbol_info = symbol_info
         self.closed = False
+        # Раздел 8 ТЗ: чем evaluate() реально вызвало эти методы — по этому
+        # список тесты сверяют fail-fast на подтверждении (max_retries=1)
+        # против обычного пути карточки (max_retries=None).
+        self.ticker_retries_seen: list[int | None] = []
+        self.balance_retries_seen: list[int | None] = []
+        self.symbols_retries_seen: list[int | None] = []
 
-    async def get_ticker(self, symbol: str) -> Ticker:
+    async def get_ticker(self, symbol: str, *, max_retries: int | None = None) -> Ticker:
+        self.ticker_retries_seen.append(max_retries)
         return Ticker(
             symbol=symbol, last_price=self.price, volume_24h=D("0"),
             price_change_percent=D("0"), timestamp=NOW,
@@ -76,13 +83,15 @@ class FakeExchangeClient(ExchangeClient):
     async def get_klines(self, symbol, interval, limit=500, end_time=None) -> list[Kline]:
         raise NotImplementedError
 
-    async def get_symbols(self) -> list[SymbolInfo]:
+    async def get_symbols(self, *, max_retries: int | None = None) -> list[SymbolInfo]:
+        self.symbols_retries_seen.append(max_retries)
         return [self.symbol_info]
 
     async def get_funding_rate(self, symbol: str) -> Decimal | None:
         return None
 
-    async def get_balance(self) -> Balance:
+    async def get_balance(self, *, max_retries: int | None = None) -> Balance:
+        self.balance_retries_seen.append(max_retries)
         return Balance(
             asset="USDT", available=self.balance, used_margin=D("0"),
             unrealized_pnl=D("0"), equity=self.balance,
@@ -581,3 +590,42 @@ async def test_refusal_stage_card_without_planned_price_confirm_with_it(ctx) -> 
         )
     )
     assert [r.stage for r in rows] == ["card", "confirm"]
+
+
+async def test_confirm_stage_uses_fail_fast_reads_card_stage_does_not(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Раздел 8 ТЗ: путь подтверждения («Да», planned_price задан) держит
+    Redis-лок — get_ticker/get_balance/get_symbol_info обязаны звать биржу
+    с max_retries=1, чтобы сбой биржи явился быстро (пакет C), а не после
+    полного цикла повторов. Путь построения карточки (planned_price=None)
+    не держит лок — там ничего не меняется, max_retries не передаётся
+    (клиент использует свой обычный default).
+
+    Отдельные MarketDataService с пустым кэшем на каждый вызов: иначе
+    второй evaluate() забрал бы symbol_info из кэша первого (TTL_SYMBOLS
+    большой) и get_symbols() на бирже вообще не позвал бы — тест ничего
+    не проверил бы про max_retries на этом конкретном вызове."""
+    session, user, client, _market = ctx
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+
+    settings = Settings(trading_execution_enabled=True, bingx_trading_mode="live")  # type: ignore[call-arg]
+    kwargs = {
+        "user": user, "signal": signal, "plan": user.trading_plan,
+        "has_trading_key": True, "key_can_trade_futures": True,
+        "selected_exchange_mode": ExchangeKeyMode.LIVE, "now": NOW,
+    }
+
+    card_service = _service(session, settings, client, MarketDataService(client, TTLCache()))
+    card_result = await card_service.evaluate(planned_price=None, **kwargs)
+    assert isinstance(card_result, ExecutionQuote)
+    assert client.ticker_retries_seen == [None]
+    assert client.balance_retries_seen == [None]
+    assert client.symbols_retries_seen == [None]
+
+    confirm_service = _service(session, settings, client, MarketDataService(client, TTLCache()))
+    confirm_result = await confirm_service.evaluate(planned_price=D("100"), **kwargs)
+    assert isinstance(confirm_result, ExecutionQuote)
+    assert client.ticker_retries_seen == [None, 1]
+    assert client.balance_retries_seen == [None, 1]
+    assert client.symbols_retries_seen == [None, 1]

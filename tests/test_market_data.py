@@ -31,7 +31,7 @@ class FakeClient:
         self.kline_calls = 0
         self._candles = candles or []
 
-    async def get_ticker(self, symbol: str) -> Ticker:
+    async def get_ticker(self, symbol: str, *, max_retries: int | None = None) -> Ticker:
         self.ticker_calls += 1
         return Ticker(
             symbol=symbol,
@@ -45,7 +45,7 @@ class FakeClient:
         self.kline_calls += 1
         return list(self._candles)
 
-    async def get_symbols(self) -> list[SymbolInfo]:
+    async def get_symbols(self, *, max_retries: int | None = None) -> list[SymbolInfo]:
         return [SymbolInfo("BTC-USDT", 2, 4, D("0.0001"), 125)]
 
     async def get_funding_rate(self, symbol: str) -> Decimal | None:

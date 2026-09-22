@@ -426,8 +426,8 @@ class BingXClient(ExchangeClient):
 
     # --- Публичные данные --------------------------------------------------
 
-    async def get_ticker(self, symbol: str) -> Ticker:
-        data = await self._request(QUOTE_TICKER, {"symbol": symbol})
+    async def get_ticker(self, symbol: str, *, max_retries: int | None = None) -> Ticker:
+        data = await self._request(QUOTE_TICKER, {"symbol": symbol}, max_retries=max_retries)
         if isinstance(data, list):
             data = data[0] if data else {}
 
@@ -498,8 +498,8 @@ class BingXClient(ExchangeClient):
             close_time=_ms_to_dt(close_ms),
         )
 
-    async def get_symbols(self) -> list[SymbolInfo]:
-        data = await self._request(QUOTE_CONTRACTS)
+    async def get_symbols(self, *, max_retries: int | None = None) -> list[SymbolInfo]:
+        data = await self._request(QUOTE_CONTRACTS, max_retries=max_retries)
         if not isinstance(data, list):
             raise ExchangeResponseError("Ожидался список контрактов")
 
@@ -532,9 +532,9 @@ class BingXClient(ExchangeClient):
 
     # --- Приватные данные --------------------------------------------------
 
-    async def get_balance(self) -> Balance:
+    async def get_balance(self, *, max_retries: int | None = None) -> Balance:
         expected_asset = _QUOTE_ASSET_BY_MODE[self._mode]
-        data = await self._request(USER_BALANCE, signed=True)
+        data = await self._request(USER_BALANCE, signed=True, max_retries=max_retries)
         if isinstance(data, list):
             # Боевая форма ответа (проверено по логам, не по документации,
             # раздел 16 ТЗ): список записей по активам, у каждой уже плоский
@@ -706,7 +706,14 @@ class BingXClient(ExchangeClient):
             "leverage": leverage,
             "side": position_side or "BOTH",
         }
-        data = await self._request(TRADE_LEVERAGE, params, signed=True, method="POST")
+        # retries=1: это торговый вызов, меняющий состояние позиции перед
+        # входом — та же логика, что и у place_market_order ниже (раздел 8
+        # ТЗ, см. докстринг блока "Торговые методы" выше). До этой правки
+        # параметр не передавался, и вызов молча ретраился 3 раза — расходясь
+        # с собственным докстрингом файла.
+        data = await self._request(
+            TRADE_LEVERAGE, params, signed=True, method="POST", max_retries=1
+        )
         return int(data.get("leverage", leverage))
 
     async def place_market_order(

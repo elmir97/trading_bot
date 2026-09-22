@@ -378,6 +378,25 @@ class TestSetLeverage:
         await client.set_leverage("ETH-USDT", 10)
         await client.close()
 
+    async def test_network_failure_does_not_retry(self) -> None:
+        """Раздел 8 ТЗ, докстринг bingx.py:692-699: торговые вызовы,
+        меняющие состояние перед входом, не ретраятся автоматически — до
+        этой правки set_leverage не передавал max_retries и молча ретраился
+        3 раза, расходясь с собственным докстрингом файла."""
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            raise httpx.TimeoutException("timeout")
+
+        client = make_client(handler, max_retries=3)
+        client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
+
+        with pytest.raises(ExchangeUnavailableError):
+            await client.set_leverage("BTC-USDT", 5, position_side="LONG")
+        assert calls["n"] == 1
+        await client.close()
+
 
 class TestPlaceMarketOrder:
     async def test_entry_with_take_profit_and_stop_loss(self) -> None:
@@ -822,6 +841,76 @@ class TestErrorHandling:
 
         with pytest.raises(ExchangeUnavailableError, match="вовремя"):
             await client.get_ticker("BTC-USDT")
+        await client.close()
+
+
+class TestPerCallRetryOverride:
+    """Раздел 8 ТЗ: путь подтверждения («Да») держит Redis-лок — обычный
+    повтор клиента (по умолчанию max_retries=3) там только удлиняет
+    удержание лока. get_ticker/get_balance/get_symbols принимают
+    max_retries за вызов, не трогая дефолт клиента для остальных
+    потребителей (сканер и т.п.), которые его не передают."""
+
+    async def test_get_ticker_max_retries_override_does_not_retry(self) -> None:
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            raise httpx.TimeoutException("timeout")
+
+        client = make_client(handler, max_retries=3)
+        client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
+
+        with pytest.raises(ExchangeUnavailableError):
+            await client.get_ticker("BTC-USDT", max_retries=1)
+        assert calls["n"] == 1
+        await client.close()
+
+    async def test_get_balance_max_retries_override_does_not_retry(self) -> None:
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            raise httpx.TimeoutException("timeout")
+
+        client = make_client(handler, max_retries=3)
+        client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
+
+        with pytest.raises(ExchangeUnavailableError):
+            await client.get_balance(max_retries=1)
+        assert calls["n"] == 1
+        await client.close()
+
+    async def test_get_symbols_max_retries_override_does_not_retry(self) -> None:
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            raise httpx.TimeoutException("timeout")
+
+        client = make_client(handler, max_retries=3)
+        client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
+
+        with pytest.raises(ExchangeUnavailableError):
+            await client.get_symbols(max_retries=1)
+        assert calls["n"] == 1
+        await client.close()
+
+    async def test_get_ticker_without_override_keeps_client_default(self) -> None:
+        """Без max_retries — старое поведение не меняется (остальные
+        потребители клиента, например сканер, ничего не передают)."""
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            raise httpx.TimeoutException("timeout")
+
+        client = make_client(handler, max_retries=3)
+        client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
+
+        with pytest.raises(ExchangeUnavailableError):
+            await client.get_ticker("BTC-USDT")
+        assert calls["n"] == 3
         await client.close()
 
 
