@@ -162,6 +162,13 @@ async def run() -> None:
         "Запуск приложения",
         extra={"environment": settings.environment, "tz": settings.default_timezone},
     )
+    # Раздел 16 ТЗ, шаг 15.5.1: значение — не литерал, а расчёт по текущим
+    # http_timeout_seconds/_CONFIRM_PATH_HTTP_CALLS, увидеть его иначе,
+    # кроме как в логе старта, нельзя.
+    logger.info(
+        "TTL лока подтверждения",
+        extra={"confirm_lock_ttl_seconds": settings.confirm_lock_ttl_seconds},
+    )
 
     db = Database(settings)
     try:

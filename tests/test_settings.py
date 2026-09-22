@@ -249,19 +249,22 @@ class TestConfirmLockTtl:
     Settings; module-level skipif без DATABASE_URL пропускает и его вместе
     с остальными, это не отдельный источник правды о конфиге."""
 
-    def test_default_settings_give_60_seconds(self) -> None:
+    def test_default_settings_give_80_seconds(self) -> None:
+        """Раздел 16 ТЗ, шаг 15.5.1: 6 реальных вызовов на confirm-пути
+        (get_ticker, get_balance, get_symbol_info, get_leverage,
+        set_leverage, place_market_order) + явный запас "+1" в формуле."""
         settings = _minimal_settings()
         assert settings.http_timeout_seconds == 10.0
         assert settings.exec_confirm_lock_margin_seconds == 10
-        # ceil(10.0 × 5) + 10 = 60
-        assert settings.confirm_lock_ttl_seconds == 60
+        # ceil(10.0 × (6+1)) + 10 = ceil(70.0) + 10 = 80
+        assert settings.confirm_lock_ttl_seconds == 80
 
     def test_formula_follows_timeout_and_margin(self) -> None:
         settings = _minimal_settings(
             http_timeout_seconds=7.5, exec_confirm_lock_margin_seconds=5
         )
-        # ceil(7.5 × 5) + 5 = ceil(37.5) + 5 = 38 + 5 = 43
-        assert settings.confirm_lock_ttl_seconds == 43
+        # ceil(7.5 × (6+1)) + 5 = ceil(52.5) + 5 = 53 + 5 = 58
+        assert settings.confirm_lock_ttl_seconds == 58
 
     def test_ttl_is_int_for_redislock(self) -> None:
         """RedisLock.__init__ ждёт ttl_seconds: int (app/core/locks.py)."""

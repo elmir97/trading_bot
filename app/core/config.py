@@ -17,18 +17,30 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from app.analysis.ai.pricing import is_known, pricing_for
 from app.trading.enums import ExchangeKeyMode
 
-# Раздел 8 ТЗ: число HTTP-вызовов на пути подтверждения («Да»), каждый
-# max_retries=1 (не путать с картой карточки — там обычный ретрай клиента,
-# см. ExecutionService.evaluate()). Меняется этот список — меняй и число:
-#   get_ticker       — app/exchanges/bingx.py (BingXClient.get_ticker)
-#   get_balance      — app/exchanges/bingx.py (BingXClient.get_balance)
-#   get_symbol_info  — app/exchanges/bingx.py (BingXClient.get_symbols)
-#   set_leverage     — app/exchanges/bingx.py (BingXClient.set_leverage)
-#   place_market_order — app/exchanges/bingx.py (BingXClient.place_market_order)
-# Последние два — часть этапа 15.5 (ещё не отправляют реальный ордер), но
-# TTL лока обязан учитывать их заранее, иначе 15.5 добавит вызовы, а лок
-# останется рассчитан на путь без них.
-_CONFIRM_PATH_HTTP_CALLS = 5
+# Раздел 8 ТЗ / раздел 16 ТЗ (шаг 15.5.1): число HTTP-вызовов на пути
+# подтверждения («Да»), каждый max_retries=1 (не путать с картой карточки —
+# там обычный ретрай клиента, см. ExecutionService.evaluate()). Список:
+#   get_ticker          — app/exchanges/bingx.py (BingXClient.get_ticker)
+#   get_balance          — app/exchanges/bingx.py (BingXClient.get_balance)
+#   get_symbol_info      — app/exchanges/bingx.py (BingXClient.get_symbols)
+#   get_leverage         — app/exchanges/bingx.py (BingXClient.get_leverage)
+#   set_leverage         — app/exchanges/bingx.py (BingXClient.set_leverage)
+#   place_market_order   — app/exchanges/bingx.py (BingXClient.place_market_order)
+# Последние три — часть шага 15.5.2 (сама отправка ещё не собрана в этом
+# шаге), но уже спроектированы именно для confirm-пути (get_leverage/
+# set_leverage — условная смена плеча перед входом, place_market_order —
+# сам вход), поэтому считаем здесь заранее.
+#
+# get_position_mode НЕ в этом списке: читается только при построении
+# карточки (app/services/position_mode.py), под локом на «Да» не
+# перезапрашивается — см. handlers/execution.py:_build_quote,
+# known_dual_side_position.
+#
+# Правило на будущее: константу обновляет тот шаг, который реально
+# добавляет запрос на confirm-путь (или, как здесь — тот, где путь уже
+# спроектирован достаточно точно, чтобы посчитать заранее без гадания) —
+# не более ранний шаг "с запасом на всякий случай".
+_CONFIRM_PATH_HTTP_CALLS = 6
 
 
 class Settings(BaseSettings):
@@ -254,11 +266,16 @@ class Settings(BaseSettings):
 
     @property
     def confirm_lock_ttl_seconds(self) -> int:
-        """TTL Redis-лока подтверждения (раздел 8 ТЗ), выведенный из реальных
-        таймаутов, а не литерал.
+        """TTL Redis-лока подтверждения (раздел 8 ТЗ / раздел 16 ТЗ, шаг
+        15.5.1), выведенный из реальных таймаутов, а не литерал.
 
-        ttl = ceil(http_timeout_seconds × _CONFIRM_PATH_HTTP_CALLS)
+        ttl = ceil(http_timeout_seconds × (_CONFIRM_PATH_HTTP_CALLS + 1))
               + exec_confirm_lock_margin_seconds
+
+        "+1" внутри множителя — явный запас сверх посчитанного числа
+        запросов (раздел 16 ТЗ), отдельно от exec_confirm_lock_margin_seconds
+        (тот покрывает локальную часть — БД, планировщик event loop, не
+        сеть). При дефолтах: ceil(10.0 × (6+1)) + 10 = 80.
 
         При max_retries=1 на каждом из этих вызовов (см. п.1-2 разведки)
         бэкофф между попытками не наступает — цикл в BingXClient._request
@@ -277,7 +294,7 @@ class Settings(BaseSettings):
         этот TTL и не сам факт удержания лока.
         """
         return (
-            math.ceil(self.http_timeout_seconds * _CONFIRM_PATH_HTTP_CALLS)
+            math.ceil(self.http_timeout_seconds * (_CONFIRM_PATH_HTTP_CALLS + 1))
             + self.exec_confirm_lock_margin_seconds
         )
 

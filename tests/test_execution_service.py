@@ -425,6 +425,50 @@ async def test_existing_position_on_symbol_refuses(ctx) -> None:  # type: ignore
     assert result.code is Code.POSITION_EXISTS
 
 
+async def test_existing_position_refuses_opposite_side_too(ctx) -> None:  # type: ignore[no-untyped-def]
+    """ЗАМОК ПОВЕДЕНИЯ, не регрессионный тест на починку — проходит и на
+    коде до раздела 16 ТЗ (шаг 15.5.1), и после: check_no_existing_position
+    сознательно НЕ трогали, сторона сигнала в сравнении не участвует, и
+    это должно остаться так. Если этот тест когда-нибудь начнут "чинить"
+    под сравнение по (symbol, side) — это и есть та самая порча поведения,
+    от которой тест защищает.
+
+    Почему сторона не участвует, даже в хедж-режиме (где по символу
+    технически могут висеть LONG и SHORT одновременно):
+      - в one-way встречный ордер НЕТТО-ЗАКРЫВАЕТ (или переворачивает)
+        открытую позицию — сравнение по символу это и ловит;
+      - в хедже встречный вход при уже открытой позиции — это
+        ХЕДЖИРОВАНИЕ, которого в ТЗ нет (раздел 15: усреднение и докупки
+        сознательно не делаем). Открытая LONG, сигнал SHORT по тому же
+        символу — это разворот, разворот требует сначала закрыть позицию,
+        а закрытие из бота в этот этап не входит.
+    MAX_TOTAL_RISK по встречным позициям со встречными стопами тоже
+    считал бы величину, лишённую смысла. Открытая LONG, сигнал на SHORT
+    по тому же символу — POSITION_EXISTS в обоих режимах, не тихий
+    проход. См. также docstring check_no_existing_position в guards.py —
+    тот же замок описан на стороне гварда."""
+    session, user, client, market = ctx
+    signal = _signal(user.id, direction=SignalDirection.SHORT)
+    session.add(signal)
+    session.add(_open_trade(user.id, symbol="BTC-USDT", side=TradeSide.LONG))
+    await session.flush()
+
+    settings = Settings(  # type: ignore[call-arg]
+        trading_execution_enabled=True,
+        bingx_trading_mode="live",
+        exec_allow_live_mode_orders=True,
+    )
+    service = _service(session, settings, client, market)
+    result = await service.evaluate(
+        user=user, signal=signal, plan=user.trading_plan,
+        has_trading_key=True, key_can_trade_futures=True,
+        dual_side_position=True,
+        selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
+    )
+    assert isinstance(result, ExecutionRefusal)
+    assert result.code is Code.POSITION_EXISTS
+
+
 async def test_max_positions_refuses(ctx) -> None:  # type: ignore[no-untyped-def]
     session, user, client, market = ctx
     signal = _signal(user.id)
