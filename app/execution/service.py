@@ -122,6 +122,9 @@ class ExecutionQuote:
     # перезапрашивается — несётся отсюда дальше, тем же принципом, что
     # planned_price в _ConfirmationState.
     dual_side_position: bool
+    # Шаг 15.5.4: equity счёта, от которого посчитан объём, — в журнал
+    # (Trade.account_balance_at_entry, база для pnl_percent при закрытии).
+    account_balance: Decimal
 
     @property
     def total_risk_after_percent(self) -> Decimal:
@@ -588,6 +591,7 @@ class ExecutionService:
             current_total_risk_percent=current_total_risk_percent,
             symbol_info=symbol_info,
             dual_side_position=dual_side_position,
+            account_balance=balance,
         )
 
 

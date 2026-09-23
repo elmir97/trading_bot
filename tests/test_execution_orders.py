@@ -15,11 +15,13 @@ from decimal import Decimal
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
+from sqlalchemy.exc import IntegrityError
 
 from app.core.config import Settings
 from app.database.models.execution_order import ExecutionOrder
 from app.database.models.signal import SignalRecord
+from app.database.models.signal_notification import SignalNotification
 from app.database.models.trade import Trade
 from app.database.models.user import User
 from app.database.repositories.execution_order import ExecutionOrderRepository
@@ -306,3 +308,46 @@ async def test_signal_trade_opened_at_defaults_to_none(ctx) -> None:  # type: ig
     reloaded = await session.get(SignalRecord, signal_id)
     assert reloaded is not None
     assert reloaded.trade_opened_at is not None
+
+
+
+# --- Шаг 15.5.4: сделка из факта исполнения ---------------------------------
+
+
+async def test_trade_fill_confirmed_defaults_to_true_in_db(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Ручные и импортированные сделки подтверждены по определению — значение
+    по умолчанию стоит на стороне БД (server_default), не только в ORM."""
+    user, session, _repo = ctx
+    trade = _trade(user.id, quantity=D("1"), entry_price=D("100"))
+    session.add(trade)
+    await session.flush()
+    value = await session.scalar(
+        text("SELECT fill_confirmed FROM trades WHERE id = :id"), {"id": trade.id}
+    )
+    assert value is True
+
+
+async def test_second_trade_for_same_notification_hits_unique_index(ctx) -> None:  # type: ignore[no-untyped-def]
+    """uq_trades_notification_id: одна сделка на одно уведомление — дубль
+    падает на UNIQUE, а сделки без уведомления (ручные) не ограничены."""
+    user, session, _repo = ctx
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = SignalNotification.snapshot_of(
+        signal, notified_at=datetime.now(UTC), expires_at=datetime.now(UTC) + timedelta(hours=4)
+    )
+    session.add(notification)
+    await session.flush()
+
+    session.add(_trade(user.id, quantity=D("1"), notification_id=None))
+    session.add(_trade(user.id, quantity=D("1"), notification_id=None))
+    await session.flush()  # две ручные — можно
+
+    session.add(_trade(user.id, quantity=D("1"), notification_id=notification.id))
+    await session.flush()
+    with pytest.raises(IntegrityError) as info:
+        async with session.begin_nested():
+            session.add(_trade(user.id, quantity=D("1"), notification_id=notification.id))
+            await session.flush()
+    assert "uq_trades_notification_id" in str(info.value)

@@ -1028,3 +1028,20 @@ async def test_levels_rounded_toward_entry_and_sizing_uses_rounded_stop(  # type
         leverage=user.trading_plan.max_leverage, symbol_info=_symbol_info(),
     )
     assert result.order.quantity == expected_size.quantity
+
+
+
+async def test_quote_carries_account_balance_for_journal(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Шаг 15.5.4: equity, от которого посчитан объём, едет в журнал
+    (Trade.account_balance_at_entry)."""
+    session, user, client, market = ctx
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _snapshot(session, signal)
+
+    service = _service(session, _live_settings(), client, market)
+    result = await _evaluate(service, user, notification, signal)
+
+    assert isinstance(result, ExecutionQuote)
+    assert result.account_balance == D("1000")

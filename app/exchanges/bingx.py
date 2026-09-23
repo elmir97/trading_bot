@@ -142,6 +142,15 @@ def _ms_to_dt(value: Any) -> datetime:
     return datetime.fromtimestamp(int(value) / 1000, tz=UTC)
 
 
+def _optional_ms_to_dt(value: Any) -> datetime | None:
+    """Мягкий разбор времени (шаг 15.5.4): нет или не число → None, а не
+    ошибка и не 1970-01-01."""
+    try:
+        return _ms_to_dt(value) if value not in (None, "", 0, "0") else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _decimal_literal(value: Decimal) -> str:
     """Decimal как литерал числа в JSON — без экспоненциальной записи."""
     return format(value, "f")
@@ -955,6 +964,7 @@ class BingXClient(ExchangeClient):
             executed_qty=number("executedQty"),
             fee=abs(number("commission")),
             raw=item,
+            filled_at=_optional_ms_to_dt(item.get("updateTime") or item.get("time")),
         )
 
     @staticmethod

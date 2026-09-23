@@ -1369,3 +1369,23 @@ def test_entry_and_rescue_share_working_type() -> None:
     триггера не может разойтись между двумя местами."""
     assert TpSlSpec(trigger_price=D("1")).working_type == CONDITIONAL_WORKING_TYPE
     assert CONDITIONAL_WORKING_TYPE == "MARK_PRICE"
+
+
+
+class TestOrderFillFilledAt:
+    """Шаг 15.5.4: время исполнения — мягко (не цифра сделки): есть →
+    datetime, нет или мусор → None, без ReadbackIncomplete. СИНТЕТИКА ДО
+    15.5.5 — имя поля (updateTime/time)."""
+
+    def test_update_time_parsed(self) -> None:
+        fill = BingXClient._parse_order_fill(
+            {**SYNTHETIC_FILLED_ORDER, "updateTime": 1789372424814}
+        )
+        assert fill.filled_at == datetime(2026, 9, 14, 7, 53, 44, 814000, tzinfo=UTC)
+
+    @pytest.mark.parametrize("value", [None, "", 0, "not-a-number"])
+    def test_missing_or_garbage_is_none_not_error(self, value: object) -> None:
+        order = {**SYNTHETIC_FILLED_ORDER}
+        if value is not None:
+            order["updateTime"] = value
+        assert BingXClient._parse_order_fill(order).filled_at is None

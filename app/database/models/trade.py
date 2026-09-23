@@ -33,6 +33,8 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
+    true,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -66,6 +68,15 @@ class Trade(IntPKMixin, TimestampMixin, Base):
         UniqueConstraint(
             "user_id", "exchange", "external_position_id",
             name="uq_trade_external_position",
+        ),
+        # Шаг 15.5.4: одна сделка на одно уведомление — второй уровень
+        # идемпотентности под execution_orders.trade_id (параллельная
+        # запись хендлера и будущего reconciler 15.6).
+        Index(
+            "uq_trades_notification_id",
+            "notification_id",
+            unique=True,
+            postgresql_where=text("notification_id IS NOT NULL"),
         ),
         CheckConstraint("quantity >= 0", name="quantity_non_negative"),
         CheckConstraint("leverage >= 1", name="leverage_at_least_one"),
@@ -156,6 +167,13 @@ class Trade(IntPKMixin, TimestampMixin, Base):
         Boolean, default=False, nullable=False
     )
     external_position_id: Mapped[str | None] = mapped_column(String(64))
+    # Шаг 15.5.4: False — сделка бота записана без подтверждённого
+    # исполнения (read-back не прочитал цену, UNKNOWN): цена плановая,
+    # запись предварительная, сверит reconciler 15.6. Ручные и
+    # импортированные сделки подтверждены по определению.
+    fill_confirmed: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=true(), nullable=False
+    )
 
     opened_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, index=True
