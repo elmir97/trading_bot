@@ -114,6 +114,139 @@ Remote `origin` — приватный резервный репозиторий
 
 Скрипт после прогона удалять из контейнера, с сервера и локально.
 
+## Чек-ап прода перед деплоем
+
+**Строго только чтение.** Без рестартов, без записи в БД и Redis, без
+правок файлов на сервере, на биржу только GET. Ничего не чинить — только
+отчёт. Разовые скрипты целиком инлайн, на диск сервера ничего:
+
+```
+ssh root@147.45.111.10 'cd /opt/trading_bot && docker compose exec -T bot python -' <<'PY'
+...
+PY
+```
+
+Секреты, ключи и `repr()` ответов не печатать — только поля по списку.
+Зависимые шаги — через `&&` или отдельными вызовами, не через `;`.
+«Окно деплоя» ниже — `State.StartedAt` контейнера `trading_bot` из
+пункта 1, а не дата из памяти.
+
+### A. Сервер
+
+1. `docker compose ps`; для каждого контейнера `docker inspect --format
+   '{{.Name}} {{.RestartCount}} {{.State.StartedAt}} {{.State.Health}}'`.
+   `RestartCount` > 0 после деплоя — флаг. У `trading_bot` healthcheck
+   нет (`health=none`) — это норма
+2. `df -h / /opt`, `free -m`, `uptime`; `du -sh /opt/backups
+   /opt/trading_bot/logs`; `docker system df`. Диск VPS — 28 ГБ
+   (не 40), RAM ~1.9 ГБ, swap нет
+3. `timedatectl` — `System clock synchronized: yes` (иначе подпись BingX
+   начнёт отказывать)
+4. `ss -tulpn` — 5432 и 6379 на хосте не слушают; `ufw status`
+5. `stat -c '%a %n' .env docker-compose.override.yml`;
+   `find /opt/backups -maxdepth 1 -type f ! -perm 600` — и для `.tar.gz`
+   из списка `tar tzf | grep -E '(^|/)\.env$'` (есть ли внутри `.env`)
+
+### B. Код на проде
+
+6. Локально: для каждого файла `git ls-tree -r --name-only <commit> app`
+   посчитать `git -c core.autocrlf=false show <commit>:<path> | md5sum`,
+   список передать по stdin в `md5sum -c --quiet -` в `/opt/trading_bot`.
+   Плюс сравнить списки файлов (лишние файлы на проде). `<commit>` —
+   последний задеплоенный, его время коммита сверить со `StartedAt`
+7. `docker compose exec -T bot alembic current` == `alembic heads`
+
+### C. Конфиг
+
+8. Из `get_settings()` печатать только: `trading_execution_enabled`,
+   `exec_dry_run`, `exec_allow_live_mode_orders`, `bingx_trading_mode`,
+   `bingx_base_url`, `bingx_demo_base_url`, `exec_symbol_whitelist`,
+   `exec_max_open_positions`, `exec_max_total_risk_percent`,
+   `confirm_lock_ttl_seconds`, `exec_position_mode_ttl_seconds`,
+   `exec_daily_digest_hour`, `log_json`, `environment`.
+   `bingx_base_url` — только публичный клиент; ключевой клиент в режиме
+   demo ходит на `bingx_demo_base_url`
+
+### D. Логи за 24 часа
+
+`logs/bot.log` пишет **только время, без даты**, и ротируется. Даты
+восстанавливать проходом с конца файла (конец = сегодня): переход
+времени вверх больше чем на 12 часов — предыдущие сутки. Для текущего
+контейнера сверять с `docker logs -t --since 24h trading_bot`. Формат
+строки — `HH:MM:SS | LEVEL | logger | message | extra`, в awk
+разделитель `-F' [|] '`.
+
+9. Счётчики по уровням и `уровень + логгер` для WARNING/ERROR; для
+   ERROR — до 10 уникальных `message` (без хвоста extra)
+10. `grep -c Traceback`
+11. `grep -ci -e Conflict -e 'terminated by other getUpdates'` — второй
+    экземпляр бота
+12. Последние `Фоновый цикл завершён: setup_scanner|position_monitor|
+    daily_jobs` и `Цикл сканера завершён` (символы, запросы,
+    длительность). Строки «Скан рынка» в логах нет. Отправка сводки
+    исполнения в лог не пишется — смотреть
+    `user_settings.execution_digest_last_sent_date` (пункт 14)
+
+### E. База
+
+Только агрегаты, через `Database(get_settings()).engine.connect()` и
+первым запросом `SET TRANSACTION READ ONLY`, в конце `rollback()`.
+`execution_orders.stage` хранится в нижнем регистре (`card`/`confirm`),
+`status` — в верхнем.
+
+13. `pg_size_pretty(pg_database_size(current_database()))`; соединения
+    из `pg_stat_activity` по `state`
+14. `execution_orders` с окна деплоя: `status × stage`. Любая строка
+    `PENDING`/`SUBMITTED`/`UNKNOWN` при `exec_dry_run=true` — флаг.
+    Там же `user_settings.execution_digest_last_sent_date` — вчерашняя
+    дата, если час `EXEC_DAILY_DIGEST_HOUR` по локальному времени прошёл
+15. `signals` с `level='READY'` по `notified_at` за 24 ч и с окна
+    деплоя; сколько из них дошло до карточки — distinct `signal_id` в
+    `execution_orders`, кроме `REFUSED` на `card`. Плюс сигналы с
+    `trade_opened_at IS NOT NULL` (слот, использованный раньше)
+16. `trades` со `status='OPEN'` по `source`; всего
+    `source='SIGNAL_EXECUTION'`
+
+### F. Redis
+
+`scripts/check_redis` **пишет** (цикл захвата/снятия лока на своём
+ключе) — в чек-апе его не запускать. Вместо него инлайн через
+`redis.asyncio.Redis.from_url(get_settings().redis_url)`:
+
+17. `PING`; `INFO memory` — `used_memory_human`, `maxmemory_human`
+    (256M), `maxmemory_policy` (`noeviction`)
+18. `SCAN exec:lock:*` — счётчик и `TTL` каждого. `TTL` -1 или > 80 —
+    залипший лок
+
+### G. BingX (demo, только GET)
+
+`ExchangeFactory(settings, SecretCipher(...)).for_user(session, 1,
+mode=ExchangeKeyMode.DEMO)`. Отдельной DEMO-строки в
+`exchange_credentials` может не быть — ключи BingX общие для режимов,
+фабрика берёт LIVE-строку. Проверить, что `client._base_url` — демо-хост.
+
+19. `get_ticker("BTC-USDT")` — `last_price`, `timestamp`
+20. `get_balance()` — `asset`, `equity`, `available`, `used_margin`
+21. `get_api_restrictions()` — `enable_futures`,
+    `permits_universal_transfer`, `ip_restrict`; и
+    `exchange_credentials.permissions_checked_at`
+22. `get_position_mode()` — `dual_side_position`
+23. `get_leverage("BTC-USDT")` — long/short текущее и максимум
+
+### H. Локально на HEAD
+
+24. Полный `pytest` (passed/skipped/failed — skipped обязан быть 0),
+    `smoke_check.py` дважды подряд с exit code, `python -m ruff check .
+    --statistics` (`F821`, `RUF100`, `I001`, `E501`, итог),
+    `python -m mypy app`. Всё — против последних известных чисел.
+    `ruff`/`mypy` на этой машине только через `python -m`
+
+### Отчёт
+
+Одна таблица: пункт | результат | ✅ / ⚠️ / ❌. Под ней — только ⚠️ и ❌:
+что увидел и чем это грозит ближайшему деплою. Предложения по починке —
+отдельным списком. Ничего не исправлять в рамках чек-апа.
+
 ## Конвенции
 
 - Настройки — через `get_settings()`. Модульного синглтона `settings` нет
