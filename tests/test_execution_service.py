@@ -1081,3 +1081,86 @@ async def test_min_rr_and_card_rr_use_rounded_levels(ctx) -> None:  # type: igno
         entry_price=D("100"), stop_loss=D("97.9"), take_profit=D("103.2"),
         side=TradeSide.LONG,
     )
+
+
+
+# --- Шаг 15.5.4: предварительная сделка видна гвардам ------------------------
+
+
+async def _provisional_trade(session, user, signal, notification) -> None:  # type: ignore[no-untyped-def]
+    """Сделка бота с неподтверждённым исполнением (UNKNOWN не найден) —
+    тем же путём, что пишет хендлер."""
+    from app.execution.journal_entry import record_entry_trade
+    from app.execution.models import OrderRequest
+    from app.execution.readback import ReadbackResult
+    from app.execution.service import build_entry_order_pending
+    from app.trading.enums import OrderSide
+
+    order = OrderRequest(
+        user_id=user.id, signal_id=signal.id, notification_id=notification.id,
+        symbol=signal.symbol, side=OrderSide.BUY, position_side=TradeSide.LONG,
+        quantity=D("0.05"), entry_price=D("100"), leverage=10, stop_loss=D("97"),
+        take_profit=D("110"), notional=D("5"), margin=D("0.5"), risk_amount=D("15"),
+        risk_percent=D("1.5"), risk_reward=D("3.33"),
+    )
+    entry = build_entry_order_pending(order)
+    entry.status = OrderStatus.UNKNOWN
+    session.add(entry)
+    await session.flush()
+    outcome = await record_entry_trade(
+        session=session, entry_row=entry, order=order, notification=notification,
+        timeframe=signal.timeframe, readback=ReadbackResult(entry_status=OrderStatus.UNKNOWN),
+        account_balance=D("1000"), now=NOW,
+    )
+    assert outcome is not None and outcome.trade.fill_confirmed is False
+
+
+async def test_provisional_trade_blocks_next_entry_on_symbol(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Неподтверждённая сделка бота блокирует следующий вход по символу —
+    ложная блокировка до сверки безопаснее второй позиции."""
+    session, user, client, market = ctx
+    first = _signal(user.id)
+    session.add(first)
+    await session.flush()
+    first_n = await _snapshot(session, first)
+    await _provisional_trade(session, user, first, first_n)
+
+    second = _signal(user.id, timeframe="1h")
+    session.add(second)
+    await session.flush()
+    second_n = await _snapshot(session, second)
+    service = _service(session, _live_settings(), client, market)
+
+    result = await _evaluate(service, user, second_n, second)
+
+    assert isinstance(result, ExecutionRefusal)
+    assert result.code is Code.POSITION_EXISTS
+
+
+async def test_provisional_trade_counts_in_total_risk(ctx) -> None:  # type: ignore[no-untyped-def]
+    session, user, client, market = ctx
+    first = _signal(user.id)
+    session.add(first)
+    await session.flush()
+    first_n = await _snapshot(session, first)
+    await _provisional_trade(session, user, first, first_n)  # риск 1.5%
+
+    eth = _signal(user.id, symbol="ETH-USDT")
+    session.add(eth)
+    await session.flush()
+    eth_n = await _snapshot(session, eth)
+    client.symbol_info = SymbolInfo(
+        symbol="ETH-USDT", price_precision=1, quantity_precision=3,
+        min_quantity=D("0.001"), min_notional=D("5"),
+    )
+    settings = Settings(  # type: ignore[call-arg]
+        trading_execution_enabled=True, bingx_trading_mode="live",
+        exec_allow_live_mode_orders=True,
+        exec_max_total_risk_percent=user.trading_plan.risk_per_trade_percent + D("1"),
+    )
+    service = _service(session, settings, client, MarketDataService(client, TTLCache()))
+
+    result = await _evaluate(service, user, eth_n, eth)
+
+    assert isinstance(result, ExecutionRefusal)
+    assert result.code is Code.MAX_TOTAL_RISK

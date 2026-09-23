@@ -42,6 +42,7 @@ from app.database.models.signal import SignalRecord
 from app.database.models.signal_notification import SignalNotification
 from app.database.repositories.signal import SignalRepository
 from app.database.repositories.strategy import MistakeTypeRepository, StrategyRepository
+from app.database.repositories.trade import TradeRepository
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
 from app.exchanges.base import (
@@ -68,6 +69,7 @@ from app.trading.enums import (
     SignalDirection,
     SignalLevel,
     TradeSide,
+    TradeStatus,
 )
 from tests.conftest import cleanup_user
 
@@ -1746,6 +1748,15 @@ async def test_two_notifications_same_slot_distinct_client_order_ids(  # type: i
     await session.flush()
     first = await _notify(session, signal)
     await _open_and_confirm(dp, bot, first, user)
+    if not dry_run:
+        # Шаг 15.5.4: вход пишет сделку в журнал, и открытая позиция по
+        # символу блокирует второй вход (POSITION_EXISTS). Этот тест — про
+        # идентичность входа, поэтому первая позиция к моменту второго
+        # сигнала закрыта.
+        for trade in await TradeRepository(session).list_open(user.id):
+            trade.status = TradeStatus.CLOSED
+            trade.closed_at = datetime.now(UTC)
+        await session.flush()
 
     signal.fingerprint = "fp-second"
     signal.stop_loss = D("96")
@@ -2011,3 +2022,100 @@ def test_slippage_described_in_words_by_trade_side(side, avg, expected) -> None:
         side=side, planned_price=D("100"), avg_price=D(avg), quantity=D("0.75")
     )
     assert text == expected
+
+
+# ---------------------------------------------------------------------------
+# Шаг 15.5.4: сделка в журнале после read-back
+# ---------------------------------------------------------------------------
+
+
+async def _user_trades(session, user_id: int) -> list:  # type: ignore[no-untyped-def]
+    return await TradeRepository(session).list_open(user_id)
+
+
+async def _real_confirm(ctx, bot, monkeypatch, **client_attrs):  # type: ignore[no-untyped-def]
+    dp, session, user, client, _redis, settings = ctx
+    client.current_leverage = _leverage_info(long_leverage=10)
+    client.place_order_result = _order_result(order_id="555555")
+    for name, value in client_attrs.items():
+        setattr(client, name, value)
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    settings.exec_dry_run = False
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _notify(session, signal)
+    await _open_and_confirm(dp, bot, notification, user)
+    edits = [m.text for m in bot.recorder.calls if isinstance(m, EditMessageText)]
+    return session, user, notification, edits
+
+
+async def test_filled_entry_writes_trade_and_reports_it(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    session, user, notification, edits = await _real_confirm(ctx, bot, monkeypatch)
+
+    [trade] = await _user_trades(session, user.id)
+    assert trade.notification_id == notification.id
+    assert trade.fill_confirmed is True
+    assert any(t.endswith(f"📒 Сделка #{trade.id} в журнале") for t in edits)
+
+
+async def test_unknown_not_found_writes_provisional_trade_with_cancel_hint(  # type: ignore[no-untyped-def]
+    ctx, bot, monkeypatch
+) -> None:
+    session, user, _n, edits = await _real_confirm(
+        ctx, bot, monkeypatch,
+        place_order_error=ExchangeUnavailableError("timeout"),
+        fill_error=ExchangeResponseError("order not exist", code=109414, payload=None),
+    )
+
+    [trade] = await _user_trades(session, user.id)
+    assert trade.fill_confirmed is False
+    assert any(
+        f"📒 Сделка #{trade.id} в журнале — предварительно. Если позиции на BingX нет — "
+        f"отмени сделку #{trade.id} в журнале, иначе символ останется заблокирован для "
+        "новых входов" in t
+        for t in edits
+    )
+
+
+async def test_unconfirmed_fill_writes_provisional_trade(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    session, user, _n, edits = await _real_confirm(
+        ctx, bot, monkeypatch, fill_overrides={"avgPrice": None}
+    )
+
+    [trade] = await _user_trades(session, user.id)
+    assert trade.fill_confirmed is False
+    assert any(
+        t.endswith(f"📒 Сделка #{trade.id} в журнале — предварительно, исполнение не подтверждено")
+        for t in edits
+    )
+
+
+async def test_dry_run_writes_no_trade(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    dp, session, user, client, _redis, settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    assert settings.exec_dry_run is True
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _notify(session, signal)
+
+    await _open_and_confirm(dp, bot, notification, user)
+
+    assert await _user_trades(session, user.id) == []
+
+
+async def test_entry_past_stop_alarm_is_separate_message(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    session, user, _n, _edits = await _real_confirm(
+        ctx, bot, monkeypatch, fill_overrides={"avgPrice": "96.5"}
+    )
+
+    alarms = [
+        t for t in bot.recorder.sent_texts() if t.startswith("⚠️ Вход исполнен за уровнем стопа")
+    ]
+    assert alarms == [
+        "⚠️ Вход исполнен за уровнем стопа: BTC-USDT LONG, цена 96.5, стоп 97. "
+        "Убыток больше заявленного — проверь позицию в BingX"
+    ]
+    [trade] = await _user_trades(session, user.id)
+    assert trade.stop_loss is None

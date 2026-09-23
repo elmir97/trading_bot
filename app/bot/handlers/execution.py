@@ -63,6 +63,7 @@ from app.database.session import Database
 from app.exchanges.base import ExchangeAuthError, ExchangeError
 from app.exchanges.bingx import bingx_position_side
 from app.execution.guards import check_live_orders_allowed
+from app.execution.journal_entry import JournalOutcome, record_entry_trade
 from app.execution.models import ExecutionRefusal, ExecutionRefusalCode, OrderRequest
 from app.execution.readback import (
     ConditionalOutcome,
@@ -197,11 +198,28 @@ def _describe_conditional(state: ConditionalState | None, price_precision: int) 
     return f"{level} ({detail})"
 
 
+def render_journal_line(journal: JournalOutcome | None) -> str | None:
+    """Шаг 15.5.4: строка о сделке в журнале под итогом read-back."""
+    if journal is None:
+        return None
+    n = journal.trade.id
+    if not journal.provisional:
+        return f"📒 Сделка #{n} в журнале"
+    if journal.entry_not_found:
+        return (
+            f"📒 Сделка #{n} в журнале — предварительно. Если позиции на BingX нет — "
+            f"отмени сделку #{n} в журнале, иначе символ останется заблокирован для "
+            "новых входов"
+        )
+    return f"📒 Сделка #{n} в журнале — предварительно, исполнение не подтверждено"
+
+
 def render_readback(
     order: OrderRequest,
     planned_price: Decimal,
     readback: ReadbackResult,
     symbol_info_precision: tuple[int, int],
+    journal: JournalOutcome | None = None,
 ) -> str:
     """Шаг 15.5.3: итог после read-back — фактическая цена против цены на
     карточке (проскальзывание словами), объём, комиссия, стоп и тейк с id.
@@ -212,9 +230,12 @@ def render_readback(
     lines: list[str] = []
     if readback.alarm:
         lines.append(readback.alarm)
+    journal_line = render_journal_line(journal)
     if readback.stop is None:
         # UNKNOWN, не найденный поиском: исполнения и стопа не видно.
         lines.extend(readback.warnings or ["⚠️ Исполнение не подтверждено — проверь BingX."])
+        if journal_line:
+            lines.append(journal_line)
         return "\n".join(lines)
     if fill is not None and readback.entry_status is OrderStatus.FILLED:
         lines.append(f"✅ Вход исполнен: {order.symbol} · {side_label}")
@@ -241,6 +262,8 @@ def render_readback(
         f"Тейк: {_describe_conditional(readback.take, price_precision)}"
     )
     lines.extend(readback.warnings)
+    if journal_line:
+        lines.append(journal_line)
     return "\n".join(lines)
 
 
@@ -970,6 +993,19 @@ async def _submit_real_order(
     finally:
         await client.close()
 
+    # Шаг 15.5.4: сделка в журнале при любом исходе, кроме отказа — гварды
+    # считают открытые позиции по trades. Под тем же локом, без HTTP.
+    journal = await record_entry_trade(
+        session=session,
+        entry_row=entry_row,
+        order=order,
+        notification=notification,
+        timeframe=slot.timeframe,
+        readback=readback,
+        account_balance=result.account_balance,
+        now=datetime.now(UTC),
+    )
+
     logger.info(
         "Read-back входа",
         extra={
@@ -977,6 +1013,7 @@ async def _submit_real_order(
             "entry_status": readback.entry_status.value,
             "stop": readback.stop.outcome.value if readback.stop else None,
             "take": readback.take.outcome.value if readback.take else None,
+            "trade_id": journal.trade.id if journal else None,
         },
     )
     await message.edit_text(
@@ -985,8 +1022,12 @@ async def _submit_real_order(
             planned_price,
             readback,
             (result.symbol_info.price_precision, result.symbol_info.quantity_precision),
+            journal,
         ),
         reply_markup=None,
     )
+    # Тревоги — отдельными сообщениями: правка сообщения не даёт уведомления.
     if readback.alarm:
         await message.answer(readback.alarm)
+    if journal is not None and journal.alarm:
+        await message.answer(journal.alarm)
