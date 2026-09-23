@@ -99,6 +99,11 @@ class ExecutionDigestStats:
     rejected: int = 0
     unknown: int = 0
     pending: int = 0
+    # Шаг 15.5.3: вход, исполнение которого подтверждено read-back.
+    filled: int = 0
+    # Шаг 15.5.3: стоп не подтверждён на бирже — (символ, сторона) по
+    # строкам STOP_LOSS (ExecutionOrderRepository.list_unprotected_between).
+    unprotected: list[tuple[str, str]] = field(default_factory=list)
     # Отказы гвардов по стадии evaluate(): "card" (карточки ещё нет) и
     # "confirm" (карточка показана, пришло «Да»). Строки без стадии (записаны
     # до её появления) — прежняя семантика «до карточки».
@@ -153,7 +158,7 @@ class ExecutionDigestStats:
         (раздел 7 ТЗ)."""
         return (
             self.confirmed + self.declined + self.expired
-            + self.submitted + self.rejected + self.unknown + self.pending
+            + self.submitted + self.filled + self.rejected + self.unknown + self.pending
             + self.refused_confirm + self.errors_confirm
         )
 
@@ -177,6 +182,7 @@ def build_stats(
     *,
     target_risk_percent: Decimal | None,
     ready_signals: int = 0,
+    unprotected: list[ExecutionOrder] | None = None,
 ) -> ExecutionDigestStats:
     """rows — строки execution_orders (role=ENTRY) за окно сводки одного
     пользователя (скользящие 24 часа, не календарные сутки — см. докстринг
@@ -188,6 +194,9 @@ def build_stats(
     (signal_notifications, не execution_orders), поэтому передаётся готовым
     числом, а не строками."""
     stats = ExecutionDigestStats(ready_signals=ready_signals)
+    stats.unprotected = [
+        (row.symbol, row.position_side.value) for row in (unprotected or [])
+    ]
 
     for row in rows:
         if row.status is OrderStatus.DRY_RUN:
@@ -201,6 +210,8 @@ def build_stats(
                 stats.confirmed_drift_percents.append(row.price_drift_percent)
         elif row.status is OrderStatus.SUBMITTED:
             stats.submitted += 1
+        elif row.status is OrderStatus.FILLED:
+            stats.filled += 1
         elif row.status is OrderStatus.REJECTED:
             stats.rejected += 1
         elif row.status is OrderStatus.UNKNOWN:
@@ -255,6 +266,14 @@ def detect_anomalies(stats: ExecutionDigestStats, *, max_price_drift_ratio: Deci
     """Раздел 12а ТЗ — единственный раздел сводки, который человек глазами
     бы не поймал. Возвращает готовые строки-пункты, порядок — как в ТЗ."""
     anomalies: list[str] = []
+
+    # Шаг 15.5.3: первой — это единственная аномалия, при которой деньги
+    # под риском прямо сейчас.
+    counts: dict[tuple[str, str], int] = {}
+    for key in stats.unprotected:
+        counts[key] = counts.get(key, 0) + 1
+    for (symbol, side), count in counts.items():
+        anomalies.append(f"позиция без стопа: {symbol} {side} — {count}")
 
     for d in stats.risk_deviations:
         anomalies.append(
@@ -336,6 +355,7 @@ def render_execution_digest(
         f"Сигналов READY: {stats.ready_signals}",
         f"  показана карточка: {stats.total_cards}",
         f"    подтверждено: {stats.confirmed}",
+        f"    исполнено (read-back): {stats.filled}",
         f"    отправлено на биржу: {stats.submitted}",
         f"    отклонено биржей: {stats.rejected}",
         f"    исход неизвестен: {stats.unknown}",

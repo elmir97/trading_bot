@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models.execution_order import ExecutionOrder
-from app.trading.enums import OrderRole
+from app.trading.enums import OrderRole, OrderStatus
 
 
 class ExecutionOrderRepository:
@@ -71,6 +71,25 @@ class ExecutionOrderRepository:
         stmt = select(ExecutionOrder).where(
             ExecutionOrder.user_id == user_id,
             ExecutionOrder.role == OrderRole.ENTRY,
+            ExecutionOrder.created_at >= start,
+            ExecutionOrder.created_at < end,
+        )
+        return list(await self.session.scalars(stmt))
+
+    async def list_unprotected_between(
+        self, user_id: int, start: datetime, end: datetime
+    ) -> list[ExecutionOrder]:
+        """Шаг 15.5.3: строки STOP_LOSS, у которых стоп на бирже не
+        подтверждён — спасение отклонено/исход неизвестен (REJECTED/UNKNOWN),
+        застряло в PENDING, или openOrders не прочитан (ERROR,
+        STOP_UNVERIFIED). Сырьё для аномалии «позиция без стопа» в сводке."""
+        stmt = select(ExecutionOrder).where(
+            ExecutionOrder.user_id == user_id,
+            ExecutionOrder.role == OrderRole.STOP_LOSS,
+            ExecutionOrder.status.in_((
+                OrderStatus.REJECTED, OrderStatus.UNKNOWN,
+                OrderStatus.PENDING, OrderStatus.ERROR,
+            )),
             ExecutionOrder.created_at >= start,
             ExecutionOrder.created_at < end,
         )

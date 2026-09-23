@@ -375,3 +375,37 @@ async def test_real_submission_statuses_reach_the_digest(ctx) -> None:  # type: 
     assert "    отклонено биржей: 1" in lines
     assert "    исход неизвестен: 1" in lines
     assert "    без ответа биржи (PENDING): 1" in lines
+
+
+
+async def test_unprotected_position_reaches_the_digest(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Шаг 15.5.3: спасение стопа не удалось (строка STOP_LOSS REJECTED) —
+    в «Аномалиях» сводки первой строкой «позиция без стопа»."""
+    daily, session, user, bot, settings = ctx
+    now = datetime.now(UTC)
+    moment = now - timedelta(minutes=1)
+    session.add(_row(user.id, OrderStatus.FILLED, created_at=moment))
+    session.add(_row(
+        user.id, OrderStatus.REJECTED, role=OrderRole.STOP_LOSS, side=OrderSide.SELL,
+        order_type=OrderType.STOP_MARKET, error_code="80012", created_at=moment,
+    ))
+    session.add(_row(
+        user.id, OrderStatus.ERROR, role=OrderRole.STOP_LOSS, side=OrderSide.SELL,
+        order_type=OrderType.STOP_MARKET, error_code="STOP_UNVERIFIED",
+        symbol="ETH-USDT", created_at=moment,
+    ))
+    await session.flush()
+
+    _now, _tz_offset, today_local, local_hour = _call_args(
+        user, settings, local_hour=settings.exec_daily_digest_hour
+    )
+    await daily._maybe_send_execution_digest(
+        session, user, user.settings, now, today_local, local_hour
+    )
+
+    lines = bot.sent_messages[0][1].splitlines()
+    assert "    исполнено (read-back): 1" in lines
+    anomalies = lines[lines.index("Аномалии:") + 1:]
+    assert anomalies[0].strip().startswith("позиция без стопа:")
+    assert "  позиция без стопа: BTC-USDT LONG — 1" in lines
+    assert "  позиция без стопа: ETH-USDT LONG — 1" in lines

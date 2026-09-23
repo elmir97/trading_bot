@@ -242,10 +242,16 @@ class DailyJobs:
         ready_signals = await SignalNotificationRepository(session).count_ready_between(
             user.id, window_start, now
         )
+        unprotected = await ExecutionOrderRepository(session).list_unprotected_between(
+            user.id, window_start, now
+        )
         plan = user.trading_plan
         target_risk_percent = plan.risk_per_trade_percent if plan else None
         stats = build_stats(
-            rows, target_risk_percent=target_risk_percent, ready_signals=ready_signals
+            rows,
+            target_risk_percent=target_risk_percent,
+            ready_signals=ready_signals,
+            unprotected=unprotected,
         )
 
         settings_row.execution_digest_last_sent_date = today_local

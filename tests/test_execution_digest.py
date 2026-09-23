@@ -502,3 +502,26 @@ class TestRealSubmissionStatuses:
     def test_submitted_only_is_not_an_anomaly(self) -> None:
         stats = build_stats([_row(OrderStatus.SUBMITTED)], target_risk_percent=D("1"))
         assert detect_anomalies(stats, max_price_drift_ratio=D("0.3")) == []
+
+
+
+class TestReadbackOutcomes:
+    """Шаг 15.5.3: исполнение, подтверждённое read-back, и позиция без стопа."""
+
+    def test_filled_counted_as_shown_card_and_rendered(self) -> None:
+        stats = build_stats([_row(OrderStatus.FILLED)], target_risk_percent=D("1"))
+        assert stats.filled == 1
+        assert stats.total_cards == 1
+        text = render_execution_digest(stats, max_price_drift_ratio=D("0.3"))
+        assert "    исполнено (read-back): 1" in text.splitlines()
+
+    def test_unprotected_position_is_first_anomaly(self) -> None:
+        stop_row = _row(OrderStatus.REJECTED, symbol="BTC-USDT")
+        stop_row.role = OrderRole.STOP_LOSS
+        stats = build_stats(
+            [_row(OrderStatus.FILLED), _row(OrderStatus.UNKNOWN)],
+            target_risk_percent=D("1"),
+            unprotected=[stop_row],
+        )
+        anomalies = detect_anomalies(stats, max_price_drift_ratio=D("0.3"))
+        assert anomalies[0] == "позиция без стопа: BTC-USDT LONG — 1"
