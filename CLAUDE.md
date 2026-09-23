@@ -274,7 +274,8 @@ PY
     `card`. Плюс уведомления с `trade_opened_at IS NOT NULL`.
     `signals.trade_opened_at` с 15.5.2а не используется
 16. `trades` со `status='OPEN'` по `source`; всего
-    `source='SIGNAL_EXECUTION'`
+    `source='SIGNAL_EXECUTION'`; из них `fill_confirmed = false`
+    (предварительные, 15.5.4) — при сухом прогоне их быть не должно
 
 ### F. Redis
 
