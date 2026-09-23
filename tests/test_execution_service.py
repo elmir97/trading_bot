@@ -1138,7 +1138,7 @@ async def test_provisional_trade_blocks_next_entry_on_symbol(ctx) -> None:  # ty
 
 
 async def test_provisional_trade_counts_in_total_risk(ctx) -> None:  # type: ignore[no-untyped-def]
-    session, user, client, market = ctx
+    session, user, client, _market = ctx
     first = _signal(user.id)
     session.add(first)
     await session.flush()
