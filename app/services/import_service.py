@@ -21,6 +21,7 @@ from decimal import Decimal
 
 from app.core.logging import get_logger
 from app.database.models.trade import Trade, TradeFill
+from app.database.repositories.execution_order import ExecutionOrderRepository
 from app.database.repositories.trade import TradeRepository
 from app.exchanges.base import ExchangeClient, Fill
 from app.trading.calculations import (
@@ -48,6 +49,8 @@ OVERLAP = timedelta(minutes=5)
 class ImportResult:
     fills_received: int = 0
     fills_new: int = 0
+    # Шаг 15.5.4: исполнения ордеров бота — их сделка уже в журнале.
+    fills_skipped_bot: int = 0
     trades_created: int = 0
     trades_updated: int = 0
     errors: list[str] = field(default_factory=list)
@@ -61,6 +64,8 @@ class ImportResult:
             f"Новых: {self.fills_new}",
             f"Создано сделок: {self.trades_created}",
         ]
+        if self.fills_skipped_bot:
+            lines.append(f"Пропущено исполнений ордеров бота: {self.fills_skipped_bot}")
         if self.trades_updated:
             lines.append(f"Дополнено сделок: {self.trades_updated}")
         if self.errors:
@@ -189,6 +194,7 @@ class HistoryImporter:
             self._user_id, self._client.name, [f.external_id for f in fills]
         )
         fresh = [f for f in fills if f.external_id not in known]
+        fresh = await self._drop_bot_fills(fresh, result)
         result.fills_new = len(fresh)
 
         if not fresh:
@@ -209,6 +215,34 @@ class HistoryImporter:
             },
         )
         return result
+
+    async def _drop_bot_fills(self, fills: list[Fill], result: ImportResult) -> list[Fill]:
+        """Шаг 15.5.4: исполнения ордеров бота (вход, стоп, тейк) не
+        импортируются — сделка бота уже в журнале с notification_id, а у её
+        TradeFill нет tradeId биржи, и обычный дедуп по external_fill_id её
+        не узнал бы. Выход, закрывший позицию бота руками, остаётся
+        «выходом без входа» и пропускается group_fills_into_trades —
+        половинчатой сделки нет.
+
+        Исполнение без orderId отличить от ордеров бота нельзя — оно
+        импортируется как раньше, но не тихо: warning о возможном дубле."""
+        bot_order_ids = await ExecutionOrderRepository(self._trades.session).exchange_order_ids(
+            self._user_id
+        )
+        kept: list[Fill] = []
+        for f in fills:
+            if f.order_id is None:
+                logger.warning(
+                    "Исполнение без orderId — не могу отличить от ордеров бота, "
+                    "возможен дубль сделки бота в журнале",
+                    extra={"user_id": self._user_id, "fill_id": f.external_id, "symbol": f.symbol},
+                )
+                kept.append(f)
+            elif f.order_id in bot_order_ids:
+                result.fills_skipped_bot += 1
+            else:
+                kept.append(f)
+        return kept
 
     def _build_trade(
         self, pending: _PendingTrade, account_balance: Decimal | None

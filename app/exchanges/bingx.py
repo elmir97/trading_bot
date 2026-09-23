@@ -767,6 +767,7 @@ class BingXClient(ExchangeClient):
             realized_pnl=_to_decimal(item.get("profit"), "profit"),
             executed_at=_ms_to_dt(executed_at) if executed_at else datetime.now(UTC),
             position_id=str(item.get("positionId")) if item.get("positionId") else None,
+            order_id=str(item.get("orderId")) if item.get("orderId") else None,
         )
 
     # --- Торговые методы (этап 15.2) ----------------------------------------

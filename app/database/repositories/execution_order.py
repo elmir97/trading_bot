@@ -76,6 +76,16 @@ class ExecutionOrderRepository:
         )
         return list(await self.session.scalars(stmt))
 
+    async def exchange_order_ids(self, user_id: int) -> set[str]:
+        """Шаг 15.5.4: все orderId биржи, записанные за ордерами бота (вход,
+        стоп, тейк) — импорт истории пропускает их исполнения: сделка бота
+        уже в журнале, повторный импорт задвоил бы её."""
+        stmt = select(ExecutionOrder.exchange_order_id).where(
+            ExecutionOrder.user_id == user_id,
+            ExecutionOrder.exchange_order_id.is_not(None),
+        )
+        return {value for value in await self.session.scalars(stmt) if value}
+
     async def list_unprotected_between(
         self, user_id: int, start: datetime, end: datetime
     ) -> list[ExecutionOrder]:

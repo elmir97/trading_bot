@@ -9,7 +9,7 @@ from app.bot.formatting import fmt_money, fmt_percent, fmt_price, fmt_qty, fmt_r
 from app.database.models.mistake import MistakeType
 from app.database.models.strategy import Strategy
 from app.database.models.trade import Trade
-from app.trading.enums import TradeSide, TradeStatus
+from app.trading.enums import TradeSide, TradeSource, TradeStatus
 
 
 class TradeCB:
@@ -159,13 +159,24 @@ def trade_line(trade: Trade) -> str:
     )
 
 
+BOT_TRADE_WARNING = (
+    "🤖 Сделка бота — закрывай в журнале только после закрытия позиции на BingX"
+)
+
+
 def trade_card(trade: Trade) -> str:
     """Подробная карточка сделки."""
     lines = [
         f"<b>{trade.symbol} — {trade.side.label}</b>",
         "",
-        f"Вход: {fmt_price(trade.entry_price)}",
     ]
+    if trade.source is TradeSource.SIGNAL_EXECUTION and trade.status is TradeStatus.OPEN:
+        # Шаг 15.5.4: сделка бота блокирует повторный вход по символу
+        # (гварды считают открытые позиции по журналу) — закрытая в журнале
+        # раньше биржи, она откроет дорогу второй позиции. Автозакрытие по
+        # факту с биржи — reconciler 15.6.
+        lines.extend([BOT_TRADE_WARNING, ""])
+    lines.append(f"Вход: {fmt_price(trade.entry_price)}")
     if trade.exit_price is not None:
         lines.append(f"Выход: {fmt_price(trade.exit_price)}")
     lines.append(f"Объём: {fmt_qty(trade.quantity)}")

@@ -196,6 +196,10 @@ class Fill:
     realized_pnl: Decimal
     executed_at: datetime
     position_id: str | None = None
+    # Шаг 15.5.4: ордер, которым сделано исполнение, — импорт пропускает
+    # исполнения ордеров бота (сделка бота уже в журнале). None — биржа не
+    # отдала orderId (имя поля в allFillOrders — синтетика до 15.5.5).
+    order_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

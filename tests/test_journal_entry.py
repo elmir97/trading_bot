@@ -297,3 +297,30 @@ async def test_entry_past_stop_alarm_and_trade_without_stop(ctx, caplog) -> None
         "Убыток больше заявленного — проверь позицию в BingX"
     )
     assert "Вход исполнен за уровнем стопа" in caplog.text
+
+
+
+# --- Р4: предупреждение на карточке сделки бота ------------------------------
+
+
+def _card_trade(source: TradeSource, status: TradeStatus) -> Trade:
+    trade = Trade(
+        user_id=1, symbol="BTC-USDT", side=TradeSide.LONG, entry_price=D("100"),
+        quantity=D("0.01"), leverage=10, status=status, source=source, opened_at=NOW,
+        closed_at=NOW if status is TradeStatus.CLOSED else None,
+    )
+    trade.mistakes = []
+    trade.fills = []
+    return trade
+
+
+def test_bot_trade_card_warns_to_close_on_exchange_first() -> None:
+    from app.bot.keyboards.trade import BOT_TRADE_WARNING, trade_card
+
+    assert BOT_TRADE_WARNING in trade_card(
+        _card_trade(TradeSource.SIGNAL_EXECUTION, TradeStatus.OPEN)
+    )
+    assert BOT_TRADE_WARNING not in trade_card(_card_trade(TradeSource.MANUAL, TradeStatus.OPEN))
+    assert BOT_TRADE_WARNING not in trade_card(
+        _card_trade(TradeSource.SIGNAL_EXECUTION, TradeStatus.CLOSED)
+    )

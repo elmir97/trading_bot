@@ -1389,3 +1389,15 @@ class TestOrderFillFilledAt:
         if value is not None:
             order["updateTime"] = value
         assert BingXClient._parse_order_fill(order).filled_at is None
+
+
+
+def test_fill_carries_order_id_for_import_dedupe() -> None:
+    """Шаг 15.5.4: orderId исполнения — по нему импорт узнаёт ордера бота
+    (СИНТЕТИКА ДО 15.5.5 — имя поля в allFillOrders)."""
+    base = {
+        "symbol": "BTC-USDT", "tradeId": "t1", "side": "BUY", "positionSide": "LONG",
+        "price": "100", "qty": "0.1", "commission": "-0.01", "time": 1789372424000,
+    }
+    assert BingXClient._parse_fill({**base, "orderId": "555"}).order_id == "555"
+    assert BingXClient._parse_fill(base).order_id is None
