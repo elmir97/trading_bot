@@ -104,6 +104,67 @@ Remote `origin` — приватный резервный репозиторий
 к базе) → дождаться «да» → применять. Если alembic применяет миграцию,
 которой не ждали — остановиться и сказать.
 
+### Деплой с миграцией
+
+Upgrade идёт одной транзакцией: `alembic/env.py` оборачивает все миграции
+одним `context.begin_transaction()`, `transaction_per_migration` не задан.
+Падение посреди бэкфилла откатывает всё целиком.
+
+0. Репетиция на копии прода (ниже) — пройдена, отчёт принят
+1. Чек-ап прода, шаги 1-4 обычного деплоя (umask, дамп, снапшот, код, md5)
+2. `docker compose exec -T bot alembic upgrade <current>:<new> --sql` —
+   показать SQL, ждать «да»
+3. `docker compose build bot` — пока старый бот работает
+4. `docker compose stop bot` — старый код не должен ни рассылать, ни
+   обрабатывать «Да» во время миграции
+5. Проверки данных, от которых зависит миграция (SELECT)
+6. `docker compose run --rm --no-deps bot alembic upgrade head` — ровно
+   одна строка `Running upgrade`
+7. Проверка схемы и данных (SELECT, по списку миграции)
+8. `docker compose up -d --no-deps bot`, логи первой минуты, `grep -ci error`
+9. Проверки после старта (конфиг, execution_orders без PENDING/SUBMITTED/
+   UNKNOWN при сухом прогоне)
+10. Ручная проверка владельцем — для 15.5.2а: старая кнопка отвечает
+    «Уведомление устарело», «⚡ Открыть сделку» в новом уведомлении
+    открывает карточку с теми же уровнями, что в тексте уведомления
+
+**Откат**, если провалился шаг 6 или 7:
+
+```
+docker compose run --rm --no-deps bot alembic downgrade -1   # НОВЫЙ образ — в нём файл миграции
+docker compose run --rm --no-deps bot alembic current        # == предыдущая ревизия
+# код из снапшота шага 1, распаковать поверх /opt/trading_bot
+docker compose build bot && docker compose up -d --no-deps bot
+docker compose logs --tail 50 bot
+```
+
+Порядок важен: сначала downgrade новым образом (старый образ не знает
+файла миграции), и только потом старый код. Если шаг 6 упал целиком,
+транзакция уже откатилась — `alembic current` покажет старую ревизию,
+downgrade не нужен.
+
+### Репетиция миграции
+
+До деплоя, на сервере, данные не покидают его. `umask 077`.
+
+1. Свежий дамп прода `pg_dump --no-owner --no-privileges` →
+   `/opt/backups/rehearsal_<ts>.sql.gz`, `gzip -t`, режим 600
+2. Временная сеть `docker network create tb_rehearsal_net` и контейнер
+   Postgres **того же образа, что в `docker-compose.yml` прода** (сейчас
+   `postgres:16-alpine`), `--tmpfs` под данные, без `-p`. Восстановить дамп
+   через `psql -v ON_ERROR_STOP=1`
+3. Образ нового кода под отдельным тегом (`trading_bot:rehearsal`) из
+   `git archive` во временном каталоге — боевой образ и `/opt/trading_bot`
+   не трогать. Alembic запускать с `-e DATABASE_URL=…@<контейнер репетиции>`;
+   перед каждым шагом `SELECT current_database(), inet_server_addr()` —
+   адрес контейнера репетиции, иначе стоп
+4. До миграции: данные, от которых она зависит; снимок значимых колонок
+5. `alembic upgrade head` → проверки схемы и данных
+6. `downgrade -1` → схема вернулась, данные не потеряны → снова `upgrade head`
+7. Ещё раз `downgrade -1` с проверкой — это прогон процедуры отката
+8. Уборка: контейнер, сеть, образ, временный каталог, дамп репетиции.
+   Проверить, что ничего не осталось
+
 Переменные окружения на проде добавлять через
 `docker-compose.override.yml`, не правкой `.env`. Исключение —
 инфраструктурные адреса вроде `REDIS_URL`: им место в `environment`
@@ -207,10 +268,11 @@ PY
     `PENDING`/`SUBMITTED`/`UNKNOWN` при `exec_dry_run=true` — флаг.
     Там же `user_settings.execution_digest_last_sent_date` — вчерашняя
     дата, если час `EXEC_DAILY_DIGEST_HOUR` по локальному времени прошёл
-15. `signals` с `level='READY'` по `notified_at` за 24 ч и с окна
-    деплоя; сколько из них дошло до карточки — distinct `signal_id` в
-    `execution_orders`, кроме `REFUSED` на `card`. Плюс сигналы с
-    `trade_opened_at IS NOT NULL` (слот, использованный раньше)
+15. `signal_notifications` с `level='READY'` по `notified_at` за 24 ч и с
+    окна деплоя (события, не слоты); сколько из них дошло до карточки —
+    distinct `notification_id` в `execution_orders`, кроме `REFUSED` на
+    `card`. Плюс уведомления с `trade_opened_at IS NOT NULL`.
+    `signals.trade_opened_at` с 15.5.2а не используется
 16. `trades` со `status='OPEN'` по `source`; всего
     `source='SIGNAL_EXECUTION'`
 
