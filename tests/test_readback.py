@@ -504,11 +504,11 @@ async def test_unknown_not_found_is_not_resent(ctx) -> None:  # type: ignore[no-
 @pytest.mark.parametrize(
     "manual",
     [
-        pytest.param(dict(created=NOW - timedelta(hours=1)), id="создан до входа"),
-        pytest.param(dict(stop_price="96.5"), id="другая цена"),
-        pytest.param(dict(client_order_id="tj999999u1S"), id="чужой вход бота"),
-        pytest.param(dict(position_side="SHORT", side="BUY"), id="другая сторона"),
-        pytest.param(dict(symbol="ETH-USDT"), id="другой символ"),
+        pytest.param({"created": NOW - timedelta(hours=1)}, id="создан до входа"),
+        pytest.param({"stop_price": "96.5"}, id="другая цена"),
+        pytest.param({"client_order_id": "tj999999u1S"}, id="чужой вход бота"),
+        pytest.param({"position_side": "SHORT", "side": "BUY"}, id="другая сторона"),
+        pytest.param({"symbol": "ETH-USDT"}, id="другой символ"),
     ],
 )
 async def test_manual_stop_is_not_taken_for_ours(ctx, manual) -> None:  # type: ignore[no-untyped-def]
