@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import ROUND_DOWN, Decimal
+from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_FLOOR, Decimal
 
 from app.exchanges.base import SymbolInfo
 from app.execution.models import ExecutionRefusal, ExecutionRefusalCode
@@ -36,6 +36,30 @@ def _round_down_to_step(value: Decimal, precision: int) -> Decimal:
     """Округление вниз до шага лота. precision=3 → шаг 0.001, precision=0 → 1."""
     step = Decimal(1).scaleb(-precision)
     return value.quantize(step, rounding=ROUND_DOWN)
+
+
+def round_levels_toward_entry(
+    *, stop_loss: Decimal, take_profit: Decimal, side: TradeSide, price_precision: int
+) -> tuple[Decimal, Decimal]:
+    """Шаг 15.5.3: стоп и тейк — к шагу цены символа (pricePrecision) ДО
+    сборки ордера, чтобы на биржу ушло ровно то значение, по которому потом
+    ищем свой условник в openOrders (иначе биржа округлит по-своему, поиск
+    по цене промахнётся и спасение поставит второй стоп).
+
+    Направление — к цене входа, раздел 6 ТЗ: риск не больше заявленного.
+    LONG: стоп ниже входа → вверх, тейк выше входа → вниз. SHORT: стоп выше
+    входа → вниз, тейк ниже входа → вверх. Тейк тоже к входу — цель не
+    завышается. Объём считается уже от округлённого стопа (см. evaluate())."""
+    step = Decimal(1).scaleb(-price_precision)
+    if side is TradeSide.LONG:
+        return (
+            stop_loss.quantize(step, rounding=ROUND_CEILING),
+            take_profit.quantize(step, rounding=ROUND_FLOOR),
+        )
+    return (
+        stop_loss.quantize(step, rounding=ROUND_FLOOR),
+        take_profit.quantize(step, rounding=ROUND_CEILING),
+    )
 
 
 def calculate_size(

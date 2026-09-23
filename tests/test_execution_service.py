@@ -983,3 +983,48 @@ async def test_quote_uses_snapshot_levels_and_notification_id(ctx) -> None:  # t
     assert result.order.notification_id == notification.id
     assert result.order.signal_id == signal.id
     assert result.order.entry_client_order_id == f"tj{notification.id}u{user.id}E"
+
+
+
+# --- Шаг 15.5.3: уровни округляются до шага цены к цене входа ---------------
+
+
+@pytest.mark.parametrize(
+    "direction,stop,take,expected_stop,expected_take",
+    [
+        # precision символа — 1 (_symbol_info); уровни снимка — с 4 знаками,
+        # как их пишет сканер (round_price).
+        (SignalDirection.LONG, "97.1234", "110.0567", "97.2", "110.0"),
+        (SignalDirection.SHORT, "103.0789", "90.0123", "103.0", "90.1"),
+    ],
+)
+async def test_levels_rounded_toward_entry_and_sizing_uses_rounded_stop(  # type: ignore[no-untyped-def]
+    ctx, direction, stop, take, expected_stop, expected_take
+) -> None:
+    """В запрос уходит стоп/тейк, округлённый по правилу стороны, и объём
+    считается от него же: иначе биржа округлит по-своему, read-back не
+    найдёт свой стоп по цене и спасение поставит второй."""
+    from app.execution.sizing import calculate_size
+
+    session, user, client, market = ctx
+    signal = _signal(
+        user.id, direction=direction, stop_loss=D(stop), take_profit=D(take),
+        entry_low=D("100"), entry_high=D("100.5"),
+    )
+    session.add(signal)
+    await session.flush()
+    notification = await _snapshot(session, signal)
+
+    service = _service(session, _live_settings(), client, market)
+    result = await _evaluate(service, user, notification, signal)
+
+    assert isinstance(result, ExecutionQuote), result
+    assert result.order.stop_loss == D(expected_stop)
+    assert result.order.take_profit == D(expected_take)
+    side = TradeSide.LONG if direction is SignalDirection.LONG else TradeSide.SHORT
+    expected_size = calculate_size(
+        account_balance=D("1000"), risk_percent=user.trading_plan.risk_per_trade_percent,
+        entry_price=D("100"), stop_loss=D(expected_stop), side=side,
+        leverage=user.trading_plan.max_leverage, symbol_info=_symbol_info(),
+    )
+    assert result.order.quantity == expected_size.quantity

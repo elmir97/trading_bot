@@ -58,7 +58,7 @@ from app.execution.guards import (
 )
 from app.execution.leverage import leverage_needs_update
 from app.execution.models import ExecutionRefusal, ExecutionRefusalCode, OrderRequest
-from app.execution.sizing import calculate_size
+from app.execution.sizing import calculate_size, round_levels_toward_entry
 from app.market.data import MarketDataService
 from app.trading.calculations import PERCENT_PRECISION, calculate_risk_reward
 from app.trading.enums import (
@@ -464,6 +464,16 @@ class ExecutionService:
                 price=current_price,
                 drift=drift,
             )
+
+        # Шаг 15.5.3: уровни — к шагу цены символа, к цене входа (раздел 6
+        # ТЗ). Дальше и гварды, и sizing, и OrderRequest видят ровно то
+        # значение, что уйдёт в запрос и по которому read-back ищет стоп.
+        stop_loss, take_profit = round_levels_toward_entry(
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            side=side,
+            price_precision=symbol_info.price_precision,
+        )
 
         balance = (await self._client.get_balance(max_retries=call_retries)).equity
 

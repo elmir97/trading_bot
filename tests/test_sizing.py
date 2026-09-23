@@ -10,7 +10,7 @@ from decimal import Decimal
 
 from app.exchanges.base import SymbolInfo
 from app.execution.models import ExecutionRefusal, ExecutionRefusalCode
-from app.execution.sizing import SizingResult, calculate_size
+from app.execution.sizing import SizingResult, calculate_size, round_levels_toward_entry
 from app.trading.enums import TradeSide
 
 D = Decimal
@@ -176,3 +176,30 @@ class TestZeroStopDistance:
         )
         assert isinstance(result, ExecutionRefusal)
         assert result.code is ExecutionRefusalCode.INVALID_LEVELS
+
+
+
+class TestRoundLevelsTowardEntry:
+    """Шаг 15.5.3: уровни — к шагу цены символа, к цене входа (раздел 6 ТЗ:
+    риск не больше заявленного, цель не завышается)."""
+
+    def test_long_stop_up_take_down(self) -> None:
+        stop, take = round_levels_toward_entry(
+            stop_loss=Decimal("97.1234"), take_profit=Decimal("110.0567"),
+            side=TradeSide.LONG, price_precision=1,
+        )
+        assert (stop, take) == (Decimal("97.2"), Decimal("110.0"))
+
+    def test_short_stop_down_take_up(self) -> None:
+        stop, take = round_levels_toward_entry(
+            stop_loss=Decimal("103.0789"), take_profit=Decimal("90.0123"),
+            side=TradeSide.SHORT, price_precision=1,
+        )
+        assert (stop, take) == (Decimal("103.0"), Decimal("90.1"))
+
+    def test_already_on_step_unchanged(self) -> None:
+        stop, take = round_levels_toward_entry(
+            stop_loss=Decimal("97.5"), take_profit=Decimal("110.5"),
+            side=TradeSide.LONG, price_precision=1,
+        )
+        assert (stop, take) == (Decimal("97.5"), Decimal("110.5"))

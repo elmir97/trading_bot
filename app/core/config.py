@@ -141,6 +141,17 @@ class Settings(BaseSettings):
     # взята с запасом самой формулой (расчёт по timeout, не по типовой
     # длительности ответа).
     exec_confirm_lock_margin_seconds: int = 10
+    # Шаг 15.5.3: read-back входа после отправки (app/execution/readback.py).
+    # Чтений исполнения по clientOrderID — до attempts, пауза между ними
+    # delay_ms. UNKNOWN — один поиск после паузы unknown_search_delay_ms.
+    # «Стопа нет» — только после повторного чтения openOrders через
+    # open_orders_recheck_delay_ms: вложенный стоп может появиться отдельным
+    # ордером не сразу после исполнения маркета (реальная задержка снимается
+    # на 15.5.5). Все паузы входят в TTL лока (confirm_lock_ttl_seconds).
+    exec_order_readback_attempts: int = 3
+    exec_order_readback_delay_ms: int = 500
+    exec_unknown_search_delay_ms: int = 1000
+    exec_open_orders_recheck_delay_ms: int = 500
     # Раздел 8 ТЗ: как часто перепроверять права ключа (GET .../apiRestrictions)
     # при построении карточки подтверждения — см. app/services/permissions.py.
     exec_permissions_ttl_hours: int = 6

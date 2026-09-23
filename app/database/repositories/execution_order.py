@@ -37,6 +37,20 @@ class ExecutionOrderRepository:
         )
         return await self.session.scalar(stmt)
 
+    async def claimed_conditional_order_ids(
+        self, user_id: int, *, exclude_notification_id: int
+    ) -> set[str]:
+        """Шаг 15.5.3: orderId биржи, уже записанные за стопами/тейками
+        ДРУГИХ входов — find_our_conditional не отдаст один и тот же
+        условный ордер двум входам по одному символу."""
+        stmt = select(ExecutionOrder.exchange_order_id).where(
+            ExecutionOrder.user_id == user_id,
+            ExecutionOrder.role.in_((OrderRole.STOP_LOSS, OrderRole.TAKE_PROFIT)),
+            ExecutionOrder.exchange_order_id.is_not(None),
+            ExecutionOrder.notification_id.is_distinct_from(exclude_notification_id),
+        )
+        return {value for value in await self.session.scalars(stmt) if value}
+
     async def list_by_signal(self, user_id: int, signal_id: int) -> list[ExecutionOrder]:
         stmt = select(ExecutionOrder).where(
             ExecutionOrder.user_id == user_id,
