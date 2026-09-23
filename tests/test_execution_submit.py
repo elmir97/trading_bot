@@ -475,6 +475,59 @@ class TestSubmitEntryOrder:
         assert updated.status is OrderStatus.UNKNOWN
         assert updated.error_code == "ExchangeResponseError"
 
+    async def test_unexpected_non_exchange_error_marks_unknown_with_traceback(  # type: ignore[no-untyped-def]
+        self, ctx, caplog
+    ) -> None:
+        """Запрос ушёл, дальше — непредвиденный сбой не из ExchangeError
+        (баг разбора ответа, неожиданная форма data). Исход неизвестен:
+        UNKNOWN, а не пролетевшее исключение со строкой, оставшейся PENDING.
+        Баг не прячется — полный трейс в логе."""
+        session, user, signal, settings = ctx
+        order = _order(user.id, signal.id)
+        entry_row = build_entry_order_pending(order)
+        session.add(entry_row)
+        await session.flush()
+
+        client = FakeSubmitClient(place_order_error=KeyError("orderId"))
+        service = _service(session, settings, client)
+
+        with caplog.at_level("ERROR", logger="app.execution.service"):
+            updated = await service.submit_entry_order(
+                order=order, position_side="LONG", entry_row=entry_row
+            )
+
+        assert updated.status is OrderStatus.UNKNOWN
+        assert updated.error_code == "KeyError"
+        assert updated.raw_response is None
+        records = [r for r in caplog.records if r.name == "app.execution.service"]
+        assert any(
+            r.exc_info is not None and r.exc_info[0] is KeyError for r in records
+        )
+
+    async def test_code_zero_without_order_id_stores_none_not_empty_string(  # type: ignore[no-untyped-def]
+        self, ctx, caplog
+    ) -> None:
+        """code 0 без orderId: биржа приняла — SUBMITTED верен, но пустая
+        строка вместо id — молчаливый фолбэк. exchange_order_id=None и
+        предупреждение в лог."""
+        session, user, signal, settings = ctx
+        order = _order(user.id, signal.id)
+        entry_row = build_entry_order_pending(order)
+        session.add(entry_row)
+        await session.flush()
+
+        client = FakeSubmitClient(place_order_result=_order_result(order_id="", raw={}))
+        service = _service(session, settings, client)
+
+        with caplog.at_level("WARNING", logger="app.execution.service"):
+            updated = await service.submit_entry_order(
+                order=order, position_side="LONG", entry_row=entry_row
+            )
+
+        assert updated.status is OrderStatus.SUBMITTED
+        assert updated.exchange_order_id is None
+        assert "BingX не вернул orderId при code 0" in caplog.text
+
     async def test_only_one_place_market_order_call(self, ctx) -> None:  # type: ignore[no-untyped-def]
         session, user, signal, settings = ctx
         order = _order(user.id, signal.id)

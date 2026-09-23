@@ -792,9 +792,14 @@ async def _submit_real_order(
     )
 
     if entry_row.status is OrderStatus.SUBMITTED:
-        await message.edit_text(
-            f"✅ Ордер отправлен, id {entry_row.exchange_order_id}", reply_markup=None
-        )
+        if entry_row.exchange_order_id:
+            submitted_text = f"✅ Ордер отправлен, id {entry_row.exchange_order_id}"
+        else:
+            submitted_text = (
+                "✅ Ордер отправлен, id в ответе биржи не пришёл — "
+                "сверю по clientOrderID"
+            )
+        await message.edit_text(submitted_text, reply_markup=None)
     elif entry_row.status is OrderStatus.REJECTED:
         await message.edit_text(
             _render_rejection_message(entry_row.error_code), reply_markup=None

@@ -251,9 +251,41 @@ class ExecutionService:
                 entry_row.error_code = type(exc).__name__
             entry_row.raw_response = exc.payload
             return entry_row
+        except Exception as exc:
+            # Осознанное исключение из правила «не ловить Exception»: запрос
+            # уже ушёл, и любой непредвиденный сбой после него (баг разбора
+            # ответа, неожиданная форма data) означает ровно «исход
+            # неизвестен» — UNKNOWN говорит правду, а пролетевшее исключение
+            # оставило бы строку PENDING и показало «внутреннюю ошибку»
+            # вместо «ордер мог пройти». Баг не прячется: полный трейс в лог.
+            logger.exception(
+                "Непредвиденный сбой после отправки ордера — исход неизвестен",
+                extra={
+                    "user_id": order.user_id,
+                    "signal_id": order.signal_id,
+                    "symbol": order.symbol,
+                },
+            )
+            entry_row.status = OrderStatus.UNKNOWN
+            entry_row.error_code = type(exc).__name__
+            entry_row.raw_response = None
+            return entry_row
 
         entry_row.status = OrderStatus.SUBMITTED
-        entry_row.exchange_order_id = result.order_id
+        if not result.order_id:
+            # Биржа приняла (code 0), но orderId не прислала. Статус верный,
+            # пустую строку вместо id не пишем — сверка пойдёт по
+            # clientOrderID.
+            logger.warning(
+                "BingX не вернул orderId при code 0",
+                extra={
+                    "user_id": order.user_id,
+                    "signal_id": order.signal_id,
+                    "symbol": order.symbol,
+                    "client_order_id": order.entry_client_order_id,
+                },
+            )
+        entry_row.exchange_order_id = result.order_id or None
         entry_row.raw_response = result.raw
         return entry_row
 

@@ -289,7 +289,7 @@ class TestExecutionGates:
         """Раздел 16 ТЗ: узнавать об этом в момент «Да» недопустимо —
         Settings() обязан упасть на старте процесса, раньше первого
         апдейта."""
-        with pytest.raises(ValidationError, match="не поддерживается"):
+        with pytest.raises(ValidationError, match=r"не поддерживается до шага 15\.5\.5"):
             _minimal_settings(exec_dry_run=False)
 
     def test_allow_live_mode_orders_default_is_false(self) -> None:

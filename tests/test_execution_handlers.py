@@ -781,6 +781,35 @@ async def test_confirm_yes_real_order_timeout_shows_unknown_text(  # type: ignor
     assert not any("15.5" in t for t in edits)
 
 
+async def test_confirm_yes_real_order_without_order_id_says_so(  # type: ignore[no-untyped-def]
+    ctx, bot, monkeypatch
+) -> None:
+    """code 0 без orderId: SUBMITTED, exchange_order_id=None, а не пустая
+    строка, и пользователь не видит «id » с пустотой после."""
+    dp, session, user, client, _redis, settings = ctx
+    client.current_leverage = _leverage_info(long_leverage=10)
+    client.place_order_result = _order_result(order_id="", raw={})
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    settings.exec_dry_run = False
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+
+    await _open_and_confirm(dp, bot, signal, user)
+
+    orders = await _orders_for_signal(session, signal.id)
+    assert len(orders) == 1
+    assert orders[0].status is OrderStatus.SUBMITTED
+    assert orders[0].exchange_order_id is None
+
+    edits = [m.text for m in bot.recorder.calls if isinstance(m, EditMessageText)]
+    assert any(
+        t == "✅ Ордер отправлен, id в ответе биржи не пришёл — сверю по clientOrderID"
+        for t in edits
+    )
+
+
 async def test_confirm_yes_live_orders_not_allowed_blocks_before_http(  # type: ignore[no-untyped-def]
     ctx, bot, monkeypatch
 ) -> None:
