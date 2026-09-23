@@ -63,6 +63,9 @@ class TradeJournal:
         exchange: str = "bingx",
         source: TradeSource = TradeSource.MANUAL,
         external_position_id: str | None = None,
+        signal_id: int | None = None,
+        notification_id: int | None = None,
+        fill_confirmed: bool = True,
     ) -> Trade:
         """Создаёт сделку вместе с первым исполнением.
 
@@ -126,6 +129,11 @@ class TradeJournal:
             source=source,
             is_annotated=source is TradeSource.MANUAL,
             external_position_id=external_position_id,
+            # Шаг 15.5.4: сделка бота — ставятся до flush, иначе частичный
+            # уникальный индекс по notification_id не защитил бы от дубля.
+            signal_id=signal_id,
+            notification_id=notification_id,
+            fill_confirmed=fill_confirmed,
             opened_at=moment,
         )
         # Первое исполнение задаётся в конструкторе, до flush.

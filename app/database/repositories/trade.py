@@ -36,6 +36,14 @@ class TradeRepository:
         )
         return await self.session.scalar(stmt)
 
+    async def get_by_notification_id(self, notification_id: int) -> Trade | None:
+        """Шаг 15.5.4: сделка, записанная по уведомлению (не больше одной —
+        uq_trades_notification_id)."""
+        trade: Trade | None = await self.session.scalar(
+            select(Trade).where(Trade.notification_id == notification_id)
+        )
+        return trade
+
     async def list_open(self, user_id: int, limit: int = 50) -> list[Trade]:
         stmt = (
             select(Trade)

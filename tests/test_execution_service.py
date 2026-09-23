@@ -40,6 +40,7 @@ from app.execution.service import ExecutionQuote, ExecutionService, build_execut
 from app.market.cache import TTLCache
 from app.market.data import MarketDataService
 from app.services.user_service import UserService
+from app.trading.calculations import calculate_risk_reward
 from app.trading.enums import (
     ExchangeKeyMode,
     OrderRole,
@@ -1045,3 +1046,38 @@ async def test_quote_carries_account_balance_for_journal(ctx) -> None:  # type: 
 
     assert isinstance(result, ExecutionQuote)
     assert result.account_balance == D("1000")
+
+
+async def test_min_rr_and_card_rr_use_rounded_levels(ctx) -> None:  # type: ignore[no-untyped-def]
+    """ЗАМОК (проверка к шагу 15.5.3, в 15.5.4): MIN_RR/INVALID_LEVELS и RR
+    карточки считаются от ОКРУГЛЁННЫХ уровней — тех, что уходят на биржу.
+    Сырой сетап 97.9 / 103.15 при цене 100 даёт RR ровно 1.5 (проходит
+    exec_min_rr=1.5), а после округления тейка к входу (103.1) — 1.476:
+    отказ. Проходит и на коде до 15.5.4 — фиксирует поведение."""
+    session, user, client, market = ctx
+    signal = _signal(user.id, stop_loss=D("97.9"), take_profit=D("103.15"))
+    session.add(signal)
+    await session.flush()
+    notification = await _snapshot(session, signal)
+    service = _service(session, _live_settings(), client, market)
+
+    refused = await _evaluate(service, user, notification, signal)
+
+    assert isinstance(refused, ExecutionRefusal)
+    assert refused.code is Code.INVALID_LEVELS
+
+    passing = _signal(
+        user.id, timeframe="1h", stop_loss=D("97.9"), take_profit=D("103.25")
+    )
+    session.add(passing)
+    await session.flush()
+    passing_n = await _snapshot(session, passing)
+    quote = await _evaluate(service, user, passing_n, passing)
+
+    assert isinstance(quote, ExecutionQuote)
+    assert quote.order.take_profit == D("103.2")
+    # RR карточки — от округлённого тейка: (103.2-100)/(100-97.9) = 1.52…
+    assert quote.order.risk_reward == calculate_risk_reward(
+        entry_price=D("100"), stop_loss=D("97.9"), take_profit=D("103.2"),
+        side=TradeSide.LONG,
+    )
