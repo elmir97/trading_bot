@@ -40,7 +40,16 @@ from app.trading.enums import ExchangeKeyMode
 # добавляет запрос на confirm-путь (или, как здесь — тот, где путь уже
 # спроектирован достаточно точно, чтобы посчитать заранее без гадания) —
 # не более ранний шаг "с запасом на всякий случай".
-_CONFIRM_PATH_HTTP_CALLS = 6
+#
+# Шаг 15.5.3: read-back входа идёт под тем же локом (решение владельца,
+# вариант A). Худший путь добавляет (app/execution/readback.py):
+#   get_order_fill       — 1 поиск при UNKNOWN + exec_order_readback_attempts
+#                          чтений «дальше как SUBMITTED» (число — из
+#                          Settings, см. confirm_path_http_calls)
+#   get_open_orders      — 2: чтение + перечтение перед «стопа нет» (Р2)
+#   place_conditional_order — 2: спасение стопа + спасение тейка
+_ENTRY_PATH_HTTP_CALLS = 6
+_READBACK_FIXED_HTTP_CALLS = 1 + 2 + 2
 
 
 class Settings(BaseSettings):
@@ -279,17 +288,42 @@ class Settings(BaseSettings):
         return value
 
     @property
+    def confirm_path_http_calls(self) -> int:
+        """Худший случай числа HTTP-вызовов на пути «Да» вместе с read-back
+        (шаг 15.5.3) — см. комментарий у _ENTRY_PATH_HTTP_CALLS. При
+        дефолтах: 6 + (1 + 3) + 2 + 2 = 14."""
+        return (
+            _ENTRY_PATH_HTTP_CALLS
+            + self.exec_order_readback_attempts
+            + _READBACK_FIXED_HTTP_CALLS
+        )
+
+    @property
+    def confirm_path_sleep_seconds(self) -> float:
+        """Паузы read-back в худшем случае (шаг 15.5.3): поиск при UNKNOWN,
+        паузы между чтениями исполнения, перечтение openOrders. При
+        дефолтах: 1.0 + 2 × 0.5 + 0.5 = 2.5 с."""
+        return (
+            self.exec_unknown_search_delay_ms
+            + max(self.exec_order_readback_attempts - 1, 0) * self.exec_order_readback_delay_ms
+            + self.exec_open_orders_recheck_delay_ms
+        ) / 1000
+
+    @property
     def confirm_lock_ttl_seconds(self) -> int:
         """TTL Redis-лока подтверждения (раздел 8 ТЗ / раздел 16 ТЗ, шаг
         15.5.1), выведенный из реальных таймаутов, а не литерал.
 
-        ttl = ceil(http_timeout_seconds × (_CONFIRM_PATH_HTTP_CALLS + 1))
+        ttl = ceil(http_timeout_seconds × (confirm_path_http_calls + 1))
               + exec_confirm_lock_margin_seconds
+              + ceil(confirm_path_sleep_seconds)
 
         "+1" внутри множителя — явный запас сверх посчитанного числа
         запросов (раздел 16 ТЗ), отдельно от exec_confirm_lock_margin_seconds
         (тот покрывает локальную часть — БД, планировщик event loop, не
-        сеть). При дефолтах: ceil(10.0 × (6+1)) + 10 = 80.
+        сеть). Шаг 15.5.3: read-back под тем же локом — его вызовы входят в
+        confirm_path_http_calls, паузы — отдельным членом. При дефолтах:
+        ceil(10.0 × (14+1)) + 10 + ceil(2.5) = 150 + 10 + 3 = 163.
 
         При max_retries=1 на каждом из этих вызовов (см. п.1-2 разведки)
         бэкофф между попытками не наступает — цикл в BingXClient._request
@@ -308,8 +342,9 @@ class Settings(BaseSettings):
         этот TTL и не сам факт удержания лока.
         """
         return (
-            math.ceil(self.http_timeout_seconds * (_CONFIRM_PATH_HTTP_CALLS + 1))
+            math.ceil(self.http_timeout_seconds * (self.confirm_path_http_calls + 1))
             + self.exec_confirm_lock_margin_seconds
+            + math.ceil(self.confirm_path_sleep_seconds)
         )
 
     @property

@@ -163,7 +163,7 @@ async def run() -> None:
         extra={"environment": settings.environment, "tz": settings.default_timezone},
     )
     # Раздел 16 ТЗ, шаг 15.5.1: значение — не литерал, а расчёт по текущим
-    # http_timeout_seconds/_CONFIRM_PATH_HTTP_CALLS, увидеть его иначе,
+    # http_timeout_seconds/confirm_path_http_calls, увидеть его иначе,
     # кроме как в логе старта, нельзя.
     logger.info(
         "TTL лока подтверждения",

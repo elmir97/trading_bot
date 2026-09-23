@@ -57,6 +57,7 @@ from app.exchanges.base import (
     SymbolInfo,
     Ticker,
 )
+from app.exchanges.bingx import BingXClient
 from app.execution import service as execution_service
 from app.services.user_service import UserService
 from app.trading.enums import (
@@ -66,6 +67,7 @@ from app.trading.enums import (
     OrderStatus,
     SignalDirection,
     SignalLevel,
+    TradeSide,
 )
 from tests.conftest import cleanup_user
 
@@ -102,6 +104,15 @@ class FakeExchangeClient(ExchangeClient):
         place_order_result: object = None,
         place_order_error: Exception | None = None,
     ) -> None:
+        # Шаг 15.5.3: read-back. По умолчанию фейк ведёт себя как биржа:
+        # исполнение — по последнему place_market_order, в openOrders —
+        # условники из его stopLoss/takeProfit (СИНТЕТИКА ДО 15.5.5).
+        self.fill_overrides: dict[str, object] = {}
+        self.fill_error: Exception | None = None
+        self.attach_conditionals = True
+        self.open_orders_error: Exception | None = None
+        self.conditional_result: object = None
+        self.conditional_error: Exception | None = None
         self.price = price
         self.balance = balance
         self.symbol_info = symbol_info
@@ -195,14 +206,62 @@ class FakeExchangeClient(ExchangeClient):
     async def get_order(self, symbol, client_order_id):
         raise NotImplementedError
 
+    def _last_entry(self) -> dict:
+        entries = [c[1] for c in self.submit_calls if c[0] == "place_market_order"]
+        assert entries, "read-back до отправки входа"
+        return entries[-1]
+
     async def get_order_fill(self, symbol, client_order_id, *, max_retries=None):  # type: ignore[no-untyped-def]
-        raise NotImplementedError
+        self.submit_calls.append(
+            ("get_order_fill", {"client_order_id": client_order_id, "max_retries": max_retries})
+        )
+        if self.fill_error is not None:
+            raise self.fill_error
+        entry = self._last_entry()
+        placed_id = getattr(self.place_order_result, "order_id", "") or "9001"
+        raw: dict[str, object] = {
+            "orderId": placed_id, "clientOrderId": client_order_id, "status": "FILLED",
+            "origQty": str(entry["quantity"]), "executedQty": str(entry["quantity"]),
+            "avgPrice": str(self.price), "commission": "-0.05",
+        }
+        raw.update(self.fill_overrides)
+        return BingXClient._parse_order_fill({k: v for k, v in raw.items() if v is not None})
+
+    async def get_open_orders(self, symbol=None, *, max_retries=None):  # type: ignore[no-untyped-def]
+        self.submit_calls.append(
+            ("get_open_orders", {"symbol": symbol, "max_retries": max_retries})
+        )
+        if self.open_orders_error is not None:
+            raise self.open_orders_error
+        if not self.attach_conditionals:
+            return []
+        entry = self._last_entry()
+        closing = "SELL" if entry["side"].value == "BUY" else "BUY"
+        now_ms = int((datetime.now(UTC) + timedelta(seconds=1)).timestamp() * 1000)
+        orders = []
+        for key, order_type, order_id in (
+            ("stop_loss", "STOP_MARKET", "8001"), ("take_profit", "TAKE_PROFIT_MARKET", "8002"),
+        ):
+            spec = entry.get(key)
+            if spec is None:
+                continue
+            orders.append(BingXClient._parse_open_order({
+                "symbol": entry["symbol"], "orderId": order_id, "side": closing,
+                "positionSide": entry["position_side"], "type": order_type,
+                "origQty": "0", "price": "0", "executedQty": "0", "avgPrice": "0",
+                "status": "NEW", "stopPrice": str(spec.trigger_price), "clientOrderId": "",
+                "time": now_ms, "updateTime": now_ms, "leverage": "10X",
+                "reduceOnly": False, "closePosition": "true", "workingType": "MARK_PRICE",
+            }))
+        return orders
 
     async def place_conditional_order(self, **kwargs):  # type: ignore[no-untyped-def]
-        raise NotImplementedError
-
-    async def get_open_orders(self, symbol=None, *, max_retries=None):
-        raise NotImplementedError
+        self.submit_calls.append(("place_conditional_order", kwargs))
+        if self.conditional_error is not None:
+            raise self.conditional_error
+        return self.conditional_result or BingXClient._parse_order(
+            {"orderId": "8101", "status": "NEW"}
+        )
 
     async def close(self) -> None:
         pass
@@ -715,21 +774,30 @@ async def test_confirm_yes_submits_real_order(ctx, bot, monkeypatch) -> None:  #
     await _open_and_confirm(dp, bot, notification, user)
 
     orders = await _orders_for_signal(session, signal.id)
-    assert len(orders) == 1
-    assert orders[0].role is OrderRole.ENTRY
-    assert orders[0].status is OrderStatus.SUBMITTED
-    assert orders[0].exchange_order_id == "555555"
-    assert orders[0].client_order_id is not None
+    entries = [o for o in orders if o.role is OrderRole.ENTRY]
+    assert len(entries) == 1
+    # Шаг 15.5.3: read-back подтвердил исполнение — FILLED, а не SUBMITTED;
+    # стоп и тейк найдены среди openOrders — строки S/T с их orderId.
+    assert entries[0].status is OrderStatus.FILLED
+    assert entries[0].exchange_order_id == "555555"
+    assert entries[0].client_order_id is not None
+    assert {o.role: o.exchange_order_id for o in orders if o.role is not OrderRole.ENTRY} == {
+        OrderRole.STOP_LOSS: "8001", OrderRole.TAKE_PROFIT: "8002",
+    }
 
     await session.refresh(notification)
     assert notification.trade_opened_at is not None
 
     submit_calls = [c[0] for c in client.submit_calls]
-    # плечо совпало — set_leverage не вызывается
-    assert submit_calls == ["get_leverage", "place_market_order"]
+    # плечо совпало — set_leverage не вызывается; стоп и тейк на месте —
+    # спасения нет, openOrders прочитан один раз.
+    assert submit_calls == [
+        "get_leverage", "place_market_order", "get_order_fill", "get_open_orders",
+    ]
 
     edits = [m.text for m in bot.recorder.calls if isinstance(m, EditMessageText)]
-    assert any("Ордер отправлен, id 555555" in t for t in edits)
+    assert "⏳ Ордер отправлен, проверяю исполнение…" in edits
+    assert any("✅ Вход исполнен: BTC-USDT" in t and "id 8001" in t for t in edits)
 
 
 async def test_confirm_yes_real_order_leverage_mismatch_calls_set_leverage(  # type: ignore[no-untyped-def]
@@ -796,6 +864,8 @@ async def test_confirm_yes_real_order_timeout_shows_unknown_text(  # type: ignor
     dp, session, user, client, _redis, settings = ctx
     client.current_leverage = _leverage_info(long_leverage=10)
     client.place_order_error = ExchangeUnavailableError("BingX не ответил вовремя")
+    # Шаг 15.5.3: поиск по clientOrderID тоже не находит ордер.
+    client.fill_error = ExchangeResponseError("order not exist", code=109414, payload=None)
     _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
     settings.exec_dry_run = False
 
@@ -811,19 +881,24 @@ async def test_confirm_yes_real_order_timeout_shows_unknown_text(  # type: ignor
     assert orders[0].status is OrderStatus.UNKNOWN
 
     edits = [m.text for m in bot.recorder.calls if isinstance(m, EditMessageText)]
+    # Шаг 15.5.3: UNKNOWN — один поиск по clientOrderID; не нашёлся —
+    # повторной отправки нет.
     assert any(
-        "Биржа не ответила. Ордер мог пройти — проверь позиции в BingX. "
+        "Биржа не подтвердила ордер — проверь позиции в BingX. "
         "Повторно не отправляю." in t
         for t in edits
     )
+    assert [c[0] for c in client.submit_calls].count("place_market_order") == 1
     assert not any("15.5" in t for t in edits)
 
 
 async def test_confirm_yes_real_order_without_order_id_says_so(  # type: ignore[no-untyped-def]
     ctx, bot, monkeypatch
 ) -> None:
-    """code 0 без orderId: SUBMITTED, exchange_order_id=None, а не пустая
-    строка, и пользователь не видит «id » с пустотой после."""
+    """code 0 без orderId: пустая строка в exchange_order_id не пишется.
+    Шаг 15.5.3: id приходит из read-back (get_order по clientOrderID) —
+    именно та сверка, которую раньше обещал текст «сверю по
+    clientOrderID»; пользователь видит итог read-back, а не «id »."""
     dp, session, user, client, _redis, settings = ctx
     client.current_leverage = _leverage_info(long_leverage=10)
     client.place_order_result = _order_result(order_id="", raw={})
@@ -837,16 +912,15 @@ async def test_confirm_yes_real_order_without_order_id_says_so(  # type: ignore[
 
     await _open_and_confirm(dp, bot, notification, user)
 
-    orders = await _orders_for_signal(session, signal.id)
-    assert len(orders) == 1
-    assert orders[0].status is OrderStatus.SUBMITTED
-    assert orders[0].exchange_order_id is None
+    [entry] = [
+        o for o in await _orders_for_signal(session, signal.id) if o.role is OrderRole.ENTRY
+    ]
+    assert entry.status is OrderStatus.FILLED
+    assert entry.exchange_order_id == "9001"  # из read-back, не "" из ответа на POST
 
     edits = [m.text for m in bot.recorder.calls if isinstance(m, EditMessageText)]
-    assert any(
-        t == "✅ Ордер отправлен, id в ответе биржи не пришёл — сверю по clientOrderID"
-        for t in edits
-    )
+    assert any(t.startswith("✅ Вход исполнен") for t in edits)
+    assert not any("id " + "\n" in t or t.endswith("id ") for t in edits)
 
 
 async def test_confirm_yes_live_orders_not_allowed_blocks_before_http(  # type: ignore[no-untyped-def]
@@ -1682,7 +1756,8 @@ async def test_two_notifications_same_slot_distinct_client_order_ids(  # type: i
     entries = [
         o for o in await _orders_for_signal(session, signal.id) if o.role is OrderRole.ENTRY
     ]
-    expected_status = OrderStatus.DRY_RUN if dry_run else OrderStatus.SUBMITTED
+    # Шаг 15.5.3: на реальном пути read-back подтверждает исполнение — FILLED.
+    expected_status = OrderStatus.DRY_RUN if dry_run else OrderStatus.FILLED
     assert [o.status for o in entries] == [expected_status, expected_status]
     assert {o.client_order_id for o in entries} == {
         f"tj{first.id}u{user.id}E", f"tj{second.id}u{user.id}E",
@@ -1788,3 +1863,151 @@ async def test_parallel_yes_on_two_notifications_of_same_setup_one_wins(  # type
     assert len({r.notification_id for r in dry_run}) == 1
     assert [r.error_code for r in refused] == ["SETUP_ALREADY_TRADED"]
     assert refused[0].notification_id != dry_run[0].notification_id
+
+
+# ---------------------------------------------------------------------------
+# Шаг 15.5.3: read-back входа после отправки
+# ---------------------------------------------------------------------------
+
+_READBACK_CALLS = ("get_order_fill", "get_open_orders", "place_conditional_order")
+
+
+def _readback_calls(client: FakeExchangeClient) -> list[str]:
+    return [c[0] for c in client.submit_calls if c[0] in _READBACK_CALLS]
+
+
+async def test_dry_run_makes_no_readback_calls(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """exec_dry_run=True — ни одного вызова read-back: сухой прогон ничего
+    не отправляет, читать нечего."""
+    dp, session, user, client, _redis, settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    assert settings.exec_dry_run is True
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _notify(session, signal)
+    await _open_and_confirm(dp, bot, notification, user)
+
+    assert _readback_calls(client) == []
+    edits = [m.text for m in bot.recorder.calls if isinstance(m, EditMessageText)]
+    assert "⏳ Ордер отправлен, проверяю исполнение…" not in edits
+
+
+async def test_callback_answered_before_first_exchange_call_on_yes(  # type: ignore[no-untyped-def]
+    ctx, bot, monkeypatch
+) -> None:
+    """Telegram ждёт ответ на callback ~15 с, а путь «Да» с read-back — до
+    TTL лока (163 с): callback.answer() обязан уйти до первого HTTP к бирже."""
+    dp, session, user, client, _redis, settings = ctx
+    client.current_leverage = _leverage_info(long_leverage=10)
+    client.place_order_result = _order_result()
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    settings.exec_dry_run = False
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _notify(session, signal)
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
+    state = execution._confirmations[(user.id, notification.id)]
+
+    yes_callback = make_callback(f"exn:yes:{notification.id}", message_id=state.message_id)
+    answered_before_ticker: list[bool] = []
+    original_get_ticker = client.get_ticker
+
+    async def spying_get_ticker(symbol, *, max_retries=None):  # type: ignore[no-untyped-def]
+        answered_before_ticker.append(any(
+            isinstance(m, AnswerCallbackQuery) and m.callback_query_id == yes_callback.id
+            for m in bot.recorder.calls
+        ))
+        return await original_get_ticker(symbol, max_retries=max_retries)
+
+    monkeypatch.setattr(client, "get_ticker", spying_get_ticker)
+    await _feed(dp, bot, 2, yes_callback)
+
+    assert answered_before_ticker == [True]
+
+
+async def test_real_order_intermediate_then_readback_result_same_message(  # type: ignore[no-untyped-def]
+    ctx, bot, monkeypatch
+) -> None:
+    """Сразу после отправки — «⏳ Ордер отправлен, проверяю исполнение…»,
+    итог read-back редактирует то же сообщение: цена против карточки
+    (проскальзывание словами), объём, комиссия, id стопа и тейка."""
+    dp, session, user, client, _redis, settings = ctx
+    client.current_leverage = _leverage_info(long_leverage=10)
+    client.place_order_result = _order_result(order_id="555555")
+    client.fill_overrides = {"avgPrice": "100.3"}  # карточка на 100
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    settings.exec_dry_run = False
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _notify(session, signal)
+    await _open_and_confirm(dp, bot, notification, user)
+
+    card_message_id = next(
+        m.message_id for m in bot.recorder.calls
+        if isinstance(m, EditMessageText) and m.text == "⏳ Ордер отправлен, проверяю исполнение…"
+    )
+    same_message = [
+        m.text for m in bot.recorder.calls
+        if isinstance(m, EditMessageText) and m.message_id == card_message_id
+    ]
+    assert same_message[0] == "⏳ Ордер отправлен, проверяю исполнение…"
+    final = same_message[-1]
+    assert final.startswith("✅ Вход исполнен: BTC-USDT")
+    assert "Цена: 100.3 (карточка 100, проскальзывание в худшую сторону 0.3%" in final
+    assert "комиссия 0.05 USDT" in final
+    assert "Стоп: 97 (id 8001)" in final
+    assert "Тейк: 110 (id 8002)" in final
+
+
+async def test_failed_stop_rescue_alarm_sent_as_separate_message(  # type: ignore[no-untyped-def]
+    ctx, bot, monkeypatch
+) -> None:
+    """Стоп не прикрепился, спасение не удалось — тревога и в итоге, и
+    отдельным сообщением: правка сообщения в Telegram не даёт уведомления."""
+    dp, session, user, client, _redis, settings = ctx
+    client.current_leverage = _leverage_info(long_leverage=10)
+    client.place_order_result = _order_result()
+    client.attach_conditionals = False
+    client.conditional_error = ExchangeResponseError("отказ", code=80012, payload=None)
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    settings.exec_dry_run = False
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _notify(session, signal)
+    await _open_and_confirm(dp, bot, notification, user)
+
+    alarms = [t for t in bot.recorder.sent_texts() if t.startswith("⚠️ ПОЗИЦИЯ БЕЗ СТОПА")]
+    assert len(alarms) == 1
+    assert "BTC-USDT LONG" in alarms[0]
+    edits = [m.text for m in bot.recorder.calls if isinstance(m, EditMessageText)]
+    assert any("⚠️ ПОЗИЦИЯ БЕЗ СТОПА" in t and "Стоп: 97 (НЕ ВЫСТАВЛЕН)" in t for t in edits)
+    # Спасение — по одной попытке на стоп и тейк, повторов нет.
+    assert _readback_calls(client).count("place_conditional_order") == 2
+
+
+@pytest.mark.parametrize(
+    "side,avg,expected",
+    [
+        (TradeSide.LONG, "100.3", "проскальзывание в худшую сторону 0.3% (0.23 USDT)"),
+        (TradeSide.LONG, "99.7", "проскальзывание в лучшую сторону 0.3% (0.23 USDT)"),
+        (TradeSide.SHORT, "99.7", "проскальзывание в худшую сторону 0.3% (0.23 USDT)"),
+        (TradeSide.SHORT, "100.3", "проскальзывание в лучшую сторону 0.3% (0.23 USDT)"),
+        (TradeSide.LONG, "100", "без проскальзывания"),
+        (TradeSide.SHORT, "100", "без проскальзывания"),
+    ],
+)
+def test_slippage_described_in_words_by_trade_side(side, avg, expected) -> None:  # type: ignore[no-untyped-def]
+    """Сторона — по направлению сделки: LONG хуже, если купил дороже
+    карточки; SHORT хуже, если продал дешевле. Словами, не знаком."""
+    text = execution.describe_slippage(
+        side=side, planned_price=D("100"), avg_price=D(avg), quantity=D("0.75")
+    )
+    assert text == expected

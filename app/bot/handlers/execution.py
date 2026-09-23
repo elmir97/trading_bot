@@ -63,7 +63,13 @@ from app.database.session import Database
 from app.exchanges.base import ExchangeAuthError, ExchangeError
 from app.exchanges.bingx import bingx_position_side
 from app.execution.guards import check_live_orders_allowed
-from app.execution.models import ExecutionRefusal, ExecutionRefusalCode
+from app.execution.models import ExecutionRefusal, ExecutionRefusalCode, OrderRequest
+from app.execution.readback import (
+    ConditionalOutcome,
+    ConditionalState,
+    ReadbackResult,
+    verify_entry,
+)
 from app.execution.service import (
     ExecutionQuote,
     ExecutionService,
@@ -80,7 +86,7 @@ from app.market.data import MarketDataService
 from app.services.exchange_factory import ExchangeFactory
 from app.services.permissions import refresh_permissions
 from app.services.position_mode import refresh_position_mode
-from app.trading.enums import ObservationStage, OrderStatus, SignalLevel
+from app.trading.enums import ObservationStage, OrderStatus, SignalLevel, TradeSide
 
 router = Router(name="execution")
 logger = get_logger(__name__)
@@ -151,6 +157,91 @@ def _render_rejection_message(error_code: str | None) -> str:
     if known is not None:
         return f"🚫 {known}"
     return f"🚫 BingX отклонил ордер, код {error_code}"
+
+
+READBACK_PENDING_TEXT = "⏳ Ордер отправлен, проверяю исполнение…"
+
+
+def describe_slippage(
+    *, side: TradeSide, planned_price: Decimal, avg_price: Decimal, quantity: Decimal
+) -> str:
+    """Шаг 15.5.3: проскальзывание словами, не знаком. Худшая сторона — по
+    направлению сделки: LONG купил дороже карточки, SHORT продал дешевле."""
+    if avg_price == planned_price:
+        return "без проскальзывания"
+    worse = avg_price > planned_price if side is TradeSide.LONG else avg_price < planned_price
+    diff = abs(avg_price - planned_price)
+    pct = diff / planned_price * Decimal(100)
+    direction = "в худшую сторону" if worse else "в лучшую сторону"
+    return (
+        f"проскальзывание {direction} {fmt_ratio(pct)}% "
+        f"({fmt_amount(diff * quantity)} USDT)"
+    )
+
+
+_CONDITIONAL_TEXT = {
+    ConditionalOutcome.FOUND: "id {order_id}",
+    ConditionalOutcome.RESCUED: "id {order_id}, выставлен отдельно",
+    ConditionalOutcome.RESCUE_FAILED: "НЕ ВЫСТАВЛЕН",
+    ConditionalOutcome.AMBIGUOUS: "не определён",
+    ConditionalOutcome.UNVERIFIED: "не подтверждён",
+    ConditionalOutcome.PENDING: "исход неизвестен",
+}
+
+
+def _describe_conditional(state: ConditionalState | None, price_precision: int) -> str:
+    if state is None:
+        return "не проверен"
+    level = fmt_price(state.trigger_price, price_precision) if state.trigger_price else "—"
+    detail = _CONDITIONAL_TEXT[state.outcome].format(order_id=state.order_id or "—")
+    return f"{level} ({detail})"
+
+
+def render_readback(
+    order: OrderRequest,
+    planned_price: Decimal,
+    readback: ReadbackResult,
+    symbol_info_precision: tuple[int, int],
+) -> str:
+    """Шаг 15.5.3: итог после read-back — фактическая цена против цены на
+    карточке (проскальзывание словами), объём, комиссия, стоп и тейк с id.
+    Журнал сделки — не здесь (15.5.4)."""
+    price_precision, quantity_precision = symbol_info_precision
+    side_label = order.position_side.label
+    fill = readback.fill
+    lines: list[str] = []
+    if readback.alarm:
+        lines.append(readback.alarm)
+    if readback.stop is None:
+        # UNKNOWN, не найденный поиском: исполнения и стопа не видно.
+        lines.extend(readback.warnings or ["⚠️ Исполнение не подтверждено — проверь BingX."])
+        return "\n".join(lines)
+    if fill is not None and readback.entry_status is OrderStatus.FILLED:
+        lines.append(f"✅ Вход исполнен: {order.symbol} · {side_label}")
+    else:
+        lines.append(f"⚠️ Вход отправлен, исполнение не подтверждено: {order.symbol} · {side_label}")
+    if fill is not None:
+        slippage = describe_slippage(
+            side=order.position_side,
+            planned_price=planned_price,
+            avg_price=fill.avg_price,
+            quantity=fill.executed_qty,
+        )
+        lines.append(
+            f"Цена: {fmt_price(fill.avg_price, price_precision)} "
+            f"(карточка {fmt_price(planned_price, price_precision)}, {slippage})"
+        )
+        base_asset = order.symbol.split("-")[0]
+        lines.append(
+            f"Объём: {fmt_qty(fill.executed_qty, quantity_precision)} {base_asset} · "
+            f"комиссия {fmt_amount(fill.fee)} USDT"
+        )
+    lines.append(
+        f"Стоп: {_describe_conditional(readback.stop, price_precision)} · "
+        f"Тейк: {_describe_conditional(readback.take, price_precision)}"
+    )
+    lines.extend(readback.warnings)
+    return "\n".join(lines)
 
 
 def render_confirmation(
@@ -658,7 +749,8 @@ async def _process_confirm(
 
     if not settings.exec_dry_run:
         await _submit_real_order(
-            callback.message, session, user, notification, slot, result, settings, cipher, now
+            callback.message, session, user, notification, slot, result, settings, cipher, now,
+            planned_price=state.planned_price,
         )
         return
 
@@ -730,14 +822,23 @@ async def _submit_real_order(
     settings: Settings,
     cipher: SecretCipher,
     now: datetime,
+    *,
+    planned_price: Decimal,
 ) -> None:
     """Раздел 16 ТЗ, шаг 15.5.2 — реальная отправка ордера на биржу.
+
+    Шаг 15.5.3: сразу после ответа биржи — промежуточное «проверяю
+    исполнение…», затем read-back (verify_entry) тем же клиентом и под тем
+    же Redis-локом (решение владельца, вариант A — TTL посчитан с ним), и
+    итог редактирует то же сообщение. Тревога «без стопа» дополнительно
+    уходит отдельным сообщением: правка сообщения в Telegram не даёт
+    уведомления, а эту нельзя пропустить.
 
     Второй клиент, не тот, что использовал _build_quote() для evaluate():
     тот уже закрыт в своём finally к этому моменту. Цена — одна лишняя
     локальная расшифровка ключа (ExchangeFactory.get_credentials — запрос
     к своей БД, не к бирже), не лишний HTTP-вызов к BingX — на
-    _CONFIRM_PATH_HTTP_CALLS (app/core/config.py) не влияет."""
+    Settings.confirm_path_http_calls (app/core/config.py) не влияет."""
     order = result.order
     drift = price_drift_percent(order.entry_price, notification)
 
@@ -838,36 +939,54 @@ async def _submit_real_order(
         # известный биржевой исход (SUBMITTED/REJECTED/UNKNOWN) не должен
         # откатиться обратно в PENDING.
         await session.commit()
+
+        logger.info(
+            "Реальная отправка ордера",
+            extra={
+                "user_id": user.id,
+                "signal_id": slot.id,
+                "notification_id": notification.id,
+                "status": entry_row.status.value,
+                "order": order.render(),
+            },
+        )
+
+        if entry_row.status is OrderStatus.REJECTED:
+            await message.edit_text(
+                _render_rejection_message(entry_row.error_code), reply_markup=None
+            )
+            return
+
+        await message.edit_text(READBACK_PENDING_TEXT, reply_markup=None)
+        readback = await verify_entry(
+            session=session,
+            client=client,
+            settings=settings,
+            entry_row=entry_row,
+            order=order,
+            position_side=position_side,
+            price_precision=result.symbol_info.price_precision,
+        )
     finally:
         await client.close()
 
     logger.info(
-        "Реальная отправка ордера",
+        "Read-back входа",
         extra={
-            "user_id": user.id,
-            "signal_id": slot.id,
             "notification_id": notification.id,
-            "status": entry_row.status.value,
-            "order": order.render(),
+            "entry_status": readback.entry_status.value,
+            "stop": readback.stop.outcome.value if readback.stop else None,
+            "take": readback.take.outcome.value if readback.take else None,
         },
     )
-
-    if entry_row.status is OrderStatus.SUBMITTED:
-        if entry_row.exchange_order_id:
-            submitted_text = f"✅ Ордер отправлен, id {entry_row.exchange_order_id}"
-        else:
-            submitted_text = (
-                "✅ Ордер отправлен, id в ответе биржи не пришёл — "
-                "сверю по clientOrderID"
-            )
-        await message.edit_text(submitted_text, reply_markup=None)
-    elif entry_row.status is OrderStatus.REJECTED:
-        await message.edit_text(
-            _render_rejection_message(entry_row.error_code), reply_markup=None
-        )
-    else:
-        await message.edit_text(
-            "⚠️ Биржа не ответила. Ордер мог пройти — проверь позиции в "
-            "BingX. Повторно не отправляю.",
-            reply_markup=None,
-        )
+    await message.edit_text(
+        render_readback(
+            order,
+            planned_price,
+            readback,
+            (result.symbol_info.price_precision, result.symbol_info.quantity_precision),
+        ),
+        reply_markup=None,
+    )
+    if readback.alarm:
+        await message.answer(readback.alarm)

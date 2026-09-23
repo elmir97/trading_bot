@@ -249,22 +249,29 @@ class TestConfirmLockTtl:
     Settings; module-level skipif без DATABASE_URL пропускает и его вместе
     с остальными, это не отдельный источник правды о конфиге."""
 
-    def test_default_settings_give_80_seconds(self) -> None:
-        """Раздел 16 ТЗ, шаг 15.5.1: 6 реальных вызовов на confirm-пути
-        (get_ticker, get_balance, get_symbol_info, get_leverage,
-        set_leverage, place_market_order) + явный запас "+1" в формуле."""
+    def test_default_settings_give_163_seconds(self) -> None:
+        """Шаг 15.5.3: read-back под тем же локом (вариант A). 6 вызовов
+        входа (get_ticker, get_balance, get_symbol_info, get_leverage,
+        set_leverage, place_market_order) + read-back в худшем случае:
+        1 поиск при UNKNOWN + 3 чтения исполнения + 2 openOrders + 2
+        спасения = 14; паузы 1.0 + 2 × 0.5 + 0.5 = 2.5 с."""
         settings = _minimal_settings()
         assert settings.http_timeout_seconds == 10.0
         assert settings.exec_confirm_lock_margin_seconds == 10
-        # ceil(10.0 × (6+1)) + 10 = ceil(70.0) + 10 = 80
-        assert settings.confirm_lock_ttl_seconds == 80
+        assert settings.confirm_path_http_calls == 14
+        assert settings.confirm_path_sleep_seconds == 2.5
+        # ceil(10.0 × (14+1)) + 10 + ceil(2.5) = 150 + 10 + 3 = 163
+        assert settings.confirm_lock_ttl_seconds == 163
 
-    def test_formula_follows_timeout_and_margin(self) -> None:
+    def test_formula_follows_timeout_margin_and_readback_settings(self) -> None:
         settings = _minimal_settings(
-            http_timeout_seconds=7.5, exec_confirm_lock_margin_seconds=5
+            http_timeout_seconds=7.5, exec_confirm_lock_margin_seconds=5,
+            exec_order_readback_attempts=2, exec_order_readback_delay_ms=300,
+            exec_unknown_search_delay_ms=700, exec_open_orders_recheck_delay_ms=400,
         )
-        # ceil(7.5 × (6+1)) + 5 = ceil(52.5) + 5 = 53 + 5 = 58
-        assert settings.confirm_lock_ttl_seconds == 58
+        # вызовов 6 + 2 + 5 = 13; пауз 0.7 + 1 × 0.3 + 0.4 = 1.4 с
+        # ceil(7.5 × (13+1)) + 5 + ceil(1.4) = 105 + 5 + 2 = 112
+        assert settings.confirm_lock_ttl_seconds == 112
 
     def test_ttl_is_int_for_redislock(self) -> None:
         """RedisLock.__init__ ждёт ttl_seconds: int (app/core/locks.py)."""
