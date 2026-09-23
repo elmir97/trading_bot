@@ -28,13 +28,15 @@ render_execution_digest() — чистые функции без I/O, поэто
 Само окно считает DailyJobs (window_start = now - 24h), этому модулю
 известны только уже готовые rows/ready_signals.
 
-"Сигналов READY" в шапке сводки — исключение: это count() из signals
-(SignalRepository.count_ready_notified_between()), не из execution_orders,
-потому что отказ гварда происходит до появления карточки, а карточка
-(и, значит, execution_orders-строка) при этом ещё не существует —
-без отдельного источника READY-сигналы, упёршиеся в гвард, были бы не
-видны. build_stats() принимает готовое число ready_signals параметром,
-I/O остаётся в DailyJobs.
+"Сигналов READY" в шапке сводки — исключение: это count() из
+signal_notifications (SignalNotificationRepository.count_ready_between()),
+не из execution_orders, потому что отказ гварда происходит до появления
+карточки, а карточка (и, значит, execution_orders-строка) при этом ещё не
+существует — без отдельного источника READY-сигналы, упёршиеся в гвард,
+были бы не видны. Шаг 15.5.2а: считаются отправленные уведомления
+(события), а не слоты — слот, уведомивший дважды за сутки, даёт два.
+build_stats() принимает готовое число ready_signals параметром, I/O
+остаётся в DailyJobs.
 """
 
 from __future__ import annotations
@@ -80,8 +82,8 @@ class ExecutionDigestStats:
     Окно — скользящие 24 часа до отправки (см. докстринг модуля), не
     календарные сутки."""
 
-    # Из signals (SignalRepository.count_ready_notified_between), не из
-    # execution_orders — сколько раз READY-сетап реально дошёл до
+    # Из signal_notifications (SignalNotificationRepository.count_ready_between),
+    # не из execution_orders — сколько раз READY-сетап реально дошёл до
     # пользователя уведомлением, независимо от того, нажималась ли кнопка
     # и прошла ли попытка гвардов (раздел 12а).
     ready_signals: int = 0
@@ -89,6 +91,14 @@ class ExecutionDigestStats:
     confirmed: int = 0
     declined: int = 0
     expired: int = 0
+    # Шаг 15.5.2а: исходы реальной отправки (EXEC_DRY_RUN=false) — тоже
+    # подтверждённые карточки, но с ответом биржи вместо сухого прогона.
+    # PENDING в окне сводки значит «ответа не дождались» — по разделу 8 ТЗ
+    # такая строка разбирается так же, как UNKNOWN.
+    submitted: int = 0
+    rejected: int = 0
+    unknown: int = 0
+    pending: int = 0
     # Отказы гвардов по стадии evaluate(): "card" (карточки ещё нет) и
     # "confirm" (карточка показана, пришло «Да»). Строки без стадии (записаны
     # до её появления) — прежняя семантика «до карточки».
@@ -143,6 +153,7 @@ class ExecutionDigestStats:
         (раздел 7 ТЗ)."""
         return (
             self.confirmed + self.declined + self.expired
+            + self.submitted + self.rejected + self.unknown + self.pending
             + self.refused_confirm + self.errors_confirm
         )
 
@@ -172,9 +183,10 @@ def build_stats(
     модуля), см. ExecutionOrderRepository.list_entries_between().
     target_risk_percent — текущий risk_per_trade_percent торгового плана,
     точка отсчёта для "риск отклонился от заданного" (раздел 12а).
-    ready_signals — SignalRepository.count_ready_notified_between() за то
-    же окно: считается отдельно от rows, источник другой (signals, не
-    execution_orders), поэтому передаётся готовым числом, а не строками."""
+    ready_signals — SignalNotificationRepository.count_ready_between() за то
+    же окно: считается отдельно от rows, источник другой
+    (signal_notifications, не execution_orders), поэтому передаётся готовым
+    числом, а не строками."""
     stats = ExecutionDigestStats(ready_signals=ready_signals)
 
     for row in rows:
@@ -187,6 +199,14 @@ def build_stats(
                 stats.confirmed_risk_rewards.append(row.risk_reward)
             if row.price_drift_percent is not None:
                 stats.confirmed_drift_percents.append(row.price_drift_percent)
+        elif row.status is OrderStatus.SUBMITTED:
+            stats.submitted += 1
+        elif row.status is OrderStatus.REJECTED:
+            stats.rejected += 1
+        elif row.status is OrderStatus.UNKNOWN:
+            stats.unknown += 1
+        elif row.status is OrderStatus.PENDING:
+            stats.pending += 1
         elif row.status is OrderStatus.DECLINED:
             stats.declined += 1
         elif row.status is OrderStatus.EXPIRED:
@@ -267,6 +287,12 @@ def detect_anomalies(stats: ExecutionDigestStats, *, max_price_drift_ratio: Deci
                     f"гвард {code} срабатывает подозрительно часто: {count} из {total} попыток"
                 )
 
+    if stats.unknown or stats.pending:
+        anomalies.append(
+            f"исход отправки неизвестен: {stats.unknown + stats.pending} "
+            f"(UNKNOWN — {stats.unknown}, PENDING — {stats.pending}) — сверить позиции в BingX"
+        )
+
     if stats.total_errors:
         by_class = ", ".join(
             f"{code} — {count}"
@@ -310,6 +336,10 @@ def render_execution_digest(
         f"Сигналов READY: {stats.ready_signals}",
         f"  показана карточка: {stats.total_cards}",
         f"    подтверждено: {stats.confirmed}",
+        f"    отправлено на биржу: {stats.submitted}",
+        f"    отклонено биржей: {stats.rejected}",
+        f"    исход неизвестен: {stats.unknown}",
+        f"    без ответа биржи (PENDING): {stats.pending}",
         f"    отказ пользователя: {stats.declined}",
         f"    истекло по TTL: {stats.expired}",
         f"    отказ кода при подтверждении: {stats.refused_confirm}",

@@ -7,9 +7,7 @@ level) — сравнение fingerprint/expires_at и решение, слат
 
 from __future__ import annotations
 
-from datetime import datetime
-
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models.signal import SignalRecord
@@ -86,27 +84,6 @@ class SignalRepository:
         record = await self.get_active_slot(user_id, symbol, timeframe, level)
         if record is not None:
             record.status = SignalRecordStatus.EXPIRED
-
-    async def count_ready_notified_between(
-        self, user_id: int, start: datetime, end: datetime
-    ) -> int:
-        """Раздел 12а ТЗ: сырьё для "Сигналов READY" дневной сводки исполнения.
-
-        signals — таблица слотов (один слот на user, symbol, timeframe,
-        level, см. docstring модели), а не журнал событий: uq_signal_slot
-        гарантирует не больше одной строки на слот навсегда, повторные
-        READY-уведомления по тому же слоту перезаписывают notified_at той
-        же строки, а не создают новую. Поэтому COUNT(*) по notified_at в
-        окне не задвоит символ, переобновившийся за сутки несколько раз —
-        считается последний notified_at строки, попал он в окно или нет.
-        """
-        stmt = select(func.count()).select_from(SignalRecord).where(
-            SignalRecord.user_id == user_id,
-            SignalRecord.level == SignalLevel.READY,
-            SignalRecord.notified_at >= start,
-            SignalRecord.notified_at < end,
-        )
-        return (await self.session.scalar(stmt)) or 0
 
     def add(self, record: SignalRecord) -> SignalRecord:
         self.session.add(record)

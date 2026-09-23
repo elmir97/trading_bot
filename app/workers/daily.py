@@ -39,7 +39,7 @@ from app.core.logging import get_logger
 from app.core.security import SecretCipher
 from app.database.models.user import User, UserSettings
 from app.database.repositories.execution_order import ExecutionOrderRepository
-from app.database.repositories.signal import SignalRepository
+from app.database.repositories.signal_notification import SignalNotificationRepository
 from app.database.repositories.trade import TradeRepository
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
@@ -239,7 +239,7 @@ class DailyJobs:
         # Отдельный источник (signals, не execution_orders) для "Сигналов
         # READY" — то же окно window_start..now, что и у rows выше (раздел
         # 12а, execution_digest.py).
-        ready_signals = await SignalRepository(session).count_ready_notified_between(
+        ready_signals = await SignalNotificationRepository(session).count_ready_between(
             user.id, window_start, now
         )
         plan = user.trading_plan

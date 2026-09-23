@@ -471,3 +471,34 @@ class TestFunnelRender:
         text = self._text([_stage_row(OrderStatus.ERROR, "confirm", "ExchangeAuthError")])
         assert "сбои биржи при попытках входа: 1 из 1 (ExchangeAuthError — 1)" in text
         assert "Аномалии: нет" not in text
+
+
+
+class TestRealSubmissionStatuses:
+    """Шаг 15.5.2а: исходы реальной отправки в разборе статусов."""
+
+    def test_counted_as_shown_cards(self) -> None:
+        rows = [
+            _row(OrderStatus.SUBMITTED),
+            _row(OrderStatus.REJECTED),
+            _row(OrderStatus.UNKNOWN),
+            _row(OrderStatus.PENDING),
+            _row(OrderStatus.DRY_RUN, risk_percent=D("1")),
+        ]
+        stats = build_stats(rows, target_risk_percent=D("1"))
+        assert (stats.submitted, stats.rejected, stats.unknown, stats.pending) == (1, 1, 1, 1)
+        assert stats.total_cards == 5
+        assert stats.total_attempts == 5
+
+    def test_unknown_outcome_is_an_anomaly(self) -> None:
+        rows = [_row(OrderStatus.UNKNOWN), _row(OrderStatus.PENDING), _row(OrderStatus.SUBMITTED)]
+        stats = build_stats(rows, target_risk_percent=D("1"))
+        anomalies = detect_anomalies(stats, max_price_drift_ratio=D("0.3"))
+        assert (
+            "исход отправки неизвестен: 2 (UNKNOWN — 1, PENDING — 1) — сверить позиции в BingX"
+            in anomalies
+        )
+
+    def test_submitted_only_is_not_an_anomaly(self) -> None:
+        stats = build_stats([_row(OrderStatus.SUBMITTED)], target_risk_percent=D("1"))
+        assert detect_anomalies(stats, max_price_drift_ratio=D("0.3")) == []
