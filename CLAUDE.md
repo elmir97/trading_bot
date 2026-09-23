@@ -80,8 +80,15 @@ Remote `origin` — приватный резервный репозиторий
 `git push`. Деплой на сервер по-прежнему идёт через `git archive`
 (шаг 2 ниже), push его не заменяет и не запускает.
 
-1. Пред-деплойный снапшот:
-   `/opt/backups/trading_bot_pre_deploy_<timestamp>.tar.gz`
+1. `umask 077` первой командой сессии — до создания дампа и снапшота.
+   Внутри снапшота лежит `.env`: файлы обязаны получиться 600 сами,
+   без `chmod` задним числом. Затем дамп БД и снапшот кода:
+   `/opt/backups/trading_bot_pre_deploy_<timestamp>.{sql.gz,tar.gz}`,
+   `gzip -t` обоим, `stat -c '%a'` — 600.
+   Права на проде: `.env` и `docker-compose.override.yml` — 600,
+   `/opt/backups` и подкаталоги — 700, файлы внутри — 600 (кроме
+   `scripts/backup_db.sh` — 700, его запускает cron root-а; в нём
+   `umask 077` второй строкой)
 2. Код лить через `git archive HEAD`, **исключая** `.env` и
    `docker-compose.override.yml` — они живут только на сервере.
    Обязательно `git -c core.autocrlf=false archive HEAD`: на этой
