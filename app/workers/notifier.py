@@ -45,7 +45,11 @@ async def send_notification(
     text: str,
     *,
     reply_markup: InlineKeyboardMarkup | None = None,
-) -> None:
+) -> bool:
+    """True — сообщение доставлено. Сбой не пробрасывается (изоляция
+    получателей, см. docstring модуля), но вызывающий код может узнать о
+    нём — сканеру это нужно, чтобы не записать снимок неотправленного
+    уведомления (шаг 15.5.2а)."""
     try:
         # reply_markup передаётся только когда задан: тестовые дублёры бота
         # (FakeBot) в существующих тестах принимают send_message(chat_id, text)
@@ -61,10 +65,13 @@ async def send_notification(
             "Уведомление не доставлено: бот заблокирован",
             extra={"telegram_id": telegram_id},
         )
+        return False
     except TelegramAPIError:
         logger.exception(
             "Не удалось отправить уведомление", extra={"telegram_id": telegram_id}
         )
+        return False
+    return True
 
 
 async def send_notification_photo(
@@ -74,7 +81,7 @@ async def send_notification_photo(
     caption: str,
     *,
     reply_markup: InlineKeyboardMarkup | None = None,
-) -> None:
+) -> bool:
     """Фото с подписью; при любой проблеме с фото (не только с сетью —
     сюда же попадает, например, подпись длиннее 1024 символов) откатывается
     на обычный текст, чтобы уведомление не терялось только из-за картинки."""
@@ -97,9 +104,11 @@ async def send_notification_photo(
             "Уведомление не доставлено: бот заблокирован",
             extra={"telegram_id": telegram_id},
         )
+        return False
     except Exception:
         logger.exception(
             "Не удалось отправить график, шлём текстом",
             extra={"telegram_id": telegram_id},
         )
-        await send_notification(bot, telegram_id, caption, reply_markup=reply_markup)
+        return await send_notification(bot, telegram_id, caption, reply_markup=reply_markup)
+    return True

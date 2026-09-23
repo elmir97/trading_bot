@@ -11,14 +11,19 @@ class ExecutionCB:
     YES = "exec:yes:"        # + signal_id
     NO = "exec:no:"          # + signal_id
     EXPIRED = "exec:expired"  # кнопка-заглушка после TTL, ничего не делает
+    # Шаг 15.5.2а: + notification_id (снимок уведомления, не строка слота).
+    NOTIFICATION_OPEN = "exn:open:"
 
 
-def open_trade_button(signal_id: int) -> InlineKeyboardMarkup:
-    """Кнопка под уведомлением о сигнале — только для READY (раздел 5 ТЗ)."""
+def open_trade_button(notification_id: int) -> InlineKeyboardMarkup:
+    """Кнопка под уведомлением о сигнале — только для READY (раздел 5 ТЗ).
+    Адресует снимок уведомления (шаг 15.5.2а): «exn:open:» + 10 цифр — 19
+    байт при лимите callback_data Telegram в 64."""
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(
-            text="⚡ Открыть сделку", callback_data=f"{ExecutionCB.OPEN}{signal_id}"
+            text="⚡ Открыть сделку",
+            callback_data=f"{ExecutionCB.NOTIFICATION_OPEN}{notification_id}",
         )
     )
     return builder.as_markup()

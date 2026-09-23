@@ -6,6 +6,15 @@
 Дедуп — по "слоту" (user, symbol, timeframe, level) в таблице signals:
 не то же самое, что случалось в прошлом скане, а то, что сейчас активно.
 См. SignalRepository и docstring SignalRecord.
+
+Шаг 15.5.2а: каждое реально отправленное уведомление пишет неизменяемый
+снимок в signal_notifications, и кнопка «Открыть сделку» адресует его
+notification_id, а не изменчивую строку слота. Порядок: вставка снимка в
+SAVEPOINT -> flush (id) -> отправка -> при недоставке откат SAVEPOINT;
+коммит — один на весь run() (Database.session). Если коммит не случится
+уже после отправки, кнопка укажет на id, которого в БД нет, — хендлер
+ответит «Уведомление устарело»; sequence PostgreSQL не откатывается,
+поэтому этот id никогда не достанется другому уведомлению.
 """
 
 from __future__ import annotations
@@ -32,8 +41,10 @@ from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.numfmt import fmt_price
 from app.database.models.signal import SignalRecord
+from app.database.models.signal_notification import SignalNotification
 from app.database.models.user import User
 from app.database.repositories.signal import SignalRepository
+from app.database.repositories.signal_notification import SignalNotificationRepository
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
 from app.market.cache import TTLCache
@@ -48,6 +59,12 @@ from app.workers.notifier import (
 )
 
 logger = get_logger(__name__)
+
+
+class _NotDeliveredError(Exception):
+    """Внутренний сигнал «сообщение не ушло» — откатывает SAVEPOINT со
+    снимком уведомления (см. SetupScanner._notify)."""
+
 
 __all__ = [
     "CONFIRMATION_CONDITION_NAME",
@@ -294,15 +311,32 @@ class SetupScanner:
             )
             repo.add(record)
             should_notify = True
-        else:
+        elif existing.status is not SignalRecordStatus.ACTIVE:
+            # Слот был погашен и сетап появился заново (требование 3).
             record = existing
-            # Условия изменились, либо тот же сетап уже провисел дольше TTL,
-            # либо слот был погашен и сетап появился заново — все три случая
-            # из требования 3 ("повтор, только если...").
+            should_notify = True
+        elif level is SignalLevel.READY:
+            # Шаг 15.5.2а, Р1: READY сверяется с последним ОТПРАВЛЕННЫМ
+            # уведомлением, а не со слотом. expires_at слота продлевается
+            # каждым пересканом, и сетап, видимый непрерывно, не уведомлялся
+            # бы повторно никогда, — а кнопка из снимка живёт ровно TTL.
+            # Заодно недоставленное уведомление (снимка нет) повторится на
+            # следующем скане, а не потеряется.
+            record = existing
+            latest = await SignalNotificationRepository(repo.session).latest_for_slot(
+                existing.id
+            )
             should_notify = (
-                existing.status is not SignalRecordStatus.ACTIVE
-                or existing.fingerprint != fingerprint
-                or now >= existing.expires_at
+                latest is None
+                or latest.fingerprint != fingerprint
+                or now >= latest.expires_at
+            )
+        else:
+            # FORMING кнопки не несёт — прежнее правило по слоту: условия
+            # изменились либо слот провисел дольше TTL без пересканов.
+            record = existing
+            should_notify = (
+                existing.fingerprint != fingerprint or now >= existing.expires_at
             )
 
         record.status = SignalRecordStatus.ACTIVE
@@ -333,25 +367,68 @@ class SetupScanner:
         await repo.flush()
 
         if should_notify:
-            # Раздел 5 ТЗ: кнопка входа только под READY, под FORMING —
-            # никогда. record.id уже назначен предыдущим repo.flush().
-            keyboard = open_trade_button(record.id) if level is SignalLevel.READY else None
+            await self._notify(
+                repo, user, record, signal, level, context, precision,
+                notified_at=now, expires_at=now + ttl,
+            )
 
-            photo = None
-            if context is not None and notification_enabled(user.settings, "setup_charts"):
-                if precision is None:
-                    precision = await self._price_precision(symbol)
-                # В отдельном потоке: matplotlib/mplfinance синхронны и
-                # заметно тяжелее текста — рендер не должен задерживать
-                # остальных пользователей в этом цикле сканера.
-                photo = await asyncio.to_thread(
-                    render_setup_chart, context, signal, level, precision
+    async def _notify(
+        self,
+        repo: SignalRepository,
+        user: User,
+        record: SignalRecord,
+        signal: Signal,
+        level: SignalLevel,
+        context: MarketContext | None,
+        precision: int | None,
+        *,
+        notified_at: datetime,
+        expires_at: datetime,
+    ) -> None:
+        """Снимок уведомления + отправка (шаг 15.5.2а).
+
+        SAVEPOINT вокруг вставки и отправки: в signal_notifications остаются
+        только реально ушедшие сообщения. Недоставка (send_* вернул False)
+        откатывает снимок; слот при этом уже обновлён — как и до 15.5.2а.
+        record.id назначен предыдущим repo.flush() в _handle_signal."""
+        notifications = SignalNotificationRepository(repo.session)
+        try:
+            async with repo.session.begin_nested():
+                notification = notifications.add(
+                    SignalNotification.snapshot_of(
+                        record, notified_at=notified_at, expires_at=expires_at
+                    )
                 )
-            if photo is not None:
-                await send_notification_photo(
-                    self._bot, user.telegram_id, photo, record.detail, reply_markup=keyboard
+                await notifications.flush()
+
+                # Раздел 5 ТЗ: кнопка входа только под READY, под FORMING —
+                # никогда. Адресует снимок, а не слот.
+                keyboard = (
+                    open_trade_button(notification.id) if level is SignalLevel.READY else None
                 )
-            else:
-                await send_notification(
-                    self._bot, user.telegram_id, record.detail, reply_markup=keyboard
-                )
+
+                photo = None
+                if context is not None and notification_enabled(user.settings, "setup_charts"):
+                    if precision is None:
+                        precision = await self._price_precision(record.symbol)
+                    # В отдельном потоке: matplotlib/mplfinance синхронны и
+                    # заметно тяжелее текста — рендер не должен задерживать
+                    # остальных пользователей в этом цикле сканера.
+                    photo = await asyncio.to_thread(
+                        render_setup_chart, context, signal, level, precision
+                    )
+                if photo is not None:
+                    delivered = await send_notification_photo(
+                        self._bot, user.telegram_id, photo, record.detail, reply_markup=keyboard
+                    )
+                else:
+                    delivered = await send_notification(
+                        self._bot, user.telegram_id, record.detail, reply_markup=keyboard
+                    )
+                if not delivered:
+                    raise _NotDeliveredError
+        except _NotDeliveredError:
+            logger.warning(
+                "Уведомление о сетапе не доставлено — снимок не сохранён",
+                extra={"user_id": user.id, "signal_id": record.id, "level": level.value},
+            )

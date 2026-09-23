@@ -14,9 +14,13 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
+from aiogram.exceptions import TelegramForbiddenError
+from aiogram.methods import SendMessage
+from sqlalchemy import select
 
 from app.analysis.signals import MarketContext, Signal, SignalCondition
 from app.core.config import Settings
+from app.database.models.signal_notification import SignalNotification
 from app.database.repositories.signal import SignalRepository
 from app.database.repositories.strategy import MistakeTypeRepository, StrategyRepository
 from app.database.repositories.user import UserRepository
@@ -46,8 +50,14 @@ class FakeBot:
         self.sent: list[tuple[int, str]] = []
         self.sent_photos: list[tuple[int, str]] = []
         self.sent_markups: list[object] = []
+        # Шаг 15.5.2а: имитация недоставки (пользователь заблокировал бота).
+        self.blocked = False
 
     async def send_message(self, chat_id: int, text: str, reply_markup=None) -> None:  # type: ignore[no-untyped-def]
+        if self.blocked:
+            raise TelegramForbiddenError(
+                method=SendMessage(chat_id=chat_id, text=text), message="blocked"
+            )
         self.sent.append((chat_id, text))
         self.sent_markups.append(reply_markup)
 
@@ -174,7 +184,18 @@ async def test_changed_price_notifies_again(ctx) -> None:  # type: ignore[no-unt
     assert len(bot.sent) == 2  # вход заметно сместился — условия "изменились"
 
 
+async def _notifications(session, user_id: int) -> list[SignalNotification]:  # type: ignore[no-untyped-def]
+    rows = await session.scalars(
+        select(SignalNotification)
+        .where(SignalNotification.user_id == user_id)
+        .order_by(SignalNotification.id)
+    )
+    return list(rows)
+
+
 async def test_expired_ttl_notifies_again(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Шаг 15.5.2а, Р1: READY повторяется, когда истёк снимок последнего
+    уведомления (кнопка из него уже мертва), даже если сетап тот же."""
     user, session, repo, scanner, bot, _ = ctx
 
     await scanner._handle_signal(
@@ -182,9 +203,8 @@ async def test_expired_ttl_notifies_again(ctx) -> None:  # type: ignore[no-untyp
     )
     await session.flush()
 
-    record = await repo.get_active_slot(user.id, "BTC-USDT", "4h", SignalLevel.READY)
-    assert record is not None
-    record.expires_at = datetime.now(UTC) - timedelta(seconds=1)  # искусственно истекло
+    [first] = await _notifications(session, user.id)
+    first.expires_at = datetime.now(UTC) - timedelta(seconds=1)  # искусственно истекло
     await session.flush()
 
     await scanner._handle_signal(
@@ -193,6 +213,75 @@ async def test_expired_ttl_notifies_again(ctx) -> None:  # type: ignore[no-untyp
     await session.flush()
 
     assert len(bot.sent) == 2  # прошло "N часов" — повтор, хотя сетап тот же
+    assert len(await _notifications(session, user.id)) == 2
+
+
+async def test_ready_rescans_do_not_extend_notification_life(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Шаг 15.5.2а, Р1: пересканы продлевают expires_at слота, но READY-сетап,
+    видимый непрерывно, всё равно получает новое уведомление, когда истёк
+    снимок. На коде до 15.5.2а повтора не было бы: слот «свежий»."""
+    user, session, repo, scanner, bot, _ = ctx
+
+    await scanner._handle_signal(
+        repo, user, _ready_signal(), "BTC-USDT", "4h", want_ready=True, want_forming=True
+    )
+    await session.flush()
+    [first] = await _notifications(session, user.id)
+    first.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    await session.flush()
+
+    record = await repo.get_active_slot(user.id, "BTC-USDT", "4h", SignalLevel.READY)
+    assert record is not None
+    assert record.expires_at > datetime.now(UTC)  # слот продлён пересканом
+
+    await scanner._handle_signal(
+        repo, user, _ready_signal(), "BTC-USDT", "4h", want_ready=True, want_forming=True
+    )
+    await session.flush()
+
+    assert len(bot.sent) == 2
+
+
+async def test_forming_expired_slot_ttl_notifies_again(ctx) -> None:  # type: ignore[no-untyped-def]
+    """FORMING кнопки не несёт — для него правило повтора прежнее, по слоту."""
+    user, session, repo, scanner, bot, _ = ctx
+
+    await scanner._handle_signal(
+        repo, user, _forming_signal(), "BTC-USDT", "4h", want_ready=True, want_forming=True
+    )
+    await session.flush()
+    record = await repo.get_active_slot(user.id, "BTC-USDT", "4h", SignalLevel.FORMING)
+    assert record is not None
+    record.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    await session.flush()
+
+    await scanner._handle_signal(
+        repo, user, _forming_signal(), "BTC-USDT", "4h", want_ready=True, want_forming=True
+    )
+    await session.flush()
+
+    assert len(bot.sent) == 2
+
+
+async def test_forming_expired_snapshot_does_not_repeat(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Истёкший снимок FORMING сам по себе повтора не вызывает — повторять
+    FORMING раз в TTL значило бы спамить уведомлениями без кнопки."""
+    user, session, repo, scanner, bot, _ = ctx
+
+    await scanner._handle_signal(
+        repo, user, _forming_signal(), "BTC-USDT", "4h", want_ready=True, want_forming=True
+    )
+    await session.flush()
+    [first] = await _notifications(session, user.id)
+    first.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    await session.flush()
+
+    await scanner._handle_signal(
+        repo, user, _forming_signal(), "BTC-USDT", "4h", want_ready=True, want_forming=True
+    )
+    await session.flush()
+
+    assert len(bot.sent) == 1
 
 
 async def test_setup_disappearing_expires_both_slots(ctx) -> None:  # type: ignore[no-untyped-def]
@@ -351,9 +440,10 @@ async def test_ready_notification_has_open_trade_button(ctx) -> None:  # type: i
     buttons = [b for row in markup.inline_keyboard for b in row]
     assert any(b.text == "⚡ Открыть сделку" for b in buttons)
 
-    record = await repo.get_active_slot(user.id, "BTC-USDT", "4h", SignalLevel.READY)
-    assert record is not None
-    assert any(b.callback_data == f"exec:open:{record.id}" for b in buttons)
+    # Шаг 15.5.2а: кнопка адресует снимок уведомления, не строку слота.
+    [notification] = await _notifications(session, user.id)
+    assert any(b.callback_data == f"exn:open:{notification.id}" for b in buttons)
+    assert all(not str(b.callback_data).startswith("exec:open:") for b in buttons)
 
 
 async def test_forming_notification_has_no_open_trade_button(ctx) -> None:  # type: ignore[no-untyped-def]
@@ -554,3 +644,110 @@ async def test_ready_card_requests_precision_without_chart(ctx) -> None:  # type
     record = await repo.get_active_slot(user.id, "ETH-USDT", "4h", SignalLevel.READY)
     assert record is not None
     assert "Стоп: 97.12\n" in record.detail and "Цель: 106.57\n" in record.detail
+
+
+# --- Шаг 15.5.2а: снимок уведомления --------------------------------------
+
+
+async def test_ready_notification_writes_snapshot(ctx) -> None:  # type: ignore[no-untyped-def]
+    user, session, repo, scanner, _bot, settings = ctx
+
+    await scanner._handle_signal(
+        repo, user, _ready_signal(), "BTC-USDT", "4h", want_ready=True, want_forming=True
+    )
+    await session.flush()
+
+    record = await repo.get_active_slot(user.id, "BTC-USDT", "4h", SignalLevel.READY)
+    assert record is not None
+    [n] = await _notifications(session, user.id)
+    assert n.signal_id == record.id
+    assert n.level is SignalLevel.READY
+    assert n.fingerprint == record.fingerprint
+    assert n.setup == record.setup
+    assert n.direction is record.direction
+    assert (n.entry_low, n.entry_high) == (record.entry_low, record.entry_high)
+    assert (n.stop_loss, n.take_profit) == (record.stop_loss, record.take_profit)
+    assert n.confidence == record.confidence
+    assert n.notified_at == record.notified_at
+    assert n.expires_at == n.notified_at + timedelta(hours=settings.setup_scanner_ttl_hours)
+    assert n.trade_opened_at is None
+
+
+async def test_same_setup_rescan_writes_no_new_snapshot(ctx) -> None:  # type: ignore[no-untyped-def]
+    user, session, repo, scanner, _bot, _ = ctx
+
+    for _ in range(3):
+        await scanner._handle_signal(
+            repo, user, _ready_signal(), "BTC-USDT", "4h", want_ready=True, want_forming=True
+        )
+    await session.flush()
+
+    assert len(await _notifications(session, user.id)) == 1
+
+
+async def test_changed_setup_writes_second_snapshot_first_untouched(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Новый fingerprint — новая строка с новым id; первый снимок хранит
+    прежние уровни, хотя слот уже перезаписан."""
+    user, session, repo, scanner, bot, _ = ctx
+
+    await scanner._handle_signal(
+        repo, user, _ready_signal("100"), "BTC-USDT", "4h", want_ready=True, want_forming=True
+    )
+    await scanner._handle_signal(
+        repo, user, _ready_signal("110"), "BTC-USDT", "4h", want_ready=True, want_forming=True
+    )
+    await session.flush()
+
+    first, second = await _notifications(session, user.id)
+    assert first.id != second.id
+    assert first.signal_id == second.signal_id
+    assert first.fingerprint != second.fingerprint
+    assert first.entry_low == D("100")
+    assert second.entry_low == D("110")
+
+    buttons = [
+        b.callback_data
+        for markup in bot.sent_markups
+        for row in markup.inline_keyboard
+        for b in row
+    ]
+    assert buttons == [f"exn:open:{first.id}", f"exn:open:{second.id}"]
+
+
+async def test_undelivered_notification_leaves_no_snapshot_and_retries(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Сбой отправки после вставки — SAVEPOINT откатывает снимок; слот при
+    этом обновлён. Следующий скан того же READY-сетапа повторяет отправку."""
+    user, session, repo, scanner, bot, _ = ctx
+    bot.blocked = True
+
+    await scanner._handle_signal(
+        repo, user, _ready_signal(), "BTC-USDT", "4h", want_ready=True, want_forming=True
+    )
+    await session.flush()
+
+    assert bot.sent == []
+    assert await _notifications(session, user.id) == []
+    assert await repo.get_active_slot(user.id, "BTC-USDT", "4h", SignalLevel.READY) is not None
+
+    bot.blocked = False
+    await scanner._handle_signal(
+        repo, user, _ready_signal(), "BTC-USDT", "4h", want_ready=True, want_forming=True
+    )
+    await session.flush()
+
+    assert len(bot.sent) == 1
+    assert len(await _notifications(session, user.id)) == 1
+
+
+async def test_forming_notification_writes_snapshot_without_button(ctx) -> None:  # type: ignore[no-untyped-def]
+    user, session, repo, scanner, bot, _ = ctx
+
+    await scanner._handle_signal(
+        repo, user, _forming_signal(), "BTC-USDT", "4h", want_ready=True, want_forming=True
+    )
+    await session.flush()
+
+    [n] = await _notifications(session, user.id)
+    assert n.level is SignalLevel.FORMING
+    assert n.direction is None
+    assert bot.sent_markups == [None]
