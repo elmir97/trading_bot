@@ -23,6 +23,7 @@ from sqlalchemy import select
 from app.core.config import Settings
 from app.database.models.execution_order import ExecutionOrder
 from app.database.models.signal import SignalRecord
+from app.database.models.signal_notification import SignalNotification
 from app.database.repositories.strategy import MistakeTypeRepository, StrategyRepository
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
@@ -168,10 +169,13 @@ def _signal(user_id: int, **overrides: object) -> SignalRecord:
     return SignalRecord(**fields)  # type: ignore[arg-type]
 
 
-def _order(user_id: int, signal_id: int, **overrides: object) -> OrderRequest:
+def _order(
+    user_id: int, signal_id: int, notification_id: int, **overrides: object
+) -> OrderRequest:
     fields: dict[str, object] = {
         "user_id": user_id,
         "signal_id": signal_id,
+        "notification_id": notification_id,
         "symbol": "BTC-USDT",
         "side": OrderSide.BUY,
         "position_side": TradeSide.LONG,
@@ -203,7 +207,14 @@ async def ctx(unique_telegram_id):  # type: ignore[no-untyped-def]
         signal = _signal(user.id)
         session.add(signal)
         await session.flush()
-        yield session, user, signal, settings
+        # Шаг 15.5.2а: execution_orders.notification_id — FK, и client_order_id
+        # строится от notification_id: нужен настоящий снимок.
+        notification = SignalNotification.snapshot_of(
+            signal, notified_at=NOW, expires_at=NOW + timedelta(hours=4)
+        )
+        session.add(notification)
+        await session.flush()
+        yield session, user, signal, settings, notification
         await cleanup_user(session, user)
     await db.dispose()
 
@@ -227,8 +238,8 @@ class TestBingxPositionSide:
 
 class TestAdjustLeverage:
     async def test_matching_leverage_does_not_call_set_leverage(self, ctx) -> None:  # type: ignore[no-untyped-def]
-        session, user, signal, settings = ctx
-        order = _order(user.id, signal.id, leverage=10)
+        session, user, signal, settings, notification = ctx
+        order = _order(user.id, signal.id, notification.id, leverage=10)
         client = FakeSubmitClient(
             current_leverage=LeverageInfo(
                 symbol="BTC-USDT", long_leverage=10, short_leverage=5,
@@ -249,8 +260,10 @@ class TestAdjustLeverage:
         не с "BOTH" при hedge — position_side здесь приходит от
         bingx_position_side(), проверяем, что adjust_leverage прокидывает
         его как есть, не подставляя свой дефолт."""
-        session, user, signal, settings = ctx
-        order = _order(user.id, signal.id, leverage=20, position_side=TradeSide.SHORT)
+        session, user, signal, settings, notification = ctx
+        order = _order(
+            user.id, signal.id, notification.id, leverage=20, position_side=TradeSide.SHORT
+        )
         client = FakeSubmitClient(
             current_leverage=LeverageInfo(
                 symbol="BTC-USDT", long_leverage=10, short_leverage=5,
@@ -272,8 +285,8 @@ class TestAdjustLeverage:
         assert set_call["leverage"] == 20
 
     async def test_get_leverage_failure_refuses_without_set_leverage(self, ctx) -> None:  # type: ignore[no-untyped-def]
-        session, user, signal, settings = ctx
-        order = _order(user.id, signal.id)
+        session, user, signal, settings, notification = ctx
+        order = _order(user.id, signal.id, notification.id)
         client = FakeSubmitClient(
             current_leverage=LeverageInfo(
                 symbol="BTC-USDT", long_leverage=1, short_leverage=1,
@@ -303,8 +316,8 @@ class TestAdjustLeverage:
         assert "BingX не ответил" not in rows[0].error_message
 
     async def test_set_leverage_failure_refuses(self, ctx) -> None:  # type: ignore[no-untyped-def]
-        session, user, signal, settings = ctx
-        order = _order(user.id, signal.id, leverage=20)
+        session, user, signal, settings, notification = ctx
+        order = _order(user.id, signal.id, notification.id, leverage=20)
         client = FakeSubmitClient(
             current_leverage=LeverageInfo(
                 symbol="BTC-USDT", long_leverage=10, short_leverage=10,
@@ -333,8 +346,8 @@ class TestBuildEntryOrderPending:
     async def test_status_pending_no_sl_tp_rows(self, ctx) -> None:  # type: ignore[no-untyped-def]
         """Раздел 8 ТЗ / раздел 16 ТЗ, шаг 15.5.2: одна ENTRY-строка,
         PENDING — SL/TP execution_orders-строк до read-back (15.5.3) нет."""
-        session, user, signal, _settings = ctx
-        order = _order(user.id, signal.id)
+        session, user, signal, _settings, notification = ctx
+        order = _order(user.id, signal.id, notification.id)
 
         row = build_entry_order_pending(order)
         session.add(row)
@@ -380,8 +393,8 @@ class TestSubmitEntryOrder:
     пройти, REJECTED сказал бы пользователю обратное."""
 
     async def test_success_marks_submitted(self, ctx) -> None:  # type: ignore[no-untyped-def]
-        session, user, signal, settings = ctx
-        order = _order(user.id, signal.id)
+        session, user, signal, settings, notification = ctx
+        order = _order(user.id, signal.id, notification.id)
         entry_row = build_entry_order_pending(order)
         session.add(entry_row)
         await session.flush()
@@ -402,8 +415,8 @@ class TestSubmitEntryOrder:
     async def test_explicit_rejection_code_marks_rejected(self, ctx) -> None:  # type: ignore[no-untyped-def]
         """Биржа ответила (HTTP 200, JSON с кодом) и явно отказала — ответ
         определённо получен, ордер определённо не прошёл."""
-        session, user, signal, settings = ctx
-        order = _order(user.id, signal.id)
+        session, user, signal, settings, notification = ctx
+        order = _order(user.id, signal.id, notification.id)
         entry_row = build_entry_order_pending(order)
         session.add(entry_row)
         await session.flush()
@@ -431,8 +444,8 @@ class TestSubmitEntryOrder:
     async def test_timeout_marks_unknown_not_rejected(self, ctx) -> None:  # type: ignore[no-untyped-def]
         """Ответа не было вовсе — ордер мог пройти, REJECTED здесь был бы
         ложью пользователю."""
-        session, user, signal, settings = ctx
-        order = _order(user.id, signal.id)
+        session, user, signal, settings, notification = ctx
+        order = _order(user.id, signal.id, notification.id)
         entry_row = build_entry_order_pending(order)
         session.add(entry_row)
         await session.flush()
@@ -455,8 +468,8 @@ class TestSubmitEntryOrder:
         разобралось (типично — BingXClient._parse_order()/_to_decimal
         на кривом поле). exc.code=None в этом случае, не 0 и не то же
         самое, что явный отказ — обязана быть UNKNOWN, не REJECTED."""
-        session, user, signal, settings = ctx
-        order = _order(user.id, signal.id)
+        session, user, signal, settings, notification = ctx
+        order = _order(user.id, signal.id, notification.id)
         entry_row = build_entry_order_pending(order)
         session.add(entry_row)
         await session.flush()
@@ -482,8 +495,8 @@ class TestSubmitEntryOrder:
         (баг разбора ответа, неожиданная форма data). Исход неизвестен:
         UNKNOWN, а не пролетевшее исключение со строкой, оставшейся PENDING.
         Баг не прячется — полный трейс в логе."""
-        session, user, signal, settings = ctx
-        order = _order(user.id, signal.id)
+        session, user, signal, settings, notification = ctx
+        order = _order(user.id, signal.id, notification.id)
         entry_row = build_entry_order_pending(order)
         session.add(entry_row)
         await session.flush()
@@ -510,8 +523,8 @@ class TestSubmitEntryOrder:
         """code 0 без orderId: биржа приняла — SUBMITTED верен, но пустая
         строка вместо id — молчаливый фолбэк. exchange_order_id=None и
         предупреждение в лог."""
-        session, user, signal, settings = ctx
-        order = _order(user.id, signal.id)
+        session, user, signal, settings, notification = ctx
+        order = _order(user.id, signal.id, notification.id)
         entry_row = build_entry_order_pending(order)
         session.add(entry_row)
         await session.flush()
@@ -529,8 +542,8 @@ class TestSubmitEntryOrder:
         assert "BingX не вернул orderId при code 0" in caplog.text
 
     async def test_only_one_place_market_order_call(self, ctx) -> None:  # type: ignore[no-untyped-def]
-        session, user, signal, settings = ctx
-        order = _order(user.id, signal.id)
+        session, user, signal, settings, notification = ctx
+        order = _order(user.id, signal.id, notification.id)
         entry_row = build_entry_order_pending(order)
         session.add(entry_row)
         await session.flush()

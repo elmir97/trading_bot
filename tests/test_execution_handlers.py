@@ -39,6 +39,7 @@ from app.core.config import Settings
 from app.core.locks import confirm_lock_key
 from app.database.models.execution_order import ExecutionOrder
 from app.database.models.signal import SignalRecord
+from app.database.models.signal_notification import SignalNotification
 from app.database.repositories.signal import SignalRepository
 from app.database.repositories.strategy import MistakeTypeRepository, StrategyRepository
 from app.database.repositories.user import UserRepository
@@ -56,6 +57,7 @@ from app.exchanges.base import (
     SymbolInfo,
     Ticker,
 )
+from app.execution import service as execution_service
 from app.services.user_service import UserService
 from app.trading.enums import (
     ExchangeKeyMode,
@@ -311,6 +313,19 @@ def _signal(user_id: int, **overrides: object) -> SignalRecord:
     return SignalRecord(**fields)  # type: ignore[arg-type]
 
 
+async def _notify(session, signal: SignalRecord, **overrides: object) -> SignalNotification:  # type: ignore[no-untyped-def]
+    """Шаг 15.5.2а: снимок уведомления по текущему состоянию слота — то,
+    что пишет сканер при отправке; кнопки адресуют его id."""
+    notification = SignalNotification.snapshot_of(
+        signal, notified_at=NOW, expires_at=NOW + timedelta(hours=4)
+    )
+    for key, value in overrides.items():
+        setattr(notification, key, value)
+    session.add(notification)
+    await session.flush()
+    return notification
+
+
 # ---------------------------------------------------------------------------
 # Плумбинг aiogram: настоящий Dispatcher, Bot.__call__ подменён
 # ---------------------------------------------------------------------------
@@ -374,6 +389,12 @@ def _fresh_execution_router() -> Router:
     r.callback_query.register(execution.confirm_no, F.data.startswith(ExecutionCB.NO))
     r.callback_query.register(execution.expired_noop, F.data == ExecutionCB.EXPIRED)
     r.callback_query.register(execution.confirm_yes, F.data.startswith(ExecutionCB.YES))
+    r.callback_query.register(
+        execution.legacy_signal_button,
+        F.data.startswith(ExecutionCB.LEGACY_OPEN)
+        | F.data.startswith(ExecutionCB.LEGACY_YES)
+        | F.data.startswith(ExecutionCB.LEGACY_NO),
+    )
     return r
 
 
@@ -461,8 +482,9 @@ async def test_open_button_sends_confirmation_card(ctx, bot, monkeypatch) -> Non
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _notify(session, signal)
 
-    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
 
     texts = bot.recorder.sent_texts()
     assert len(texts) == 1
@@ -470,7 +492,7 @@ async def test_open_button_sends_confirmation_card(ctx, bot, monkeypatch) -> Non
     assert "BTC-USDT" in text
     assert "Стоп: 97" in text
     assert "Тейк: 110" in text
-    assert (user.id, signal.id) in execution._confirmations
+    assert (user.id, notification.id) in execution._confirmations
 
 
 async def test_open_button_shows_refusal_when_execution_disabled(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -481,13 +503,14 @@ async def test_open_button_shows_refusal_when_execution_disabled(ctx, bot, monke
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _notify(session, signal)
 
-    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
 
     texts = bot.recorder.sent_texts()
     assert len(texts) == 1
     assert "Не открыл" in texts[0]
-    assert (user.id, signal.id) not in execution._confirmations
+    assert (user.id, notification.id) not in execution._confirmations
 
     # Раздел 12а ТЗ: отказ гварда пишется ExecutionService.evaluate() сам,
     # без похода в биржу — карточка при этом не показывается.
@@ -513,13 +536,14 @@ async def test_open_button_refuses_permissions_unknown_on_stale_check_failure(  
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _notify(session, signal)
 
-    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
 
     texts = bot.recorder.sent_texts()
     assert len(texts) == 1
     assert "Не удалось проверить права ключа" in texts[0]
-    assert (user.id, signal.id) not in execution._confirmations
+    assert (user.id, notification.id) not in execution._confirmations
 
     # Пакет A (инцидент GRAMTON): PERMISSIONS_UNKNOWN теперь строится внутри
     # ExecutionService.evaluate(), как и остальные отказы гвардов — строка
@@ -549,14 +573,15 @@ async def test_open_button_refreshes_stale_permissions_and_proceeds(  # type: ig
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _notify(session, signal)
 
-    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
 
     texts = bot.recorder.sent_texts()
     assert len(texts) == 1
     assert "Не открыл" not in texts[0]
     assert "BTC-USDT" in texts[0]
-    assert (user.id, signal.id) in execution._confirmations
+    assert (user.id, notification.id) in execution._confirmations
 
     assert creds.is_read_only is False
     assert creds.permissions_checked_at is not None
@@ -574,13 +599,14 @@ async def test_open_button_shows_refusal_when_mode_not_allowed(ctx, bot, monkeyp
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _notify(session, signal)
 
-    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
 
     texts = bot.recorder.sent_texts()
     assert len(texts) == 1
     assert "реальном счёте" in texts[0]
-    assert (user.id, signal.id) not in execution._confirmations
+    assert (user.id, notification.id) not in execution._confirmations
 
     orders = await _orders_for_signal(session, signal.id)
     assert len(orders) == 1
@@ -601,15 +627,16 @@ async def test_open_button_shows_refusal_when_signal_stale(ctx, bot, monkeypatch
     signal = _signal(user.id, take_profit=D("200"))
     session.add(signal)
     await session.flush()
+    notification = await _notify(session, signal)
     client.price = D("106")
 
-    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
 
     texts = bot.recorder.sent_texts()
     assert len(texts) == 1
     assert "Не открыл" in texts[0]
     assert "устарел" in texts[0]
-    assert (user.id, signal.id) not in execution._confirmations
+    assert (user.id, notification.id) not in execution._confirmations
 
     orders = await _orders_for_signal(session, signal.id)
     assert len(orders) == 1
@@ -629,13 +656,14 @@ async def test_confirm_yes_creates_dry_run_orders(ctx, bot, monkeypatch) -> None
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _notify(session, signal)
 
-    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
-    state = execution._confirmations[(user.id, signal.id)]
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
+    state = execution._confirmations[(user.id, notification.id)]
 
     await _feed(
         dp, bot, 2,
-        make_callback(f"exec:yes:{signal.id}", message_id=state.message_id),
+        make_callback(f"exn:yes:{notification.id}", message_id=state.message_id),
     )
 
     orders = await _orders_for_signal(session, signal.id)
@@ -643,22 +671,22 @@ async def test_confirm_yes_creates_dry_run_orders(ctx, bot, monkeypatch) -> None
     assert {o.role for o in orders} == {OrderRole.ENTRY, OrderRole.STOP_LOSS, OrderRole.TAKE_PROFIT}
     assert all(o.status is OrderStatus.DRY_RUN for o in orders)
 
-    await session.refresh(signal)
-    assert signal.trade_opened_at is not None
+    await session.refresh(notification)
+    assert notification.trade_opened_at is not None
 
     dry_run_texts = [t for t in bot.recorder.sent_texts() if "Сухой прогон" in t]
     assert len(dry_run_texts) == 1
-    assert (user.id, signal.id) not in execution._confirmations
+    assert (user.id, notification.id) not in execution._confirmations
 
 
-async def _open_and_confirm(dp, bot, signal, user) -> None:  # type: ignore[no-untyped-def]
+async def _open_and_confirm(dp, bot, notification, user) -> None:  # type: ignore[no-untyped-def]
     """Общий пролог для тестов реальной отправки ниже: открыть карточку,
     нажать «Да»."""
-    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
-    state = execution._confirmations[(user.id, signal.id)]
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
+    state = execution._confirmations[(user.id, notification.id)]
     await _feed(
         dp, bot, 2,
-        make_callback(f"exec:yes:{signal.id}", message_id=state.message_id),
+        make_callback(f"exn:yes:{notification.id}", message_id=state.message_id),
     )
 
 
@@ -676,8 +704,9 @@ async def test_confirm_yes_submits_real_order(ctx, bot, monkeypatch) -> None:  #
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _notify(session, signal)
 
-    await _open_and_confirm(dp, bot, signal, user)
+    await _open_and_confirm(dp, bot, notification, user)
 
     orders = await _orders_for_signal(session, signal.id)
     assert len(orders) == 1
@@ -686,8 +715,8 @@ async def test_confirm_yes_submits_real_order(ctx, bot, monkeypatch) -> None:  #
     assert orders[0].exchange_order_id == "555555"
     assert orders[0].client_order_id is not None
 
-    await session.refresh(signal)
-    assert signal.trade_opened_at is not None
+    await session.refresh(notification)
+    assert notification.trade_opened_at is not None
 
     submit_calls = [c[0] for c in client.submit_calls]
     # плечо совпало — set_leverage не вызывается
@@ -709,8 +738,9 @@ async def test_confirm_yes_real_order_leverage_mismatch_calls_set_leverage(  # t
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _notify(session, signal)
 
-    await _open_and_confirm(dp, bot, signal, user)
+    await _open_and_confirm(dp, bot, notification, user)
 
     submit_calls = {c[0]: c[1] for c in client.submit_calls}
     assert "set_leverage" in submit_calls
@@ -738,8 +768,9 @@ async def test_confirm_yes_real_order_rejected_shows_known_code_not_raw_msg(  # 
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _notify(session, signal)
 
-    await _open_and_confirm(dp, bot, signal, user)
+    await _open_and_confirm(dp, bot, notification, user)
 
     orders = await _orders_for_signal(session, signal.id)
     assert len(orders) == 1
@@ -765,8 +796,9 @@ async def test_confirm_yes_real_order_timeout_shows_unknown_text(  # type: ignor
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _notify(session, signal)
 
-    await _open_and_confirm(dp, bot, signal, user)
+    await _open_and_confirm(dp, bot, notification, user)
 
     orders = await _orders_for_signal(session, signal.id)
     assert len(orders) == 1
@@ -795,8 +827,9 @@ async def test_confirm_yes_real_order_without_order_id_says_so(  # type: ignore[
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _notify(session, signal)
 
-    await _open_and_confirm(dp, bot, signal, user)
+    await _open_and_confirm(dp, bot, notification, user)
 
     orders = await _orders_for_signal(session, signal.id)
     assert len(orders) == 1
@@ -829,9 +862,10 @@ async def test_confirm_yes_live_orders_not_allowed_blocks_before_http(  # type: 
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _notify(session, signal)
 
-    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
-    state = execution._confirmations[(user.id, signal.id)]
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
+    state = execution._confirmations[(user.id, notification.id)]
     # Обходим evaluate()/run_guards() тем же приёмом, что и остальные
     # тесты файла (мутация settings после сборки dp): гвард уже пропустил
     # запрос на "Да" (значения были верными при открытии карточки), эта
@@ -840,7 +874,7 @@ async def test_confirm_yes_live_orders_not_allowed_blocks_before_http(  # type: 
 
     await _feed(
         dp, bot, 2,
-        make_callback(f"exec:yes:{signal.id}", message_id=state.message_id),
+        make_callback(f"exn:yes:{notification.id}", message_id=state.message_id),
     )
 
     assert client.submit_calls == []
@@ -874,10 +908,11 @@ async def test_confirm_yes_real_order_commit_survives_later_exception(  # type: 
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _notify(session, signal)
     signal_id = signal.id
 
     with pytest.raises(RuntimeError, match="boom-after-commit"):
-        await _open_and_confirm(dp, bot, signal, user)
+        await _open_and_confirm(dp, bot, notification, user)
 
     db2 = Database(settings)
     async with db2.session() as session2:
@@ -900,15 +935,16 @@ async def test_position_mode_read_on_card_not_reread_on_confirm(ctx, bot, monkey
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _notify(session, signal)
 
-    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
     assert client.get_position_mode_calls == 1
-    state = execution._confirmations[(user.id, signal.id)]
+    state = execution._confirmations[(user.id, notification.id)]
     assert state.quote.dual_side_position is True  # дефолт фейка
 
     await _feed(
         dp, bot, 2,
-        make_callback(f"exec:yes:{signal.id}", message_id=state.message_id),
+        make_callback(f"exn:yes:{notification.id}", message_id=state.message_id),
     )
 
     assert client.get_position_mode_calls == 1  # не переспросили на "Да"
@@ -929,13 +965,14 @@ async def test_open_button_refuses_position_mode_unknown_on_fetch_failure(  # ty
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _notify(session, signal)
 
-    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
 
     texts = bot.recorder.sent_texts()
     assert len(texts) == 1
     assert "Не удалось проверить режим позиций" in texts[0]
-    assert (user.id, signal.id) not in execution._confirmations
+    assert (user.id, notification.id) not in execution._confirmations
 
     orders = await _orders_for_signal(session, signal.id)
     assert len(orders) == 1
@@ -954,17 +991,18 @@ async def test_confirm_yes_lock_ttl_comes_from_settings(ctx, bot, monkeypatch) -
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _notify(session, signal)
 
-    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
-    state = execution._confirmations[(user.id, signal.id)]
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
+    state = execution._confirmations[(user.id, notification.id)]
 
     await _feed(
         dp, bot, 2,
-        make_callback(f"exec:yes:{signal.id}", message_id=state.message_id),
+        make_callback(f"exn:yes:{notification.id}", message_id=state.message_id),
     )
 
     lock_calls = [
-        ex for name, ex in redis.set_calls if name == confirm_lock_key(user.id, signal.id)
+        ex for name, ex in redis.set_calls if name == confirm_lock_key(user.id, notification.id)
     ]
     assert lock_calls == [settings.confirm_lock_ttl_seconds]
     assert settings.confirm_lock_ttl_seconds != 15
@@ -977,11 +1015,12 @@ async def test_confirm_no_cancels_without_orders(ctx, bot, monkeypatch) -> None:
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _notify(session, signal)
 
-    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
-    state = execution._confirmations[(user.id, signal.id)]
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
+    state = execution._confirmations[(user.id, notification.id)]
 
-    await _feed(dp, bot, 2, make_callback(f"exec:no:{signal.id}", message_id=state.message_id))
+    await _feed(dp, bot, 2, make_callback(f"exn:no:{notification.id}", message_id=state.message_id))
 
     # Раздел 12а ТЗ: карточка была показана и отклонена пользователем — не
     # DRY_RUN (нет тройки вход/стоп/тейк), а одна строка-наблюдение DECLINED
@@ -992,9 +1031,9 @@ async def test_confirm_no_cancels_without_orders(ctx, bot, monkeypatch) -> None:
     assert orders[0].role is OrderRole.ENTRY
     assert orders[0].client_order_id is None
     assert orders[0].quantity is not None
-    await session.refresh(signal)
-    assert signal.trade_opened_at is None
-    assert (user.id, signal.id) not in execution._confirmations
+    await session.refresh(notification)
+    assert notification.trade_opened_at is None
+    assert (user.id, notification.id) not in execution._confirmations
 
 
 async def test_confirm_yes_busy_lock_answers_and_creates_nothing(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -1005,13 +1044,16 @@ async def test_confirm_yes_busy_lock_answers_and_creates_nothing(ctx, bot, monke
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _notify(session, signal)
 
-    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
-    state = execution._confirmations[(user.id, signal.id)]
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
+    state = execution._confirmations[(user.id, notification.id)]
 
-    redis.store[confirm_lock_key(user.id, signal.id)] = "someone-elses-token"
+    redis.store[confirm_lock_key(user.id, notification.id)] = "someone-elses-token"
 
-    await _feed(dp, bot, 2, make_callback(f"exec:yes:{signal.id}", message_id=state.message_id))
+    await _feed(
+        dp, bot, 2, make_callback(f"exn:yes:{notification.id}", message_id=state.message_id)
+    )
 
     assert any("уже обрабатывается" in a.lower() for a in bot.recorder.alerts())
     orders = await _orders_for_signal(session, signal.id)
@@ -1025,63 +1067,67 @@ async def test_two_parallel_confirms_one_signal_race_is_caught(ctx, bot, monkeyp
     Второе нажатие в этом окне успешно берёт лок и запускает второй,
     полностью параллельный _process_confirm. Воспроизводим это напрямую,
     в обход RedisLock (как если бы TTL уже истёк), двумя независимыми
-    сессиями на один сигнал — как в проде два разных апдейта получают
+    сессиями на одно уведомление — как в проде два разных апдейта получают
     каждый свою сессию.
 
-    Где на самом деле расходятся два процесса: `signal = await
-    SignalRepository(session).get(signal_id, user.id)` (execution.py:501)
-    читает `trade_opened_at` в объект ORM ОДИН раз за вызов; всё, что
-    дальше (guards → sizing → запись execution_orders → `signal.
-    trade_opened_at = now`) — это уже работа с этим объектом в памяти,
-    без повторного похода в БД. Победитель коммитит `trade_opened_at`
-    только в самом конце, когда `async with db.session()` в run_confirm()
-    закрывается. Без синхронизации это окно достаточно широкое, чтобы
-    планировщик asyncio иногда прогонял один _process_confirm целиком
-    (включая commit) раньше, чем второй вообще доходил до своего
-    SignalRepository.get() — тогда гонку ловил гвард SIGNAL_ALREADY_USED,
-    а не UNIQUE, и тест с "любой из двух" проходил зелёным, даже когда
-    ветка IntegrityError ни разу не исполнялась (обнаружено флейком:
-    ~1 провал на 5 прогонов). Барьер ниже держит оба вызова
-    SignalRepository.get() ровно на этой точке, пока не отработают ОБА —
-    это гарантирует, что оба видят trade_opened_at=None и оба проходят
-    SIGNAL_ALREADY_USED, а расходятся заведомо позже, на UNIQUE
-    client_order_id при записи execution_orders."""
+    Шаг 15.5.2а: в проде такую пару уже сериализует FOR NO KEY UPDATE на
+    строке слота (SignalRepository.get_for_update) — второй дождётся
+    коммита первого и получит SIGNAL_ALREADY_USED. Этот тест проверяет
+    последний рубеж на случай, если сериализации нет: get_for_update
+    подменён чтением БЕЗ блокировки, а барьер держит оба процесса на
+    входе в гварды идентичности (после перечитывания снимка), пока до
+    него не дойдут ОБА — оба видят trade_opened_at=None, проходят
+    SIGNAL_ALREADY_USED и расходятся заведомо позже, на UNIQUE
+    client_order_id при записи execution_orders. Без барьера планировщик
+    asyncio иногда прогонял один процесс целиком раньше, чем второй
+    доходил до чтения, и тест проходил зелёным, ни разу не исполнив ветку
+    IntegrityError (флейк ~1 на 5 прогонов)."""
     dp, session, user, client, _redis, settings = ctx
     _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
 
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _notify(session, signal)
     await session.commit()  # видно другим сессиям/соединениям
 
-    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
-    state = execution._confirmations[(user.id, signal.id)]
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
+    state = execution._confirmations[(user.id, notification.id)]
 
-    # Барьер ставим ПОСЛЕ open_confirmation: у него свой, одиночный вызов
-    # SignalRepository.get() (execution.py:388, до гонки) — если бы барьер
-    # ждал двоих уже тогда, тест завис бы там навсегда.
+    # Подмены ставим ПОСЛЕ open_confirmation: у него свой, одиночный вызов
+    # evaluate() (до гонки) — если бы барьер ждал двоих уже тогда, тест
+    # завис бы там навсегда.
     barrier = asyncio.Barrier(2)
     original_get = SignalRepository.get
 
-    async def synced_get(self, sid: int, uid: int):  # type: ignore[no-untyped-def]
-        result = await original_get(self, sid, uid)
-        # Оба процесса дошли до чтения сигнала (и оба ещё видят его
-        # trade_opened_at=None, раз ни один не проходил дальше этой
-        # точки) — только теперь отпускаем обоих дальше.
+    async def unlocked_get_for_update(self, sid: int, uid: int):  # type: ignore[no-untyped-def]
+        # Без FOR NO KEY UPDATE: иначе второй процесс ждал бы коммита
+        # первого, а первый — второго на барьере ниже (взаимоблокировка).
+        return await original_get(self, sid, uid)
+
+    # Барьер — внутри evaluate(), прямо перед гвардами идентичности: оба
+    # процесса к этому моменту уже перечитали снимок (trade_opened_at=None).
+    original_exists_traded = execution_service.SignalNotificationRepository.exists_traded
+
+    async def synced_exists_traded(self, signal_id: int, fingerprint: str) -> bool:  # type: ignore[no-untyped-def]
+        result = await original_exists_traded(self, signal_id, fingerprint)
         await barrier.wait()
         return result
 
-    monkeypatch.setattr(SignalRepository, "get", synced_get)
+    monkeypatch.setattr(SignalRepository, "get_for_update", unlocked_get_for_update)
+    monkeypatch.setattr(
+        execution_service.SignalNotificationRepository, "exists_traded", synced_exists_traded
+    )
 
     db = Database(settings)
     try:
         async def run_confirm() -> None:
             async with db.session() as own_session:
                 callback = make_bound_callback(
-                    bot, f"exec:yes:{signal.id}", message_id=state.message_id
+                    bot, f"exn:yes:{notification.id}", message_id=state.message_id
                 )
                 await execution._process_confirm(
-                    callback, own_session, user, signal.id, settings, None, db
+                    callback, own_session, user, notification.id, settings, None, db
                 )
 
         # asyncio.gather без RedisLock: оба процесса реально параллельны,
@@ -1112,8 +1158,8 @@ async def test_two_parallel_confirms_one_signal_race_is_caught(ctx, bot, monkeyp
     assert len(success_texts) == 1
     assert len(race_texts) == 1
 
-    await session.refresh(signal)
-    assert signal.trade_opened_at is not None
+    await session.refresh(notification)
+    assert notification.trade_opened_at is not None
 
 
 class _FakeAsyncpgCauseError(Exception):
@@ -1177,9 +1223,10 @@ async def test_integrity_error_other_than_client_order_id_propagates(ctx, bot, m
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _notify(session, signal)
 
-    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
-    state = execution._confirmations[(user.id, signal.id)]
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
+    state = execution._confirmations[(user.id, notification.id)]
 
     async def fake_flush(self) -> None:  # type: ignore[no-untyped-def]
         raise _fake_integrity_error("fk_execution_orders_user_id_users")
@@ -1188,10 +1235,10 @@ async def test_integrity_error_other_than_client_order_id_propagates(ctx, bot, m
 
     monkeypatch.setattr(ExecutionOrderRepository, "flush", fake_flush)
 
-    callback = make_bound_callback(bot, f"exec:yes:{signal.id}", message_id=state.message_id)
+    callback = make_bound_callback(bot, f"exn:yes:{notification.id}", message_id=state.message_id)
     with pytest.raises(IntegrityError):
         await execution._process_confirm(
-            callback, session, user, signal.id, settings, None, dp["db"]
+            callback, session, user, notification.id, settings, None, dp["db"]
         )
 
     edit_texts = [m.text for m in bot.recorder.calls if isinstance(m, EditMessageText)]
@@ -1205,19 +1252,22 @@ async def test_confirm_yes_after_ttl_shows_expired(ctx, bot, monkeypatch) -> Non
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _notify(session, signal)
 
-    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
-    state = execution._confirmations[(user.id, signal.id)]
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
+    state = execution._confirmations[(user.id, notification.id)]
     state.created_at = datetime.now(UTC) - timedelta(seconds=settings.exec_confirm_ttl_seconds + 1)
 
-    await _feed(dp, bot, 2, make_callback(f"exec:yes:{signal.id}", message_id=state.message_id))
+    await _feed(
+        dp, bot, 2, make_callback(f"exn:yes:{notification.id}", message_id=state.message_id)
+    )
 
     # Раздел 12а ТЗ: "Да" пришло позже TTL — считаем карточку истёкшей и
     # логируем EXPIRED, а не молча проглатываем попытку.
     orders = await _orders_for_signal(session, signal.id)
     assert len(orders) == 1
     assert orders[0].status is OrderStatus.EXPIRED
-    assert (user.id, signal.id) not in execution._confirmations
+    assert (user.id, notification.id) not in execution._confirmations
     edits = [m for m in bot.recorder.calls if isinstance(m, EditMessageReplyMarkup)]
     assert len(edits) == 1
 
@@ -1238,10 +1288,12 @@ async def test_expire_card_background_task_writes_expired(ctx, bot, monkeypatch)
 
     signal = _signal(user.id)
     session.add(signal)
+    await session.flush()
+    notification = await _notify(session, signal)
     await session.commit()
 
-    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
-    assert (user.id, signal.id) in execution._confirmations
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
+    assert (user.id, notification.id) in execution._confirmations
 
     tasks = list(execution._background_tasks)
     assert len(tasks) == 1
@@ -1250,7 +1302,7 @@ async def test_expire_card_background_task_writes_expired(ctx, bot, monkeypatch)
     orders = await _orders_for_signal(session, signal.id)
     assert len(orders) == 1
     assert orders[0].status is OrderStatus.EXPIRED
-    assert (user.id, signal.id) not in execution._confirmations
+    assert (user.id, notification.id) not in execution._confirmations
     edits = [m for m in bot.recorder.calls if isinstance(m, EditMessageReplyMarkup)]
     assert len(edits) == 1
 
@@ -1262,16 +1314,19 @@ async def test_confirm_yes_price_drift_sends_recalculated_card(ctx, bot, monkeyp
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _notify(session, signal)
 
-    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
-    state = execution._confirmations[(user.id, signal.id)]
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
+    state = execution._confirmations[(user.id, notification.id)]
 
     # Дрейф 1 > 0.3 * 3 (дистанция до стопа 97) — за границей допустимого,
     # но RR по новой цене (101→110 против стопа 97) всё ещё ≥ EXEC_MIN_RR,
     # так что пересчитанная карточка обязана уйти успешно, а не отказом.
     client.price = D("101")
 
-    await _feed(dp, bot, 2, make_callback(f"exec:yes:{signal.id}", message_id=state.message_id))
+    await _feed(
+        dp, bot, 2, make_callback(f"exn:yes:{notification.id}", message_id=state.message_id)
+    )
 
     # Раздел 12а ТЗ: сам PRICE_DRIFT-отказ на "Да" — это тоже отказ гварда,
     # ExecutionService.evaluate() пишет его сам (REFUSED). Тройки DRY_RUN
@@ -1281,13 +1336,13 @@ async def test_confirm_yes_price_drift_sends_recalculated_card(ctx, bot, monkeyp
     assert orders[0].status is OrderStatus.REFUSED
     assert orders[0].error_code == "PRICE_DRIFT"
     assert orders[0].stage == ObservationStage.CONFIRM
-    await session.refresh(signal)
-    assert signal.trade_opened_at is None
+    await session.refresh(notification)
+    assert notification.trade_opened_at is None
 
     # Новая карточка отправлена (снова "Да, открыть" где-то в текстах) —
     # это следующее сообщение с кнопками, а не тихий вход.
-    assert (user.id, signal.id) in execution._confirmations
-    new_state = execution._confirmations[(user.id, signal.id)]
+    assert (user.id, notification.id) in execution._confirmations
+    new_state = execution._confirmations[(user.id, notification.id)]
     assert new_state.planned_price == D("101")
 
 
@@ -1330,8 +1385,9 @@ async def test_card_stage_refusal_is_marked_card(ctx, bot, monkeypatch) -> None:
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _notify(session, signal)
 
-    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
 
     (row,) = await _orders_for_signal(session, signal.id)
     assert row.status is OrderStatus.REFUSED
@@ -1346,12 +1402,15 @@ async def test_confirm_stage_refusal_is_marked_confirm(ctx, bot, monkeypatch) ->
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _notify(session, signal)
 
-    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
-    state = execution._confirmations[(user.id, signal.id)]
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
+    state = execution._confirmations[(user.id, notification.id)]
     settings.trading_execution_enabled = False
 
-    await _feed(dp, bot, 2, make_callback(f"exec:yes:{signal.id}", message_id=state.message_id))
+    await _feed(
+        dp, bot, 2, make_callback(f"exn:yes:{notification.id}", message_id=state.message_id)
+    )
 
     (row,) = await _orders_for_signal(session, signal.id)
     assert row.status is OrderStatus.REFUSED
@@ -1367,11 +1426,14 @@ async def test_price_drift_refusal_on_yes_is_confirm_and_recalculated_card_is_ca
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _notify(session, signal)
 
-    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
-    state = execution._confirmations[(user.id, signal.id)]
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
+    state = execution._confirmations[(user.id, notification.id)]
     client.price = D("101")
-    await _feed(dp, bot, 2, make_callback(f"exec:yes:{signal.id}", message_id=state.message_id))
+    await _feed(
+        dp, bot, 2, make_callback(f"exn:yes:{notification.id}", message_id=state.message_id)
+    )
 
     (row,) = await _orders_for_signal(session, signal.id)
     assert row.error_code == "PRICE_DRIFT"
@@ -1384,8 +1446,9 @@ async def test_auth_error_on_card_is_recorded_as_error_card(ctx, bot, monkeypatc
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _notify(session, signal)
 
-    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
 
     texts = bot.recorder.sent_texts()
     assert len(texts) == 1 and "ключ отозван" in texts[0]
@@ -1404,8 +1467,9 @@ async def test_exchange_error_in_evaluate_on_card_is_recorded(ctx, bot, monkeypa
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _notify(session, signal)
 
-    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
 
     assert len(bot.recorder.sent_texts()) == 1
     (row,) = await _orders_for_signal(session, signal.id)
@@ -1420,19 +1484,22 @@ async def test_exchange_error_on_yes_is_recorded_as_error_confirm(ctx, bot, monk
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _notify(session, signal)
 
-    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
-    state = execution._confirmations[(user.id, signal.id)]
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
+    state = execution._confirmations[(user.id, notification.id)]
     _make_ticker_fail(monkeypatch, client, ExchangeUnavailableError("timeout"))
 
-    await _feed(dp, bot, 2, make_callback(f"exec:yes:{signal.id}", message_id=state.message_id))
+    await _feed(
+        dp, bot, 2, make_callback(f"exn:yes:{notification.id}", message_id=state.message_id)
+    )
 
     (row,) = await _orders_for_signal(session, signal.id)
     assert row.status is OrderStatus.ERROR
     assert row.stage == ObservationStage.CONFIRM
-    assert (user.id, signal.id) not in execution._confirmations
-    await session.refresh(signal)
-    assert signal.trade_opened_at is None
+    assert (user.id, notification.id) not in execution._confirmations
+    await session.refresh(notification)
+    assert notification.trade_opened_at is None
 
 
 async def test_error_row_never_stores_exception_text(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -1444,8 +1511,9 @@ async def test_error_row_never_stores_exception_text(ctx, bot, monkeypatch) -> N
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _notify(session, signal)
 
-    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
 
     (row,) = await _orders_for_signal(session, signal.id)
     assert row.status is OrderStatus.ERROR
@@ -1467,9 +1535,250 @@ async def test_failed_observation_write_does_not_swallow_user_message(  # type: 
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _notify(session, signal)
 
-    await _feed(dp, bot, 1, make_callback(f"exec:open:{signal.id}", message_id=1))
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
 
     texts = bot.recorder.sent_texts()
     assert len(texts) == 1 and "ключ отозван" in texts[0]
     assert await _orders_for_signal(session, signal.id) == []
+
+
+# ---------------------------------------------------------------------------
+# Шаг 15.5.2а: уведомление сигнала как неизменяемая сущность
+# ---------------------------------------------------------------------------
+
+
+def _exchange_calls(client: FakeExchangeClient) -> int:
+    """Все обращения к бирже, которые фейк умеет считать."""
+    return (
+        len(client.ticker_retries_seen)
+        + len(client.balance_retries_seen)
+        + len(client.symbols_retries_seen)
+        + len(client.submit_calls)
+        + client.get_position_mode_calls
+    )
+
+
+async def _orders_for_notification(session, notification_id: int) -> list[ExecutionOrder]:  # type: ignore[no-untyped-def]
+    stmt = select(ExecutionOrder).where(ExecutionOrder.notification_id == notification_id)
+    return list((await session.scalars(stmt)).all())
+
+
+async def test_card_window_superseded_refuses_on_yes_without_exchange_calls(  # type: ignore[no-untyped-def]
+    ctx, bot, monkeypatch
+) -> None:
+    """Карточка показана → сканер перезаписал слот новым сетапом (новый
+    fingerprint, другие уровни) → «Да» даёт SIGNAL_SUPERSEDED, и после
+    показа карточки на биржу не уходит ни одного запроса. До 15.5.2а «Да»
+    молча исполнило бы новые уровни слота, которых пользователь не видел."""
+    dp, session, user, client, _redis, _settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _notify(session, signal)
+
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
+    state = execution._confirmations[(user.id, notification.id)]
+    calls_after_card = _exchange_calls(client)
+
+    signal.fingerprint = "fp-new"
+    signal.stop_loss = D("90")
+    signal.take_profit = D("130")
+    await session.flush()
+
+    await _feed(
+        dp, bot, 2,
+        make_callback(f"exn:yes:{notification.id}", message_id=state.message_id),
+    )
+
+    assert _exchange_calls(client) == calls_after_card
+    rows = await _orders_for_notification(session, notification.id)
+    refused = [r for r in rows if r.status is OrderStatus.REFUSED]
+    assert len(refused) == 1
+    assert refused[0].error_code == "SIGNAL_SUPERSEDED"
+    assert refused[0].stage == ObservationStage.CONFIRM
+    assert not [r for r in rows if r.status is OrderStatus.DRY_RUN]
+    await session.refresh(notification)
+    assert notification.trade_opened_at is None
+
+    edits = [m.text for m in bot.recorder.calls if isinstance(m, EditMessageText)]
+    assert any(
+        "Сетап обновился после уведомления — новые уровни придут новым сигналом" in (t or "")
+        for t in edits
+    )
+
+
+@pytest.mark.parametrize("prefix", ["exec:open:", "exec:yes:", "exec:no:"])
+async def test_legacy_signal_button_answers_stale_and_does_nothing(  # type: ignore[no-untyped-def]
+    ctx, bot, monkeypatch, prefix
+) -> None:
+    """Кнопки старого образца exec:*:{signal_id} из уже отправленных
+    сообщений: «Уведомление устарело», ни записей, ни карточки, ни биржи."""
+    dp, session, user, client, _redis, _settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    await _notify(session, signal)
+
+    await _feed(dp, bot, 1, make_callback(f"{prefix}{signal.id}", message_id=1))
+
+    assert bot.recorder.alerts() == ["⏳ Уведомление устарело — дождись нового сигнала."]
+    assert bot.recorder.sent_texts() == []
+    assert await _orders_for_signal(session, signal.id) == []
+    assert execution._confirmations == {}
+    assert _exchange_calls(client) == 0
+
+
+async def test_open_unknown_notification_answers_stale(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Кнопка указывает на id, которого в БД нет (коммит сканера после
+    отправки не случился) — «устарело», а не исключение."""
+    dp, _session, _user, client, _redis, _settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+
+    await _feed(dp, bot, 1, make_callback("exn:open:2147483000", message_id=1))
+
+    assert bot.recorder.sent_texts() == ["⏳ Уведомление устарело — дождись нового сигнала."]
+    assert _exchange_calls(client) == 0
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+async def test_two_notifications_same_slot_distinct_client_order_ids(  # type: ignore[no-untyped-def]
+    ctx, bot, monkeypatch, dry_run
+) -> None:
+    """Два уведомления одного слота с разными fingerprint: вход по каждому
+    получает свой client_order_id (tj{nid}u…E), второй вход не упирается в
+    UNIQUE. До 15.5.2а оба давали tj{signal_id}u…E, и второй вход ловил
+    ложную «гонку»."""
+    dp, session, user, client, _redis, settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    if not dry_run:
+        settings.exec_dry_run = False  # обходим валидатор конструктора, как и другие тесты
+        client.current_leverage = _leverage_info(long_leverage=10)
+        client.place_order_result = _order_result()
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    first = await _notify(session, signal)
+    await _open_and_confirm(dp, bot, first, user)
+
+    signal.fingerprint = "fp-second"
+    signal.stop_loss = D("96")
+    await session.flush()
+    second = await _notify(session, signal)
+    await _open_and_confirm(dp, bot, second, user)
+
+    entries = [
+        o for o in await _orders_for_signal(session, signal.id) if o.role is OrderRole.ENTRY
+    ]
+    expected_status = OrderStatus.DRY_RUN if dry_run else OrderStatus.SUBMITTED
+    assert [o.status for o in entries] == [expected_status, expected_status]
+    assert {o.client_order_id for o in entries} == {
+        f"tj{first.id}u{user.id}E", f"tj{second.id}u{user.id}E",
+    }
+    assert {o.notification_id for o in entries} == {first.id, second.id}
+
+    edits = [m.text or "" for m in bot.recorder.calls if isinstance(m, EditMessageText)]
+    assert not any("уже обрабатывается" in t for t in edits)
+    if not dry_run:
+        placed = [
+            c[1]["client_order_id"] for c in client.submit_calls if c[0] == "place_market_order"
+        ]
+        assert placed == [f"tj{first.id}u{user.id}E", f"tj{second.id}u{user.id}E"]
+
+
+async def test_setup_already_traded_refuses_other_notification_of_same_setup(  # type: ignore[no-untyped-def]
+    ctx, bot, monkeypatch
+) -> None:
+    """По сетапу вошли через одно уведомление; сканер прислал новое
+    уведомление того же сетапа (тот же fingerprint) — повторный вход
+    запрещён: SETUP_ALREADY_TRADED уже на карточке, без запросов к бирже
+    за ценой."""
+    dp, session, user, client, _redis, _settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    first = await _notify(session, signal)
+    await _open_and_confirm(dp, bot, first, user)
+    await session.refresh(first)
+    assert first.trade_opened_at is not None
+
+    second = await _notify(session, signal)  # тот же fingerprint
+    tickers_before = len(client.ticker_retries_seen)
+    await _feed(dp, bot, 3, make_callback(f"exn:open:{second.id}", message_id=3))
+
+    assert (user.id, second.id) not in execution._confirmations
+    assert len(client.ticker_retries_seen) == tickers_before
+    [row] = await _orders_for_notification(session, second.id)
+    assert row.status is OrderStatus.REFUSED
+    assert row.error_code == "SETUP_ALREADY_TRADED"
+    assert any("По этому сетапу уже открывали сделку" in t for t in bot.recorder.sent_texts())
+
+
+async def test_parallel_yes_on_two_notifications_of_same_setup_one_wins(  # type: ignore[no-untyped-def]
+    ctx, bot, monkeypatch
+) -> None:
+    """Р2: два уведомления одного сетапа, обе карточки открыты, два «Да»
+    параллельно в разных сессиях. FOR NO KEY UPDATE на слоте сериализует
+    их: второй дожидается коммита первого и видит его trade_opened_at —
+    ровно один вход, второй — SETUP_ALREADY_TRADED."""
+    dp, session, user, client, _redis, settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    first = await _notify(session, signal)
+    second = await _notify(session, signal)  # тот же fingerprint
+    await session.commit()
+
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{first.id}", message_id=1))
+    await _feed(dp, bot, 2, make_callback(f"exn:open:{second.id}", message_id=2))
+    state_first = execution._confirmations[(user.id, first.id)]
+    state_second = execution._confirmations[(user.id, second.id)]
+    await session.commit()  # отпустить транзакцию общей сессии теста
+
+    # Оба процесса прочитали свои снимки до того, как кто-то взял слот.
+    barrier = asyncio.Barrier(2)
+    original_get = execution.SignalNotificationRepository.get
+
+    async def synced_get(self, nid: int, uid: int):  # type: ignore[no-untyped-def]
+        result = await original_get(self, nid, uid)
+        await barrier.wait()
+        return result
+
+    monkeypatch.setattr(execution.SignalNotificationRepository, "get", synced_get)
+
+    db = Database(settings)
+    try:
+        async def run_confirm(nid: int, message_id: int) -> None:
+            async with db.session() as own_session:
+                callback = make_bound_callback(bot, f"exn:yes:{nid}", message_id=message_id)
+                await execution._process_confirm(
+                    callback, own_session, user, nid, settings, None, db
+                )
+
+        await asyncio.wait_for(
+            asyncio.gather(
+                run_confirm(first.id, state_first.message_id),
+                run_confirm(second.id, state_second.message_id),
+            ),
+            timeout=30,
+        )
+    finally:
+        await db.dispose()
+
+    rows = await _orders_for_signal(session, signal.id)
+    dry_run = [r for r in rows if r.status is OrderStatus.DRY_RUN]
+    refused = [r for r in rows if r.status is OrderStatus.REFUSED]
+    assert len(dry_run) == 3  # одна тройка вход/стоп/тейк
+    assert len({r.notification_id for r in dry_run}) == 1
+    assert [r.error_code for r in refused] == ["SETUP_ALREADY_TRADED"]
+    assert refused[0].notification_id != dry_run[0].notification_id

@@ -22,6 +22,13 @@ execution_orders — DRY_RUN при «Да», DECLINED при «Нет», EXPIRE
 Отказ гварда (REFUSED) пишет сам ExecutionService.evaluate(), не здесь.
 Отдельной таблицы под ежедневную сводку исполнения нет — см. раздел
 "Что накапливать" в ТЗ и app/workers/execution_digest.py.
+
+Шаг 15.5.2а: кнопки адресуют снимок уведомления (notification_id,
+префиксы exn:*), а не строку слота. Карточка и «Да» строятся из снимка;
+слот читается только чтобы проверить, что снимок ещё актуален (гварды
+3а-4а в ExecutionService.evaluate()). Кнопки старого образца exec:*:{signal_id}
+из уже отправленных сообщений отвечают «Уведомление устарело» и ничего
+не исполняют.
 """
 
 from __future__ import annotations
@@ -46,10 +53,12 @@ from app.core.locks import LockBusyError, RedisLike, RedisLock, confirm_lock_key
 from app.core.logging import get_logger
 from app.core.security import SecretCipher
 from app.database.models.signal import SignalRecord
+from app.database.models.signal_notification import SignalNotification
 from app.database.models.trading_plan import TradingPlan
 from app.database.models.user import User
 from app.database.repositories.execution_order import ExecutionOrderRepository
 from app.database.repositories.signal import SignalRepository
+from app.database.repositories.signal_notification import SignalNotificationRepository
 from app.database.session import Database
 from app.exchanges.base import ExchangeAuthError, ExchangeError
 from app.exchanges.bingx import bingx_position_side
@@ -71,7 +80,7 @@ from app.market.data import MarketDataService
 from app.services.exchange_factory import ExchangeFactory
 from app.services.permissions import refresh_permissions
 from app.services.position_mode import refresh_position_mode
-from app.trading.enums import ObservationStage, OrderStatus, SignalLevel, SignalRecordStatus
+from app.trading.enums import ObservationStage, OrderStatus, SignalLevel
 
 router = Router(name="execution")
 logger = get_logger(__name__)
@@ -98,9 +107,11 @@ class _ConfirmationState:
     drift_percent: Decimal | None
 
 
-# (user_id, signal_id) → активная карточка. Одна на пару: новая карточка
-# (в т.ч. пересчёт после PRICE_DRIFT) вытесняет предыдущую.
+# (user_id, notification_id) → активная карточка. Одна на пару: новая
+# карточка (в т.ч. пересчёт после PRICE_DRIFT) вытесняет предыдущую.
 _confirmations: dict[tuple[int, int], _ConfirmationState] = {}
+
+STALE_NOTIFICATION_TEXT = "⏳ Уведомление устарело — дождись нового сигнала."
 
 # Сильные ссылки на фоновые задачи TTL: без этого asyncio может собрать
 # задачу сборщиком мусора до того, как она успеет доспать (RUF006).
@@ -112,7 +123,7 @@ _background_tasks: set[asyncio.Task[None]] = set()
 _position_mode_cache = TTLCache()
 
 
-def _parse_signal_id(data: str | None, prefix: str) -> int | None:
+def _parse_id(data: str | None, prefix: str) -> int | None:
     if data is None:
         return None
     try:
@@ -142,16 +153,19 @@ def _render_rejection_message(error_code: str | None) -> str:
     return f"🚫 BingX отклонил ордер, код {error_code}"
 
 
-def render_confirmation(quote: ExecutionQuote, signal: SignalRecord, settings: Settings) -> str:
-    """Раздел 5 ТЗ: карточка подтверждения со всеми цифрами."""
+def render_confirmation(
+    quote: ExecutionQuote, notification: SignalNotification, settings: Settings
+) -> str:
+    """Раздел 5 ТЗ: карточка подтверждения со всеми цифрами. Опорная цена —
+    из снимка уведомления, того, что пользователь видел в сообщении."""
     order = quote.order
     base_asset = order.symbol.split("-")[0]
     price_precision = quote.symbol_info.price_precision
     quantity_precision = quote.symbol_info.quantity_precision
 
     drift_note = ""
-    reference = signal_reference_price(signal)
-    drift_pct = price_drift_percent(order.entry_price, signal)
+    reference = signal_reference_price(notification)
+    drift_pct = price_drift_percent(order.entry_price, notification)
     if reference is not None and drift_pct is not None:
         drift_note = (
             f" (сигнал был на {fmt_price(reference, price_precision)}, "
@@ -212,7 +226,8 @@ def _is_client_order_id_collision(exc: IntegrityError) -> bool:
 async def _record_exchange_error(
     session: AsyncSession,
     user: User,
-    signal: SignalRecord,
+    notification: SignalNotification,
+    slot: SignalRecord,
     error: ExchangeError,
     *,
     at_confirm: bool,
@@ -221,10 +236,10 @@ async def _record_exchange_error(
     классом исключения. Запись идёт в SAVEPOINT и не должна ронять ответ
     пользователю: если БД недоступна, текст об ошибке биржи всё равно уйдёт,
     а сбой записи — в лог (не молча)."""
-    if signal.direction is None:
+    if notification.direction is None:
         logger.error(
             "Сбой биржи по сигналу без направления — наблюдение не записано",
-            extra={"user_id": user.id, "signal_id": signal.id},
+            extra={"user_id": user.id, "notification_id": notification.id},
         )
         return
     stage = ObservationStage.CONFIRM if at_confirm else ObservationStage.CARD
@@ -233,9 +248,10 @@ async def _record_exchange_error(
             session.add(
                 build_exchange_error_order(
                     user_id=user.id,
-                    signal_id=signal.id,
-                    symbol=signal.symbol,
-                    direction=signal.direction,
+                    signal_id=slot.id,
+                    notification_id=notification.id,
+                    symbol=slot.symbol,
+                    direction=notification.direction,
                     error=error,
                     stage=stage,
                 )
@@ -243,14 +259,15 @@ async def _record_exchange_error(
     except Exception:
         logger.exception(
             "Не удалось записать сбой биржи в execution_orders",
-            extra={"user_id": user.id, "signal_id": signal.id},
+            extra={"user_id": user.id, "notification_id": notification.id},
         )
 
 
 async def _build_quote(
     session: AsyncSession,
     user: User,
-    signal: SignalRecord,
+    notification: SignalNotification,
+    slot: SignalRecord,
     plan: TradingPlan,
     settings: Settings,
     cipher: SecretCipher,
@@ -292,7 +309,7 @@ async def _build_quote(
             client = await factory.for_user(session, user.id, mode=allowed_mode)
         except ExchangeAuthError as exc:
             await _record_exchange_error(
-                session, user, signal, exc, at_confirm=planned_price is not None
+                session, user, notification, slot, exc, at_confirm=planned_price is not None
             )
             return _describe(exc)
     else:
@@ -320,7 +337,8 @@ async def _build_quote(
     try:
         return await service.evaluate(
             user=user,
-            signal=signal,
+            notification=notification,
+            slot=slot,
             plan=plan,
             has_trading_key=has_trading_key,
             key_can_trade_futures=key_can_trade_futures,
@@ -332,7 +350,7 @@ async def _build_quote(
     except ExchangeError as exc:
         logger.warning("Биржа недоступна при оценке исполнения", extra={"user_id": user.id})
         await _record_exchange_error(
-            session, user, signal, exc, at_confirm=planned_price is not None
+            session, user, notification, slot, exc, at_confirm=planned_price is not None
         )
         return _describe(exc)
     finally:
@@ -344,7 +362,7 @@ async def _send_result(
     db: Database,
     chat_id: int,
     user: User,
-    signal: SignalRecord,
+    notification: SignalNotification,
     result: _EvaluationResult,
     settings: Settings,
 ) -> None:
@@ -357,20 +375,20 @@ async def _send_result(
         await bot.send_message(chat_id, render_refusal(result))
         return
 
-    text = render_confirmation(result, signal, settings)
-    sent = await bot.send_message(chat_id, text, reply_markup=confirm_keyboard(signal.id))
+    text = render_confirmation(result, notification, settings)
+    sent = await bot.send_message(chat_id, text, reply_markup=confirm_keyboard(notification.id))
     now = datetime.now(UTC)
-    _confirmations[(user.id, signal.id)] = _ConfirmationState(
+    _confirmations[(user.id, notification.id)] = _ConfirmationState(
         planned_price=result.order.entry_price,
         created_at=now,
         chat_id=sent.chat.id,
         message_id=sent.message_id,
         quote=result,
-        drift_percent=price_drift_percent(result.order.entry_price, signal),
+        drift_percent=price_drift_percent(result.order.entry_price, notification),
     )
     task = asyncio.create_task(
         _expire_card(
-            bot, db, user.id, signal.id, sent.chat.id, sent.message_id,
+            bot, db, user.id, notification.id, sent.chat.id, sent.message_id,
             settings.exec_confirm_ttl_seconds,
         )
     )
@@ -382,7 +400,7 @@ async def _expire_card(
     bot: Bot,
     db: Database,
     user_id: int,
-    signal_id: int,
+    notification_id: int,
     chat_id: int,
     message_id: int,
     ttl_seconds: int,
@@ -398,7 +416,7 @@ async def _expire_card(
     задача не участвует в транзакции обработчика, который её запустил).
     """
     await asyncio.sleep(ttl_seconds)
-    key = (user_id, signal_id)
+    key = (user_id, notification_id)
     state = _confirmations.get(key)
     if state is None or state.chat_id != chat_id or state.message_id != message_id:
         return
@@ -429,18 +447,27 @@ async def open_confirmation(
     cipher: SecretCipher,
     db: Database,
 ) -> None:
-    signal_id = _parse_signal_id(str(callback.data), ExecutionCB.OPEN)
+    notification_id = _parse_id(str(callback.data), ExecutionCB.OPEN)
     await callback.answer()
-    if signal_id is None or not isinstance(callback.message, Message) or callback.bot is None:
+    if (
+        notification_id is None
+        or not isinstance(callback.message, Message)
+        or callback.bot is None
+    ):
         return
 
-    signal = await SignalRepository(session).get(signal_id, user.id)
-    if (
-        signal is None
-        or signal.level is not SignalLevel.READY
-        or signal.status is not SignalRecordStatus.ACTIVE
-    ):
-        await callback.message.answer("⏳ Сигнал уже не актуален.")
+    # Нет строки — уведомление чужое, или коммит сканера после отправки не
+    # случился (кнопка ушла, снимка нет): «устарело», а не падение.
+    # Актуальность снимка против слота (погашен, сетап сменился, истёк,
+    # уже использован) — гварды 3а-4а в evaluate(), с записью REFUSED.
+    notification = await SignalNotificationRepository(session).get(notification_id, user.id)
+    slot = (
+        await SignalRepository(session).get(notification.signal_id, user.id)
+        if notification is not None
+        else None
+    )
+    if notification is None or slot is None or notification.level is not SignalLevel.READY:
+        await callback.message.answer(STALE_NOTIFICATION_TEXT)
         return
 
     plan = user.trading_plan
@@ -449,11 +476,11 @@ async def open_confirmation(
         return
 
     result = await _build_quote(
-        session, user, signal, plan, settings, cipher,
+        session, user, notification, slot, plan, settings, cipher,
         planned_price=None, check_permissions=True,
     )
     await _send_result(
-        callback.bot, db, callback.message.chat.id, user, signal, result, settings
+        callback.bot, db, callback.message.chat.id, user, notification, result, settings
     )
 
 
@@ -462,11 +489,11 @@ async def confirm_no(callback: CallbackQuery, user: User, session: AsyncSession)
     """Раздел 12а ТЗ: отказ пользователя пишется тут же, в транзакции этого
     апдейта — карточка ещё жива в _confirmations, повторный поход на биржу
     ради чисел не нужен, они уже посчитаны при показе (state.quote)."""
-    signal_id = _parse_signal_id(str(callback.data), ExecutionCB.NO)
+    notification_id = _parse_id(str(callback.data), ExecutionCB.NO)
     await callback.answer()
-    if signal_id is None or not isinstance(callback.message, Message):
+    if notification_id is None or not isinstance(callback.message, Message):
         return
-    state = _confirmations.pop((user.id, signal_id), None)
+    state = _confirmations.pop((user.id, notification_id), None)
     if state is not None:
         row = build_observation_order_from_quote(
             state.quote.order, status=OrderStatus.DECLINED, price_drift_percent=state.drift_percent
@@ -481,6 +508,19 @@ async def expired_noop(callback: CallbackQuery) -> None:
     await callback.answer("Карточка устарела. Дождись нового сигнала.", show_alert=True)
 
 
+@router.callback_query(
+    F.data.startswith(ExecutionCB.LEGACY_OPEN)
+    | F.data.startswith(ExecutionCB.LEGACY_YES)
+    | F.data.startswith(ExecutionCB.LEGACY_NO)
+)
+async def legacy_signal_button(callback: CallbackQuery) -> None:
+    """Шаг 15.5.2а: кнопки exec:*:{signal_id} из сообщений, отправленных до
+    перехода на снимки. signal_id адресует изменчивый слот — по нему нельзя
+    понять, какой сетап пользователь видел. Ничего не исполняет и не пишет;
+    exec:expired сюда не попадает — у префиксов есть двоеточие на конце."""
+    await callback.answer(STALE_NOTIFICATION_TEXT, show_alert=True)
+
+
 @router.callback_query(F.data.startswith(ExecutionCB.YES))
 async def confirm_yes(
     callback: CallbackQuery,
@@ -491,8 +531,8 @@ async def confirm_yes(
     redis: RedisLike,
     db: Database,
 ) -> None:
-    signal_id = _parse_signal_id(str(callback.data), ExecutionCB.YES)
-    if signal_id is None:
+    notification_id = _parse_id(str(callback.data), ExecutionCB.YES)
+    if notification_id is None:
         await callback.answer()
         return
 
@@ -500,8 +540,10 @@ async def confirm_yes(
     # ответ "уже обрабатывается", без ожидания и без повторной попытки.
     try:
         ttl = settings.confirm_lock_ttl_seconds
-        async with RedisLock(redis, confirm_lock_key(user.id, signal_id), ttl_seconds=ttl):
-            await _process_confirm(callback, session, user, signal_id, settings, cipher, db)
+        async with RedisLock(redis, confirm_lock_key(user.id, notification_id), ttl_seconds=ttl):
+            await _process_confirm(
+                callback, session, user, notification_id, settings, cipher, db
+            )
     except LockBusyError:
         await callback.answer("Уже обрабатывается…", show_alert=True)
 
@@ -510,7 +552,7 @@ async def _process_confirm(
     callback: CallbackQuery,
     session: AsyncSession,
     user: User,
-    signal_id: int,
+    notification_id: int,
     settings: Settings,
     cipher: SecretCipher,
     db: Database,
@@ -519,7 +561,7 @@ async def _process_confirm(
     if not isinstance(callback.message, Message) or callback.bot is None:
         return
 
-    key = (user.id, signal_id)
+    key = (user.id, notification_id)
     state = _confirmations.get(key)
     now = datetime.now(UTC)
     ttl = timedelta(seconds=settings.exec_confirm_ttl_seconds)
@@ -547,15 +589,24 @@ async def _process_confirm(
             await callback.message.edit_reply_markup(reply_markup=expired_keyboard())
         return
 
-    signal = await SignalRepository(session).get(signal_id, user.id)
-    if (
-        signal is None
-        or signal.level is not SignalLevel.READY
-        or signal.status is not SignalRecordStatus.ACTIVE
-    ):
+    notification = await SignalNotificationRepository(session).get(notification_id, user.id)
+    # Шаг 15.5.2а, Р2: слот под FOR NO KEY UPDATE до гвардов — два «Да» по
+    # разным уведомлениям одного сетапа не проскочат SETUP_ALREADY_TRADED
+    # вдвоём: второй дождётся коммита первого. Держится до конца транзакции.
+    slot = (
+        await SignalRepository(session).get_for_update(notification.signal_id, user.id)
+        if notification is not None
+        else None
+    )
+    if notification is None or slot is None or notification.level is not SignalLevel.READY:
         _confirmations.pop(key, None)
-        await callback.message.edit_text("⏳ Сигнал уже не актуален.", reply_markup=None)
+        await callback.message.edit_text(STALE_NOTIFICATION_TEXT, reply_markup=None)
         return
+    # Снимок прочитан ДО блокировки слота: параллельное «Да» по этому же
+    # уведомлению могло за время ожидания закоммитить trade_opened_at.
+    # Перечитываем под блокировкой — иначе вместо SIGNAL_ALREADY_USED
+    # сработал бы SETUP_ALREADY_TRADED по устаревшему объекту в памяти.
+    await session.refresh(notification)
 
     plan = user.trading_plan
     if plan is None:
@@ -566,7 +617,7 @@ async def _process_confirm(
         return
 
     result = await _build_quote(
-        session, user, signal, plan, settings, cipher,
+        session, user, notification, slot, plan, settings, cipher,
         planned_price=state.planned_price, check_permissions=False,
         known_dual_side_position=state.quote.dual_side_position,
     )
@@ -583,7 +634,7 @@ async def _process_confirm(
             # с пересчётом и повторным "Да/Нет".
             await callback.message.edit_reply_markup(reply_markup=None)
             new_result = await _build_quote(
-                session, user, signal, plan, settings, cipher,
+                session, user, notification, slot, plan, settings, cipher,
                 planned_price=None, check_permissions=False,
                 known_dual_side_position=state.quote.dual_side_position,
             )
@@ -591,7 +642,8 @@ async def _process_confirm(
                 "↻ Цена ушла дальше допустимого. Пересчитал карточку:"
             )
             await _send_result(
-                callback.bot, db, callback.message.chat.id, user, signal, new_result, settings
+                callback.bot, db, callback.message.chat.id, user, notification,
+                new_result, settings,
             )
         else:
             await callback.message.edit_text(render_refusal(result), reply_markup=None)
@@ -606,7 +658,7 @@ async def _process_confirm(
 
     if not settings.exec_dry_run:
         await _submit_real_order(
-            callback.message, session, user, signal, result, settings, cipher, now
+            callback.message, session, user, notification, slot, result, settings, cipher, now
         )
         return
 
@@ -615,7 +667,7 @@ async def _process_confirm(
     # Дрейф — от свежей цены подтверждения (order.entry_price), не от цены
     # первого показа карточки (state.drift_percent): раздел 5 ТЗ запрашивает
     # цену заново именно на "Да", это и есть цифры на момент входа.
-    drift = price_drift_percent(order.entry_price, signal)
+    drift = price_drift_percent(order.entry_price, notification)
 
     orders_repo = ExecutionOrderRepository(session)
     try:
@@ -628,13 +680,13 @@ async def _process_confirm(
     except IntegrityError as exc:
         if not _is_client_order_id_collision(exc):
             raise
-        # Гонка: два параллельных _process_confirm по одному сигналу
+        # Гонка: два параллельных _process_confirm по одному уведомлению
         # (двойной тап после протухшего лока, раздел 8 ТЗ) — второй
-        # проигрывает на UNIQUE client_order_id. Не помечаем signal.trade_
-        # opened_at: это уже сделал победитель.
+        # проигрывает на UNIQUE client_order_id. Не помечаем notification.
+        # trade_opened_at: это уже сделал победитель.
         logger.info(
             "Гонка на подтверждении: client_order_id уже занят",
-            extra={"user_id": user.id, "signal_id": signal.id},
+            extra={"user_id": user.id, "notification_id": notification.id},
         )
         await callback.message.edit_text(
             "⏳ Сигнал уже обрабатывается — похоже, вход уже отправлен "
@@ -644,14 +696,20 @@ async def _process_confirm(
         return
 
     # Тот же guard SIGNAL_ALREADY_USED (раздел 7, п.4), что и для реального
-    # входа: повторное подтверждение того же сигнала после сухого прогона
-    # тоже должно быть отклонено, а не превращаться во вторую запись.
-    signal.trade_opened_at = now
+    # входа: повторное подтверждение того же уведомления после сухого
+    # прогона тоже должно быть отклонено, а не превращаться во вторую запись.
+    # Шаг 15.5.2а: отметка на снимке, не на слоте — слот переиспользуется.
+    notification.trade_opened_at = now
     await session.flush()
 
     logger.info(
         "Сухой прогон исполнения: ушёл бы ордер",
-        extra={"user_id": user.id, "signal_id": signal.id, "order": order.render()},
+        extra={
+            "user_id": user.id,
+            "signal_id": slot.id,
+            "notification_id": notification.id,
+            "order": order.render(),
+        },
     )
 
     await callback.message.edit_text(
@@ -666,7 +724,8 @@ async def _submit_real_order(
     message: Message,
     session: AsyncSession,
     user: User,
-    signal: SignalRecord,
+    notification: SignalNotification,
+    slot: SignalRecord,
     result: ExecutionQuote,
     settings: Settings,
     cipher: SecretCipher,
@@ -680,7 +739,7 @@ async def _submit_real_order(
     к своей БД, не к бирже), не лишний HTTP-вызов к BingX — на
     _CONFIRM_PATH_HTTP_CALLS (app/core/config.py) не влияет."""
     order = result.order
-    drift = price_drift_percent(order.entry_price, signal)
+    drift = price_drift_percent(order.entry_price, notification)
 
     # Раздел 16 ТЗ, шаг 15.5.2, п.3 плана: тот же LIVE_ORDERS_NOT_ALLOWED,
     # что уже проверен в evaluate()/run_guards() при построении карточки —
@@ -697,7 +756,8 @@ async def _submit_real_order(
     if mode_refusal is not None:
         row = build_observation_order(
             user_id=user.id,
-            signal_id=signal.id,
+            signal_id=slot.id,
+            notification_id=notification.id,
             symbol=order.symbol,
             side=order.side,
             position_side=order.position_side,
@@ -718,7 +778,7 @@ async def _submit_real_order(
     try:
         client = await factory.for_user(session, user.id, mode=allowed_mode)
     except ExchangeAuthError as exc:
-        await _record_exchange_error(session, user, signal, exc, at_confirm=True)
+        await _record_exchange_error(session, user, notification, slot, exc, at_confirm=True)
         await message.edit_text(_describe(exc), reply_markup=None)
         return
 
@@ -748,7 +808,7 @@ async def _submit_real_order(
             logger.info(
                 "Гонка на подтверждении (реальная отправка): "
                 "client_order_id уже занят",
-                extra={"user_id": user.id, "signal_id": signal.id},
+                extra={"user_id": user.id, "notification_id": notification.id},
             )
             await message.edit_text(
                 "⏳ Сигнал уже обрабатывается — похоже, вход уже отправлен "
@@ -767,7 +827,7 @@ async def _submit_real_order(
         # client_order_id упрётся в UNIQUE), ни считать вход не
         # случившимся — reconciler (15.6) обязан разбирать такую строку
         # так же, как UNKNOWN (см. docs/execution-stage-15.md, раздел 8).
-        signal.trade_opened_at = now
+        notification.trade_opened_at = now
         await session.commit()
 
         entry_row = await service.submit_entry_order(
@@ -785,7 +845,8 @@ async def _submit_real_order(
         "Реальная отправка ордера",
         extra={
             "user_id": user.id,
-            "signal_id": signal.id,
+            "signal_id": slot.id,
+            "notification_id": notification.id,
             "status": entry_row.status.value,
             "order": order.render(),
         },

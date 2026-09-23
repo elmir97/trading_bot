@@ -43,8 +43,16 @@ class ExecutionRefusalCode(StrEnum):
     # тем, что разрешён конфигом (Settings.bingx_trading_mode) — см.
     # guards.check_mode_allowed.
     MODE_NOT_ALLOWED = "MODE_NOT_ALLOWED"
+    # Шаг 15.5.2а: сетап слота сменился после уведомления (fingerprint слота
+    # != fingerprint снимка) — «Да» исполнило бы уровни, которых пользователь
+    # не видел. См. guards.check_signal_current.
+    SIGNAL_SUPERSEDED = "SIGNAL_SUPERSEDED"
     SIGNAL_EXPIRED = "SIGNAL_EXPIRED"
     SIGNAL_ALREADY_USED = "SIGNAL_ALREADY_USED"
+    # Шаг 15.5.2а: по этому же сетапу (слот + fingerprint) уже открывали
+    # сделку через другое уведомление — повторный вход в тот же сетап
+    # запрещён (наращивание риска). См. guards.check_setup_not_traded.
+    SETUP_ALREADY_TRADED = "SETUP_ALREADY_TRADED"
     POSITION_EXISTS = "POSITION_EXISTS"
     MAX_POSITIONS = "MAX_POSITIONS"
     MAX_TOTAL_RISK = "MAX_TOTAL_RISK"
@@ -77,18 +85,24 @@ class ExecutionRefusal:
     message: str
 
 
-def client_order_id(*, signal_id: int, user_id: int, role: OrderRole) -> str:
+def client_order_id(*, notification_id: int, user_id: int, role: OrderRole) -> str:
     """Детерминированный ключ идемпотентности (раздел 8 ТЗ):
-    f"tj{signal_id}u{user_id}{role.letter}". Один и тот же вызов с теми же
+    f"tj{notification_id}u{user_id}{role.letter}". Один и тот же вызов с теми же
     аргументами всегда даёт одну и ту же строку — этим и обеспечивается
     "повторной отправки нет, пока сверка по client_order_id не подтвердит
     обратное" (раздел 8, шаг 5), а не полагается на память процесса.
 
+    Шаг 15.5.2а: ключ — notification_id (снимок уведомления), а не
+    signal_id. Слот переиспользуется, и второй вход на том же слоте давал
+    тот же ключ и ложный UNIQUE. notification_id всегда больше любого
+    signal_id на момент миграции (setval в b0943282b974) — поэтому ключ не
+    совпадёт со строками формата 15.5.2 f"tj{signal_id}u{user_id}...".
+
     Раздел 16 ТЗ, шаг 15.5.2: разделитель "u" перед user_id обязателен —
-    без него f"tj{signal_id}{user_id}..." неоднозначен: (signal_id=12,
-    user_id=3) и (signal_id=1, user_id=23) склеивались бы в одну и ту же
-    строку "tj123...", а UNIQUE на client_order_id — глобальный по всей
-    таблице, не по паре (signal_id, user_id). role.letter — не role.value:
+    без него f"tj{id}{user_id}..." неоднозначен: (id=12, user_id=3) и
+    (id=1, user_id=23) склеивались бы в одну и ту же строку "tj123...", а
+    UNIQUE на client_order_id — глобальный по всей таблице, не по паре
+    (id, user_id). role.letter — не role.value:
     тот содержит "_" ("STOP_LOSS"), это не только ASCII буквы и цифры.
     Длина на максимумах Integer-колонок id (2**31-1 = 10 цифр у обоих):
     2 ("tj") + 10 + 1 ("u") + 10 + 1 (буква роли) = 24 символа — с запасом
@@ -96,7 +110,7 @@ def client_order_id(*, signal_id: int, user_id: int, role: OrderRole) -> str:
     более консервативных лимитов, встречающихся у бирж этого семейства
     API; точный лимит BingX живьём не снят (раздел 16, открыто до 15.5.5).
     """
-    return f"tj{signal_id}u{user_id}{role.letter}"
+    return f"tj{notification_id}u{user_id}{role.letter}"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -111,7 +125,8 @@ class OrderRequest:
     """
 
     user_id: int
-    signal_id: int
+    signal_id: int              # слот — контекст (execution_orders.signal_id)
+    notification_id: int        # снимок — идентичность входа (шаг 15.5.2а)
     symbol: str
     side: OrderSide             # BUY/SELL — сторона ВХОДНОГО ордера
     position_side: TradeSide    # LONG/SHORT — сторона позиции
@@ -128,18 +143,22 @@ class OrderRequest:
 
     @property
     def entry_client_order_id(self) -> str:
-        return client_order_id(signal_id=self.signal_id, user_id=self.user_id, role=OrderRole.ENTRY)
+        return client_order_id(
+            notification_id=self.notification_id, user_id=self.user_id, role=OrderRole.ENTRY
+        )
 
     @property
     def stop_loss_client_order_id(self) -> str:
         return client_order_id(
-            signal_id=self.signal_id, user_id=self.user_id, role=OrderRole.STOP_LOSS
+            notification_id=self.notification_id, user_id=self.user_id, role=OrderRole.STOP_LOSS
         )
 
     @property
     def take_profit_client_order_id(self) -> str:
         return client_order_id(
-            signal_id=self.signal_id, user_id=self.user_id, role=OrderRole.TAKE_PROFIT
+            notification_id=self.notification_id,
+            user_id=self.user_id,
+            role=OrderRole.TAKE_PROFIT,
         )
 
     def render(self) -> str:

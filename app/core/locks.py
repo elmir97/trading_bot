@@ -71,6 +71,8 @@ class RedisLock:
         await self._redis.eval(_RELEASE_SCRIPT, 1, self._key, self._token)
 
 
-def confirm_lock_key(user_id: int, signal_id: int) -> str:
-    """Раздел 8 ТЗ: exec:lock:{user_id}:{signal_id}."""
-    return f"exec:lock:{user_id}:{signal_id}"
+def confirm_lock_key(user_id: int, notification_id: int) -> str:
+    """Раздел 8 ТЗ: exec:lock:{user_id}:n{notification_id}. Буква "n" — шаг
+    15.5.2а: ключ адресует снимок уведомления, а не слот (прежний формат
+    exec:lock:{user_id}:{signal_id}), и два формата не путаются."""
+    return f"exec:lock:{user_id}:n{notification_id}"

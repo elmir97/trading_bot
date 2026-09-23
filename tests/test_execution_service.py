@@ -19,6 +19,7 @@ from sqlalchemy import select
 from app.core.config import Settings
 from app.database.models.execution_order import ExecutionOrder
 from app.database.models.signal import SignalRecord
+from app.database.models.signal_notification import SignalNotification
 from app.database.models.trade import Trade
 from app.database.repositories.strategy import MistakeTypeRepository, StrategyRepository
 from app.database.repositories.user import UserRepository
@@ -45,6 +46,7 @@ from app.trading.enums import (
     OrderStatus,
     SignalDirection,
     SignalLevel,
+    SignalRecordStatus,
     TradeSide,
     TradeStatus,
 )
@@ -155,6 +157,19 @@ def _signal(user_id: int, **overrides: object) -> SignalRecord:
     return SignalRecord(**fields)  # type: ignore[arg-type]
 
 
+async def _snapshot(session, signal: SignalRecord, **overrides: object) -> SignalNotification:  # type: ignore[no-untyped-def]
+    """Шаг 15.5.2а: снимок уведомления по текущему состоянию слота — то,
+    что сканер пишет в момент отправки; evaluate() строит вход из него."""
+    notification = SignalNotification.snapshot_of(
+        signal, notified_at=NOW, expires_at=NOW + timedelta(hours=4)
+    )
+    for key, value in overrides.items():
+        setattr(notification, key, value)
+    session.add(notification)
+    await session.flush()
+    return notification
+
+
 def _open_trade(user_id: int, **overrides: object) -> Trade:
     fields: dict[str, object] = {
         "user_id": user_id,
@@ -200,6 +215,7 @@ async def test_execution_disabled_refuses_without_touching_exchange(ctx) -> None
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _snapshot(session, signal)
 
     service = ExecutionService(
         session=session,
@@ -209,7 +225,7 @@ async def test_execution_disabled_refuses_without_touching_exchange(ctx) -> None
     )
 
     result = await service.evaluate(
-        user=user, signal=signal, plan=user.trading_plan,
+        user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=True,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
@@ -226,6 +242,7 @@ async def test_execution_disabled_writes_refused_observation_without_price(ctx) 
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _snapshot(session, signal)
 
     service = ExecutionService(
         session=session,
@@ -234,7 +251,7 @@ async def test_execution_disabled_writes_refused_observation_without_price(ctx) 
         market=market,
     )
     result = await service.evaluate(
-        user=user, signal=signal, plan=user.trading_plan,
+        user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=True,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
@@ -267,10 +284,11 @@ async def test_max_positions_refused_observation_captures_price_and_drift(ctx) -
     for i in range(2):
         session.add(_open_trade(user.id, symbol=f"ALT{i}-USDT"))
     await session.flush()
+    notification = await _snapshot(session, signal)
 
     service = _service(session, settings, client, market)
     result = await service.evaluate(
-        user=user, signal=signal, plan=user.trading_plan,
+        user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=True,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
@@ -292,10 +310,11 @@ async def test_no_trading_key_refuses(ctx) -> None:  # type: ignore[no-untyped-d
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _snapshot(session, signal)
 
     service = _service(session, Settings(trading_execution_enabled=True), client, market)  # type: ignore[call-arg]
     result = await service.evaluate(
-        user=user, signal=signal, plan=user.trading_plan,
+        user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=False, key_can_trade_futures=False,
         dual_side_position=True,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
@@ -311,10 +330,11 @@ async def test_mode_not_allowed_refuses(ctx) -> None:  # type: ignore[no-untyped
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _snapshot(session, signal)
 
     service = _service(session, Settings(trading_execution_enabled=True), client, market)  # type: ignore[call-arg]
     result = await service.evaluate(
-        user=user, signal=signal, plan=user.trading_plan,
+        user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=True,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
@@ -332,6 +352,7 @@ async def test_live_orders_not_allowed_refuses_before_trading_key_check(ctx) -> 
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _snapshot(session, signal)
 
     settings = Settings(  # type: ignore[call-arg]
         trading_execution_enabled=True,
@@ -340,7 +361,7 @@ async def test_live_orders_not_allowed_refuses_before_trading_key_check(ctx) -> 
     )
     service = _service(session, settings, client, market)
     result = await service.evaluate(
-        user=user, signal=signal, plan=user.trading_plan,
+        user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=False, key_can_trade_futures=False,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
     )
@@ -354,6 +375,7 @@ async def test_valid_ready_signal_returns_quote(ctx) -> None:  # type: ignore[no
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _snapshot(session, signal)
 
     settings = Settings(  # type: ignore[call-arg]
         trading_execution_enabled=True,
@@ -362,7 +384,7 @@ async def test_valid_ready_signal_returns_quote(ctx) -> None:  # type: ignore[no
     )
     service = _service(session, settings, client, market)
     result = await service.evaluate(
-        user=user, signal=signal, plan=user.trading_plan,
+        user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=True,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
@@ -382,9 +404,10 @@ async def test_valid_ready_signal_returns_quote(ctx) -> None:  # type: ignore[no
 
 async def test_signal_already_used_refuses(ctx) -> None:  # type: ignore[no-untyped-def]
     session, user, client, market = ctx
-    signal = _signal(user.id, trade_opened_at=NOW)
+    signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _snapshot(session, signal, trade_opened_at=NOW)
 
     settings = Settings(  # type: ignore[call-arg]
         trading_execution_enabled=True,
@@ -393,7 +416,7 @@ async def test_signal_already_used_refuses(ctx) -> None:  # type: ignore[no-unty
     )
     service = _service(session, settings, client, market)
     result = await service.evaluate(
-        user=user, signal=signal, plan=user.trading_plan,
+        user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=True,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
@@ -408,6 +431,7 @@ async def test_existing_position_on_symbol_refuses(ctx) -> None:  # type: ignore
     session.add(signal)
     session.add(_open_trade(user.id, symbol="BTC-USDT"))
     await session.flush()
+    notification = await _snapshot(session, signal)
 
     settings = Settings(  # type: ignore[call-arg]
         trading_execution_enabled=True,
@@ -416,7 +440,7 @@ async def test_existing_position_on_symbol_refuses(ctx) -> None:  # type: ignore
     )
     service = _service(session, settings, client, market)
     result = await service.evaluate(
-        user=user, signal=signal, plan=user.trading_plan,
+        user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=True,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
@@ -452,6 +476,7 @@ async def test_existing_position_refuses_opposite_side_too(ctx) -> None:  # type
     session.add(signal)
     session.add(_open_trade(user.id, symbol="BTC-USDT", side=TradeSide.LONG))
     await session.flush()
+    notification = await _snapshot(session, signal)
 
     settings = Settings(  # type: ignore[call-arg]
         trading_execution_enabled=True,
@@ -460,7 +485,7 @@ async def test_existing_position_refuses_opposite_side_too(ctx) -> None:  # type
     )
     service = _service(session, settings, client, market)
     result = await service.evaluate(
-        user=user, signal=signal, plan=user.trading_plan,
+        user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=True,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
@@ -480,10 +505,11 @@ async def test_max_positions_refuses(ctx) -> None:  # type: ignore[no-untyped-de
     for i in range(2):
         session.add(_open_trade(user.id, symbol=f"ALT{i}-USDT"))
     await session.flush()
+    notification = await _snapshot(session, signal)
 
     service = _service(session, settings, client, market)
     result = await service.evaluate(
-        user=user, signal=signal, plan=user.trading_plan,
+        user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=True,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
@@ -499,6 +525,7 @@ async def test_price_drift_refuses_on_second_evaluation(ctx) -> None:  # type: i
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _snapshot(session, signal)
 
     settings = Settings(  # type: ignore[call-arg]
         trading_execution_enabled=True,
@@ -508,7 +535,7 @@ async def test_price_drift_refuses_on_second_evaluation(ctx) -> None:  # type: i
     service = _service(session, settings, client, market)
 
     first = await service.evaluate(
-        user=user, signal=signal, plan=user.trading_plan,
+        user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=True,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
@@ -518,7 +545,7 @@ async def test_price_drift_refuses_on_second_evaluation(ctx) -> None:  # type: i
 
     client.price = D("105")  # дрейф 5 > 0.3 * 3 = 0.9
     second = await service.evaluate(
-        user=user, signal=signal, plan=user.trading_plan,
+        user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=True,
         selected_exchange_mode=ExchangeKeyMode.LIVE,
@@ -539,6 +566,7 @@ async def test_signal_stale_refuses_on_first_evaluation(ctx) -> None:  # type: i
     signal = _signal(user.id, take_profit=D("200"))
     session.add(signal)
     await session.flush()
+    notification = await _snapshot(session, signal)
 
     settings = Settings(  # type: ignore[call-arg]
         trading_execution_enabled=True,
@@ -551,7 +579,7 @@ async def test_signal_stale_refuses_on_first_evaluation(ctx) -> None:  # type: i
     # (ratio по умолчанию 1.0) 3.5. Цена 106 — уход на 5.5, за порогом.
     client.price = D("106")
     result = await service.evaluate(
-        user=user, signal=signal, plan=user.trading_plan,
+        user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=True,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
@@ -567,6 +595,7 @@ async def test_signal_stale_does_not_refuse_move_toward_stop(ctx) -> None:  # ty
     signal = _signal(user.id, take_profit=D("200"))
     session.add(signal)
     await session.flush()
+    notification = await _snapshot(session, signal)
 
     settings = Settings(  # type: ignore[call-arg]
         trading_execution_enabled=True,
@@ -577,7 +606,7 @@ async def test_signal_stale_does_not_refuse_move_toward_stop(ctx) -> None:  # ty
 
     client.price = D("98")  # к стопу, дальше допустимых 3.5 от reference 100.5
     result = await service.evaluate(
-        user=user, signal=signal, plan=user.trading_plan,
+        user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=True,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
@@ -595,10 +624,11 @@ async def test_permissions_untrustworthy_refuses_before_trading_key_check(ctx) -
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _snapshot(session, signal)
 
     service = _service(session, Settings(trading_execution_enabled=True), client, market)  # type: ignore[call-arg]
     result = await service.evaluate(
-        user=user, signal=signal, plan=user.trading_plan,
+        user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=False,
         permissions_trustworthy=False,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
@@ -625,10 +655,11 @@ async def test_position_mode_unknown_refuses_before_trading_key_check(ctx) -> No
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _snapshot(session, signal)
 
     service = _service(session, Settings(trading_execution_enabled=True), client, market)  # type: ignore[call-arg]
     result = await service.evaluate(
-        user=user, signal=signal, plan=user.trading_plan,
+        user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=None,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
@@ -646,6 +677,7 @@ async def test_valid_signal_carries_dual_side_position_on_quote(ctx) -> None:  #
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _snapshot(session, signal)
 
     settings = Settings(  # type: ignore[call-arg]
         trading_execution_enabled=True,
@@ -654,7 +686,7 @@ async def test_valid_signal_carries_dual_side_position_on_quote(ctx) -> None:  #
     )
     service = _service(session, settings, client, market)
     result = await service.evaluate(
-        user=user, signal=signal, plan=user.trading_plan,
+        user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=False,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
@@ -671,6 +703,7 @@ async def test_symbol_data_unavailable_refuses(ctx) -> None:  # type: ignore[no-
     signal = _signal(user.id)  # symbol="BTC-USDT"
     session.add(signal)
     await session.flush()
+    notification = await _snapshot(session, signal)
 
     # Биржа знает только про ETH-USDT — по BTC-USDT данных инструмента нет.
     client.symbol_info = SymbolInfo(
@@ -685,7 +718,7 @@ async def test_symbol_data_unavailable_refuses(ctx) -> None:  # type: ignore[no-
     )
     service = _service(session, settings, client, market)
     result = await service.evaluate(
-        user=user, signal=signal, plan=user.trading_plan,
+        user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=True,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
@@ -707,7 +740,7 @@ def test_build_execution_orders_creates_entry_stop_take() -> None:
     from app.trading.enums import OrderSide
 
     order = OrderRequest(
-        user_id=1, signal_id=2, symbol="BTC-USDT", side=OrderSide.BUY,
+        user_id=1, signal_id=2, notification_id=3, symbol="BTC-USDT", side=OrderSide.BUY,
         position_side=TradeSide.LONG, quantity=D("0.01"), entry_price=D("100"),
         leverage=10, stop_loss=D("97"), take_profit=D("110"), notional=D("1"),
         margin=D("0.1"), risk_amount=D("2"), risk_percent=D("2"), risk_reward=D("3"),
@@ -733,6 +766,7 @@ async def test_refusal_stage_card_without_planned_price_confirm_with_it(ctx) -> 
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _snapshot(session, signal)
     service = ExecutionService(
         session=session,
         settings=Settings(trading_execution_enabled=False),  # type: ignore[call-arg]
@@ -740,7 +774,7 @@ async def test_refusal_stage_card_without_planned_price_confirm_with_it(ctx) -> 
         market=market,
     )
     kwargs = {
-        "user": user, "signal": signal, "plan": user.trading_plan,
+        "user": user, "notification": notification, "slot": signal, "plan": user.trading_plan,
         "has_trading_key": True, "key_can_trade_futures": True,
         "dual_side_position": True,
         "selected_exchange_mode": ExchangeKeyMode.LIVE, "now": NOW,
@@ -774,6 +808,7 @@ async def test_confirm_stage_uses_fail_fast_reads_card_stage_does_not(ctx) -> No
     signal = _signal(user.id)
     session.add(signal)
     await session.flush()
+    notification = await _snapshot(session, signal)
 
     settings = Settings(  # type: ignore[call-arg]
         trading_execution_enabled=True,
@@ -781,7 +816,7 @@ async def test_confirm_stage_uses_fail_fast_reads_card_stage_does_not(ctx) -> No
         exec_allow_live_mode_orders=True,
     )
     kwargs = {
-        "user": user, "signal": signal, "plan": user.trading_plan,
+        "user": user, "notification": notification, "slot": signal, "plan": user.trading_plan,
         "has_trading_key": True, "key_can_trade_futures": True,
         "dual_side_position": True,
         "selected_exchange_mode": ExchangeKeyMode.LIVE, "now": NOW,
@@ -800,3 +835,145 @@ async def test_confirm_stage_uses_fail_fast_reads_card_stage_does_not(ctx) -> No
     assert client.ticker_retries_seen == [None, 1]
     assert client.balance_retries_seen == [None, 1]
     assert client.symbols_retries_seen == [None, 1]
+
+
+# --- Шаг 15.5.2а: вход по снимку уведомления --------------------------------
+
+
+def _live_settings() -> Settings:
+    return Settings(  # type: ignore[call-arg]
+        trading_execution_enabled=True,
+        bingx_trading_mode="live",
+        exec_allow_live_mode_orders=True,
+    )
+
+
+async def _evaluate(service, user, notification, slot, **kwargs):  # type: ignore[no-untyped-def]
+    return await service.evaluate(
+        user=user, notification=notification, slot=slot, plan=user.trading_plan,
+        has_trading_key=True, key_can_trade_futures=True,
+        dual_side_position=True,
+        selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW, **kwargs,
+    )
+
+
+async def test_superseded_slot_refuses_before_any_exchange_call(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Сканер записал в слот новый сетап после уведомления — SIGNAL_SUPERSEDED
+    раньше тикера, баланса и списка инструментов (ни одного вызова биржи)."""
+    session, user, client, market = ctx
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _snapshot(session, signal)
+    signal.fingerprint = "fp-new"
+    signal.stop_loss = D("90")
+    await session.flush()
+
+    service = _service(session, _live_settings(), client, market)
+    result = await _evaluate(service, user, notification, signal, planned_price=D("100"))
+
+    assert isinstance(result, ExecutionRefusal)
+    assert result.code is Code.SIGNAL_SUPERSEDED
+    assert client.ticker_retries_seen == []
+    assert client.balance_retries_seen == []
+    assert client.symbols_retries_seen == []
+
+    [row] = list(
+        await session.scalars(
+            select(ExecutionOrder).where(ExecutionOrder.notification_id == notification.id)
+        )
+    )
+    assert row.status is OrderStatus.REFUSED
+    assert row.error_code == Code.SIGNAL_SUPERSEDED.value
+    assert row.stage == "confirm"
+    assert row.signal_id == signal.id
+
+
+async def test_expired_slot_refuses_signal_expired(ctx) -> None:  # type: ignore[no-untyped-def]
+    session, user, client, market = ctx
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _snapshot(session, signal)
+    signal.status = SignalRecordStatus.EXPIRED
+    await session.flush()
+
+    service = _service(session, _live_settings(), client, market)
+    result = await _evaluate(service, user, notification, signal)
+
+    assert isinstance(result, ExecutionRefusal)
+    assert result.code is Code.SIGNAL_EXPIRED
+    assert client.ticker_retries_seen == []
+
+
+async def test_expiry_is_read_from_snapshot_not_slot(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Слот продлён пересканом (expires_at в будущем), а снимок истёк —
+    кнопка из этого сообщения мертва: SIGNAL_EXPIRED."""
+    session, user, client, market = ctx
+    signal = _signal(user.id, expires_at=NOW + timedelta(hours=4))
+    session.add(signal)
+    await session.flush()
+    notification = await _snapshot(session, signal, expires_at=NOW - timedelta(seconds=1))
+
+    service = _service(session, _live_settings(), client, market)
+    result = await _evaluate(service, user, notification, signal)
+
+    assert isinstance(result, ExecutionRefusal)
+    assert result.code is Code.SIGNAL_EXPIRED
+
+
+async def test_burned_slot_accepts_new_notification(ctx) -> None:  # type: ignore[no-untyped-def]
+    """signals.trade_opened_at на слоте (след входа до 15.5.2а) больше не
+    сжигает слот: новое уведомление с другим сетапом проходит."""
+    session, user, client, market = ctx
+    signal = _signal(user.id, trade_opened_at=NOW - timedelta(days=7), fingerprint="fp-new")
+    session.add(signal)
+    await session.flush()
+    notification = await _snapshot(session, signal)
+
+    service = _service(session, _live_settings(), client, market)
+    result = await _evaluate(service, user, notification, signal)
+
+    assert isinstance(result, ExecutionQuote)
+
+
+async def test_setup_already_traded_via_other_notification_refuses(ctx) -> None:  # type: ignore[no-untyped-def]
+    """По тому же сетапу (слот + fingerprint) уже входили через другое
+    уведомление — повторный вход запрещён."""
+    session, user, client, market = ctx
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    await _snapshot(session, signal, trade_opened_at=NOW - timedelta(hours=1))
+    second = await _snapshot(session, signal)
+
+    service = _service(session, _live_settings(), client, market)
+    result = await _evaluate(service, user, second, signal)
+
+    assert isinstance(result, ExecutionRefusal)
+    assert result.code is Code.SETUP_ALREADY_TRADED
+    assert client.ticker_retries_seen == []
+
+
+async def test_quote_uses_snapshot_levels_and_notification_id(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Стоп, тейк и направление — из снимка, client_order_id — от
+    notification_id. Слот намеренно рассинхронизирован по уровням при том
+    же fingerprint: так видно, откуда берутся числа."""
+    session, user, client, market = ctx
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _snapshot(session, signal)
+    signal.stop_loss = D("50")
+    signal.take_profit = D("500")
+    await session.flush()
+
+    service = _service(session, _live_settings(), client, market)
+    result = await _evaluate(service, user, notification, signal)
+
+    assert isinstance(result, ExecutionQuote)
+    assert result.order.stop_loss == D("97")
+    assert result.order.take_profit == D("110")
+    assert result.order.notification_id == notification.id
+    assert result.order.signal_id == signal.id
+    assert result.order.entry_client_order_id == f"tj{notification.id}u{user.id}E"

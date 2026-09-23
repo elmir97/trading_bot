@@ -9,6 +9,10 @@
 run_guards() прогоняет их в порядке раздела 7 и останавливается на первом
 отказе: "первая сработавшая останавливает вход". Именно этот порядок
 проверяет test_guards.py::TestGuardOrder.
+
+Шаг 15.5.2а: проверки 3а-4а (идентичность сигнала — снимок уведомления
+против текущего слота) собраны в run_signal_identity_guards(): их же
+ExecutionService.evaluate() гоняет дёшево, до первого запроса к бирже.
 """
 
 from __future__ import annotations
@@ -127,6 +131,28 @@ def check_mode_allowed(
     return None
 
 
+# --- 3а. SIGNAL_SUPERSEDED (шаг 15.5.2а) ---------------------------------------
+
+
+def check_signal_current(
+    *, slot_active: bool, slot_fingerprint: str, notification_fingerprint: str
+) -> ExecutionRefusal | None:
+    """Снимок уведомления всё ещё описывает то, что сейчас в слоте.
+
+    Слот погашен (сетап больше не находится) — SIGNAL_EXPIRED: уровни из
+    уведомления уже никто не подтверждает. Слот жив, но fingerprint другой —
+    сканер записал в него новый сетап после уведомления: SIGNAL_SUPERSEDED,
+    а не вход по уровням, которых пользователь не видел."""
+    if not slot_active:
+        return ExecutionRefusal(Code.SIGNAL_EXPIRED, "Сигнал уже истёк.")
+    if slot_fingerprint != notification_fingerprint:
+        return ExecutionRefusal(
+            Code.SIGNAL_SUPERSEDED,
+            "Сетап обновился после уведомления — новые уровни придут новым сигналом.",
+        )
+    return None
+
+
 # --- 3. SIGNAL_EXPIRED -------------------------------------------------------
 
 
@@ -148,6 +174,49 @@ def check_signal_not_used(
         return ExecutionRefusal(
             Code.SIGNAL_ALREADY_USED, "По этому сигналу уже открывали сделку."
         )
+    return None
+
+
+# --- 4а. SETUP_ALREADY_TRADED (шаг 15.5.2а) -------------------------------------
+
+
+def check_setup_not_traded(*, already_traded: bool) -> ExecutionRefusal | None:
+    """По этому же сетапу (слот + fingerprint) уже открывали сделку через
+    другое уведомление — повторный вход в тот же сетап запрещён
+    (наращивание риска после убытка, решение владельца)."""
+    if already_traded:
+        return ExecutionRefusal(
+            Code.SETUP_ALREADY_TRADED, "По этому сетапу уже открывали сделку."
+        )
+    return None
+
+
+def run_signal_identity_guards(
+    *,
+    slot_active: bool,
+    slot_fingerprint: str,
+    notification_fingerprint: str,
+    notification_expires_at: datetime,
+    now: datetime,
+    notification_trade_opened_at: datetime | None,
+    setup_already_traded: bool,
+) -> ExecutionRefusal | None:
+    """3а → 3 → 4 → 4а. SUPERSEDED первым: к этому моменту новое
+    уведомление уже пришло, и текст подсказывает, где искать уровни.
+    SETUP_ALREADY_TRADED после ALREADY_USED: на повторное «Да» по тому же
+    уведомлению точнее ответ «по этому сигналу уже открывали»."""
+    if refusal := check_signal_current(
+        slot_active=slot_active,
+        slot_fingerprint=slot_fingerprint,
+        notification_fingerprint=notification_fingerprint,
+    ):
+        return refusal
+    if refusal := check_signal_not_expired(expires_at=notification_expires_at, now=now):
+        return refusal
+    if refusal := check_signal_not_used(trade_opened_at=notification_trade_opened_at):
+        return refusal
+    if refusal := check_setup_not_traded(already_traded=setup_already_traded):
+        return refusal
     return None
 
 
@@ -382,11 +451,17 @@ class GuardInputs:
     # 2а (этап 15.4в)
     selected_exchange_mode: ExchangeKeyMode
     allowed_exchange_mode: ExchangeKeyMode
-    # 3
-    signal_expires_at: datetime
+    # 3а (шаг 15.5.2а) — текущий слот против снимка уведомления
+    slot_active: bool
+    slot_fingerprint: str
+    notification_fingerprint: str
+    # 3 — срок снимка уведомления, не слота (тот продлевают пересканы)
+    notification_expires_at: datetime
     now: datetime
-    # 4
-    signal_trade_opened_at: datetime | None
+    # 4 — отметка на уведомлении, не на слоте (слот переиспользуется)
+    notification_trade_opened_at: datetime | None
+    # 4а (шаг 15.5.2а)
+    setup_already_traded: bool
     # 5
     has_open_position: bool
     # 6
@@ -438,9 +513,15 @@ def run_guards(inputs: GuardInputs) -> ExecutionRefusal | None:
         allowed_mode=inputs.allowed_exchange_mode,
     ):
         return refusal
-    if refusal := check_signal_not_expired(expires_at=inputs.signal_expires_at, now=inputs.now):
-        return refusal
-    if refusal := check_signal_not_used(trade_opened_at=inputs.signal_trade_opened_at):
+    if refusal := run_signal_identity_guards(
+        slot_active=inputs.slot_active,
+        slot_fingerprint=inputs.slot_fingerprint,
+        notification_fingerprint=inputs.notification_fingerprint,
+        notification_expires_at=inputs.notification_expires_at,
+        now=inputs.now,
+        notification_trade_opened_at=inputs.notification_trade_opened_at,
+        setup_already_traded=inputs.setup_already_traded,
+    ):
         return refusal
     if refusal := check_no_existing_position(has_open_position=inputs.has_open_position):
         return refusal

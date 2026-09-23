@@ -24,6 +24,8 @@ from app.execution.guards import (
     check_permissions_trustworthy,
     check_position_mode_known,
     check_price_drift,
+    check_setup_not_traded,
+    check_signal_current,
     check_signal_not_expired,
     check_signal_not_stale,
     check_signal_not_used,
@@ -32,6 +34,7 @@ from app.execution.guards import (
     check_trading_key,
     check_valid_levels,
     run_guards,
+    run_signal_identity_guards,
 )
 from app.execution.models import ExecutionRefusal
 from app.execution.models import ExecutionRefusalCode as Code
@@ -64,9 +67,13 @@ def _valid_inputs(**overrides: object) -> GuardInputs:
         "key_can_trade_futures": True,
         "selected_exchange_mode": ExchangeKeyMode.LIVE,
         "allowed_exchange_mode": ExchangeKeyMode.LIVE,
-        "signal_expires_at": NOW + timedelta(hours=1),
+        "slot_active": True,
+        "slot_fingerprint": "fp",
+        "notification_fingerprint": "fp",
+        "notification_expires_at": NOW + timedelta(hours=1),
         "now": NOW,
-        "signal_trade_opened_at": None,
+        "notification_trade_opened_at": None,
+        "setup_already_traded": False,
         "has_open_position": False,
         "open_positions_count": 1,
         "max_positions": 4,
@@ -178,6 +185,97 @@ class TestModeNotAllowed:
         assert check_mode_allowed(
             selected_mode=ExchangeKeyMode.DEMO, allowed_mode=ExchangeKeyMode.DEMO
         ) is None
+
+
+class TestSignalCurrent:
+    """Шаг 15.5.2а, гвард 3а: снимок уведомления против текущего слота."""
+
+    def test_same_fingerprint_active_slot_passes(self) -> None:
+        assert check_signal_current(
+            slot_active=True, slot_fingerprint="fp", notification_fingerprint="fp"
+        ) is None
+
+    def test_changed_fingerprint_refuses_superseded(self) -> None:
+        refusal = check_signal_current(
+            slot_active=True, slot_fingerprint="fp-new", notification_fingerprint="fp"
+        )
+        assert refusal is not None
+        assert refusal.code is Code.SIGNAL_SUPERSEDED
+        assert refusal.message == (
+            "Сетап обновился после уведомления — новые уровни придут новым сигналом."
+        )
+
+    def test_inactive_slot_refuses_expired(self) -> None:
+        """Слот погашен — сетап больше не находится: SIGNAL_EXPIRED, даже
+        если fingerprint совпадает."""
+        refusal = check_signal_current(
+            slot_active=False, slot_fingerprint="fp", notification_fingerprint="fp"
+        )
+        assert refusal is not None
+        assert refusal.code is Code.SIGNAL_EXPIRED
+
+
+class TestSetupAlreadyTraded:
+    """Шаг 15.5.2а, гвард 4а."""
+
+    def test_traded_refuses(self) -> None:
+        refusal = check_setup_not_traded(already_traded=True)
+        assert refusal is not None
+        assert refusal.code is Code.SETUP_ALREADY_TRADED
+
+    def test_not_traded_passes(self) -> None:
+        assert check_setup_not_traded(already_traded=False) is None
+
+
+class TestSignalIdentityGuards:
+    """Шаг 15.5.2а: run_signal_identity_guards() — тот же порядок 3а → 3 →
+    4 → 4а, что и внутри run_guards(); evaluate() гоняет его до биржи."""
+
+    @staticmethod
+    def _run(**overrides: object) -> ExecutionRefusal | None:
+        fields: dict[str, object] = {
+            "slot_active": True,
+            "slot_fingerprint": "fp",
+            "notification_fingerprint": "fp",
+            "notification_expires_at": NOW + timedelta(hours=1),
+            "now": NOW,
+            "notification_trade_opened_at": None,
+            "setup_already_traded": False,
+        }
+        fields.update(overrides)
+        return run_signal_identity_guards(**fields)  # type: ignore[arg-type]
+
+    def test_all_valid_passes(self) -> None:
+        assert self._run() is None
+
+    def test_superseded_wins_over_everything(self) -> None:
+        refusal = self._run(
+            slot_fingerprint="fp-new",
+            notification_expires_at=NOW - timedelta(seconds=1),
+            notification_trade_opened_at=NOW,
+            setup_already_traded=True,
+        )
+        assert refusal is not None
+        assert refusal.code is Code.SIGNAL_SUPERSEDED
+
+    def test_expired_before_already_used(self) -> None:
+        refusal = self._run(
+            notification_expires_at=NOW - timedelta(seconds=1),
+            notification_trade_opened_at=NOW,
+            setup_already_traded=True,
+        )
+        assert refusal is not None
+        assert refusal.code is Code.SIGNAL_EXPIRED
+
+    def test_already_used_before_setup_traded(self) -> None:
+        refusal = self._run(notification_trade_opened_at=NOW, setup_already_traded=True)
+        assert refusal is not None
+        assert refusal.code is Code.SIGNAL_ALREADY_USED
+
+    def test_setup_traded_alone(self) -> None:
+        refusal = self._run(setup_already_traded=True)
+        assert refusal is not None
+        assert refusal.code is Code.SETUP_ALREADY_TRADED
 
 
 class TestSignalExpired:
@@ -589,23 +687,26 @@ GUARD_ORDER: list[tuple[int, Code, dict[str, object]]] = [
     ),
     (3, Code.NO_TRADING_KEY, {"has_trading_key": False}),
     (4, Code.MODE_NOT_ALLOWED, {"selected_exchange_mode": ExchangeKeyMode.DEMO}),
-    (5, Code.SIGNAL_EXPIRED, {"signal_expires_at": NOW - timedelta(seconds=1)}),
-    (6, Code.SIGNAL_ALREADY_USED, {"signal_trade_opened_at": NOW}),
-    (7, Code.POSITION_EXISTS, {"has_open_position": True}),
-    (8, Code.MAX_POSITIONS, {"open_positions_count": 4, "max_positions": 4}),
+    # Шаг 15.5.2а: 3а → 3 → 4 → 4а — по снимку уведомления, не по слоту.
+    (5, Code.SIGNAL_SUPERSEDED, {"slot_fingerprint": "fp-new"}),
+    (6, Code.SIGNAL_EXPIRED, {"notification_expires_at": NOW - timedelta(seconds=1)}),
+    (7, Code.SIGNAL_ALREADY_USED, {"notification_trade_opened_at": NOW}),
+    (8, Code.SETUP_ALREADY_TRADED, {"setup_already_traded": True}),
+    (9, Code.POSITION_EXISTS, {"has_open_position": True}),
+    (10, Code.MAX_POSITIONS, {"open_positions_count": 4, "max_positions": 4}),
     (
-        9,
+        11,
         Code.MAX_TOTAL_RISK,
         {"current_total_risk_percent": D("10"), "max_total_risk_percent": D("1")},
     ),
     (
-        10,
+        12,
         Code.DAILY_LOSS_LIMIT,
         {"day_loss_percent": D("10"), "max_daily_loss_percent": D("1")},
     ),
-    (11, Code.PRICE_DRIFT, {"current_price": D("10000")}),
+    (13, Code.PRICE_DRIFT, {"current_price": D("10000")}),
     (
-        12,
+        14,
         Code.SIGNAL_STALE,
         # Не трогает current_price/planned_price (не пересекается с
         # PRICE_DRIFT) и не trogaет stop_loss: с крошечным ratio дрейф
@@ -614,9 +715,9 @@ GUARD_ORDER: list[tuple[int, Code, dict[str, object]]] = [
         # test_order_is_respected_for_every_adjacent_pair.
         {"signal_reference_price": D("100"), "max_signal_staleness_ratio": D("0.0001")},
     ),
-    (13, Code.INVALID_LEVELS, {"stop_loss": D("105")}),
-    (14, Code.SIZE_TOO_SMALL, {"symbol_info": _symbol_info(min_quantity=D("1000"))}),
-    (15, Code.SYMBOL_NOT_ALLOWED, {"symbol": "XRP-USDT"}),
+    (15, Code.INVALID_LEVELS, {"stop_loss": D("105")}),
+    (16, Code.SIZE_TOO_SMALL, {"symbol_info": _symbol_info(min_quantity=D("1000"))}),
+    (17, Code.SYMBOL_NOT_ALLOWED, {"symbol": "XRP-USDT"}),
 ]
 
 
@@ -632,8 +733,11 @@ class TestGuardOrder:
             has_trading_key=False,
             key_can_trade_futures=False,
             selected_exchange_mode=ExchangeKeyMode.DEMO,
-            signal_expires_at=NOW - timedelta(seconds=1),
-            signal_trade_opened_at=NOW,
+            slot_active=False,
+            slot_fingerprint="fp-new",
+            notification_expires_at=NOW - timedelta(seconds=1),
+            notification_trade_opened_at=NOW,
+            setup_already_traded=True,
             has_open_position=True,
             open_positions_count=10,
             max_positions=1,

@@ -25,6 +25,7 @@ from app.core.security import SecretCipher, mask_secret
 from app.database.models.credentials import ExchangeCredentials
 from app.database.models.execution_order import ExecutionOrder
 from app.database.models.signal import SignalRecord
+from app.database.models.signal_notification import SignalNotification
 from app.database.models.user import User
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
@@ -407,8 +408,11 @@ async def _fake_get_position_mode(self, *, max_retries=None) -> bool:  # type: i
     return True
 
 
-async def _seed_execution_fixtures(db: Database, settings) -> SignalRecord:  # type: ignore[no-untyped-def]
-    """SignalRecord (READY/ACTIVE) + фейковые ключи биржи, тем же путём, что
+async def _seed_execution_fixtures(  # type: ignore[no-untyped-def]
+    db: Database, settings
+) -> tuple[SignalRecord, SignalNotification]:
+    """SignalRecord (READY/ACTIVE) + снимок его уведомления (шаг 15.5.2а:
+    кнопки адресуют notification_id) + фейковые ключи биржи, тем же путём, что
     и бот: repository + SecretCipher.encrypt (не сырой INSERT) — расшифровка
     в ExchangeFactory.for_user() должна реально отработать, не просто найти
     непустую строку в базе."""
@@ -451,7 +455,13 @@ async def _seed_execution_fixtures(db: Database, settings) -> SignalRecord:  # t
         )
         session.add(signal)
         await session.flush()
-        return signal
+        now = datetime.now(UTC)
+        notification = SignalNotification.snapshot_of(
+            signal, notified_at=now, expires_at=now + timedelta(hours=4)
+        )
+        session.add(notification)
+        await session.flush()
+        return signal, notification
 
 
 async def _run_execution_scenario(sim, tg, db, redis, settings) -> None:  # type: ignore[no-untyped-def]
@@ -463,8 +473,9 @@ async def _run_execution_scenario(sim, tg, db, redis, settings) -> None:  # type
     await sim.tap("Настройки")
     await sim.tap("Счёт")
 
-    signal = await _seed_execution_fixtures(db, settings)
+    signal, notification = await _seed_execution_fixtures(db, settings)
     signal_id = signal.id
+    notification_id = notification.id
 
     # Раздел "общие ключи BingX": ровно одна пара сохранена (DEMO, только
     # что засеяна выше) — экран "Ключи" обязан показать её как ОДИН ключ
@@ -506,12 +517,12 @@ async def _run_execution_scenario(sim, tg, db, redis, settings) -> None:  # type
     BingXClient.get_balance = _fake_get_balance
     BingXClient.get_position_mode = _fake_get_position_mode
     try:
-        text = await sim.tap_data(f"exec:open:{signal_id}")
+        text = await sim.tap_data(f"exn:open:{notification_id}")
         check("карточка: объём", has(text, "объём"), text[:300])
         check("карточка: риск", has(text, "риск"), text[:300])
         check("карточка: RR", has(text, "rr"), text[:300])
 
-        text = await sim.tap_data(f"exec:yes:{signal_id}")
+        text = await sim.tap_data(f"exn:yes:{notification_id}")
         # "Да" отправляет ДВА сообщения (execution.py:478-483): edit_text
         # "Подтверждено" на самой карточке, затем отдельным send детали
         # ордера ("Сухой прогон: ушёл бы..."). tap_data() возвращает только
@@ -537,11 +548,11 @@ async def _run_execution_scenario(sim, tg, db, redis, settings) -> None:  # type
         # результат детерминирован (не зависит от того, как event loop
         # чередует две по-настоящему параллельные корутины), а код хендлера
         # исполняется настоящий: confirm_yes реально получит LockBusyError.
-        lock_key = confirm_lock_key(user_id=signal.user_id, signal_id=signal_id)
+        lock_key = confirm_lock_key(user_id=signal.user_id, notification_id=notification_id)
         blocker = RedisLock(redis, lock_key, ttl_seconds=15)
         await blocker.__aenter__()
         try:
-            await sim.tap_data(f"exec:yes:{signal_id}")
+            await sim.tap_data(f"exn:yes:{notification_id}")
         finally:
             await blocker.__aexit__(None, None, None)
 

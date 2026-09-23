@@ -18,6 +18,11 @@ OrderRequest (обёрнутый в ExecutionQuote вместе с тем, чт�
 запрошен). Успешный путь (ExecutionQuote) ничего не пишет: итог карточки
 (подтверждена/отклонена/просрочена) решается позже и не в этом методе —
 см. app/bot/handlers/execution.py.
+
+Шаг 15.5.2а: вход строится из снимка уведомления (SignalNotification) —
+направление, вход, стоп, тейк — а не из строки слота, которую сканер
+перезаписывает. Слот нужен только чтобы проверить, что снимок ещё
+актуален (гварды 3а-4а, до первого запроса к бирже).
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,9 +38,11 @@ from app.core.config import Settings
 from app.core.logging import get_logger
 from app.database.models.execution_order import ExecutionOrder
 from app.database.models.signal import SignalRecord
+from app.database.models.signal_notification import SignalNotification
 from app.database.models.trading_plan import TradingPlan
 from app.database.models.user import User
 from app.database.repositories.execution_order import ExecutionOrderRepository
+from app.database.repositories.signal_notification import SignalNotificationRepository
 from app.database.repositories.trade import TradeRepository
 from app.exchanges.base import ExchangeClient, ExchangeError, SymbolInfo, TpSlSpec
 from app.execution.guards import (
@@ -46,6 +54,7 @@ from app.execution.guards import (
     check_position_mode_known,
     check_trading_key,
     run_guards,
+    run_signal_identity_guards,
 )
 from app.execution.leverage import leverage_needs_update
 from app.execution.models import ExecutionRefusal, ExecutionRefusalCode, OrderRequest
@@ -60,6 +69,7 @@ from app.trading.enums import (
     OrderStatus,
     OrderType,
     SignalDirection,
+    SignalRecordStatus,
     TradeSide,
 )
 from app.trading.risk import day_bounds, tz_offset_for
@@ -68,7 +78,18 @@ ZERO = Decimal(0)
 logger = get_logger(__name__)
 
 
-def signal_reference_price(signal: SignalRecord) -> Decimal | None:
+class _EntryZone(Protocol):
+    """entry-зона есть и у снимка уведомления, и у строки слота — путь
+    исполнения передаёт снимок (шаг 15.5.2а)."""
+
+    @property
+    def entry_low(self) -> Decimal | None: ...
+
+    @property
+    def entry_high(self) -> Decimal | None: ...
+
+
+def signal_reference_price(signal: _EntryZone) -> Decimal | None:
     """Опорная цена сигнала для дрейфа — середина entry-зоны (раздел 5 ТЗ:
     карточка показывает "сигнал был на ...")."""
     if signal.entry_low is not None and signal.entry_high is not None:
@@ -76,7 +97,7 @@ def signal_reference_price(signal: SignalRecord) -> Decimal | None:
     return signal.entry_low or signal.entry_high
 
 
-def price_drift_percent(current_price: Decimal, signal: SignalRecord) -> Decimal | None:
+def price_drift_percent(current_price: Decimal, signal: _EntryZone) -> Decimal | None:
     """Дрейф текущей цены от опорной цены сигнала — та же величина, что
     показана на карточке (раздел 5) и копится в сводке (раздел 12а)."""
     reference = signal_reference_price(signal)
@@ -129,6 +150,7 @@ class ExecutionService:
         *,
         user_id: int,
         signal_id: int,
+        notification_id: int,
         symbol: str,
         side: OrderSide,
         position_side: TradeSide,
@@ -143,6 +165,7 @@ class ExecutionService:
         row = build_observation_order(
             user_id=user_id,
             signal_id=signal_id,
+            notification_id=notification_id,
             symbol=symbol,
             side=side,
             position_side=position_side,
@@ -197,6 +220,7 @@ class ExecutionService:
                 refusal,
                 user_id=order.user_id,
                 signal_id=order.signal_id,
+                notification_id=order.notification_id,
                 symbol=order.symbol,
                 side=order.side,
                 position_side=order.position_side,
@@ -293,7 +317,8 @@ class ExecutionService:
         self,
         *,
         user: User,
-        signal: SignalRecord,
+        notification: SignalNotification,
+        slot: SignalRecord,
         plan: TradingPlan,
         has_trading_key: bool,
         key_can_trade_futures: bool,
@@ -315,7 +340,13 @@ class ExecutionService:
         Раздел 12а: planned_price не None — это вызов на «Да» (карточка уже
         показана), строки отказов получают stage=CONFIRM, иначе CARD.
         Пересчёт после PRICE_DRIFT идёт с planned_price=None — это
-        построение новой карточки, то есть CARD."""
+        построение новой карточки, то есть CARD.
+
+        Шаг 15.5.2а: notification — снимок, из которого строится вход; slot —
+        текущая строка слота (notification.signal_id), только для гвардов
+        3а-4а. Они идут дёшево, сразу после MODE_NOT_ALLOWED и до первого
+        запроса к бирже: сетап, обновившийся за время жизни карточки,
+        отказывается на «Да» без единого HTTP-вызова."""
         moment = now or datetime.now(UTC)
         stage = ObservationStage.CONFIRM if planned_price is not None else ObservationStage.CARD
         # Раздел 8 ТЗ: путь подтверждения («Да») держит Redis-лок — там
@@ -328,13 +359,22 @@ class ExecutionService:
         # call_retries=None оставляет его как есть.
         call_retries = 1 if stage is ObservationStage.CONFIRM else None
 
-        if signal.direction is None or signal.stop_loss is None or signal.take_profit is None:
+        if (
+            notification.direction is None
+            or notification.stop_loss is None
+            or notification.take_profit is None
+        ):
             # Кнопка показывается только под READY (см. handlers/execution.py),
             # а у READY эти поля всегда заполнены сканером — попадание сюда
-            # значит, что где-то выше пропустили проверку уровня сигнала.
-            raise ValueError(f"Сигнал {signal.id} не READY: нет направления/уровней")
-        side = TradeSide(signal.direction.value)
+            # значит, что где-то выше пропустили проверку уровня уведомления.
+            raise ValueError(
+                f"Уведомление {notification.id} не READY: нет направления/уровней"
+            )
+        side = TradeSide(notification.direction.value)
         order_side = OrderSide.BUY if side is TradeSide.LONG else OrderSide.SELL
+        stop_loss = notification.stop_loss
+        take_profit = notification.take_profit
+        symbol = slot.symbol
 
         async def refuse(
             refusal: ExecutionRefusal,
@@ -345,8 +385,9 @@ class ExecutionService:
             return await self._refuse(
                 refusal,
                 user_id=user.id,
-                signal_id=signal.id,
-                symbol=signal.symbol,
+                signal_id=slot.id,
+                notification_id=notification.id,
+                symbol=symbol,
                 side=order_side,
                 position_side=side,
                 price=price,
@@ -391,18 +432,34 @@ class ExecutionService:
         ):
             return await refuse(refusal)
 
-        ticker = await self._client.get_ticker(signal.symbol, max_retries=call_retries)
+        # Шаг 15.5.2а: 3а-4а — только своя БД, до первого запроса к бирже.
+        slot_active = slot.status is SignalRecordStatus.ACTIVE
+        setup_already_traded = await SignalNotificationRepository(
+            self._session
+        ).exists_traded(slot.id, notification.fingerprint)
+        if refusal := run_signal_identity_guards(
+            slot_active=slot_active,
+            slot_fingerprint=slot.fingerprint,
+            notification_fingerprint=notification.fingerprint,
+            notification_expires_at=notification.expires_at,
+            now=moment,
+            notification_trade_opened_at=notification.trade_opened_at,
+            setup_already_traded=setup_already_traded,
+        ):
+            return await refuse(refusal)
+
+        ticker = await self._client.get_ticker(symbol, max_retries=call_retries)
         current_price = ticker.last_price
         if planned_price is None:
             planned_price = current_price
-        drift = price_drift_percent(current_price, signal)
+        drift = price_drift_percent(current_price, notification)
 
-        symbol_info = await self._market.get_symbol_info(signal.symbol, max_retries=call_retries)
+        symbol_info = await self._market.get_symbol_info(symbol, max_retries=call_retries)
         if symbol_info is None:
             return await refuse(
                 ExecutionRefusal(
                     ExecutionRefusalCode.SYMBOL_DATA_UNAVAILABLE,
-                    f"{signal.symbol}: нет данных инструмента на бирже.",
+                    f"{symbol}: нет данных инструмента на бирже.",
                 ),
                 price=current_price,
                 drift=drift,
@@ -412,7 +469,7 @@ class ExecutionService:
 
         open_trades = await self._trades.list_open(user.id)
         open_positions_count = len(open_trades)
-        has_open_position = any(t.symbol == signal.symbol for t in open_trades)
+        has_open_position = any(t.symbol == symbol for t in open_trades)
         current_total_risk_percent = sum(
             (t.risk_percent for t in open_trades if t.risk_percent is not None), ZERO
         )
@@ -433,9 +490,13 @@ class ExecutionService:
             key_can_trade_futures=key_can_trade_futures,
             selected_exchange_mode=selected_exchange_mode,
             allowed_exchange_mode=allowed_exchange_mode,
-            signal_expires_at=signal.expires_at,
+            slot_active=slot_active,
+            slot_fingerprint=slot.fingerprint,
+            notification_fingerprint=notification.fingerprint,
+            notification_expires_at=notification.expires_at,
             now=moment,
-            signal_trade_opened_at=signal.trade_opened_at,
+            notification_trade_opened_at=notification.trade_opened_at,
+            setup_already_traded=setup_already_traded,
             has_open_position=has_open_position,
             open_positions_count=open_positions_count,
             max_positions=self._settings.exec_max_open_positions,
@@ -447,17 +508,17 @@ class ExecutionService:
             planned_price=planned_price,
             current_price=current_price,
             max_price_drift_ratio=self._settings.exec_max_price_drift_ratio,
-            signal_reference_price=signal_reference_price(signal),
+            signal_reference_price=signal_reference_price(notification),
             max_signal_staleness_ratio=self._settings.exec_max_signal_staleness_ratio,
             entry_price=current_price,
-            stop_loss=signal.stop_loss,
-            take_profit=signal.take_profit,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
             side=side,
             min_risk_reward=self._settings.exec_min_rr,
             account_balance=balance,
             leverage=leverage,
             symbol_info=symbol_info,
-            symbol=signal.symbol,
+            symbol=symbol,
             symbol_whitelist=self._settings.exec_symbol_whitelist_symbols,
         )
 
@@ -468,7 +529,7 @@ class ExecutionService:
             account_balance=balance,
             risk_percent=plan.risk_per_trade_percent,
             entry_price=current_price,
-            stop_loss=signal.stop_loss,
+            stop_loss=stop_loss,
             side=side,
             leverage=leverage,
             symbol_info=symbol_info,
@@ -482,8 +543,8 @@ class ExecutionService:
 
         risk_reward = calculate_risk_reward(
             entry_price=current_price,
-            stop_loss=signal.stop_loss,
-            take_profit=signal.take_profit,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
             side=side,
         )
         risk_percent = (
@@ -494,15 +555,16 @@ class ExecutionService:
 
         order = OrderRequest(
             user_id=user.id,
-            signal_id=signal.id,
-            symbol=signal.symbol,
+            signal_id=slot.id,
+            notification_id=notification.id,
+            symbol=symbol,
             side=OrderSide.BUY if side is TradeSide.LONG else OrderSide.SELL,
             position_side=side,
             quantity=sizing.quantity,
             entry_price=current_price,
             leverage=leverage,
-            stop_loss=signal.stop_loss,
-            take_profit=signal.take_profit,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
             notional=sizing.notional,
             margin=sizing.margin,
             risk_amount=sizing.risk_amount,
@@ -538,6 +600,7 @@ def build_execution_orders(
         ExecutionOrder(
             user_id=order.user_id,
             signal_id=order.signal_id,
+            notification_id=order.notification_id,
             client_order_id=order.entry_client_order_id,
             symbol=order.symbol,
             side=order.side,
@@ -558,6 +621,7 @@ def build_execution_orders(
         ExecutionOrder(
             user_id=order.user_id,
             signal_id=order.signal_id,
+            notification_id=order.notification_id,
             client_order_id=order.stop_loss_client_order_id,
             symbol=order.symbol,
             side=closing_side,
@@ -571,6 +635,7 @@ def build_execution_orders(
         ExecutionOrder(
             user_id=order.user_id,
             signal_id=order.signal_id,
+            notification_id=order.notification_id,
             client_order_id=order.take_profit_client_order_id,
             symbol=order.symbol,
             side=closing_side,
@@ -600,6 +665,7 @@ def build_entry_order_pending(
     return ExecutionOrder(
         user_id=order.user_id,
         signal_id=order.signal_id,
+        notification_id=order.notification_id,
         client_order_id=order.entry_client_order_id,
         symbol=order.symbol,
         side=order.side,
@@ -623,6 +689,7 @@ def build_observation_order(
     *,
     user_id: int,
     signal_id: int,
+    notification_id: int | None = None,
     symbol: str,
     side: OrderSide,
     position_side: TradeSide,
@@ -648,6 +715,7 @@ def build_observation_order(
     return ExecutionOrder(
         user_id=user_id,
         signal_id=signal_id,
+        notification_id=notification_id,
         symbol=symbol,
         side=side,
         position_side=position_side,
@@ -673,6 +741,7 @@ def build_exchange_error_order(
     *,
     user_id: int,
     signal_id: int,
+    notification_id: int | None = None,
     symbol: str,
     direction: SignalDirection,
     error: Exception,
@@ -686,6 +755,7 @@ def build_exchange_error_order(
     return build_observation_order(
         user_id=user_id,
         signal_id=signal_id,
+        notification_id=notification_id,
         symbol=symbol,
         side=OrderSide.BUY if position_side is TradeSide.LONG else OrderSide.SELL,
         position_side=position_side,
@@ -703,6 +773,7 @@ def build_observation_order_from_quote(
     return build_observation_order(
         user_id=order.user_id,
         signal_id=order.signal_id,
+        notification_id=order.notification_id,
         symbol=order.symbol,
         side=order.side,
         position_side=order.position_side,

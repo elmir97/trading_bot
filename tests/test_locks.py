@@ -90,4 +90,6 @@ async def test_lock_released_even_if_body_raises() -> None:
 
 
 def test_confirm_lock_key_format() -> None:
-    assert confirm_lock_key(user_id=42, signal_id=7) == "exec:lock:42:7"
+    """Шаг 15.5.2а: ключ адресует уведомление, буква "n" отличает его от
+    прежнего формата exec:lock:{user_id}:{signal_id}."""
+    assert confirm_lock_key(user_id=42, notification_id=7) == "exec:lock:42:n7"

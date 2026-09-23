@@ -197,7 +197,8 @@ async def show_exchange_positions(
 
 def _is_own_order(client_order_id: str) -> bool:
     """Ордер отправлен ботом по сигналу — см. app/execution/models.py
-    client_order_id(): f"tj{signal_id}{user_id}{role}". Конвенция бота,
+    client_order_id(): f"tj{notification_id}u{user_id}{E|S|T}" (до шага
+    15.5.2а — tj{signal_id}…, префикс тот же). Конвенция бота,
     биржевой клиент про неё ничего не знает — поэтому проверка тут,
     не в OpenOrder."""
     return client_order_id.startswith("tj")

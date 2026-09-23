@@ -26,13 +26,13 @@ _ASCII_ALNUM = re.compile(r"^[A-Za-z0-9]+$")
 
 @pytest.mark.parametrize("role", list(OrderRole))
 def test_ascii_alnum_only(role: OrderRole) -> None:
-    result = client_order_id(signal_id=12, user_id=3, role=role)
+    result = client_order_id(notification_id=12, user_id=3, role=role)
     assert _ASCII_ALNUM.match(result), result
 
 
 @pytest.mark.parametrize("role", list(OrderRole))
 def test_max_length_on_int32_ids(role: OrderRole) -> None:
-    result = client_order_id(signal_id=_INT32_MAX, user_id=_INT32_MAX, role=role)
+    result = client_order_id(notification_id=_INT32_MAX, user_id=_INT32_MAX, role=role)
     assert len(result) <= 24, (len(result), result)
     # Тот же лимит, что уже жёстко проверяет BingXClient.place_market_order
     # (1-40 символов, раздел 16 ТЗ) — с запасом, не впритык.
@@ -40,22 +40,32 @@ def test_max_length_on_int32_ids(role: OrderRole) -> None:
 
 
 def test_disambiguates_swapped_signal_and_user_id() -> None:
-    """Без разделителя (signal_id=12, user_id=3) и (signal_id=1, user_id=23)
-    давали бы одну и ту же строку "tj123E" — а UNIQUE на client_order_id
-    глобальный по всей таблице execution_orders, не по паре id."""
-    a = client_order_id(signal_id=12, user_id=3, role=OrderRole.ENTRY)
-    b = client_order_id(signal_id=1, user_id=23, role=OrderRole.ENTRY)
+    """Без разделителя (id=12, user_id=3) и (id=1, user_id=23) давали бы
+    одну и ту же строку "tj123E" — а UNIQUE на client_order_id глобальный
+    по всей таблице execution_orders, не по паре id."""
+    a = client_order_id(notification_id=12, user_id=3, role=OrderRole.ENTRY)
+    b = client_order_id(notification_id=1, user_id=23, role=OrderRole.ENTRY)
     assert a != b
 
 
 def test_deterministic() -> None:
-    a = client_order_id(signal_id=42, user_id=7, role=OrderRole.STOP_LOSS)
-    b = client_order_id(signal_id=42, user_id=7, role=OrderRole.STOP_LOSS)
+    a = client_order_id(notification_id=42, user_id=7, role=OrderRole.STOP_LOSS)
+    b = client_order_id(notification_id=42, user_id=7, role=OrderRole.STOP_LOSS)
     assert a == b
 
 
 def test_roles_produce_distinct_ids() -> None:
     ids = {
-        client_order_id(signal_id=1, user_id=1, role=role) for role in OrderRole
+        client_order_id(notification_id=1, user_id=1, role=role) for role in OrderRole
     }
     assert len(ids) == len(list(OrderRole))
+
+
+def test_format_uses_notification_id() -> None:
+    """Шаг 15.5.2а: ключ — от notification_id (снимок уведомления), а не от
+    signal_id слота; формат tj{notification_id}u{user_id}{E|S|T}."""
+    assert client_order_id(notification_id=105, user_id=1, role=OrderRole.ENTRY) == "tj105u1E"
+    assert client_order_id(notification_id=105, user_id=1, role=OrderRole.STOP_LOSS) == "tj105u1S"
+    assert (
+        client_order_id(notification_id=105, user_id=1, role=OrderRole.TAKE_PROFIT) == "tj105u1T"
+    )

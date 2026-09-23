@@ -38,6 +38,24 @@ class SignalRepository:
         )
         return await self.session.scalar(stmt)
 
+    async def get_for_update(self, signal_id: int, user_id: int) -> SignalRecord | None:
+        """Шаг 15.5.2а, Р2: строка слота под FOR NO KEY UPDATE на пути «Да».
+
+        Два «Да» по разным уведомлениям одного сетапа сериализуются: второй
+        ждёт коммита первого и видит его trade_opened_at (гвард
+        SETUP_ALREADY_TRADED). NO KEY — не блокирует вставку снимков с FK
+        на этот слот (им нужен только KEY SHARE); UPDATE слота сканером
+        подождёт, пока «Да» не закоммитится. populate_existing — строка
+        могла уже лежать в identity map со старыми значениями."""
+        stmt = (
+            select(SignalRecord)
+            .where(SignalRecord.id == signal_id, SignalRecord.user_id == user_id)
+            .with_for_update(key_share=True)
+            .execution_options(populate_existing=True)
+        )
+        slot: SignalRecord | None = await self.session.scalar(stmt)
+        return slot
+
     async def get_slot(
         self, user_id: int, symbol: str, timeframe: str, level: SignalLevel
     ) -> SignalRecord | None:

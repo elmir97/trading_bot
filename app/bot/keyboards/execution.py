@@ -7,12 +7,16 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 
 class ExecutionCB:
-    OPEN = "exec:open:"      # + signal_id — кнопка под карточкой сигнала READY
-    YES = "exec:yes:"        # + signal_id
-    NO = "exec:no:"          # + signal_id
+    # Шаг 15.5.2а: + notification_id — снимок уведомления, не строка слота.
+    OPEN = "exn:open:"       # кнопка под уведомлением о сигнале READY
+    YES = "exn:yes:"
+    NO = "exn:no:"
     EXPIRED = "exec:expired"  # кнопка-заглушка после TTL, ничего не делает
-    # Шаг 15.5.2а: + notification_id (снимок уведомления, не строка слота).
-    NOTIFICATION_OPEN = "exn:open:"
+    # До 15.5.2а: + signal_id. Кнопки в уже отправленных сообщениях живут
+    # вечно — отдельный хендлер отвечает «устарело» и ничего не исполняет.
+    LEGACY_OPEN = "exec:open:"
+    LEGACY_YES = "exec:yes:"
+    LEGACY_NO = "exec:no:"
 
 
 def open_trade_button(notification_id: int) -> InlineKeyboardMarkup:
@@ -23,19 +27,21 @@ def open_trade_button(notification_id: int) -> InlineKeyboardMarkup:
     builder.row(
         InlineKeyboardButton(
             text="⚡ Открыть сделку",
-            callback_data=f"{ExecutionCB.NOTIFICATION_OPEN}{notification_id}",
+            callback_data=f"{ExecutionCB.OPEN}{notification_id}",
         )
     )
     return builder.as_markup()
 
 
-def confirm_keyboard(signal_id: int) -> InlineKeyboardMarkup:
+def confirm_keyboard(notification_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(
-            text="✅ Да, открыть", callback_data=f"{ExecutionCB.YES}{signal_id}"
+            text="✅ Да, открыть", callback_data=f"{ExecutionCB.YES}{notification_id}"
         ),
-        InlineKeyboardButton(text="❌ Нет", callback_data=f"{ExecutionCB.NO}{signal_id}"),
+        InlineKeyboardButton(
+            text="❌ Нет", callback_data=f"{ExecutionCB.NO}{notification_id}"
+        ),
     )
     return builder.as_markup()
 
