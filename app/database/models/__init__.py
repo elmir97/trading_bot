@@ -10,6 +10,7 @@ from app.database.models.credentials import ExchangeCredentials
 from app.database.models.execution_order import ExecutionOrder
 from app.database.models.mistake import SYSTEM_MISTAKES, MistakeType, TradeMistake
 from app.database.models.signal import SignalRecord
+from app.database.models.signal_notification import SignalNotification
 from app.database.models.strategy import DEFAULT_STRATEGIES, Strategy
 from app.database.models.trade import Trade, TradeFill
 from app.database.models.trading_plan import (
@@ -30,6 +31,7 @@ __all__ = [
     "ExchangeCredentials",
     "ExecutionOrder",
     "MistakeType",
+    "SignalNotification",
     "SignalRecord",
     "Strategy",
     "Trade",

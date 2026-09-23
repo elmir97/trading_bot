@@ -89,10 +89,11 @@ class SignalRecord(IntPKMixin, TimestampMixin, Base):
     # заново, даже если сетап буквально не изменился.
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
-    # Этап 15: по этому слоту уже открывали сделку — NULL значит "ещё нет".
-    # Guard SIGNAL_ALREADY_USED (app/execution/guards.py) читает это поле,
-    # чтобы не дать открыть вторую сделку по тому же сигналу повторным
-    # нажатием "Да" после перезапуска подтверждения.
+    # УСТАРЕЛО (шаг 15.5.2а): код это поле больше не читает и не пишет —
+    # «по этому уже открывали сделку» теперь SignalNotification.trade_opened_at
+    # (слот переиспользуется, и отметка на нём навсегда сжигала слот).
+    # Колонка удаляется позже отдельной миграцией; downgrade 15.5.2а
+    # переносит сюда отметки из signal_notifications.
     trade_opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     user: Mapped[User] = relationship()

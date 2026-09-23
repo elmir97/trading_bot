@@ -33,6 +33,7 @@ from app.trading.enums import OrderRole, OrderSide, OrderStatus, OrderType, Trad
 
 if TYPE_CHECKING:
     from app.database.models.signal import SignalRecord
+    from app.database.models.signal_notification import SignalNotification
     from app.database.models.trade import Trade
     from app.database.models.user import User
 
@@ -41,6 +42,7 @@ class ExecutionOrder(IntPKMixin, TimestampMixin, Base):
     __tablename__ = "execution_orders"
     __table_args__ = (
         Index("ix_execution_orders_user_status", "user_id", "status"),
+        Index("ix_execution_orders_notification_id", "notification_id"),
     )
 
     user_id: Mapped[int] = mapped_column(
@@ -55,10 +57,17 @@ class ExecutionOrder(IntPKMixin, TimestampMixin, Base):
     trade_id: Mapped[int | None] = mapped_column(
         ForeignKey("trades.id", ondelete="SET NULL")
     )
+    # Шаг 15.5.2а: уведомление (неизменяемый снимок), по которому шла попытка
+    # входа. NULL у строк, записанных до 15.5.2а — у них есть только
+    # signal_id. SET NULL по той же причине, что и у signal_id выше.
+    notification_id: Mapped[int | None] = mapped_column(
+        ForeignKey("signal_notifications.id", ondelete="SET NULL")
+    )
 
-    # Детерминированный ключ идемпотентности: f"tj{signal_id}{user_id}{role}".
-    # Точный лимит длины и допустимые символы у BingX — проверить перед
-    # 15.5 (раздел 16 ТЗ), 64 символа взяты с запасом.
+    # Детерминированный ключ идемпотентности: f"tj{notification_id}u{user_id}
+    # {E|S|T}" (app/execution/models.py::client_order_id). Строки до шага
+    # 15.5.2а хранят прежние форматы: f"tj{signal_id}{user_id}{ROLE}" (до
+    # 15.5.2) и f"tj{signal_id}u{user_id}{E|S|T}" (15.5.2).
     #
     # NULL для строк-наблюдений (status REFUSED/DECLINED/EXPIRED, раздел
     # 12а ТЗ) — им нечего отправлять на биржу и не с чем сверяться, ключ
@@ -127,6 +136,7 @@ class ExecutionOrder(IntPKMixin, TimestampMixin, Base):
 
     user: Mapped[User] = relationship()
     signal: Mapped[SignalRecord | None] = relationship()
+    notification: Mapped[SignalNotification | None] = relationship()
     trade: Mapped[Trade | None] = relationship()
 
     def __repr__(self) -> str:

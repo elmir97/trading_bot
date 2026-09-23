@@ -144,6 +144,12 @@ class Trade(IntPKMixin, TimestampMixin, Base):
     signal_id: Mapped[int | None] = mapped_column(
         ForeignKey("signals.id", ondelete="SET NULL")
     )
+    # Шаг 15.5.2а: уведомление, по которому открыта сделка. Писатель
+    # появится в 15.5.4 (запись сделки в журнал) — колонка заведена заранее,
+    # чтобы не делать вторую миграцию.
+    notification_id: Mapped[int | None] = mapped_column(
+        ForeignKey("signal_notifications.id", ondelete="SET NULL")
+    )
     # Импортированная сделка до разметки не участвует в статистике по
     # стратегиям и ошибкам — иначе срезы окажутся смещёнными.
     is_annotated: Mapped[bool] = mapped_column(
