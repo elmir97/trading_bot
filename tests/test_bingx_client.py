@@ -17,10 +17,12 @@ import httpx
 import pytest
 
 from app.exchanges.base import (
+    CONDITIONAL_WORKING_TYPE,
     ExchangeAuthError,
     ExchangeRateLimitError,
     ExchangeResponseError,
     ExchangeUnavailableError,
+    ReadbackIncomplete,
     TpSlSpec,
 )
 from app.exchanges.bingx import QUOTE_TICKER, BingXClient
@@ -1202,3 +1204,168 @@ class TestPerCallRetryOverride:
 
 async def _noop() -> None:
     return None
+
+
+# --- Шаг 15.5.3: строгий read-back и условный ордер -------------------------
+#
+# СИНТЕТИКА ДО 15.5.5, заменить живым снимком: форма ответа GET
+# /trade/order по исполненному маркет-ордеру и POST условного ордера
+# живьём не сняты (раздел 16). Имена полей — те же, что уже разбирает
+# _parse_order (orderId, status, avgPrice, origQty, executedQty,
+# commission).
+SYNTHETIC_FILLED_ORDER = {
+    "symbol": "BTC-USDT", "orderId": 2100000000000000001,
+    "clientOrderId": "tj105u1E", "side": "BUY", "positionSide": "LONG",
+    "type": "MARKET", "status": "FILLED", "origQty": "0.0100",
+    "executedQty": "0.0100", "avgPrice": "86012.4", "commission": "-0.4301",
+}
+
+
+class TestGetOrderFill:
+    async def test_parses_required_fields(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            assert request.method == "GET"
+            assert "clientOrderID=tj105u1E" in url
+            return ok({"order": SYNTHETIC_FILLED_ORDER})
+
+        client = make_client(handler)
+        fill = await client.get_order_fill("BTC-USDT", "tj105u1E", max_retries=1)
+
+        assert fill.order_id == "2100000000000000001"
+        assert fill.status == "FILLED"
+        assert fill.avg_price == D("86012.4")
+        assert fill.orig_qty == D("0.0100")
+        assert fill.executed_qty == D("0.0100")
+        assert fill.fee == D("0.4301")
+        await client.close()
+
+    @pytest.mark.parametrize(
+        "field", ["avgPrice", "executedQty", "origQty", "commission", "status", "orderId"]
+    )
+    async def test_missing_field_raises_not_zero(self, field: str) -> None:
+        """«Поля нет» ≠ «поле = 0»: отсутствие обязательного поля — явная
+        ошибка с его именем, а не молчаливый Decimal(0) (как в _parse_order)."""
+        order = {k: v for k, v in SYNTHETIC_FILLED_ORDER.items() if k != field}
+        client = make_client(lambda r: ok({"order": order}))
+
+        with pytest.raises(ReadbackIncomplete) as info:
+            await client.get_order_fill("BTC-USDT", "tj105u1E")
+        assert info.value.field == field
+        await client.close()
+
+    async def test_empty_avg_price_raises(self) -> None:
+        order = {**SYNTHETIC_FILLED_ORDER, "avgPrice": ""}
+        client = make_client(lambda r: ok({"order": order}))
+        with pytest.raises(ReadbackIncomplete, match="avgPrice"):
+            await client.get_order_fill("BTC-USDT", "tj105u1E")
+        await client.close()
+
+    async def test_explicit_zero_is_a_value(self) -> None:
+        """Поле есть и равно 0 — это значение, не ошибка."""
+        order = {**SYNTHETIC_FILLED_ORDER, "commission": "0", "executedQty": "0"}
+        client = make_client(lambda r: ok({"order": order}))
+        fill = await client.get_order_fill("BTC-USDT", "tj105u1E")
+        assert fill.fee == D("0")
+        assert fill.executed_qty == D("0")
+        await client.close()
+
+    async def test_order_id_alternative_spelling(self) -> None:
+        order = {k: v for k, v in SYNTHETIC_FILLED_ORDER.items() if k != "orderId"}
+        order["orderID"] = "777"
+        client = make_client(lambda r: ok({"order": order}))
+        fill = await client.get_order_fill("BTC-USDT", "tj105u1E")
+        assert fill.order_id == "777"
+        await client.close()
+
+    async def test_max_retries_one_does_not_retry(self) -> None:
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            raise httpx.TimeoutException("timeout")
+
+        client = make_client(handler, max_retries=3)
+        client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
+        with pytest.raises(ExchangeUnavailableError):
+            await client.get_order_fill("BTC-USDT", "tj105u1E", max_retries=1)
+        assert calls["n"] == 1
+        await client.close()
+
+
+class TestGetOpenOrdersMaxRetries:
+    async def test_max_retries_one_does_not_retry(self) -> None:
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            raise httpx.TimeoutException("timeout")
+
+        client = make_client(handler, max_retries=3)
+        client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
+        with pytest.raises(ExchangeUnavailableError):
+            await client.get_open_orders("BTC-USDT", max_retries=1)
+        assert calls["n"] == 1
+        await client.close()
+
+
+class TestPlaceConditionalOrder:
+    async def test_stop_market_close_position_params(self) -> None:
+        """Спасение стопа LONG: закрывающая сторона SELL, positionSide LONG,
+        closePosition=true, без quantity, тот же workingType, что у входа."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.method == "POST"
+            params = dict(httpx.QueryParams(request.url.query))
+            assert params["type"] == "STOP_MARKET"
+            assert params["side"] == "SELL"
+            assert params["positionSide"] == "LONG"
+            assert params["stopPrice"] == "84300.1"
+            assert params["closePosition"] == "true"
+            assert params["workingType"] == CONDITIONAL_WORKING_TYPE
+            assert params["clientOrderID"] == "tj105u1S"
+            assert "quantity" not in params
+            return ok({"order": {"orderId": 2100000000000000009, "status": "NEW"}})
+
+        client = make_client(handler)
+        result = await client.place_conditional_order(
+            symbol="BTC-USDT", side=OrderSide.SELL, position_side="LONG",
+            order_type="STOP_MARKET", stop_price=D("84300.1"),
+            client_order_id="tj105u1S",
+        )
+        assert result.order_id == "2100000000000000009"
+        await client.close()
+
+    async def test_rejects_non_conditional_type(self) -> None:
+        client = make_client(lambda r: ok({}))
+        with pytest.raises(ValueError, match="Не условный"):
+            await client.place_conditional_order(
+                symbol="BTC-USDT", side=OrderSide.SELL, position_side="LONG",
+                order_type="MARKET", stop_price=D("1"), client_order_id="tj1u1S",
+            )
+        await client.close()
+
+    async def test_network_failure_does_not_retry(self) -> None:
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            raise httpx.TimeoutException("timeout")
+
+        client = make_client(handler, max_retries=3)
+        client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
+        with pytest.raises(ExchangeUnavailableError):
+            await client.place_conditional_order(
+                symbol="BTC-USDT", side=OrderSide.BUY, position_side="SHORT",
+                order_type="TAKE_PROFIT_MARKET", stop_price=D("80000"),
+                client_order_id="tj105u1T",
+            )
+        assert calls["n"] == 1
+        await client.close()
+
+
+def test_entry_and_rescue_share_working_type() -> None:
+    """Одна константа для вложенных TP/SL входа и для спасения — тип
+    триггера не может разойтись между двумя местами."""
+    assert TpSlSpec(trigger_price=D("1")).working_type == CONDITIONAL_WORKING_TYPE
+    assert CONDITIONAL_WORKING_TYPE == "MARK_PRICE"

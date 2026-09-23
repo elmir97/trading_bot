@@ -28,6 +28,7 @@ import httpx
 
 from app.core.logging import get_logger
 from app.exchanges.base import (
+    CONDITIONAL_WORKING_TYPE,
     ApiRestrictions,
     AttachedTpSl,
     Balance,
@@ -40,8 +41,10 @@ from app.exchanges.base import (
     Kline,
     LeverageInfo,
     OpenOrder,
+    OrderFill,
     OrderResult,
     Position,
+    ReadbackIncomplete,
     SymbolInfo,
     Ticker,
     TpSlSpec,
@@ -864,11 +867,95 @@ class BingXClient(ExchangeClient):
         order = data.get("order", data) if isinstance(data, dict) else {}
         return self._parse_order(order)
 
-    async def get_order(self, symbol: str, client_order_id: str) -> OrderResult:
-        params = {"symbol": symbol, "clientOrderID": client_order_id}
-        data = await self._request(TRADE_ORDER, params, signed=True)
+    async def place_conditional_order(
+        self,
+        *,
+        symbol: str,
+        side: OrderSide,
+        position_side: str,
+        order_type: str,
+        stop_price: Decimal,
+        client_order_id: str,
+    ) -> OrderResult:
+        """Шаг 15.5.3: см. ExchangeClient.place_conditional_order. Тот же
+        путь /trade/order, что и у входа, но type — условный, stopPrice
+        вместо quantity и closePosition=true. max_retries=1 — торговый
+        вызов, повтор после обрыва мог бы выставить второй ордер (раздел 8
+        ТЗ, как у place_market_order). Форма параметров — по документации
+        BingX, живьём не снята (раздел 16, 15.5.5)."""
+        if order_type not in (OrderType.STOP_MARKET.value, OrderType.TAKE_PROFIT_MARKET.value):
+            raise ValueError(f"Не условный тип ордера: {order_type!r}")
+        if not 1 <= len(client_order_id) <= 40:
+            raise ValueError(
+                "clientOrderID у BingX — 1-40 символов, получено "
+                f"{len(client_order_id)}: {client_order_id!r}"
+            )
+        params: dict[str, Any] = {
+            "symbol": symbol,
+            "side": side.value,
+            "positionSide": position_side,
+            "type": order_type,
+            "stopPrice": _decimal_literal(stop_price),
+            "closePosition": "true",
+            "workingType": CONDITIONAL_WORKING_TYPE,
+            "clientOrderID": client_order_id,
+        }
+        data = await self._request(
+            TRADE_ORDER, params, signed=True, method="POST", max_retries=1
+        )
         order = data.get("order", data) if isinstance(data, dict) else {}
         return self._parse_order(order)
+
+    async def get_order(
+        self, symbol: str, client_order_id: str, *, max_retries: int | None = None
+    ) -> OrderResult:
+        params = {"symbol": symbol, "clientOrderID": client_order_id}
+        data = await self._request(TRADE_ORDER, params, signed=True, max_retries=max_retries)
+        order = data.get("order", data) if isinstance(data, dict) else {}
+        return self._parse_order(order)
+
+    async def get_order_fill(
+        self, symbol: str, client_order_id: str, *, max_retries: int | None = None
+    ) -> OrderFill:
+        """Шаг 15.5.3: тот же GET, что у get_order, но строгий разбор
+        (_parse_order_fill). Фикстуры тестов — синтетика до 15.5.5."""
+        params = {"symbol": symbol, "clientOrderID": client_order_id}
+        data = await self._request(TRADE_ORDER, params, signed=True, max_retries=max_retries)
+        order = data.get("order", data) if isinstance(data, dict) else None
+        if not isinstance(order, dict):
+            raise ExchangeResponseError("Ожидался объект ордера в data.order")
+        return self._parse_order_fill(order)
+
+    @staticmethod
+    def _parse_order_fill(item: dict[str, Any]) -> OrderFill:
+        """Строгий разбор для read-back: обязательное поле отсутствует или
+        пустое → ReadbackIncomplete с именем поля, а не Decimal(0) (в
+        отличие от _parse_order/_to_decimal — там "" и None дают ноль).
+        Написание orderId/orderID и clientOrderId/clientOrderID — оба
+        варианта, как в _parse_order: документация BingX расходится."""
+
+        def required(*names: str) -> Any:
+            for name in names:
+                value = item.get(name)
+                if value is not None and value != "":
+                    return value
+            raise ReadbackIncomplete(names[0], payload=item)
+
+        def number(name: str) -> Decimal:
+            return _to_decimal(required(name), name)
+
+        return OrderFill(
+            order_id=str(required("orderId", "orderID")),
+            client_order_id=str(
+                item.get("clientOrderId") or item.get("clientOrderID") or ""
+            ),
+            status=str(required("status")),
+            avg_price=number("avgPrice"),
+            orig_qty=number("origQty"),
+            executed_qty=number("executedQty"),
+            fee=abs(number("commission")),
+            raw=item,
+        )
 
     @staticmethod
     def _parse_order(item: dict[str, Any]) -> OrderResult:
@@ -894,9 +981,13 @@ class BingXClient(ExchangeClient):
             raw=item,
         )
 
-    async def get_open_orders(self, symbol: str | None = None) -> list[OpenOrder]:
+    async def get_open_orders(
+        self, symbol: str | None = None, *, max_retries: int | None = None
+    ) -> list[OpenOrder]:
         params = {"symbol": symbol} if symbol else {}
-        data = await self._request(TRADE_OPEN_ORDERS, params, signed=True)
+        data = await self._request(
+            TRADE_OPEN_ORDERS, params, signed=True, max_retries=max_retries
+        )
         orders = data.get("orders", []) if isinstance(data, dict) else data
         if not isinstance(orders, list):
             raise ExchangeResponseError("Ожидался список ордеров в data.orders")

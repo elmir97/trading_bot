@@ -75,6 +75,20 @@ class ExchangeResponseError(ExchangeError):
     """Ответ получен, но не соответствует ожидаемому формату."""
 
 
+class ReadbackIncomplete(ExchangeResponseError):  # noqa: N818 — имя из ТЗ шага 15.5.3
+    """Шаг 15.5.3: в ответе чтения ордера нет обязательного поля.
+
+    Для read-back «поля нет» и «поле = 0» — разные вещи: нестрогий разбор
+    (_to_decimal) превратил бы отсутствие в Decimal(0), и пустой avgPrice
+    молча стал бы ценой входа. Рабочие имена полей живьём не сняты (раздел
+    16, 15.5.5) — строгость и есть способ увидеть расхождение на первом
+    демо-ордере."""
+
+    def __init__(self, field: str, payload: dict[str, object] | None = None) -> None:
+        super().__init__(f"В ответе чтения ордера нет поля {field}", payload=payload)
+        self.field = field
+
+
 # ---------------------------------------------------------------------------
 # Данные
 # ---------------------------------------------------------------------------
@@ -202,6 +216,14 @@ class SymbolInfo:
     min_notional: Decimal = Decimal(0)
 
 
+# Шаг 15.5.3: тип триггера условных ордеров — один для вложенных в вход
+# (TpSlSpec → _build_tp_sl, уходит в запрос явно) и для отдельно
+# выставленных при спасении стопа/тейка (place_conditional_order). Не
+# дефолт биржи: «по маркировочной цене» — не срабатывает на единичном
+# выносе last price.
+CONDITIONAL_WORKING_TYPE = "MARK_PRICE"
+
+
 @dataclass(frozen=True, slots=True)
 class TpSlSpec:
     """Условный ордер (стоп или тейк), вложенный в маркет-вход.
@@ -214,7 +236,7 @@ class TpSlSpec:
 
     trigger_price: Decimal
     price: Decimal | None = None
-    working_type: str = "MARK_PRICE"
+    working_type: str = CONDITIONAL_WORKING_TYPE
 
 
 @dataclass(frozen=True, slots=True)
@@ -332,6 +354,26 @@ class OrderResult:
     raw: dict[str, object]
 
 
+@dataclass(frozen=True, slots=True)
+class OrderFill:
+    """Шаг 15.5.3: исполнение ордера по строгому чтению (get_order_fill).
+
+    В отличие от OrderResult каждое числовое поле здесь пришло от биржи
+    явно — отсутствие поля не превращается в ноль, а поднимает
+    ReadbackIncomplete. status — строка биржи (NEW/PARTIALLY_FILLED/FILLED/
+    CANCELED/...), перевод в OrderStatus — забота app/execution/readback.py.
+    fee — модуль комиссии (биржа отдаёт её отрицательной)."""
+
+    order_id: str
+    client_order_id: str
+    status: str
+    avg_price: Decimal
+    orig_qty: Decimal
+    executed_qty: Decimal
+    fee: Decimal
+    raw: dict[str, object]
+
+
 # ---------------------------------------------------------------------------
 # Интерфейс
 # ---------------------------------------------------------------------------
@@ -406,7 +448,12 @@ class ExchangeClient(ABC):
     ) -> list[Fill]: ...
 
     @abstractmethod
-    async def get_open_orders(self, symbol: str | None = None) -> list[OpenOrder]: ...
+    async def get_open_orders(
+        self, symbol: str | None = None, *, max_retries: int | None = None
+    ) -> list[OpenOrder]:
+        """max_retries — см. get_ticker: read-back на пути «Да» читает с
+        max_retries=1 (шаг 15.5.3), остальные — обычным ретраем."""
+        ...
 
     @abstractmethod
     async def get_leverage(
@@ -457,7 +504,36 @@ class ExchangeClient(ABC):
     ) -> OrderResult: ...
 
     @abstractmethod
-    async def get_order(self, symbol: str, client_order_id: str) -> OrderResult: ...
+    async def place_conditional_order(
+        self,
+        *,
+        symbol: str,
+        side: OrderSide,
+        position_side: str,
+        order_type: str,
+        stop_price: Decimal,
+        client_order_id: str,
+    ) -> OrderResult:
+        """Шаг 15.5.3: отдельный условный ордер (STOP_MARKET/
+        TAKE_PROFIT_MARKET) с closePosition=true — спасение стопа/тейка,
+        которые не прикрепились к входу. Без quantity: closePosition
+        закрывает позицию целиком, не завися от частичного исполнения.
+        Тип триггера — CONDITIONAL_WORKING_TYPE, тот же, что у вложенных."""
+        ...
+
+    @abstractmethod
+    async def get_order(
+        self, symbol: str, client_order_id: str, *, max_retries: int | None = None
+    ) -> OrderResult: ...
+
+    @abstractmethod
+    async def get_order_fill(
+        self, symbol: str, client_order_id: str, *, max_retries: int | None = None
+    ) -> OrderFill:
+        """Шаг 15.5.3: строгое чтение исполнения — нет обязательного поля
+        (orderId, status, avgPrice, origQty, executedQty, commission) →
+        ReadbackIncomplete, а не ноль."""
+        ...
 
     @abstractmethod
     async def close(self) -> None: ...

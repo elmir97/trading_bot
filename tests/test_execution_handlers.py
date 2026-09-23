@@ -195,7 +195,13 @@ class FakeExchangeClient(ExchangeClient):
     async def get_order(self, symbol, client_order_id):
         raise NotImplementedError
 
-    async def get_open_orders(self, symbol=None):
+    async def get_order_fill(self, symbol, client_order_id, *, max_retries=None):  # type: ignore[no-untyped-def]
+        raise NotImplementedError
+
+    async def place_conditional_order(self, **kwargs):  # type: ignore[no-untyped-def]
+        raise NotImplementedError
+
+    async def get_open_orders(self, symbol=None, *, max_retries=None):
         raise NotImplementedError
 
     async def close(self) -> None:
