@@ -73,6 +73,7 @@ def _valid_inputs(**overrides: object) -> GuardInputs:
         "notification_expires_at": NOW + timedelta(hours=1),
         "now": NOW,
         "notification_trade_opened_at": None,
+        "notification_entry_rejected": False,
         "setup_already_traded": False,
         "has_open_position": False,
         "open_positions_count": 1,
@@ -240,6 +241,7 @@ class TestSignalIdentityGuards:
             "notification_expires_at": NOW + timedelta(hours=1),
             "now": NOW,
             "notification_trade_opened_at": None,
+            "notification_entry_rejected": False,
             "setup_already_traded": False,
         }
         fields.update(overrides)
@@ -304,6 +306,22 @@ class TestSignalAlreadyUsed:
 
     def test_unused_passes(self) -> None:
         assert check_signal_not_used(trade_opened_at=None) is None
+
+    def test_used_text_unchanged(self) -> None:
+        refusal = check_signal_not_used(trade_opened_at=NOW, entry_rejected=False)
+        assert refusal is not None
+        assert refusal.message == "По этому сигналу уже открывали сделку."
+
+    def test_rejected_entry_says_exchange_rejected(self) -> None:
+        """Биржа отклонила вход по этому уведомлению: код тот же, текст —
+        не «уже открывали сделку» (сделки не было)."""
+        refusal = check_signal_not_used(trade_opened_at=NOW, entry_rejected=True)
+        assert refusal is not None
+        assert refusal.code is Code.SIGNAL_ALREADY_USED
+        assert refusal.message == (
+            "Биржа уже отклонила вход по этому сигналу. "
+            "Повторить нельзя — дождись следующего уведомления."
+        )
 
 
 class TestPositionExists:

@@ -9,11 +9,29 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, ColumnExpressionArgument, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.database.models.execution_order import ExecutionOrder
 from app.database.models.signal_notification import SignalNotification
-from app.trading.enums import SignalLevel
+from app.trading.enums import OrderRole, OrderStatus, SignalLevel
+
+
+def _entry_rejected(notification_id: ColumnExpressionArgument[int] | int) -> ColumnElement[bool]:
+    """У уведомления есть ENTRY-строка со статусом REJECTED — биржа явно
+    отказала во входе. Только REJECTED: строки-наблюдения (REFUSED, ERROR,
+    DECLINED, EXPIRED) этим статусом не бывают, а UNKNOWN/PENDING/SUBMITTED
+    значат «ордер мог пройти». Роль ENTRY — чтобы не задеть REJECTED
+    спасения стопа/тейка (read-back): там вход уже исполнен."""
+    return (
+        select(ExecutionOrder.id)
+        .where(
+            ExecutionOrder.notification_id == notification_id,
+            ExecutionOrder.role == OrderRole.ENTRY,
+            ExecutionOrder.status == OrderStatus.REJECTED,
+        )
+        .exists()
+    )
 
 
 class SignalNotificationRepository:
@@ -52,17 +70,28 @@ class SignalNotificationRepository:
     async def exists_traded(self, signal_id: int, fingerprint: str) -> bool:
         """Гвард SETUP_ALREADY_TRADED: по этому же сетапу (слот + fingerprint)
         уже открывали сделку через любое уведомление, не обязательно текущее —
-        повторный вход в тот же сетап запрещён (наращивание риска)."""
+        повторный вход в тот же сетап запрещён (наращивание риска).
+
+        Уведомление с явным отказом биржи (ENTRY REJECTED) сетап не сжигает:
+        позиции не было, повтор разрешён по новому уведомлению. Само
+        уведомление остаётся использованным — trade_opened_at не снимается,
+        SIGNAL_ALREADY_USED на нём срабатывает как раньше (раздел 8)."""
         stmt = select(
             select(SignalNotification.id)
             .where(
                 SignalNotification.signal_id == signal_id,
                 SignalNotification.fingerprint == fingerprint,
                 SignalNotification.trade_opened_at.is_not(None),
+                ~_entry_rejected(SignalNotification.id),
             )
             .exists()
         )
         return bool(await self.session.scalar(stmt))
+
+    async def entry_rejected(self, notification_id: int) -> bool:
+        """Вход по этому уведомлению биржа уже отклонила — для текста
+        SIGNAL_ALREADY_USED на повторное «Да»."""
+        return bool(await self.session.scalar(select(_entry_rejected(notification_id))))
 
     async def count_ready_between(
         self, user_id: int, start: datetime, end: datetime

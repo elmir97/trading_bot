@@ -17,6 +17,7 @@ import pytest_asyncio
 from sqlalchemy import select
 
 from app.core.config import Settings
+from app.database.models.execution_order import ExecutionOrder
 from app.database.models.signal import SignalRecord
 from app.database.models.signal_notification import SignalNotification
 from app.database.repositories.signal_notification import SignalNotificationRepository
@@ -24,7 +25,15 @@ from app.database.repositories.strategy import MistakeTypeRepository, StrategyRe
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
 from app.services.user_service import UserService
-from app.trading.enums import SignalDirection, SignalLevel
+from app.trading.enums import (
+    OrderRole,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    SignalDirection,
+    SignalLevel,
+    TradeSide,
+)
 from tests.conftest import cleanup_user
 
 pytestmark = pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="Нужен PostgreSQL")
@@ -152,6 +161,83 @@ async def test_exists_traded_matches_slot_and_fingerprint_only(ctx) -> None:  # 
     session.add(other_slot)
     await session.flush()
     assert await repo.exists_traded(other_slot.id, "fp-b") is False
+
+
+def _order_row(
+    notification: SignalNotification, status: OrderStatus, role: OrderRole = OrderRole.ENTRY
+) -> ExecutionOrder:
+    return ExecutionOrder(
+        user_id=notification.user_id,
+        signal_id=notification.signal_id,
+        notification_id=notification.id,
+        symbol="BTC-USDT",
+        side=OrderSide.BUY,
+        position_side=TradeSide.LONG,
+        order_type=OrderType.MARKET,
+        role=role,
+        status=status,
+    )
+
+
+async def _traded_with(session, repo, slot, *rows) -> bool:  # type: ignore[no-untyped-def]
+    """Уведомление №1 сетапа с отметкой и строками execution_orders; ответ
+    exists_traded — то, что увидит уведомление №2 того же сетапа."""
+    first = repo.add(_notify(slot, NOW - timedelta(hours=1), trade_opened_at=NOW))
+    await repo.flush()
+    for status, role in rows:
+        session.add(_order_row(first, status, role))
+    await session.flush()
+    return bool(await repo.exists_traded(slot.id, "fp-a"))
+
+
+async def test_exists_traded_rejected_entry_does_not_burn_setup(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Решение А (раздел 8): явный отказ биржи по №1 — позиции не было,
+    уведомление №2 того же сетапа SETUP_ALREADY_TRADED не получает."""
+    session, _user, slot, repo = ctx
+    assert await _traded_with(session, repo, slot, (OrderStatus.REJECTED, OrderRole.ENTRY)) is False
+
+
+@pytest.mark.parametrize(
+    "status", [OrderStatus.UNKNOWN, OrderStatus.PENDING, OrderStatus.SUBMITTED,
+               OrderStatus.FILLED, OrderStatus.DRY_RUN],
+)
+async def test_exists_traded_non_rejected_entry_still_burns_setup(ctx, status) -> None:  # type: ignore[no-untyped-def]
+    """Ордер мог пройти (UNKNOWN/PENDING) или прошёл — сетап сожжён, как раньше."""
+    session, _user, slot, repo = ctx
+    assert await _traded_with(session, repo, slot, (status, OrderRole.ENTRY)) is True
+
+
+async def test_exists_traded_ignores_refused_observations_and_rejected_legs(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Строки-наблюдения REFUSED и отказ спасения стопа (REJECTED у
+    STOP_LOSS) — не отказ входа: при UNKNOWN-входе сетап сожжён."""
+    session, _user, slot, repo = ctx
+    assert await _traded_with(
+        session, repo, slot,
+        (OrderStatus.REFUSED, OrderRole.ENTRY),
+        (OrderStatus.UNKNOWN, OrderRole.ENTRY),
+        (OrderStatus.REJECTED, OrderRole.STOP_LOSS),
+    ) is True
+
+
+async def test_exists_traded_refused_observation_alone_keeps_old_rule(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Только REFUSED-наблюдение при стоящей отметке — условие его не
+    задевает: решает trade_opened_at, как до правки."""
+    session, _user, slot, repo = ctx
+    assert await _traded_with(session, repo, slot, (OrderStatus.REFUSED, OrderRole.ENTRY)) is True
+
+
+async def test_entry_rejected_only_for_rejected_entry(ctx) -> None:  # type: ignore[no-untyped-def]
+    session, _user, slot, repo = ctx
+    rejected = repo.add(_notify(slot, NOW - timedelta(hours=2), trade_opened_at=NOW))
+    unknown = repo.add(_notify(slot, NOW - timedelta(hours=1), trade_opened_at=NOW))
+    await repo.flush()
+    session.add(_order_row(rejected, OrderStatus.REJECTED))
+    session.add(_order_row(unknown, OrderStatus.UNKNOWN))
+    session.add(_order_row(unknown, OrderStatus.REJECTED, OrderRole.STOP_LOSS))
+    await session.flush()
+
+    assert await repo.entry_rejected(rejected.id) is True
+    assert await repo.entry_rejected(unknown.id) is False
 
 
 async def test_count_ready_between_counts_events_not_slots(ctx) -> None:  # type: ignore[no-untyped-def]

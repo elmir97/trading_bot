@@ -168,9 +168,18 @@ def check_signal_not_expired(
 
 
 def check_signal_not_used(
-    *, trade_opened_at: datetime | None
+    *, trade_opened_at: datetime | None, entry_rejected: bool = False
 ) -> ExecutionRefusal | None:
+    """entry_rejected — вход по этому уведомлению биржа уже отклонила:
+    отметка стоит (одна попытка на уведомление), но сделки не было, и
+    «уже открывали сделку» было бы неправдой."""
     if trade_opened_at is not None:
+        if entry_rejected:
+            return ExecutionRefusal(
+                Code.SIGNAL_ALREADY_USED,
+                "Биржа уже отклонила вход по этому сигналу. "
+                "Повторить нельзя — дождись следующего уведомления.",
+            )
         return ExecutionRefusal(
             Code.SIGNAL_ALREADY_USED, "По этому сигналу уже открывали сделку."
         )
@@ -199,6 +208,7 @@ def run_signal_identity_guards(
     notification_expires_at: datetime,
     now: datetime,
     notification_trade_opened_at: datetime | None,
+    notification_entry_rejected: bool,
     setup_already_traded: bool,
 ) -> ExecutionRefusal | None:
     """3а → 3 → 4 → 4а. SUPERSEDED первым: к этому моменту новое
@@ -213,7 +223,10 @@ def run_signal_identity_guards(
         return refusal
     if refusal := check_signal_not_expired(expires_at=notification_expires_at, now=now):
         return refusal
-    if refusal := check_signal_not_used(trade_opened_at=notification_trade_opened_at):
+    if refusal := check_signal_not_used(
+        trade_opened_at=notification_trade_opened_at,
+        entry_rejected=notification_entry_rejected,
+    ):
         return refusal
     if refusal := check_setup_not_traded(already_traded=setup_already_traded):
         return refusal
@@ -460,6 +473,8 @@ class GuardInputs:
     now: datetime
     # 4 — отметка на уведомлении, не на слоте (слот переиспользуется)
     notification_trade_opened_at: datetime | None
+    # 4 — вход по уведомлению биржа уже отклонила (только текст отказа)
+    notification_entry_rejected: bool
     # 4а (шаг 15.5.2а)
     setup_already_traded: bool
     # 5
@@ -520,6 +535,7 @@ def run_guards(inputs: GuardInputs) -> ExecutionRefusal | None:
         notification_expires_at=inputs.notification_expires_at,
         now=inputs.now,
         notification_trade_opened_at=inputs.notification_trade_opened_at,
+        notification_entry_rejected=inputs.notification_entry_rejected,
         setup_already_traded=inputs.setup_already_traded,
     ):
         return refusal

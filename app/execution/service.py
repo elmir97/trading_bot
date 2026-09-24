@@ -437,9 +437,15 @@ class ExecutionService:
 
         # Шаг 15.5.2а: 3а-4а — только своя БД, до первого запроса к бирже.
         slot_active = slot.status is SignalRecordStatus.ACTIVE
-        setup_already_traded = await SignalNotificationRepository(
-            self._session
-        ).exists_traded(slot.id, notification.fingerprint)
+        notifications = SignalNotificationRepository(self._session)
+        setup_already_traded = await notifications.exists_traded(
+            slot.id, notification.fingerprint
+        )
+        # Запрос только когда отметка стоит — иначе текст не нужен.
+        notification_entry_rejected = (
+            notification.trade_opened_at is not None
+            and await notifications.entry_rejected(notification.id)
+        )
         if refusal := run_signal_identity_guards(
             slot_active=slot_active,
             slot_fingerprint=slot.fingerprint,
@@ -447,6 +453,7 @@ class ExecutionService:
             notification_expires_at=notification.expires_at,
             now=moment,
             notification_trade_opened_at=notification.trade_opened_at,
+            notification_entry_rejected=notification_entry_rejected,
             setup_already_traded=setup_already_traded,
         ):
             return await refuse(refusal)
@@ -509,6 +516,7 @@ class ExecutionService:
             notification_expires_at=notification.expires_at,
             now=moment,
             notification_trade_opened_at=notification.trade_opened_at,
+            notification_entry_rejected=notification_entry_rejected,
             setup_already_traded=setup_already_traded,
             has_open_position=has_open_position,
             open_positions_count=open_positions_count,

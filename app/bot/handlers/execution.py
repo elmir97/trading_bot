@@ -149,15 +149,18 @@ def render_refusal(refusal: ExecutionRefusal) -> str:
 # живых REJECTED. Ключ — ExecutionOrder.error_code (строка числового кода).
 _KNOWN_REJECTION_CODES: dict[str, str] = {}
 
+# Одна попытка на уведомление (раздел 8): trade_opened_at остаётся,
+# повтор — только по новому уведомлению того же сетапа.
+REJECTED_RETRY_HINT = "Повторить по этому сигналу нельзя — дождись следующего уведомления."
+
 
 def _render_rejection_message(error_code: str | None) -> str:
     """Раздел 16 ТЗ, шаг 15.5.2, п.7 плана: сырой msg биржи сюда не
     попадает — error_code это число (ExecutionService.submit_entry_order)
     или имя класса исключения, не текст ответа."""
     known = _KNOWN_REJECTION_CODES.get(error_code or "")
-    if known is not None:
-        return f"🚫 {known}"
-    return f"🚫 BingX отклонил ордер, код {error_code}"
+    reason = known if known is not None else f"BingX отклонил ордер, код {error_code}"
+    return f"🚫 {reason}\n{REJECTED_RETRY_HINT}"
 
 
 READBACK_PENDING_TEXT = "⏳ Ордер отправлен, проверяю исполнение…"

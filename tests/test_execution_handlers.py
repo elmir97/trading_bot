@@ -65,7 +65,9 @@ from app.trading.enums import (
     ExchangeKeyMode,
     ObservationStage,
     OrderRole,
+    OrderSide,
     OrderStatus,
+    OrderType,
     SignalDirection,
     SignalLevel,
     TradeSide,
@@ -854,7 +856,11 @@ async def test_confirm_yes_real_order_rejected_shows_known_code_not_raw_msg(  # 
     assert orders[0].error_code == "80001"
 
     edits = [m.text for m in bot.recorder.calls if isinstance(m, EditMessageText)]
-    assert any("BingX отклонил ордер, код 80001" in t for t in edits)
+    assert any(
+        "BingX отклонил ордер, код 80001\n"
+        "Повторить по этому сигналу нельзя — дождись следующего уведомления." in t
+        for t in edits
+    )
     assert not any("insufficient margin" in t for t in edits)
 
 
@@ -1812,6 +1818,138 @@ async def test_setup_already_traded_refuses_other_notification_of_same_setup(  #
     assert row.status is OrderStatus.REFUSED
     assert row.error_code == "SETUP_ALREADY_TRADED"
     assert any("По этому сетапу уже открывали сделку" in t for t in bot.recorder.sent_texts())
+
+
+def _reject_entry(client) -> None:  # type: ignore[no-untyped-def]
+    client.current_leverage = _leverage_info(long_leverage=10)
+    client.place_order_error = ExchangeResponseError(
+        "BingX: отказ (код 80001)", code=80001, payload={"code": 80001}
+    )
+
+
+async def test_rejected_entry_does_not_burn_setup_for_next_notification(  # type: ignore[no-untyped-def]
+    ctx, bot, monkeypatch
+) -> None:
+    """Решение А (раздел 8): биржа явно отклонила вход по №1 — позиции нет,
+    уведомление №2 того же слота и fingerprint открывает карточку без
+    SETUP_ALREADY_TRADED. Отметка на №1 остаётся."""
+    dp, session, user, client, _redis, settings = ctx
+    _reject_entry(client)
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    settings.exec_dry_run = False
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    first = await _notify(session, signal)
+    await _open_and_confirm(dp, bot, first, user)
+    await session.refresh(first)
+    assert first.trade_opened_at is not None
+    [entry] = await _orders_for_notification(session, first.id)
+    assert entry.status is OrderStatus.REJECTED
+
+    second = await _notify(session, signal)  # тот же fingerprint
+    await _feed(dp, bot, 3, make_callback(f"exn:open:{second.id}", message_id=3))
+
+    assert (user.id, second.id) in execution._confirmations
+    assert await _orders_for_notification(session, second.id) == []
+    assert not any("уже открывали сделку" in t for t in bot.recorder.sent_texts())
+
+
+async def test_unknown_entry_still_burns_setup_for_next_notification(  # type: ignore[no-untyped-def]
+    ctx, bot, monkeypatch
+) -> None:
+    """UNKNOWN по №1 — ордер мог пройти: №2 того же сетапа получает
+    SETUP_ALREADY_TRADED, как до решения А."""
+    dp, session, user, client, _redis, settings = ctx
+    client.current_leverage = _leverage_info(long_leverage=10)
+    client.place_order_error = ExchangeUnavailableError("BingX не ответил вовремя")
+    client.fill_error = ExchangeResponseError("order not exist", code=109414, payload=None)
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    settings.exec_dry_run = False
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    first = await _notify(session, signal)
+    await _open_and_confirm(dp, bot, first, user)
+    entries = [
+        o for o in await _orders_for_notification(session, first.id)
+        if o.role is OrderRole.ENTRY
+    ]
+    assert [o.status for o in entries] == [OrderStatus.UNKNOWN]
+
+    second = await _notify(session, signal)
+    await _feed(dp, bot, 3, make_callback(f"exn:open:{second.id}", message_id=3))
+
+    assert (user.id, second.id) not in execution._confirmations
+    [row] = await _orders_for_notification(session, second.id)
+    assert row.error_code == "SETUP_ALREADY_TRADED"
+
+
+async def test_pending_entry_still_burns_setup_for_next_notification(  # type: ignore[no-untyped-def]
+    ctx, bot, monkeypatch
+) -> None:
+    """PENDING по №1 (процесс упал между коммитом PENDING и ответом биржи,
+    раздел 8) — исход неизвестен: №2 того же сетапа получает
+    SETUP_ALREADY_TRADED. Состояние собрано вручную: хендлер PENDING не
+    оставляет."""
+    dp, session, user, client, _redis, _settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    first = await _notify(session, signal, trade_opened_at=NOW)
+    session.add(ExecutionOrder(
+        user_id=user.id, signal_id=signal.id, notification_id=first.id,
+        client_order_id=f"tj{first.id}u{user.id}E", symbol="BTC-USDT",
+        side=OrderSide.BUY, position_side=TradeSide.LONG, order_type=OrderType.MARKET,
+        role=OrderRole.ENTRY, status=OrderStatus.PENDING,
+    ))
+    await session.flush()
+
+    second = await _notify(session, signal)
+    await _feed(dp, bot, 3, make_callback(f"exn:open:{second.id}", message_id=3))
+
+    assert (user.id, second.id) not in execution._confirmations
+    [row] = await _orders_for_notification(session, second.id)
+    assert row.error_code == "SETUP_ALREADY_TRADED"
+
+
+async def test_repeat_on_rejected_notification_says_exchange_rejected(  # type: ignore[no-untyped-def]
+    ctx, bot, monkeypatch
+) -> None:
+    """Повторная попытка по №1 после REJECTED: SIGNAL_ALREADY_USED с текстом
+    про отказ биржи, не «уже открывали сделку»; второго ордера нет — только
+    строка-наблюдение REFUSED, как у любого отказа гварда (раздел 12а)."""
+    dp, session, user, client, _redis, settings = ctx
+    _reject_entry(client)
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    settings.exec_dry_run = False
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    first = await _notify(session, signal)
+    await _open_and_confirm(dp, bot, first, user)
+
+    await _feed(dp, bot, 3, make_callback(f"exn:open:{first.id}", message_id=3))
+
+    assert (user.id, first.id) not in execution._confirmations
+    assert any(
+        "Биржа уже отклонила вход по этому сигналу. "
+        "Повторить нельзя — дождись следующего уведомления." in t
+        for t in bot.recorder.sent_texts()
+    )
+    assert not any("уже открывали сделку" in t for t in bot.recorder.sent_texts())
+    rows = await _orders_for_notification(session, first.id)
+    orders = [r for r in rows if r.client_order_id is not None]
+    assert [(o.role, o.status) for o in orders] == [(OrderRole.ENTRY, OrderStatus.REJECTED)]
+    refused = [r for r in rows if r.status is OrderStatus.REFUSED]
+    assert [r.error_code for r in refused] == ["SIGNAL_ALREADY_USED"]
+    assert len(rows) == 2
+    assert [c[0] for c in client.submit_calls].count("place_market_order") == 1
 
 
 async def test_parallel_yes_on_two_notifications_of_same_setup_one_wins(  # type: ignore[no-untyped-def]
