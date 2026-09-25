@@ -33,6 +33,7 @@ from app.exchanges.base import (
     Position,
     SymbolInfo,
     Ticker,
+    UnsupportedPositionMode,
 )
 from app.execution.models import ExecutionRefusal
 from app.execution.models import ExecutionRefusalCode as Code
@@ -75,6 +76,10 @@ class FakeExchangeClient(ExchangeClient):
         self.ticker_retries_seen: list[int | None] = []
         self.balance_retries_seen: list[int | None] = []
         self.symbols_retries_seen: list[int | None] = []
+        # Шаг 15.5.4а
+        self.positions: list[Position] = []
+        self.positions_error: Exception | None = None
+        self.positions_retries_seen: list[int | None] = []
 
     async def get_ticker(self, symbol: str, *, max_retries: int | None = None) -> Ticker:
         self.ticker_retries_seen.append(max_retries)
@@ -100,8 +105,11 @@ class FakeExchangeClient(ExchangeClient):
             unrealized_pnl=D("0"), equity=self.balance,
         )
 
-    async def get_positions(self) -> list[Position]:
-        return []
+    async def get_positions(self, *, max_retries: int | None = None) -> list[Position]:
+        self.positions_retries_seen.append(max_retries)
+        if self.positions_error is not None:
+            raise self.positions_error
+        return self.positions
 
     async def get_api_restrictions(self) -> ApiRestrictions:
         raise NotImplementedError
@@ -1164,3 +1172,86 @@ async def test_provisional_trade_counts_in_total_risk(ctx) -> None:  # type: ign
 
     assert isinstance(result, ExecutionRefusal)
     assert result.code is Code.MAX_TOTAL_RISK
+
+
+
+# --- Шаг 15.5.4а: живая позиция на бирже ------------------------------------
+
+
+def _exchange_position(symbol: str = "BTC-USDT", side: TradeSide = TradeSide.LONG) -> Position:
+    return Position(
+        symbol=symbol, side=side, quantity=D("0.8397"), entry_price=D("100"),
+        mark_price=D("100"), leverage=10, unrealized_pnl=D("0"), margin=D("10"),
+    )
+
+
+async def test_card_refuses_on_live_exchange_position_any_side(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Журнал пуст, на бирже SHORT по символу, сигнал LONG — отказ: сторона
+    не участвует, как у POSITION_EXISTS."""
+    session, user, client, market = ctx
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _snapshot(session, signal)
+    client.positions = [_exchange_position(side=TradeSide.SHORT)]
+
+    service = _service(session, _live_settings(), client, market)
+    result = await _evaluate(service, user, notification, signal)
+
+    assert isinstance(result, ExecutionRefusal)
+    assert result.code is Code.EXCHANGE_POSITION_EXISTS
+    assert client.positions_retries_seen == [None]
+    [row] = list(
+        await session.scalars(
+            select(ExecutionOrder).where(ExecutionOrder.notification_id == notification.id)
+        )
+    )
+    assert row.status is OrderStatus.REFUSED
+    assert row.error_code == "EXCHANGE_POSITION_EXISTS"
+    assert row.stage == "card"
+
+
+async def test_card_passes_with_position_on_other_symbol(ctx) -> None:  # type: ignore[no-untyped-def]
+    session, user, client, market = ctx
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _snapshot(session, signal)
+    client.positions = [_exchange_position(symbol="ETH-USDT")]
+
+    service = _service(session, _live_settings(), client, market)
+    result = await _evaluate(service, user, notification, signal)
+
+    assert isinstance(result, ExecutionQuote)
+
+
+async def test_confirm_evaluate_does_not_read_exchange_positions(ctx) -> None:  # type: ignore[no-untyped-def]
+    """На «Да» позиции читает _submit_real_order клиентом отправки
+    (check_exchange_position) — evaluate() их не трогает."""
+    session, user, client, market = ctx
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _snapshot(session, signal)
+    client.positions = [_exchange_position()]
+
+    service = _service(session, _live_settings(), client, market)
+    result = await _evaluate(service, user, notification, signal, planned_price=D("100"))
+
+    assert isinstance(result, ExecutionQuote)
+    assert client.positions_retries_seen == []
+
+
+async def test_card_positions_read_failure_is_not_no_positions(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Сбой чтения позиций — ExchangeError наружу (карточка пишет ERROR и
+    объясняет), не «позиций нет»."""
+    session, user, client, market = ctx
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _snapshot(session, signal)
+    client.positions_error = UnsupportedPositionMode("BTC-USDT")
+
+    service = _service(session, _live_settings(), client, market)
+    with pytest.raises(UnsupportedPositionMode):
+        await _evaluate(service, user, notification, signal)

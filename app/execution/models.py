@@ -54,6 +54,9 @@ class ExecutionRefusalCode(StrEnum):
     # запрещён (наращивание риска). См. guards.check_setup_not_traded.
     SETUP_ALREADY_TRADED = "SETUP_ALREADY_TRADED"
     POSITION_EXISTS = "POSITION_EXISTS"
+    # Шаг 15.5.4а: живая позиция по символу на бирже, а не в журнале — см.
+    # guards.check_no_exchange_position и ExecutionService.check_exchange_position.
+    EXCHANGE_POSITION_EXISTS = "EXCHANGE_POSITION_EXISTS"
     MAX_POSITIONS = "MAX_POSITIONS"
     MAX_TOTAL_RISK = "MAX_TOTAL_RISK"
     DAILY_LOSS_LIMIT = "DAILY_LOSS_LIMIT"

@@ -860,6 +860,9 @@ async def _submit_real_order(
     уходит отдельным сообщением: правка сообщения в Telegram не даёт
     уведомления, а эту нельзя пропустить.
 
+    Шаг 15.5.4а: гвард EXCHANGE_POSITION_EXISTS на «Да» — здесь, а не в
+    evaluate(): позиции читает тот же клиент, что отправит ордер.
+
     Второй клиент, не тот, что использовал _build_quote() для evaluate():
     тот уже закрыт в своём finally к этому моменту. Цена — одна лишняя
     локальная расшифровка ключа (ExchangeFactory.get_credentials — запрос
@@ -915,6 +918,24 @@ async def _submit_real_order(
             session=session, settings=settings, client=client, market=market
         )
         position_side = bingx_position_side(order.position_side, result.dual_side_position)
+
+        # Шаг 15.5.4а: живая позиция на бирже — этим же клиентом, до плеча
+        # (set_leverage уже меняет состояние счёта).
+        try:
+            position_refusal = await service.check_exchange_position(order=order)
+        except ExchangeError as exc:
+            logger.warning(
+                "Не удалось прочитать позиции биржи перед отправкой ордера",
+                extra={"user_id": user.id, "notification_id": notification.id},
+            )
+            await _record_exchange_error(
+                session, user, notification, slot, exc, at_confirm=True
+            )
+            await message.edit_text(_describe(exc), reply_markup=None)
+            return
+        if position_refusal is not None:
+            await message.edit_text(render_refusal(position_refusal), reply_markup=None)
+            return
 
         leverage_refusal = await service.adjust_leverage(order=order, position_side=position_side)
         if leverage_refusal is not None:

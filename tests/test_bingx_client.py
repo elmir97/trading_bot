@@ -24,6 +24,7 @@ from app.exchanges.base import (
     ExchangeUnavailableError,
     ReadbackIncomplete,
     TpSlSpec,
+    UnsupportedPositionMode,
 )
 from app.exchanges.bingx import QUOTE_TICKER, BingXClient
 from app.trading.enums import ExchangeKeyMode, OrderSide, TradeSide
@@ -450,27 +451,6 @@ class TestPrivateData:
         )
         await client.close()
 
-    async def test_positions_skip_closed(self) -> None:
-        """Биржа возвращает и закрытые позиции с нулевым объёмом."""
-        def handler(request: httpx.Request) -> httpx.Response:
-            return ok([
-                {"symbol": "BTC-USDT", "positionSide": "LONG",
-                 "positionAmt": "0.2", "avgPrice": "100500",
-                 "markPrice": "101000", "leverage": "10",
-                 "unrealizedProfit": "100", "initialMargin": "2010"},
-                {"symbol": "ETH-USDT", "positionSide": "SHORT",
-                 "positionAmt": "0", "avgPrice": "0"},
-            ])
-
-        client = make_client(handler)
-        positions = await client.get_positions()
-
-        assert len(positions) == 1
-        assert positions[0].symbol == "BTC-USDT"
-        assert positions[0].side is TradeSide.LONG
-        assert positions[0].quantity == D("0.2")
-        await client.close()
-
     async def test_fill_direction_derived_from_position_side(self) -> None:
         """BUY — это вход для лонга, но выход для шорта."""
         def handler(request: httpx.Request) -> httpx.Response:
@@ -493,6 +473,148 @@ class TestPrivateData:
         assert fills[1].is_entry is False   # BUY в шорт — выход
         # Комиссия приходит отрицательной, храним модуль.
         assert fills[0].fee == D("4")
+        await client.close()
+
+
+# Шаг 15.5.4а: форма /openApi/swap/v2/user/positions снята живьём на демо
+# (хедж), прогоны 25-26.09.2026: (a) нет позиций, (b) LONG BTC-USDT открыт,
+# (c) закрыт, (d) SHORT BTC-USDT открыт, (e) закрыт. Живые — список ключей
+# записи и symbol/positionSide/positionAmt/availableAmt с типами. Значения
+# остальных полей не печатались (ответ полями по списку, не repr()) —
+# в фикстуре они синтетика.
+_LIVE_POSITION_KEYS = [
+    "availableAmt", "avgPrice", "createTime", "currency", "initialMargin",
+    "isolated", "leverage", "liquidationPrice", "margin", "markPrice",
+    "maxMarginReduction", "minIncreaseMargin", "onlyOnePosition", "pnlRatio",
+    "positionAmt", "positionId", "positionSide", "positionValue",
+    "realisedProfit", "riskRate", "symbol", "unrealizedProfit", "updateTime",
+]
+
+
+def _live_position(position_side: str, amount: str) -> dict[str, object]:
+    item: dict[str, object] = {
+        # Синтетика — см. комментарий выше.
+        "avgPrice": "100000", "createTime": 1790000000000, "currency": "VST",
+        "initialMargin": "100", "isolated": False, "leverage": 10,
+        "liquidationPrice": 0, "margin": "100", "markPrice": "100100",
+        "maxMarginReduction": "0", "minIncreaseMargin": "0", "onlyOnePosition": False,
+        "pnlRatio": "0", "positionId": "1", "positionValue": "84000",
+        "realisedProfit": "0", "riskRate": "0", "unrealizedProfit": "0",
+        "updateTime": 1790000000000,
+        # Живые значения и типы.
+        "symbol": "BTC-USDT",
+        "positionSide": position_side,
+        "positionAmt": amount,
+        "availableAmt": amount,
+    }
+    assert sorted(item) == _LIVE_POSITION_KEYS
+    return item
+
+
+class TestGetPositions:
+    """Шаг 15.5.4а: строгий разбор — по нему гвард EXCHANGE_POSITION_EXISTS."""
+
+    async def _positions(self, payload):  # type: ignore[no-untyped-def]
+        client = make_client(lambda request: ok(payload))
+        try:
+            return await client.get_positions()
+        finally:
+            await client.close()
+
+    async def test_no_positions_is_empty_list(self) -> None:
+        """Прогоны (a), (c), (e): без позиций и после закрытия — пустой
+        список; закрытая позиция с нулём в списке не остаётся."""
+        assert await self._positions([]) == []
+
+    async def test_live_long(self) -> None:
+        """Прогон (b): positionAmt — строка, разбирается в Decimal."""
+        [position] = await self._positions([_live_position("LONG", "0.8397")])
+        assert position.symbol == "BTC-USDT"
+        assert position.side is TradeSide.LONG
+        assert position.quantity == D("0.8397")
+
+    async def test_live_short_amount_is_positive(self) -> None:
+        """Прогон (d): у SHORT в хедже positionAmt положительный — сторона
+        только из positionSide."""
+        [position] = await self._positions([_live_position("SHORT", "1.2592")])
+        assert position.side is TradeSide.SHORT
+        assert position.quantity == D("1.2592")
+
+    async def test_one_way_both_blocks_with_named_reason(self) -> None:
+        with pytest.raises(UnsupportedPositionMode) as exc_info:
+            await self._positions([_live_position("BOTH", "0.5")])
+        assert isinstance(exc_info.value, ExchangeResponseError)
+        assert str(exc_info.value) == (
+            "BTC-USDT: позиция в режиме one-way (BOTH) — форма ответа не проверена, "
+            "вход заблокирован"
+        )
+
+    @pytest.mark.parametrize("side", [None, "", "long", "HEDGE"])
+    async def test_unknown_position_side_fails(self, side: object) -> None:
+        item = _live_position("LONG", "0.8397")
+        if side is None:
+            del item["positionSide"]
+        else:
+            item["positionSide"] = side
+        with pytest.raises(ExchangeResponseError, match="positionSide"):
+            await self._positions([item])
+
+    @pytest.mark.parametrize("amount", [None, "", "abc"])
+    async def test_unparseable_amount_fails(self, amount: object) -> None:
+        item = _live_position("LONG", "0.8397")
+        if amount is None:
+            del item["positionAmt"]
+        else:
+            item["positionAmt"] = amount
+        with pytest.raises(ExchangeResponseError, match="positionAmt"):
+            await self._positions([item])
+
+    async def test_available_amt_is_not_a_fallback(self) -> None:
+        item = _live_position("LONG", "0.8397")
+        del item["positionAmt"]
+        with pytest.raises(ExchangeResponseError, match="positionAmt"):
+            await self._positions([item])
+
+    async def test_negative_amount_fails(self) -> None:
+        """В хедже минуса не видели — не берём abs() наугад."""
+        with pytest.raises(ExchangeResponseError, match="отрицательный"):
+            await self._positions([_live_position("SHORT", "-1.2592")])
+
+    async def test_zero_amount_is_skipped(self) -> None:
+        """Живьём не наблюдалось, но ноль — не живая позиция."""
+        assert await self._positions([_live_position("LONG", "0")]) == []
+
+    @pytest.mark.parametrize("leverage", ["10X", "10.0", {"x": 1}])
+    async def test_unparseable_leverage_is_exchange_error(self, leverage: object) -> None:
+        """Не ValueError/TypeError: потребители ловят только ExchangeError."""
+        item = _live_position("LONG", "0.8397")
+        item["leverage"] = leverage
+        with pytest.raises(ExchangeResponseError, match="leverage"):
+            await self._positions([item])
+
+    async def test_missing_symbol_fails(self) -> None:
+        item = _live_position("LONG", "0.8397")
+        del item["symbol"]
+        with pytest.raises(ExchangeResponseError, match="symbol"):
+            await self._positions([item])
+
+    @pytest.mark.parametrize("payload", [{}, {"positions": []}, None])
+    async def test_not_a_list_fails(self, payload: object) -> None:
+        with pytest.raises(ExchangeResponseError, match="не список"):
+            await self._positions(payload)
+
+    async def test_max_retries_one_does_not_retry(self) -> None:
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            raise httpx.TimeoutException("timeout")
+
+        client = make_client(handler, max_retries=3)
+        client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
+        with pytest.raises(ExchangeUnavailableError):
+            await client.get_positions(max_retries=1)
+        assert calls["n"] == 1
         await client.close()
 
 

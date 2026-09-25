@@ -26,6 +26,8 @@ from app.trading.enums import ExchangeKeyMode
 #   get_leverage         — app/exchanges/bingx.py (BingXClient.get_leverage)
 #   set_leverage         — app/exchanges/bingx.py (BingXClient.set_leverage)
 #   place_market_order   — app/exchanges/bingx.py (BingXClient.place_market_order)
+#   get_positions        — шаг 15.5.4а, гвард EXCHANGE_POSITION_EXISTS в
+#                          _submit_real_order (ExecutionService.check_exchange_position)
 # Последние три — часть шага 15.5.2 (сама отправка ещё не собрана в этом
 # шаге), но уже спроектированы именно для confirm-пути (get_leverage/
 # set_leverage — условная смена плеча перед входом, place_market_order —
@@ -48,7 +50,11 @@ from app.trading.enums import ExchangeKeyMode
 #                          Settings, см. confirm_path_http_calls)
 #   get_open_orders      — 2: чтение + перечтение перед «стопа нет» (Р2)
 #   place_conditional_order — 2: спасение стопа + спасение тейка
-_ENTRY_PATH_HTTP_CALLS = 6
+#
+# Шаг 15.5.4а: пересчёт карточки после PRICE_DRIFT на «Да» тоже идёт под
+# локом — ticker/symbol/balance дважды + get_positions карточки = 7 вызовов,
+# не больше пути отправки; худшим остаётся путь отправки с read-back.
+_ENTRY_PATH_HTTP_CALLS = 7
 _READBACK_FIXED_HTTP_CALLS = 1 + 2 + 2
 
 
@@ -291,7 +297,7 @@ class Settings(BaseSettings):
     def confirm_path_http_calls(self) -> int:
         """Худший случай числа HTTP-вызовов на пути «Да» вместе с read-back
         (шаг 15.5.3) — см. комментарий у _ENTRY_PATH_HTTP_CALLS. При
-        дефолтах: 6 + (1 + 3) + 2 + 2 = 14."""
+        дефолтах: 7 + (1 + 3) + 2 + 2 = 15."""
         return (
             _ENTRY_PATH_HTTP_CALLS
             + self.exec_order_readback_attempts
@@ -323,7 +329,7 @@ class Settings(BaseSettings):
         (тот покрывает локальную часть — БД, планировщик event loop, не
         сеть). Шаг 15.5.3: read-back под тем же локом — его вызовы входят в
         confirm_path_http_calls, паузы — отдельным членом. При дефолтах:
-        ceil(10.0 × (14+1)) + 10 + ceil(2.5) = 150 + 10 + 3 = 163.
+        ceil(10.0 × (15+1)) + 10 + ceil(2.5) = 160 + 10 + 3 = 173.
 
         При max_retries=1 на каждом из этих вызовов (см. п.1-2 разведки)
         бэкофф между попытками не наступает — цикл в BingXClient._request

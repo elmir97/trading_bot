@@ -167,7 +167,7 @@ class FakeReadbackClient(ExchangeClient):
     async def get_balance(self, *, max_retries=None):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 
-    async def get_positions(self):  # type: ignore[no-untyped-def]
+    async def get_positions(self, *, max_retries=None):  # type: ignore[no-untyped-def]
         return []
 
     async def get_api_restrictions(self):  # type: ignore[no-untyped-def]

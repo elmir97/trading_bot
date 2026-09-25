@@ -257,6 +257,27 @@ def check_no_existing_position(*, has_open_position: bool) -> ExecutionRefusal |
     return None
 
 
+# --- 5а. EXCHANGE_POSITION_EXISTS (шаг 15.5.4а) -----------------------------
+# POSITION_EXISTS выше смотрит только журнал. Ручная позиция владельца на
+# BingX по тому же символу в хедже сольётся со входом бота, а спасённый стоп
+# (closePosition=true, шаг 15.5.3) закроет её целиком. Та же логика «по
+# символу, сторона не участвует», что у POSITION_EXISTS — по тем же причинам.
+
+
+def check_no_exchange_position(
+    *, has_exchange_position: bool | None
+) -> ExecutionRefusal | None:
+    """None — позиции биржи здесь не читались: на «Да» чтение идёт в
+    _submit_real_order (handlers/execution.py) тем же клиентом, что
+    отправит ордер, а не в evaluate(). См. ExecutionService.evaluate()."""
+    if has_exchange_position:
+        return ExecutionRefusal(
+            Code.EXCHANGE_POSITION_EXISTS,
+            "На бирже уже есть открытая позиция по этому символу.",
+        )
+    return None
+
+
 # --- 6. MAX_POSITIONS ---------------------------------------------------------
 
 
@@ -451,7 +472,7 @@ def check_symbol_allowed(
 class GuardInputs:
     """Один снимок данных для всех проверок раздела 7 (плюс добавленные позже
     вне исходного ТЗ — 1а LIVE_ORDERS_NOT_ALLOWED, 2а MODE_NOT_ALLOWED,
-    9а SIGNAL_STALE), в порядке run_guards()."""
+    5а EXCHANGE_POSITION_EXISTS, 9а SIGNAL_STALE), в порядке run_guards()."""
 
     # 1
     execution_enabled: bool
@@ -479,6 +500,8 @@ class GuardInputs:
     setup_already_traded: bool
     # 5
     has_open_position: bool
+    # 5а (шаг 15.5.4а) — None: не читалось здесь (см. check_no_exchange_position)
+    has_exchange_position: bool | None
     # 6
     open_positions_count: int
     max_positions: int
@@ -540,6 +563,10 @@ def run_guards(inputs: GuardInputs) -> ExecutionRefusal | None:
     ):
         return refusal
     if refusal := check_no_existing_position(has_open_position=inputs.has_open_position):
+        return refusal
+    if refusal := check_no_exchange_position(
+        has_exchange_position=inputs.has_exchange_position
+    ):
         return refusal
     if refusal := check_max_positions(
         open_positions_count=inputs.open_positions_count, max_positions=inputs.max_positions

@@ -50,6 +50,7 @@ from app.execution.guards import (
     check_execution_enabled,
     check_live_orders_allowed,
     check_mode_allowed,
+    check_no_exchange_position,
     check_permissions_trustworthy,
     check_position_mode_known,
     check_trading_key,
@@ -182,6 +183,33 @@ class ExecutionService:
         self._orders.add(row)
         await self._orders.flush()
         return refusal
+
+    async def check_exchange_position(self, *, order: OrderRequest) -> ExecutionRefusal | None:
+        """Шаг 15.5.4а: гвард EXCHANGE_POSITION_EXISTS на «Да» — тем же
+        клиентом (и счётом, bingx_trading_mode), которым следом уйдёт ордер;
+        вызывается из _submit_real_order до adjust_leverage.
+
+        ExchangeError не ловится: «не смогли прочитать позиции» — не «позиций
+        нет». Вызывающий пишет ERROR и показывает причину (в т.ч.
+        UnsupportedPositionMode для one-way)."""
+        positions = await self._client.get_positions(max_retries=1)
+        refusal = check_no_exchange_position(
+            has_exchange_position=any(p.symbol == order.symbol for p in positions)
+        )
+        if refusal is None:
+            return None
+        return await self._refuse(
+            refusal,
+            user_id=order.user_id,
+            signal_id=order.signal_id,
+            notification_id=order.notification_id,
+            symbol=order.symbol,
+            side=order.side,
+            position_side=order.position_side,
+            price=order.entry_price,
+            drift=None,
+            stage=ObservationStage.CONFIRM,
+        )
 
     async def adjust_leverage(
         self, *, order: OrderRequest, position_side: str
@@ -487,6 +515,17 @@ class ExecutionService:
 
         balance = (await self._client.get_balance(max_retries=call_retries)).equity
 
+        # Шаг 15.5.4а: позиции биржи — только на карточке. На «Да» их читает
+        # _submit_real_order (handlers/execution.py) тем же клиентом, что
+        # отправит ордер (ExecutionService.check_exchange_position), —
+        # здесь был бы другой экземпляр клиента, закрытый до отправки.
+        # Сухой прогон до _submit_real_order не доходит: на «Да» он биржу
+        # не проверяет, ордера нет.
+        has_exchange_position: bool | None = None
+        if stage is ObservationStage.CARD:
+            positions = await self._client.get_positions(max_retries=call_retries)
+            has_exchange_position = any(p.symbol == symbol for p in positions)
+
         open_trades = await self._trades.list_open(user.id)
         open_positions_count = len(open_trades)
         has_open_position = any(t.symbol == symbol for t in open_trades)
@@ -519,6 +558,7 @@ class ExecutionService:
             notification_entry_rejected=notification_entry_rejected,
             setup_already_traded=setup_already_traded,
             has_open_position=has_open_position,
+            has_exchange_position=has_exchange_position,
             open_positions_count=open_positions_count,
             max_positions=self._settings.exec_max_open_positions,
             current_total_risk_percent=current_total_risk_percent,

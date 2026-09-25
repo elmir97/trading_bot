@@ -75,6 +75,22 @@ class ExchangeResponseError(ExchangeError):
     """Ответ получен, но не соответствует ожидаемому формату."""
 
 
+class UnsupportedPositionMode(ExchangeResponseError):  # noqa: N818 — не сбой связи, а причина отказа
+    """Шаг 15.5.4а: позиция в режиме one-way (positionSide=BOTH).
+
+    Форма ответа в этом режиме живьём не снята (знак объёма, поля) — разбирать
+    её наугад нельзя, от этого чтения зависит гвард EXCHANGE_POSITION_EXISTS.
+    Текст исключения уходит пользователю как есть (handlers/exchange.py:
+    _describe) и должен называть причину, а не звучать как сбой сети."""
+
+    def __init__(self, symbol: str) -> None:
+        super().__init__(
+            f"{symbol}: позиция в режиме one-way (BOTH) — форма ответа не проверена, "
+            "вход заблокирован"
+        )
+        self.symbol = symbol
+
+
 class ReadbackIncomplete(ExchangeResponseError):  # noqa: N818 — имя из ТЗ шага 15.5.3
     """Шаг 15.5.3: в ответе чтения ордера нет обязательного поля.
 
@@ -442,7 +458,12 @@ class ExchangeClient(ABC):
         ...
 
     @abstractmethod
-    async def get_positions(self) -> list[Position]: ...
+    async def get_positions(self, *, max_retries: int | None = None) -> list[Position]:
+        """max_retries — см. get_ticker. Только живые позиции (объём != 0).
+
+        Шаг 15.5.4а: читает и гвард EXCHANGE_POSITION_EXISTS — поэтому
+        строгий: непонятная запись роняет чтение, а не пропускается."""
+        ...
 
     @abstractmethod
     async def get_api_restrictions(self) -> ApiRestrictions:

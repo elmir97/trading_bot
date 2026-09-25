@@ -48,6 +48,7 @@ from app.exchanges.base import (
     SymbolInfo,
     Ticker,
     TpSlSpec,
+    UnsupportedPositionMode,
 )
 from app.trading.enums import ExchangeKeyMode, OrderSide, OrderType, TradeSide
 
@@ -654,31 +655,72 @@ class BingXClient(ExchangeClient):
             equity=equity,
         )
 
-    async def get_positions(self) -> list[Position]:
-        data = await self._request(USER_POSITIONS, signed=True)
+    async def get_positions(self, *, max_retries: int | None = None) -> list[Position]:
+        """Шаг 15.5.4а: разбор строгий — по этому чтению гвард
+        EXCHANGE_POSITION_EXISTS решает, пускать ли вход.
+
+        Форма снята живьём на демо (прогоны 25-26.09, хедж): data — список;
+        без позиций — пустой список; закрытая позиция из списка исчезает,
+        с нулём не остаётся. positionAmt — строка, у SHORT в хедже
+        положительная: сторона только из positionSide. positionSide=BOTH
+        (one-way) живьём не снят — UnsupportedPositionMode, не догадка по
+        знаку."""
+        data = await self._request(USER_POSITIONS, signed=True, max_retries=max_retries)
         if not isinstance(data, list):
-            return []
+            raise ExchangeResponseError(
+                f"Ответ positions — не список: {type(data).__name__}"
+            )
 
         positions = []
         for item in data:
-            quantity = _to_decimal(
-                item.get("positionAmt") or item.get("availableAmt"), "positionAmt"
-            )
+            if not isinstance(item, dict):
+                raise ExchangeResponseError(
+                    f"Запись positions — не объект: {type(item).__name__}"
+                )
+            symbol = item.get("symbol")
+            if not symbol:
+                raise ExchangeResponseError("В записи positions нет symbol")
+            raw_side = item.get("positionSide")
+            if raw_side == "BOTH":
+                raise UnsupportedPositionMode(symbol)
+            if raw_side not in ("LONG", "SHORT"):
+                raise ExchangeResponseError(
+                    f"{symbol}: неизвестный positionSide {raw_side!r}"
+                )
+            raw_amount = item.get("positionAmt")
+            if raw_amount is None or raw_amount == "":
+                raise ExchangeResponseError(f"{symbol}: в записи positions нет positionAmt")
+            quantity = _to_decimal(raw_amount, "positionAmt")
             if quantity == 0:
-                continue  # закрытые позиции биржа тоже возвращает
+                # Живьём не наблюдалось (закрытая позиция исчезает из
+                # списка), но нулевой объём — не живая позиция.
+                continue
+            if quantity < 0:
+                # В хедже объём SHORT положительный (прогон (d)). Минус
+                # значит форму, которой мы не видели, — не берём abs().
+                raise ExchangeResponseError(
+                    f"{symbol} {raw_side}: отрицательный positionAmt {raw_amount!r}"
+                )
+
+            # Тип leverage живьём не снят (разведка печатала четыре поля).
+            # int() бросает ValueError/TypeError — не ExchangeError, мимо
+            # всех потребителей; оборачиваем.
+            raw_leverage = item.get("leverage", 1) or 1
+            try:
+                leverage = int(raw_leverage)
+            except (TypeError, ValueError) as exc:
+                raise ExchangeResponseError(
+                    f"{symbol}: не удалось разобрать leverage {raw_leverage!r}"
+                ) from exc
 
             positions.append(
                 Position(
-                    symbol=item.get("symbol", ""),
-                    side=(
-                        TradeSide.LONG
-                        if str(item.get("positionSide", "LONG")).upper() == "LONG"
-                        else TradeSide.SHORT
-                    ),
-                    quantity=abs(quantity),
+                    symbol=symbol,
+                    side=TradeSide(raw_side),
+                    quantity=quantity,
                     entry_price=_to_decimal(item.get("avgPrice"), "avgPrice"),
                     mark_price=_to_decimal(item.get("markPrice"), "markPrice"),
-                    leverage=int(item.get("leverage", 1) or 1),
+                    leverage=leverage,
                     unrealized_pnl=_to_decimal(
                         item.get("unrealizedProfit"), "unrealizedProfit"
                     ),

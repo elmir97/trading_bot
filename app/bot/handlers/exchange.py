@@ -29,6 +29,7 @@ from app.exchanges.base import (
     ExchangeError,
     ExchangeRateLimitError,
     ExchangeUnavailableError,
+    UnsupportedPositionMode,
 )
 from app.market.cache import TTLCache
 from app.market.data import MarketDataService
@@ -60,6 +61,9 @@ def _describe(error: ExchangeError) -> str:
     """Переводит сбой биржи в объяснение, с которым можно что-то сделать."""
     if isinstance(error, ExchangeAuthError):
         return f"🔑 {error}"
+    if isinstance(error, UnsupportedPositionMode):
+        # Не сбой связи и не «ошибка биржи» — причина названа в тексте.
+        return f"⛔ {error}"
     if isinstance(error, ExchangeRateLimitError):
         return (
             "⏳ Превышен лимит запросов к бирже. "

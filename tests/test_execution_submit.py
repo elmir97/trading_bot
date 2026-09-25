@@ -38,6 +38,7 @@ from app.exchanges.base import (
     OrderResult,
     Position,
     SymbolInfo,
+    UnsupportedPositionMode,
 )
 from app.exchanges.bingx import bingx_position_side
 from app.execution.models import ExecutionRefusal, OrderRequest
@@ -74,7 +75,11 @@ class FakeSubmitClient(ExchangeClient):
         set_leverage_error: Exception | None = None,
         place_order_result: OrderResult | None = None,
         place_order_error: Exception | None = None,
+        positions: list[Position] | None = None,
+        positions_error: Exception | None = None,
     ) -> None:
+        self.positions = positions or []
+        self.positions_error = positions_error
         self.current_leverage = current_leverage
         self.leverage_error = leverage_error
         self.set_leverage_error = set_leverage_error
@@ -98,8 +103,11 @@ class FakeSubmitClient(ExchangeClient):
     async def get_balance(self, *, max_retries=None) -> Balance:
         raise NotImplementedError
 
-    async def get_positions(self) -> list[Position]:
-        return []
+    async def get_positions(self, *, max_retries: int | None = None) -> list[Position]:
+        self.calls.append(("get_positions", {"max_retries": max_retries}))
+        if self.positions_error is not None:
+            raise self.positions_error
+        return self.positions
 
     async def get_api_restrictions(self) -> ApiRestrictions:
         raise NotImplementedError
@@ -240,6 +248,69 @@ class TestBingxPositionSide:
     def test_one_way_is_always_both(self) -> None:
         assert bingx_position_side(TradeSide.LONG, False) == "BOTH"
         assert bingx_position_side(TradeSide.SHORT, False) == "BOTH"
+
+
+class TestCheckExchangePosition:
+    """Шаг 15.5.4а: гвард на «Да» — клиентом отправки, max_retries=1."""
+
+    @staticmethod
+    def _position(symbol: str, side: TradeSide) -> Position:
+        return Position(
+            symbol=symbol, side=side, quantity=D("1.2592"), entry_price=D("100"),
+            mark_price=D("100"), leverage=10, unrealized_pnl=D("0"), margin=D("10"),
+        )
+
+    async def test_no_positions_passes(self, ctx) -> None:  # type: ignore[no-untyped-def]
+        session, user, signal, settings, notification = ctx
+        client = FakeSubmitClient()
+        service = _service(session, settings, client)
+
+        result = await service.check_exchange_position(
+            order=_order(user.id, signal.id, notification.id)
+        )
+
+        assert result is None
+        assert client.calls == [("get_positions", {"max_retries": 1})]
+
+    async def test_position_on_symbol_any_side_refuses_with_confirm_row(self, ctx) -> None:  # type: ignore[no-untyped-def]
+        session, user, signal, settings, notification = ctx
+        client = FakeSubmitClient(positions=[self._position("BTC-USDT", TradeSide.SHORT)])
+        service = _service(session, settings, client)
+
+        result = await service.check_exchange_position(
+            order=_order(user.id, signal.id, notification.id)
+        )
+
+        assert result is not None
+        assert result.code is Code.EXCHANGE_POSITION_EXISTS
+        [row] = list(
+            await session.scalars(
+                select(ExecutionOrder).where(ExecutionOrder.notification_id == notification.id)
+            )
+        )
+        assert row.status is OrderStatus.REFUSED
+        assert row.error_code == "EXCHANGE_POSITION_EXISTS"
+        assert row.stage == "confirm"
+
+    async def test_position_on_other_symbol_passes(self, ctx) -> None:  # type: ignore[no-untyped-def]
+        session, user, signal, settings, notification = ctx
+        client = FakeSubmitClient(positions=[self._position("ETH-USDT", TradeSide.LONG)])
+        service = _service(session, settings, client)
+
+        assert await service.check_exchange_position(
+            order=_order(user.id, signal.id, notification.id)
+        ) is None
+
+    async def test_read_failure_propagates(self, ctx) -> None:  # type: ignore[no-untyped-def]
+        """«Не смогли прочитать» — не «позиций нет»: исключение наружу."""
+        session, user, signal, settings, notification = ctx
+        client = FakeSubmitClient(positions_error=UnsupportedPositionMode("BTC-USDT"))
+        service = _service(session, settings, client)
+
+        with pytest.raises(UnsupportedPositionMode):
+            await service.check_exchange_position(
+                order=_order(user.id, signal.id, notification.id)
+            )
 
 
 class TestAdjustLeverage:

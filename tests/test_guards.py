@@ -20,6 +20,7 @@ from app.execution.guards import (
     check_max_positions,
     check_max_total_risk,
     check_mode_allowed,
+    check_no_exchange_position,
     check_no_existing_position,
     check_permissions_trustworthy,
     check_position_mode_known,
@@ -76,6 +77,7 @@ def _valid_inputs(**overrides: object) -> GuardInputs:
         "notification_entry_rejected": False,
         "setup_already_traded": False,
         "has_open_position": False,
+        "has_exchange_position": False,
         "open_positions_count": 1,
         "max_positions": 4,
         "current_total_risk_percent": D("1"),
@@ -332,6 +334,23 @@ class TestPositionExists:
 
     def test_no_position_passes(self) -> None:
         assert check_no_existing_position(has_open_position=False) is None
+
+
+class TestExchangePositionExists:
+    """Шаг 15.5.4а."""
+
+    def test_live_exchange_position_refuses(self) -> None:
+        refusal = check_no_exchange_position(has_exchange_position=True)
+        assert refusal is not None
+        assert refusal.code is Code.EXCHANGE_POSITION_EXISTS
+        assert refusal.message == "На бирже уже есть открытая позиция по этому символу."
+
+    def test_no_exchange_position_passes(self) -> None:
+        assert check_no_exchange_position(has_exchange_position=False) is None
+
+    def test_not_read_here_passes(self) -> None:
+        """None — позиции читает _submit_real_order на «Да», не evaluate()."""
+        assert check_no_exchange_position(has_exchange_position=None) is None
 
 
 class TestMaxPositions:
@@ -711,20 +730,22 @@ GUARD_ORDER: list[tuple[int, Code, dict[str, object]]] = [
     (7, Code.SIGNAL_ALREADY_USED, {"notification_trade_opened_at": NOW}),
     (8, Code.SETUP_ALREADY_TRADED, {"setup_already_traded": True}),
     (9, Code.POSITION_EXISTS, {"has_open_position": True}),
-    (10, Code.MAX_POSITIONS, {"open_positions_count": 4, "max_positions": 4}),
+    # Шаг 15.5.4а: журнал, затем биржа — своя БД раньше чужого счёта.
+    (10, Code.EXCHANGE_POSITION_EXISTS, {"has_exchange_position": True}),
+    (11, Code.MAX_POSITIONS, {"open_positions_count": 4, "max_positions": 4}),
     (
-        11,
+        12,
         Code.MAX_TOTAL_RISK,
         {"current_total_risk_percent": D("10"), "max_total_risk_percent": D("1")},
     ),
     (
-        12,
+        13,
         Code.DAILY_LOSS_LIMIT,
         {"day_loss_percent": D("10"), "max_daily_loss_percent": D("1")},
     ),
-    (13, Code.PRICE_DRIFT, {"current_price": D("10000")}),
+    (14, Code.PRICE_DRIFT, {"current_price": D("10000")}),
     (
-        14,
+        15,
         Code.SIGNAL_STALE,
         # Не трогает current_price/planned_price (не пересекается с
         # PRICE_DRIFT) и не trogaет stop_loss: с крошечным ratio дрейф
@@ -733,9 +754,9 @@ GUARD_ORDER: list[tuple[int, Code, dict[str, object]]] = [
         # test_order_is_respected_for_every_adjacent_pair.
         {"signal_reference_price": D("100"), "max_signal_staleness_ratio": D("0.0001")},
     ),
-    (15, Code.INVALID_LEVELS, {"stop_loss": D("105")}),
-    (16, Code.SIZE_TOO_SMALL, {"symbol_info": _symbol_info(min_quantity=D("1000"))}),
-    (17, Code.SYMBOL_NOT_ALLOWED, {"symbol": "XRP-USDT"}),
+    (16, Code.INVALID_LEVELS, {"stop_loss": D("105")}),
+    (17, Code.SIZE_TOO_SMALL, {"symbol_info": _symbol_info(min_quantity=D("1000"))}),
+    (18, Code.SYMBOL_NOT_ALLOWED, {"symbol": "XRP-USDT"}),
 ]
 
 
@@ -757,6 +778,7 @@ class TestGuardOrder:
             notification_trade_opened_at=NOW,
             setup_already_traded=True,
             has_open_position=True,
+            has_exchange_position=True,
             open_positions_count=10,
             max_positions=1,
             current_total_risk_percent=D("10"),

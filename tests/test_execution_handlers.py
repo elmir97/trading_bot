@@ -55,8 +55,10 @@ from app.exchanges.base import (
     ExchangeUnavailableError,
     LeverageInfo,
     OrderResult,
+    Position,
     SymbolInfo,
     Ticker,
+    UnsupportedPositionMode,
 )
 from app.exchanges.bingx import BingXClient
 from app.execution import service as execution_service
@@ -140,6 +142,11 @@ class FakeExchangeClient(ExchangeClient):
         self.ticker_retries_seen: list[int | None] = []
         self.balance_retries_seen: list[int | None] = []
         self.symbols_retries_seen: list[int | None] = []
+        # Шаг 15.5.4а: живые позиции биржи. Карточка читает их с
+        # max_retries=None, «Да» (_submit_real_order) — с max_retries=1.
+        self.positions: list[Position] = []
+        self.positions_error: Exception | None = None
+        self.positions_retries_seen: list[int | None] = []
 
     async def get_ticker(self, symbol: str, *, max_retries: int | None = None) -> Ticker:
         self.ticker_retries_seen.append(max_retries)
@@ -165,8 +172,11 @@ class FakeExchangeClient(ExchangeClient):
             unrealized_pnl=D("0"), equity=self.balance,
         )
 
-    async def get_positions(self):
-        return []
+    async def get_positions(self, *, max_retries: int | None = None) -> list[Position]:
+        self.positions_retries_seen.append(max_retries)
+        if self.positions_error is not None:
+            raise self.positions_error
+        return self.positions
 
     async def get_api_restrictions(self) -> ApiRestrictions:
         if self.restrictions_error is not None:
@@ -798,10 +808,132 @@ async def test_confirm_yes_submits_real_order(ctx, bot, monkeypatch) -> None:  #
     assert submit_calls == [
         "get_leverage", "place_market_order", "get_order_fill", "get_open_orders",
     ]
+    # Шаг 15.5.4а: позиции биржи — на карточке (без ограничения повторов) и
+    # на «Да» клиентом отправки (max_retries=1).
+    assert client.positions_retries_seen == [None, 1]
 
     edits = [m.text for m in bot.recorder.calls if isinstance(m, EditMessageText)]
     assert "⏳ Ордер отправлен, проверяю исполнение…" in edits
     assert any("✅ Вход исполнен: BTC-USDT" in t and "id 8001" in t for t in edits)
+
+
+def _exchange_position(side: TradeSide = TradeSide.LONG) -> Position:
+    return Position(
+        symbol="BTC-USDT", side=side, quantity=D("0.8397"), entry_price=D("100"),
+        mark_price=D("100"), leverage=10, unrealized_pnl=D("0"), margin=D("10"),
+    )
+
+
+async def test_card_refuses_on_live_exchange_position(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Шаг 15.5.4а: журнал пуст, на бирже позиция по символу — карточка не
+    открывается."""
+    dp, session, user, client, _redis, _settings = ctx
+    client.positions = [_exchange_position(TradeSide.SHORT)]
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _notify(session, signal)
+
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
+
+    texts = bot.recorder.sent_texts()
+    assert len(texts) == 1
+    assert "На бирже уже есть открытая позиция по этому символу." in texts[0]
+    assert (user.id, notification.id) not in execution._confirmations
+    [row] = await _orders_for_signal(session, signal.id)
+    assert row.status is OrderStatus.REFUSED
+    assert row.error_code == "EXCHANGE_POSITION_EXISTS"
+    assert row.stage == "card"
+
+
+async def test_confirm_yes_refuses_on_position_opened_after_card(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Позиция появилась на бирже между карточкой и «Да» — отказ клиентом
+    отправки, до плеча: ни get_leverage, ни ордера, отметки нет."""
+    dp, session, user, client, _redis, settings = ctx
+    client.current_leverage = _leverage_info(long_leverage=10)
+    client.place_order_result = _order_result()
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    settings.exec_dry_run = False
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _notify(session, signal)
+
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
+    state = execution._confirmations[(user.id, notification.id)]
+    client.positions = [_exchange_position()]
+    await _feed(
+        dp, bot, 2,
+        make_callback(f"exn:yes:{notification.id}", message_id=state.message_id),
+    )
+
+    assert client.positions_retries_seen == [None, 1]
+    assert client.submit_calls == []
+    [row] = await _orders_for_signal(session, signal.id)
+    assert row.status is OrderStatus.REFUSED
+    assert row.error_code == "EXCHANGE_POSITION_EXISTS"
+    assert row.stage == "confirm"
+    await session.refresh(notification)
+    assert notification.trade_opened_at is None
+    edits = [m.text for m in bot.recorder.calls if isinstance(m, EditMessageText)]
+    assert any("На бирже уже есть открытая позиция по этому символу." in t for t in edits)
+
+
+async def test_confirm_yes_one_way_position_names_reason(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """positionSide=BOTH на «Да» — ERROR-строка и текст с причиной, не
+    «биржа не отвечает»; до плеча и ордера не доходит."""
+    dp, session, user, client, _redis, settings = ctx
+    client.current_leverage = _leverage_info(long_leverage=10)
+    client.place_order_result = _order_result()
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    settings.exec_dry_run = False
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _notify(session, signal)
+
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
+    state = execution._confirmations[(user.id, notification.id)]
+    client.positions_error = UnsupportedPositionMode("BTC-USDT")
+    await _feed(
+        dp, bot, 2,
+        make_callback(f"exn:yes:{notification.id}", message_id=state.message_id),
+    )
+
+    assert client.submit_calls == []
+    [row] = await _orders_for_signal(session, signal.id)
+    assert row.status is OrderStatus.ERROR
+    assert row.error_code == "UnsupportedPositionMode"
+    assert row.stage == "confirm"
+    edits = [m.text for m in bot.recorder.calls if isinstance(m, EditMessageText)]
+    assert (
+        "⛔ BTC-USDT: позиция в режиме one-way (BOTH) — форма ответа не проверена, "
+        "вход заблокирован"
+    ) in edits
+
+
+async def test_confirm_yes_dry_run_reads_exchange_positions_only_on_card(  # type: ignore[no-untyped-def]
+    ctx, bot, monkeypatch
+) -> None:
+    """Сухой прогон до _submit_real_order не доходит — на «Да» биржу не
+    проверяет (ордера нет); evaluate() на «Да» позиции не читает."""
+    dp, session, user, client, _redis, _settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _notify(session, signal)
+
+    await _open_and_confirm(dp, bot, notification, user)
+
+    assert client.positions_retries_seen == [None]
+    orders = await _orders_for_signal(session, signal.id)
+    assert all(o.status is OrderStatus.DRY_RUN for o in orders)
 
 
 async def test_confirm_yes_real_order_leverage_mismatch_calls_set_leverage(  # type: ignore[no-untyped-def]
@@ -2047,7 +2179,7 @@ async def test_callback_answered_before_first_exchange_call_on_yes(  # type: ign
     ctx, bot, monkeypatch
 ) -> None:
     """Telegram ждёт ответ на callback ~15 с, а путь «Да» с read-back — до
-    TTL лока (163 с): callback.answer() обязан уйти до первого HTTP к бирже."""
+    TTL лока (173 с): callback.answer() обязан уйти до первого HTTP к бирже."""
     dp, session, user, client, _redis, settings = ctx
     client.current_leverage = _leverage_info(long_leverage=10)
     client.place_order_result = _order_result()
