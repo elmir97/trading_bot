@@ -702,9 +702,10 @@ class BingXClient(ExchangeClient):
                     f"{symbol} {raw_side}: отрицательный positionAmt {raw_amount!r}"
                 )
 
-            # Тип leverage живьём не снят (разведка печатала четыре поля).
-            # int() бросает ValueError/TypeError — не ExchangeError, мимо
-            # всех потребителей; оборачиваем.
+            # Тип и наличие leverage живьём не сняты; дефолт только для
+            # отображения, в торговый путь не идёт. int() бросает
+            # ValueError/TypeError — не ExchangeError, мимо всех
+            # потребителей; оборачиваем.
             raw_leverage = item.get("leverage", 1) or 1
             try:
                 leverage = int(raw_leverage)

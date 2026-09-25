@@ -465,7 +465,11 @@ async def _build_quote(
             planned_price=planned_price,
         )
     except ExchangeError as exc:
-        logger.warning("Биржа недоступна при оценке исполнения", extra={"user_id": user.id})
+        logger.warning(
+            "Биржа недоступна при оценке исполнения",
+            extra={"user_id": user.id},
+            exc_info=True,
+        )
         await _record_exchange_error(
             session, user, notification, slot, exc, at_confirm=planned_price is not None
         )
@@ -927,6 +931,7 @@ async def _submit_real_order(
             logger.warning(
                 "Не удалось прочитать позиции биржи перед отправкой ордера",
                 extra={"user_id": user.id, "notification_id": notification.id},
+                exc_info=True,
             )
             await _record_exchange_error(
                 session, user, notification, slot, exc, at_confirm=True
