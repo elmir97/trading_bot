@@ -7,10 +7,9 @@ app/execution/service.py, сюда не переносится. При «Да»:
 полным содержимым OrderRequest, без похода на биржу. EXEC_DRY_RUN=false
 (раздел 16 ТЗ, шаг 15.5.2) — реальная отправка: ExecutionService.
 adjust_leverage()/submit_entry_order(), PENDING-строка коммитится до
-HTTP-запроса и обновляется коммитом после ответа (раздел 8 ТЗ). Валидатор
-Settings._dry_run_supported_only_when_true по-прежнему не пускает
-EXEC_DRY_RUN=false на прод — снимается явным решением владельца на 15.5.5,
-после read-back (15.5.3) и записи сделки в журнал (15.5.4).
+HTTP-запроса и обновляется коммитом после ответа (раздел 8 ТЗ). Старт-
+валидатор EXEC_DRY_RUN снят на 15.5.5; боевой счёт закрыт
+EXEC_ALLOW_LIVE_MODE_ORDERS (гвард LIVE_ORDERS_NOT_ALLOWED).
 
 Состояние карточки (цена на момент показа, TTL) живёт в памяти процесса,
 как и _market_cache в exchange.py — рестарт бота теряет незавершённые
@@ -771,10 +770,7 @@ async def _process_confirm(
         return
 
     # Успех. Раздел 16 ТЗ, шаг 15.5.2: exec_dry_run — состояние сервиса,
-    # не зашитый литерал (было: OrderStatus.DRY_RUN безусловно). Валидатор
-    # Settings._dry_run_supported_only_when_true сегодня не пускает
-    # EXEC_DRY_RUN=false на прод — ветка ниже реализована и покрыта тестами
-    # заранее, снимается явным решением владельца на 15.5.5.
+    # не зашитый литерал (было: OrderStatus.DRY_RUN безусловно).
     _confirmations.pop(key, None)
 
     if not settings.exec_dry_run:

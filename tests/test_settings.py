@@ -10,7 +10,6 @@ from decimal import Decimal
 
 import pytest
 import pytest_asyncio
-from pydantic import ValidationError
 from sqlalchemy import select, text
 
 from app.core.config import Settings
@@ -293,12 +292,10 @@ class TestExecutionGates:
     def test_dry_run_default_is_true(self) -> None:
         assert _minimal_settings().exec_dry_run is True
 
-    def test_dry_run_false_fails_at_startup(self) -> None:
-        """Раздел 16 ТЗ: узнавать об этом в момент «Да» недопустимо —
-        Settings() обязан упасть на старте процесса, раньше первого
-        апдейта."""
-        with pytest.raises(ValidationError, match=r"не поддерживается до шага 15\.5\.5"):
-            _minimal_settings(exec_dry_run=False)
+    def test_dry_run_false_starts(self) -> None:
+        """Шаг 15.5.5: старт-валидатор снят — EXEC_DRY_RUN=false не роняет
+        запуск. Боевой счёт закрыт exec_allow_live_mode_orders (ниже)."""
+        assert _minimal_settings(exec_dry_run=False).exec_dry_run is False
 
     def test_allow_live_mode_orders_default_is_false(self) -> None:
         assert _minimal_settings().exec_allow_live_mode_orders is False

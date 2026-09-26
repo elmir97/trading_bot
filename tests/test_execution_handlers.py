@@ -61,6 +61,7 @@ from app.exchanges.base import (
     UnsupportedPositionMode,
 )
 from app.exchanges.bingx import BingXClient
+from app.execution import guards as guards_module
 from app.execution import service as execution_service
 from app.services.user_service import UserService
 from app.trading.enums import (
@@ -778,7 +779,7 @@ async def test_confirm_yes_submits_real_order(ctx, bot, monkeypatch) -> None:  #
     client.current_leverage = _leverage_info(long_leverage=10)  # совпадает с plan.max_leverage=10
     client.place_order_result = _order_result(order_id="555555")
     _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
-    settings.exec_dry_run = False  # обходим валидатор конструктора, как и другие тесты файла
+    settings.exec_dry_run = False
 
     signal = _signal(user.id)
     session.add(signal)
@@ -1067,12 +1068,12 @@ async def test_confirm_yes_live_orders_not_allowed_blocks_before_http(  # type: 
     ctx, bot, monkeypatch
 ) -> None:
     """Раздел 16 ТЗ, шаг 15.5.2, п.3 плана: bingx_trading_mode="live" и
-    exec_allow_live_mode_orders=False — place_market_order не вызывается
-    ни при каких значениях остальных настроек режима. Этот путь в теории
-    недостижим (тот же LIVE_ORDERS_NOT_ALLOWED уже отказал бы в
-    evaluate()/run_guards() раньше, до _submit_real_order) — тест бьёт по
-    отдельной защите фазы отправки на случай, если evaluate() когда-нибудь
-    обойдут."""
+    exec_allow_live_mode_orders=False — place_market_order не вызывается.
+    Тест всего пути: флаг выключается между карточкой и «Да», и отказывает
+    ранняя проверка в evaluate() на «Да» (слой A), до _submit_real_order.
+    Падает только при выключенных всех трёх слоях (A — evaluate(), B —
+    run_guards(), C — _submit_real_order). Слой C отдельно —
+    test_live_orders_send_phase_layer_refuses_alone."""
     dp, session, user, client, _redis, settings = ctx
     client.current_leverage = _leverage_info(long_leverage=10)
     client.place_order_result = _order_result()
@@ -1103,6 +1104,78 @@ async def test_confirm_yes_live_orders_not_allowed_blocks_before_http(  # type: 
         o.status is OrderStatus.REFUSED and o.error_code == "LIVE_ORDERS_NOT_ALLOWED"
         for o in orders
     )
+
+
+async def test_live_without_allow_refuses_card_before_any_send(  # type: ignore[no-untyped-def]
+    ctx, bot, monkeypatch
+) -> None:
+    """Шаг 15.5.5: live + EXEC_DRY_RUN=false + EXEC_ALLOW_LIVE_MODE_ORDERS=false
+    с самого начала. Карточка отказывает LIVE_ORDERS_NOT_ALLOWED раньше
+    тикера, баланса, инструментов, позиций и любой отправки.
+
+    Не раньше ЛЮБОГО обращения к бирже: _build_quote до evaluate() читает
+    права ключа (apiRestrictions) и режим позиций (positionSide/dual) —
+    это чтение, не отправка; порядок сознательно не меняли.
+    Падает при выключенных слоях A (evaluate) и B (run_guards)."""
+    dp, session, user, client, _redis, settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    settings.exec_dry_run = False
+    settings.exec_allow_live_mode_orders = False
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _notify(session, signal)
+
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
+
+    assert (user.id, notification.id) not in execution._confirmations
+    [row] = await _orders_for_signal(session, signal.id)
+    assert row.status is OrderStatus.REFUSED
+    assert row.error_code == "LIVE_ORDERS_NOT_ALLOWED"
+    assert row.stage == "card"
+    # Чтения до evaluate() — были (см. docstring).
+    assert client.get_position_mode_calls == 1
+    # Ничего из evaluate() после гварда и ничего из отправки.
+    assert client.ticker_retries_seen == []
+    assert client.balance_retries_seen == []
+    assert client.symbols_retries_seen == []
+    assert client.positions_retries_seen == []
+    assert client.submit_calls == []
+
+
+async def test_live_orders_send_phase_layer_refuses_alone(  # type: ignore[no-untyped-def]
+    ctx, bot, monkeypatch
+) -> None:
+    """Слой C — повтор LIVE_ORDERS_NOT_ALLOWED в _submit_real_order — сам по
+    себе: слои A (evaluate) и B (run_guards) выключены подменой, карточка
+    строится, «Да» доходит до фазы отправки. Отказ раньше get_positions,
+    плеча и ордера, отметки нет. Падает при выключенном слое C."""
+    dp, session, user, client, _redis, settings = ctx
+    client.current_leverage = _leverage_info(long_leverage=10)
+    client.place_order_result = _order_result()
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    settings.exec_dry_run = False
+    settings.exec_allow_live_mode_orders = False
+    monkeypatch.setattr(execution_service, "check_live_orders_allowed", lambda **kw: None)
+    monkeypatch.setattr(guards_module, "check_live_orders_allowed", lambda **kw: None)
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _notify(session, signal)
+
+    await _open_and_confirm(dp, bot, notification, user)
+
+    orders = await _orders_for_signal(session, signal.id)
+    [row] = [o for o in orders if o.error_code == "LIVE_ORDERS_NOT_ALLOWED"]
+    assert row.status is OrderStatus.REFUSED
+    assert row.stage == "confirm"
+    # Позиции читала только карточка; на «Да» — ни чтения, ни отправки.
+    assert client.positions_retries_seen == [None]
+    assert client.submit_calls == []
+    await session.refresh(notification)
+    assert notification.trade_opened_at is None
 
 
 async def test_confirm_yes_real_order_commit_survives_later_exception(  # type: ignore[no-untyped-def]
