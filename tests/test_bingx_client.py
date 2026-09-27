@@ -1564,3 +1564,94 @@ class TestLiveFillsForm:
                 "price": "1", "volume": "1", "commission": "0"}
         with pytest.raises(ExchangeResponseError):
             BingXClient._parse_fill(item)
+
+
+# ---------------------------------------------------------------------------
+# Шаг 15.6: история ордеров и позиций — живые ответы демо 27.09 (фикстура).
+# ---------------------------------------------------------------------------
+
+
+class TestReconcilerHistoryEndpoints:
+    async def test_all_orders_sol_shows_stop_child_and_cancelled_tp(self) -> None:
+        from tests.bingx_fixtures import live_items
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/openApi/swap/v2/trade/allOrders"
+            return ok({"orders": live_items("allOrders SOL")})
+
+        client = make_client(handler)
+        orders = await client.get_all_orders(
+            "SOL-USDT", datetime(2026, 9, 26, tzinfo=UTC), datetime(2026, 9, 27, 18, tzinfo=UTC)
+        )
+        by_type = {o.order_type: o for o in orders}
+        stop = by_type["STOP_MARKET"]
+        assert stop.status == "FILLED"
+        assert stop.order_id == "2104219661398712320"
+        assert stop.trigger_order_id == "2104213344721920001"
+        assert stop.reduce_only is True
+        assert stop.avg_price == D("121.611")
+        assert stop.executed_qty == D("1362.07")
+        assert stop.fee == D("82.821383")
+        assert stop.realized_pnl == D("-1920.2749")
+        assert stop.position_id == "2104213344168714242"
+        assert stop.updated_at == datetime(2026, 9, 27, 14, 40, 36, tzinfo=UTC)
+        assert by_type["TAKE_PROFIT_MARKET"].status == "CANCELLED"
+        entry = by_type["MARKET"]
+        assert (entry.status, entry.reduce_only, entry.trigger_order_id) == ("FILLED", False, None)
+        await client.close()
+
+    async def test_order_by_conditional_id_returns_triggered_child(self) -> None:
+        """GET по orderId сработавшего стопа отдаёт дочерний исполненный ордер."""
+        from tests.bingx_fixtures import live_items
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.params["orderId"] == "2104213344721920001"
+            [order] = live_items("order #41 SOL-USDT STOP_LOSS")
+            return ok({"order": order})
+
+        client = make_client(handler)
+        order = await client.get_order_by_id("SOL-USDT", "2104213344721920001")
+        assert order.order_id == "2104219661398712320"
+        assert order.trigger_order_id == "2104213344721920001"
+        assert (order.status, order.avg_price) == ("FILLED", D("121.611"))
+        await client.close()
+
+    async def test_position_history_sol(self) -> None:
+        from tests.bingx_fixtures import live_items
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/openApi/swap/v1/trade/positionHistory"
+            return ok({"positionHistory": live_items("positionHistory SOL")})
+
+        client = make_client(handler)
+        [entry] = await client.get_position_history(
+            "SOL-USDT", datetime(2026, 9, 26, tzinfo=UTC), datetime(2026, 9, 27, 18, tzinfo=UTC)
+        )
+        assert entry.position_id == "2104213344168714242"
+        assert entry.avg_close_price == D("121.611")
+        assert entry.close_position_amt == D("1362.07")
+        assert entry.net_profit == D("-2086.8778")
+        assert entry.commission == D("166.602902565")
+        assert entry.close_all is True
+        assert entry.opened_at == datetime(2026, 9, 27, 14, 15, 30, tzinfo=UTC)
+        await client.close()
+
+    async def test_positions_carry_position_id(self) -> None:
+        from tests.bingx_fixtures import live_items
+
+        client = make_client(lambda request: ok(live_items("positions all")))
+        [link] = await client.get_positions()
+        assert link.symbol == "LINK-USDT"
+        assert link.position_id == "2104122757805514754"
+        await client.close()
+
+    async def test_history_window_over_7_days_refused_before_http(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise AssertionError("запроса быть не должно")
+
+        client = make_client(handler)
+        with pytest.raises(ValueError):
+            await client.get_all_orders(
+                "SOL-USDT", datetime(2026, 9, 1, tzinfo=UTC), datetime(2026, 9, 9, tzinfo=UTC)
+            )
+        await client.close()

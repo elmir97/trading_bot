@@ -19,7 +19,7 @@ import hashlib
 import hmac
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import quote, urlencode
@@ -38,12 +38,14 @@ from app.exchanges.base import (
     ExchangeResponseError,
     ExchangeUnavailableError,
     Fill,
+    HistoryOrder,
     Kline,
     LeverageInfo,
     OpenOrder,
     OrderFill,
     OrderResult,
     Position,
+    PositionHistoryEntry,
     ReadbackIncomplete,
     SymbolInfo,
     Ticker,
@@ -74,6 +76,14 @@ TRADE_LEVERAGE = "/openApi/swap/v2/trade/leverage"
 # Один и тот же путь: POST размещает ордер, GET — запрашивает его статус.
 TRADE_ORDER = "/openApi/swap/v2/trade/order"
 TRADE_OPEN_ORDERS = "/openApi/swap/v2/trade/openOrders"
+# Шаг 15.6 (reconciler), обе сняты живьём на демо 27.09: история ордеров
+# символа (окно не длиннее 7 дней, data.orders) и итоги позиций — v1, НЕ v2
+# (data.positionHistory: avgClosePrice, closePositionAmt, netProfit,
+# positionCommission).
+TRADE_ALL_ORDERS = "/openApi/swap/v2/trade/allOrders"
+POSITION_HISTORY = "/openApi/swap/v1/trade/positionHistory"
+# BingX не отдаёт историю ордеров за окно длиннее 7 дней.
+MAX_HISTORY_WINDOW = timedelta(days=7)
 # Раздел 16 ТЗ, шаг 15.5.1: путь v1, НЕ v2 — /openApi/swap/v2/trade/
 # positionSide/dual отвечает code 100404 "this api is not exist"
 # (проверено дважды живым запросом на демо-хосте, не по документации:
@@ -161,6 +171,84 @@ def _exchange_time(value: Any, field: str) -> datetime:
             raise ExchangeResponseError(f"Время {field} без часового пояса: {value!r}")
         return moment.astimezone(UTC)
     raise ExchangeResponseError(f"В ответе нет времени {field}")
+
+
+def _optional_id(value: Any) -> str | None:
+    """Идентификатор биржи строкой; 0, пустая строка, None — «нет»
+    (triggerOrderId=0 у обычного ордера, positionID=0 у ещё не сработавшего
+    условника)."""
+    if value in (None, "", 0, "0"):
+        return None
+    return str(value)
+
+
+def _required(item: dict[str, Any], *names: str) -> Any:
+    for name in names:
+        value = item.get(name)
+        if value is not None and value != "":
+            return value
+    raise ExchangeResponseError(f"В ответе нет поля {names[0]}")
+
+
+def _parse_history_order(item: Any) -> HistoryOrder:
+    """Строгий разбор ордера истории (allOrders, GET по orderId). Живая форма
+    снята 27.09: числа — строки, orderId/triggerOrderId/positionID — int."""
+    if not isinstance(item, dict):
+        raise ExchangeResponseError(f"Ордер — не объект: {type(item).__name__}")
+    return HistoryOrder(
+        order_id=str(_required(item, "orderId", "orderID")),
+        symbol=str(_required(item, "symbol")),
+        side=str(_required(item, "side")),
+        position_side=str(_required(item, "positionSide")),
+        order_type=str(_required(item, "type")),
+        status=str(_required(item, "status")),
+        avg_price=_to_decimal(item.get("avgPrice"), "avgPrice"),
+        orig_qty=_to_decimal(item.get("origQty"), "origQty"),
+        executed_qty=_to_decimal(item.get("executedQty"), "executedQty"),
+        fee=abs(_to_decimal(item.get("commission"), "commission")),
+        realized_pnl=_to_decimal(item.get("profit"), "profit"),
+        reduce_only=_str_bool(item.get("reduceOnly")),
+        stop_price=_to_decimal(item.get("stopPrice"), "stopPrice"),
+        trigger_order_id=_optional_id(item.get("triggerOrderId")),
+        position_id=_optional_id(item.get("positionID") or item.get("positionId")),
+        created_at=_exchange_time(_required(item, "time"), "time"),
+        updated_at=_exchange_time(_required(item, "updateTime", "time"), "updateTime"),
+    )
+
+
+def _parse_position_history(item: Any) -> PositionHistoryEntry:
+    if not isinstance(item, dict):
+        raise ExchangeResponseError(
+            f"Запись positionHistory — не объект: {type(item).__name__}"
+        )
+    close_all = item.get("closeAllPositions")
+    if not isinstance(close_all, bool):
+        raise ExchangeResponseError(f"closeAllPositions не bool: {close_all!r}")
+    return PositionHistoryEntry(
+        position_id=str(_required(item, "positionId")),
+        symbol=str(_required(item, "symbol")),
+        position_side=str(_required(item, "positionSide")),
+        avg_price=_to_decimal(_required(item, "avgPrice"), "avgPrice"),
+        avg_close_price=_to_decimal(_required(item, "avgClosePrice"), "avgClosePrice"),
+        position_amt=_to_decimal(_required(item, "positionAmt"), "positionAmt"),
+        close_position_amt=_to_decimal(
+            _required(item, "closePositionAmt"), "closePositionAmt"
+        ),
+        realised_profit=_to_decimal(item.get("realisedProfit"), "realisedProfit"),
+        net_profit=_to_decimal(item.get("netProfit"), "netProfit"),
+        commission=abs(_to_decimal(item.get("positionCommission"), "positionCommission")),
+        total_funding=_to_decimal(item.get("totalFunding"), "totalFunding"),
+        close_all=close_all,
+        opened_at=_exchange_time(_required(item, "openTime"), "openTime"),
+        updated_at=_exchange_time(_required(item, "updateTime"), "updateTime"),
+    )
+
+
+def _check_history_window(start: datetime, end: datetime) -> None:
+    if end <= start:
+        raise ValueError(f"Окно истории пустое: {start} — {end}")
+    if end - start > MAX_HISTORY_WINDOW:
+        raise ValueError(f"Окно истории BingX не длиннее 7 дней: {start} — {end}")
 
 
 def _optional_ms_to_dt(value: Any) -> datetime | None:
@@ -751,6 +839,7 @@ class BingXClient(ExchangeClient):
                         if item.get("liquidationPrice")
                         else None
                     ),
+                    position_id=_optional_id(item.get("positionId")),
                 )
             )
         return positions
@@ -1063,6 +1152,58 @@ class BingXClient(ExchangeClient):
             fee=abs(_to_decimal(item.get("commission"), "commission")),
             raw=item,
         )
+
+    async def get_all_orders(
+        self, symbol: str, start: datetime, end: datetime, *, max_retries: int | None = None
+    ) -> list[HistoryOrder]:
+        """Шаг 15.6: ордера символа за окно не длиннее 7 дней, включая
+        исполненные дочерние ордера сработавших стопов/тейков. Чтение —
+        обычный retry."""
+        _check_history_window(start, end)
+        params = {
+            "symbol": symbol,
+            "startTime": int(start.timestamp() * 1000),
+            "endTime": int(end.timestamp() * 1000),
+            "limit": 500,
+        }
+        data = await self._request(
+            TRADE_ALL_ORDERS, params, signed=True, max_retries=max_retries
+        )
+        orders = data.get("orders") if isinstance(data, dict) else None
+        if not isinstance(orders, list):
+            raise ExchangeResponseError("Ожидался список ордеров в data.orders")
+        return [_parse_history_order(item) for item in orders]
+
+    async def get_order_by_id(
+        self, symbol: str, order_id: str, *, max_retries: int | None = None
+    ) -> HistoryOrder:
+        data = await self._request(
+            TRADE_ORDER, {"symbol": symbol, "orderId": order_id}, signed=True,
+            max_retries=max_retries,
+        )
+        order = data.get("order") if isinstance(data, dict) else None
+        if not isinstance(order, dict):
+            raise ExchangeResponseError("Ожидался объект ордера в data.order")
+        return _parse_history_order(order)
+
+    async def get_position_history(
+        self, symbol: str, start: datetime, end: datetime, *, max_retries: int | None = None
+    ) -> list[PositionHistoryEntry]:
+        _check_history_window(start, end)
+        params = {
+            "symbol": symbol,
+            "startTs": int(start.timestamp() * 1000),
+            "endTs": int(end.timestamp() * 1000),
+        }
+        data = await self._request(
+            POSITION_HISTORY, params, signed=True, max_retries=max_retries
+        )
+        if not isinstance(data, dict):
+            raise ExchangeResponseError("Ожидался объект в data positionHistory")
+        entries = data.get("positionHistory")
+        if not isinstance(entries, list):
+            raise ExchangeResponseError("Ожидался список в data.positionHistory")
+        return [_parse_position_history(item) for item in entries]
 
     async def get_open_orders(
         self, symbol: str | None = None, *, max_retries: int | None = None

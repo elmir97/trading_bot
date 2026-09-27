@@ -192,6 +192,9 @@ class Position:
     unrealized_pnl: Decimal
     margin: Decimal
     liquidation_price: Decimal | None = None
+    # positionId биржи — тот же, что positionID в ответе ордера входа и
+    # positionId в positionHistory (снято живьём 27.09). None — не отдан.
+    position_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -407,6 +410,54 @@ class OrderFill:
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
+class HistoryOrder:
+    """Ордер из истории (allOrders / GET ордера по orderId) — сырьё reconciler.
+
+    Выход по стопу/тейку — дочерний ордер: свой order_id, trigger_order_id =
+    orderId условника (снято живьём 27.09, SOL #4). reduce_only — закрывающий.
+    fee — модуль commission, realized_pnl — profit как есть."""
+
+    order_id: str
+    symbol: str
+    side: str
+    position_side: str
+    order_type: str
+    status: str
+    avg_price: Decimal
+    orig_qty: Decimal
+    executed_qty: Decimal
+    fee: Decimal
+    realized_pnl: Decimal
+    reduce_only: bool
+    stop_price: Decimal
+    trigger_order_id: str | None
+    position_id: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class PositionHistoryEntry:
+    """Итог позиции из positionHistory (v1): средняя цена закрытия, закрытый
+    объём, чистый результат с комиссиями входа и выхода (снято живьём 27.09)."""
+
+    position_id: str
+    symbol: str
+    position_side: str
+    avg_price: Decimal
+    avg_close_price: Decimal
+    position_amt: Decimal
+    close_position_amt: Decimal
+    realised_profit: Decimal
+    net_profit: Decimal
+    commission: Decimal
+    total_funding: Decimal
+    close_all: bool
+    opened_at: datetime
+    updated_at: datetime
+
+
 class ExchangeClient(ABC):
     """Контракт биржевого клиента.
 
@@ -567,6 +618,27 @@ class ExchangeClient(ABC):
         (orderId, status, avgPrice, origQty, executedQty, commission) →
         ReadbackIncomplete, а не ноль."""
         ...
+
+    # Шаг 15.6, reconciler. Не абстрактные: фейки тестов, которым сверка не
+    # нужна, не обязаны их реализовывать; реальный клиент — BingXClient.
+    async def get_all_orders(
+        self, symbol: str, start: datetime, end: datetime, *, max_retries: int | None = None
+    ) -> list[HistoryOrder]:
+        """Ордера символа за окно не длиннее 7 дней (ограничение BingX)."""
+        raise NotImplementedError
+
+    async def get_order_by_id(
+        self, symbol: str, order_id: str, *, max_retries: int | None = None
+    ) -> HistoryOrder:
+        """Ордер по orderId биржи. Для условника, который сработал, биржа
+        отдаёт дочерний исполненный ордер (его trigger_order_id = order_id)."""
+        raise NotImplementedError
+
+    async def get_position_history(
+        self, symbol: str, start: datetime, end: datetime, *, max_retries: int | None = None
+    ) -> list[PositionHistoryEntry]:
+        """Закрытые (и частично закрытые) позиции символа за окно."""
+        raise NotImplementedError
 
     @abstractmethod
     async def close(self) -> None: ...
