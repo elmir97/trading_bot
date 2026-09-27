@@ -427,11 +427,14 @@ async def test_execution_slippage_reaches_the_digest_through_the_db(ctx) -> None
     )
     session.add(trade)
     await session.flush()
+    # Только trade_id, не row.trade, и сделка убрана из памяти сессии: иначе
+    # связь многие-к-одному достаётся из identity map без SQL, и тест прошёл
+    # бы и без selectinload. В проде сводка читает строки свежей сессией —
+    # ленивая загрузка там упала бы (MissingGreenlet).
     session.add(_row(user.id, OrderStatus.FILLED, price=D("100"), trade_id=trade.id,
                      created_at=moment))
     await session.flush()
-    session.expunge_all()  # как в проде: строки приходят из запроса, не из памяти сессии
-    user = await UserRepository(session).get_by_telegram_id(user.telegram_id)
+    session.expunge(trade)
 
     _now, _tz_offset, today_local, local_hour = _call_args(
         user, settings, local_hour=settings.exec_daily_digest_hour
