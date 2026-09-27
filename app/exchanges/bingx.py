@@ -712,6 +712,17 @@ class BingXClient(ExchangeClient):
             )
         return result
 
+    async def get_mark_price(self, symbol: str) -> Decimal:
+        """premiumIndex, живая форма (27.09): data — объект, markPrice —
+        строка. Нет поля или чужой символ — ошибка, не last price: стопы
+        бота срабатывают по mark (workingType=MARK_PRICE)."""
+        data = await self._request(QUOTE_PREMIUM_INDEX, {"symbol": symbol})
+        if isinstance(data, list):
+            data = data[0] if len(data) == 1 else None
+        if not isinstance(data, dict) or data.get("symbol") != symbol:
+            raise ExchangeResponseError(f"premiumIndex: нет записи {symbol}")
+        return _to_decimal(_required(data, "markPrice"), "markPrice")
+
     async def get_funding_rate(self, symbol: str) -> Decimal | None:
         data = await self._request(QUOTE_PREMIUM_INDEX, {"symbol": symbol})
         if isinstance(data, list):

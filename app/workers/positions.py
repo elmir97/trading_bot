@@ -3,15 +3,19 @@
 В отличие от сканера сетапов, дедуп здесь не требует fingerprint и таблицы
 signals: у открытой сделки ровно один TP и один SL, поэтому "не слать
 повторно" сводится к двум таймстампам прямо на Trade
-(tp_approach_notified_at/sl_approach_notified_at), которые сбрасываются в
-None, если цена отъехала обратно — готовность к новому предупреждению при
-повторном приближении.
+(tp_approach_notified_at/sl_approach_notified_at).
+
+Шаг 15.6: отметка сбрасывается, только когда цена ушла от цели дальше
+удвоенного порога (гистерезис). Раньше — при любом выходе из полосы, и цена,
+ходящая вокруг её края или за уровнем, давала уведомление каждые 35–60 минут
+(SOL #4, 27.09). Цена — mark price: по нему срабатывают стопы и тейки бота.
+Закрытую на бирже сделку закрывает reconciler, и монитор её больше не видит.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from aiogram import Bot
 
@@ -30,6 +34,10 @@ logger = get_logger(__name__)
 
 ZERO = Decimal(0)
 ONE = Decimal(1)
+# Отметка «уже уведомили» снимается, когда до цели снова больше
+# RESET_FACTOR × порог пути (гистерезис против дребезга у края полосы).
+RESET_FACTOR = Decimal(2)
+PERCENT_STEP = Decimal("0.1")
 
 
 def progress_fraction(entry: Decimal, target: Decimal, price: Decimal) -> Decimal | None:
@@ -61,7 +69,7 @@ class PositionMonitor:
                 return
 
             symbols = sorted({t.symbol for t in trades})
-            prices = await self._market.get_prices(symbols)
+            prices = await self._market.get_mark_prices(symbols)
 
             for trade in trades:
                 price = prices.get(trade.symbol)
@@ -108,19 +116,23 @@ class PositionMonitor:
 
         approaching = ZERO <= remaining <= threshold
         already_notified = getattr(trade, f"{kind}_approach_notified_at") is not None
+        # За уровнем (remaining < 0) и у края полосы отметка остаётся: сброс
+        # только когда цена ушла дальше удвоенного порога.
+        moved_away = remaining > threshold * RESET_FACTOR
 
         if approaching and not already_notified:
             setattr(trade, f"{kind}_approach_notified_at", datetime.now(UTC))
             label = "Take-Profit" if kind == "tp" else "Stop-Loss"
+            percent = (remaining * 100).quantize(PERCENT_STEP, rounding=ROUND_HALF_UP)
             icon = "🎯" if kind == "tp" else "🛑"
             text = (
                 f"{icon} <b>{trade.symbol} приближается к {label}</b>\n\n"
-                f"Текущая цена: {fmt_decimal(price)}\n"
+                f"Mark price: {fmt_decimal(price)}\n"
                 f"{label}: {fmt_decimal(target)}\n"
-                f"Осталось: {fmt_decimal(remaining * 100)}% пути от входа"
+                f"Осталось: {fmt_decimal(percent)}% пути от входа"
             )
             await send_notification(self._bot, trade.user.telegram_id, text)
-        elif not approaching and already_notified:
-            # Цена отъехала обратно за порог — снимаем отметку, чтобы
-            # повторное приближение снова дало уведомление.
+        elif moved_away and already_notified:
+            # Цена ушла от цели дальше удвоенного порога — снимаем отметку,
+            # повторное приближение снова даст уведомление.
             setattr(trade, f"{kind}_approach_notified_at", None)

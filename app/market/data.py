@@ -42,6 +42,22 @@ class MarketDataService:
         ticker = await self.get_ticker(symbol)
         return ticker.last_price
 
+    async def get_mark_prices(self, symbols: list[str]) -> dict[str, Decimal | None]:
+        """Mark price нескольких символов (кэш — как у тикера). Ошибка по
+        символу — None для него, не last price вместо mark."""
+        result: dict[str, Decimal | None] = {}
+        for symbol in symbols:
+            try:
+                result[symbol] = await self._cache.get_or_fetch(
+                    f"mark:{self._client.name}:{symbol}",
+                    TTL_TICKER,
+                    lambda symbol=symbol: self._client.get_mark_price(symbol),  # type: ignore[misc]
+                )
+            except Exception:
+                logger.warning("Не удалось получить mark price", extra={"symbol": symbol})
+                result[symbol] = None
+        return result
+
     async def get_ticker(self, symbol: str) -> Ticker:
         return await self._cache.get_or_fetch(
             f"ticker:{self._client.name}:{symbol}",

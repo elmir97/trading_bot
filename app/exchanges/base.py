@@ -619,6 +619,11 @@ class ExchangeClient(ABC):
         ReadbackIncomplete, а не ноль."""
         ...
 
+    async def get_mark_price(self, symbol: str) -> Decimal:
+        """Mark price символа — по нему срабатывают стопы и тейки бота
+        (workingType=MARK_PRICE). Не абстрактный: нужен только монитору."""
+        raise NotImplementedError
+
     # Шаг 15.6, reconciler. Не абстрактные: фейки тестов, которым сверка не
     # нужна, не обязаны их реализовывать; реальный клиент — BingXClient.
     async def get_all_orders(
