@@ -16,6 +16,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from app.database.models.execution_order import ExecutionOrder
+from app.database.models.trade import Trade
 from app.trading.enums import OrderRole, OrderSide, OrderStatus, OrderType, TradeSide
 from app.workers.execution_digest import (
     build_stats,
@@ -86,9 +87,9 @@ class TestBuildStats:
             _row(OrderStatus.REFUSED, error_code="X"),
         ]
         stats = build_stats(rows, target_risk_percent=None)
-        assert stats.confirmed_risk_percents == [D("1.0")]
-        assert stats.confirmed_risk_rewards == [D("2.0")]
-        assert stats.confirmed_drift_percents == [D("0.1")]
+        assert stats.entry_risk_percents == [D("1.0")]
+        assert stats.entry_risk_rewards == [D("2.0")]
+        assert stats.entry_drift_percents == [D("0.1")]
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +363,7 @@ class TestStages:
     def test_error_rows_do_not_leak_into_averages(self) -> None:
         rows = [_row(OrderStatus.ERROR, risk_percent=D("5"), risk_reward=D("9"))]
         stats = build_stats(rows, target_risk_percent=D("1"))
-        assert stats.confirmed_risk_percents == []
+        assert stats.entry_risk_percents == []
         assert stats.risk_deviations == []
 
 
@@ -525,3 +526,99 @@ class TestReadbackOutcomes:
         )
         anomalies = detect_anomalies(stats, max_price_drift_ratio=D("0.3"))
         assert anomalies[0] == "позиция без стопа: BTC-USDT LONG — 1"
+
+
+# ---------------------------------------------------------------------------
+# Реальные входы (FILLED/SUBMITTED) — средние, правила и проскальзывание.
+# До этого средние и правила по ним видели только DRY_RUN: с
+# EXEC_DRY_RUN=false сводка была слепа к настоящим входам.
+# ---------------------------------------------------------------------------
+
+
+def _filled_with_trade(
+    *, price: str, avg: str, fill_confirmed: bool = True,
+    side: TradeSide = TradeSide.LONG, status: OrderStatus = OrderStatus.FILLED,
+) -> ExecutionOrder:
+    row = _row(status, price=D(price), position_side=side)
+    row.trade = Trade(entry_price=D(avg), fill_confirmed=fill_confirmed)
+    return row
+
+
+class TestRealEntries:
+    def test_filled_risk_over_target_is_anomaly(self) -> None:
+        rows = [_row(OrderStatus.FILLED, risk_percent=D("3"))]
+        stats = build_stats(rows, target_risk_percent=D("2"))
+        anomalies = detect_anomalies(stats, max_price_drift_ratio=D("0.3"))
+        assert "риск по BTC-USDT отклонился от заданных 2%: получилось 3%" in anomalies
+
+    def test_submitted_risk_over_target_is_anomaly(self) -> None:
+        rows = [_row(OrderStatus.SUBMITTED, risk_percent=D("3"))]
+        stats = build_stats(rows, target_risk_percent=D("2"))
+        anomalies = detect_anomalies(stats, max_price_drift_ratio=D("0.3"))
+        assert "риск по BTC-USDT отклонился от заданных 2%: получилось 3%" in anomalies
+
+    def test_real_entries_feed_averages_rendered(self) -> None:
+        rows = [
+            _row(OrderStatus.FILLED, risk_percent=D("2"), risk_reward=D("2.5"),
+                 price_drift_percent=D("0.2")),
+            _row(OrderStatus.SUBMITTED, risk_percent=D("1"), risk_reward=D("3.5"),
+                 price_drift_percent=D("0.4")),
+        ]
+        text = render_execution_digest(
+            build_stats(rows, target_risk_percent=None), max_price_drift_ratio=D("0.3")
+        )
+        assert "Средний расчётный риск: 1.5% (диапазон 1–2%)" in text
+        assert "Средний RR: 3" in text
+        assert "Средний дрейф цены сигнала к моменту подтверждения: 0.3%" in text
+
+    def test_price_drift_rule_sees_real_entries(self) -> None:
+        rows = [_row(OrderStatus.FILLED, price_drift_percent=D("0.2")) for _ in range(3)]
+        stats = build_stats(rows, target_risk_percent=None)
+        anomalies = detect_anomalies(stats, max_price_drift_ratio=D("0.003"))
+        assert any("выше половины порога гварда PRICE_DRIFT" in a for a in anomalies)
+
+    def test_rejected_and_unknown_do_not_feed_averages(self) -> None:
+        rows = [
+            _row(OrderStatus.REJECTED, risk_percent=D("9")),
+            _row(OrderStatus.UNKNOWN, risk_percent=D("9")),
+            _row(OrderStatus.PENDING, risk_percent=D("9")),
+        ]
+        stats = build_stats(rows, target_risk_percent=D("2"))
+        assert stats.entry_risk_percents == []
+        assert stats.risk_deviations == []
+
+
+class TestExecutionSlippage:
+    def test_long_worse_is_positive(self) -> None:
+        stats = build_stats(
+            [_filled_with_trade(price="100", avg="100.3")], target_risk_percent=None
+        )
+        text = render_execution_digest(stats, max_price_drift_ratio=D("0.3"))
+        assert (
+            "Проскальзывание исполнения (на «Да» → исполнение): среднее +0.3%, "
+            "худшее +0.3% — входов 1, «+» — в худшую сторону"
+        ) in text
+
+    def test_short_better_is_negative(self) -> None:
+        stats = build_stats(
+            [_filled_with_trade(price="100", avg="100.3", side=TradeSide.SHORT)],
+            target_risk_percent=None,
+        )
+        assert stats.entry_slippage_percents == [D("-0.3")]
+
+    def test_unconfirmed_fill_not_counted(self) -> None:
+        """Предварительная сделка: entry_price — плановая, не исполнение."""
+        stats = build_stats(
+            [_filled_with_trade(price="100", avg="100.3", fill_confirmed=False)],
+            target_risk_percent=None,
+        )
+        assert stats.entry_slippage_percents == []
+        text = render_execution_digest(stats, max_price_drift_ratio=D("0.3"))
+        assert "Проскальзывание" not in text
+
+    def test_dry_run_has_no_slippage(self) -> None:
+        stats = build_stats(
+            [_filled_with_trade(price="100", avg="100.3", status=OrderStatus.DRY_RUN)],
+            target_risk_percent=None,
+        )
+        assert stats.entry_slippage_percents == []

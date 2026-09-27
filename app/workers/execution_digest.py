@@ -45,7 +45,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 from app.database.models.execution_order import ExecutionOrder
-from app.trading.enums import ObservationStage, OrderStatus
+from app.trading.enums import ObservationStage, OrderStatus, TradeSide
 from app.workers.base import fmt_decimal
 from app.workers.scanner import ScanCycleStats
 
@@ -66,6 +66,13 @@ GUARD_DOMINANCE_MIN_ATTEMPTS = 5
 # Ниже этого числа карточек с данными о дрейфе средний дрейф не считается —
 # та же защита от вывода по одному-двум наблюдениям.
 PRICE_DRIFT_MIN_CARDS = 3
+
+# Входы, у которых есть расчёт (объём, риск, RR, дрейф): подтверждённый
+# сухой прогон и реальная отправка. Проскальзывание — только у реальных.
+_ENTRY_STATUSES = (OrderStatus.DRY_RUN, OrderStatus.SUBMITTED, OrderStatus.FILLED)
+_REAL_ENTRY_STATUSES = (OrderStatus.SUBMITTED, OrderStatus.FILLED)
+
+SLIPPAGE_PRECISION = Decimal("0.001")
 
 
 @dataclass(slots=True)
@@ -114,11 +121,18 @@ class ExecutionDigestStats:
     errors_confirm: int = 0
     errors_by_code: dict[str, int] = field(default_factory=dict)
 
-    # Только у подтверждённых (DRY_RUN) есть реальный объём/маржа/RR —
-    # только по ним считаются "средние" в сводке.
-    confirmed_risk_percents: list[Decimal] = field(default_factory=list)
-    confirmed_risk_rewards: list[Decimal] = field(default_factory=list)
-    confirmed_drift_percents: list[Decimal] = field(default_factory=list)
+    # Средние — по входам: подтверждённым сухим (DRY_RUN) и реальным
+    # (SUBMITTED/FILLED). Раньше только по DRY_RUN — с EXEC_DRY_RUN=false
+    # средние и правила по ним (отклонение риска, дрейф) не видели ни
+    # одного настоящего входа. DECLINED/EXPIRED/REFUSED/ERROR/REJECTED/
+    # UNKNOWN/PENDING — не входы, в средние не идут.
+    entry_risk_percents: list[Decimal] = field(default_factory=list)
+    entry_risk_rewards: list[Decimal] = field(default_factory=list)
+    entry_drift_percents: list[Decimal] = field(default_factory=list)
+    # Проскальзывание исполнения: цена на «Да» (execution_orders.price) →
+    # исполнение (trades.entry_price при fill_confirmed), в процентах, «+» —
+    # в худшую сторону по направлению сделки. Только реальные входы.
+    entry_slippage_percents: list[Decimal] = field(default_factory=list)
 
     risk_deviations: list[RiskDeviation] = field(default_factory=list)
     undersized: list[RiskDeviation] = field(default_factory=list)
@@ -199,15 +213,15 @@ def build_stats(
     ]
 
     for row in rows:
+        if row.status in _ENTRY_STATUSES:
+            _collect_entry_numbers(stats, row, target_risk_percent)
+        if row.status in _REAL_ENTRY_STATUSES:
+            slippage = _execution_slippage_percent(row)
+            if slippage is not None:
+                stats.entry_slippage_percents.append(slippage)
+
         if row.status is OrderStatus.DRY_RUN:
             stats.confirmed += 1
-            if row.risk_percent is not None:
-                stats.confirmed_risk_percents.append(row.risk_percent)
-                _check_risk_deviation(stats, row, target_risk_percent)
-            if row.risk_reward is not None:
-                stats.confirmed_risk_rewards.append(row.risk_reward)
-            if row.price_drift_percent is not None:
-                stats.confirmed_drift_percents.append(row.price_drift_percent)
         elif row.status is OrderStatus.SUBMITTED:
             stats.submitted += 1
         elif row.status is OrderStatus.FILLED:
@@ -242,6 +256,37 @@ def build_stats(
             stats.errors_by_code[code] = stats.errors_by_code.get(code, 0) + 1
 
     return stats
+
+
+def _collect_entry_numbers(
+    stats: ExecutionDigestStats, row: ExecutionOrder, target_risk_percent: Decimal | None
+) -> None:
+    if row.risk_percent is not None:
+        stats.entry_risk_percents.append(row.risk_percent)
+        _check_risk_deviation(stats, row, target_risk_percent)
+    if row.risk_reward is not None:
+        stats.entry_risk_rewards.append(row.risk_reward)
+    if row.price_drift_percent is not None:
+        stats.entry_drift_percents.append(row.price_drift_percent)
+
+
+def _execution_slippage_percent(row: ExecutionOrder) -> Decimal | None:
+    """Цена на «Да» (row.price) → исполнение (trades.entry_price), «+» — в
+    худшую сторону: LONG купил дороже, SHORT продал дешевле. None — нет
+    сделки или исполнение не подтверждено: у предварительной сделки
+    entry_price плановая, проскальзывание из неё выдумано. row.trade
+    загружен заранее (ExecutionOrderRepository.list_entries_between)."""
+    trade = row.trade
+    if trade is None or not trade.fill_confirmed or row.price is None or row.price <= ZERO:
+        return None
+    diff = trade.entry_price - row.price
+    signed = diff if row.position_side is TradeSide.LONG else -diff
+    return signed / row.price * Decimal(100)
+
+
+def _signed_percent(value: Decimal) -> str:
+    text = fmt_decimal(value.quantize(SLIPPAGE_PRECISION))
+    return f"+{text}" if value > ZERO else text
 
 
 def _check_risk_deviation(
@@ -286,8 +331,8 @@ def detect_anomalies(stats: ExecutionDigestStats, *, max_price_drift_ratio: Deci
             f"— меньше половины заданных {fmt_decimal(d.target_percent)}%"
         )
 
-    if len(stats.confirmed_drift_percents) >= PRICE_DRIFT_MIN_CARDS:
-        avg_drift = sum(stats.confirmed_drift_percents, ZERO) / len(stats.confirmed_drift_percents)
+    if len(stats.entry_drift_percents) >= PRICE_DRIFT_MIN_CARDS:
+        avg_drift = sum(stats.entry_drift_percents, ZERO) / len(stats.entry_drift_percents)
         # "половина допустимого порога" — половина EXEC_MAX_PRICE_DRIFT_RATIO,
         # выраженного в процентах той же величины, что и сам price_drift_percent
         # (дрейф от опорной цены сигнала, раздел 5 ТЗ).
@@ -371,26 +416,35 @@ def render_execution_digest(
     lines.append(f"  сбой биржи до карточки: {stats.errors_card}")
 
     has_averages = bool(
-        stats.confirmed_risk_percents
-        or stats.confirmed_risk_rewards
-        or stats.confirmed_drift_percents
+        stats.entry_risk_percents
+        or stats.entry_risk_rewards
+        or stats.entry_drift_percents
+        or stats.entry_slippage_percents
     )
     if has_averages:
         lines.append("")
-    if stats.confirmed_risk_percents:
-        avg_risk = sum(stats.confirmed_risk_percents, ZERO) / len(stats.confirmed_risk_percents)
+    if stats.entry_risk_percents:
+        avg_risk = sum(stats.entry_risk_percents, ZERO) / len(stats.entry_risk_percents)
         lines.append(
             f"Средний расчётный риск: {fmt_decimal(avg_risk)}% "
-            f"(диапазон {fmt_decimal(min(stats.confirmed_risk_percents))}–"
-            f"{fmt_decimal(max(stats.confirmed_risk_percents))}%)"
+            f"(диапазон {fmt_decimal(min(stats.entry_risk_percents))}–"
+            f"{fmt_decimal(max(stats.entry_risk_percents))}%)"
         )
-    if stats.confirmed_risk_rewards:
-        avg_rr = sum(stats.confirmed_risk_rewards, ZERO) / len(stats.confirmed_risk_rewards)
+    if stats.entry_risk_rewards:
+        avg_rr = sum(stats.entry_risk_rewards, ZERO) / len(stats.entry_risk_rewards)
         lines.append(f"Средний RR: {fmt_decimal(avg_rr)}")
-    if stats.confirmed_drift_percents:
-        avg_drift = sum(stats.confirmed_drift_percents, ZERO) / len(stats.confirmed_drift_percents)
+    if stats.entry_drift_percents:
+        avg_drift = sum(stats.entry_drift_percents, ZERO) / len(stats.entry_drift_percents)
         lines.append(
             f"Средний дрейф цены сигнала к моменту подтверждения: {fmt_decimal(avg_drift)}%"
+        )
+    if stats.entry_slippage_percents:
+        slippages = stats.entry_slippage_percents
+        avg_slippage = sum(slippages, ZERO) / len(slippages)
+        lines.append(
+            f"Проскальзывание исполнения (на «Да» → исполнение): среднее "
+            f"{_signed_percent(avg_slippage)}%, худшее {_signed_percent(max(slippages))}% "
+            f"— входов {len(slippages)}, «+» — в худшую сторону"
         )
 
     lines.append("")

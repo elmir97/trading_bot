@@ -23,6 +23,7 @@ from app.core.security import SecretCipher
 from app.database.models.execution_order import ExecutionOrder
 from app.database.models.signal import SignalRecord
 from app.database.models.signal_notification import SignalNotification
+from app.database.models.trade import Trade
 from app.database.repositories.strategy import MistakeTypeRepository, StrategyRepository
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
@@ -34,6 +35,7 @@ from app.trading.enums import (
     OrderType,
     SignalLevel,
     TradeSide,
+    TradeSource,
 )
 from app.trading.risk import tz_offset_for
 from app.workers.daily import DailyJobs
@@ -409,3 +411,34 @@ async def test_unprotected_position_reaches_the_digest(ctx) -> None:  # type: ig
     assert anomalies[0].strip().startswith("позиция без стопа:")
     assert "  позиция без стопа: BTC-USDT LONG — 1" in lines
     assert "  позиция без стопа: ETH-USDT LONG — 1" in lines
+
+
+async def test_execution_slippage_reaches_the_digest_through_the_db(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Проскальзывание исполнения берёт avgPrice из trades.entry_price по
+    execution_orders.trade_id — через list_entries_between (selectinload),
+    ленивая загрузка в async-сессии упала бы."""
+    daily, session, user, bot, settings = ctx
+    now = datetime.now(UTC)
+    moment = now - timedelta(minutes=1)
+    trade = Trade(
+        user_id=user.id, symbol="BTC-USDT", side=TradeSide.LONG, quantity=D("1"),
+        entry_price=D("100.3"), opened_at=moment, source=TradeSource.SIGNAL_EXECUTION,
+        fill_confirmed=True,
+    )
+    session.add(trade)
+    await session.flush()
+    session.add(_row(user.id, OrderStatus.FILLED, price=D("100"), trade_id=trade.id,
+                     created_at=moment))
+    await session.flush()
+    session.expunge_all()  # как в проде: строки приходят из запроса, не из памяти сессии
+    user = await UserRepository(session).get_by_telegram_id(user.telegram_id)
+
+    _now, _tz_offset, today_local, local_hour = _call_args(
+        user, settings, local_hour=settings.exec_daily_digest_hour
+    )
+    await daily._maybe_send_execution_digest(
+        session, user, user.settings, now, today_local, local_hour
+    )
+
+    text = bot.sent_messages[0][1]
+    assert "Проскальзывание исполнения (на «Да» → исполнение): среднее +0.3%" in text

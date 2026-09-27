@@ -11,6 +11,7 @@ from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.database.models.execution_order import ExecutionOrder
 from app.trading.enums import OrderRole, OrderStatus
@@ -68,11 +69,17 @@ class ExecutionOrderRepository:
         (раздел 12а) всегда одна строка с role=ENTRY. Без фильтра по роли
         подтверждённые входы утроились бы в подсчётах сводки.
         """
-        stmt = select(ExecutionOrder).where(
-            ExecutionOrder.user_id == user_id,
-            ExecutionOrder.role == OrderRole.ENTRY,
-            ExecutionOrder.created_at >= start,
-            ExecutionOrder.created_at < end,
+        # trade — для проскальзывания исполнения в сводке (trades.entry_price
+        # при fill_confirmed): ленивая загрузка в async-сессии не работает.
+        stmt = (
+            select(ExecutionOrder)
+            .where(
+                ExecutionOrder.user_id == user_id,
+                ExecutionOrder.role == OrderRole.ENTRY,
+                ExecutionOrder.created_at >= start,
+                ExecutionOrder.created_at < end,
+            )
+            .options(selectinload(ExecutionOrder.trade))
         )
         return list(await self.session.scalars(stmt))
 
