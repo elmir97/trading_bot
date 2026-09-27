@@ -39,6 +39,7 @@ from app.core.logging import get_logger
 from app.core.security import SecretCipher
 from app.database.models.user import User, UserSettings
 from app.database.repositories.execution_order import ExecutionOrderRepository
+from app.database.repositories.reconciliation_event import ReconciliationEventRepository
 from app.database.repositories.signal_notification import SignalNotificationRepository
 from app.database.repositories.trade import TradeRepository
 from app.database.repositories.user import UserRepository
@@ -245,6 +246,9 @@ class DailyJobs:
         unprotected = await ExecutionOrderRepository(session).list_unprotected_between(
             user.id, window_start, now
         )
+        reconciler_events = await ReconciliationEventRepository(session).list_between(
+            user.id, window_start, now
+        )
         plan = user.trading_plan
         target_risk_percent = plan.risk_per_trade_percent if plan else None
         stats = build_stats(
@@ -252,6 +256,7 @@ class DailyJobs:
             target_risk_percent=target_risk_percent,
             ready_signals=ready_signals,
             unprotected=unprotected,
+            reconciler_events=reconciler_events,
         )
 
         settings_row.execution_digest_last_sent_date = today_local

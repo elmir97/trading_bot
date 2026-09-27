@@ -648,3 +648,42 @@ class TestRejectedAnomaly:
         stats = build_stats([_row(OrderStatus.FILLED)], target_risk_percent=None)
         anomalies = detect_anomalies(stats, max_price_drift_ratio=D("0.3"))
         assert not any("отклонила" in a for a in anomalies)
+
+
+class TestReconcilerInDigest:
+    """Шаг 15.6: расхождения reconciler — «Аномалии», факты — строка сводки."""
+
+    @staticmethod
+    def _event(kind):  # type: ignore[no-untyped-def]
+        from app.database.models.reconciliation_event import ReconciliationEvent
+
+        return ReconciliationEvent(
+            user_id=1, symbol="LINK-USDT", kind=kind, dedup_key=f"k:{kind}", detail="d",
+        )
+
+    def test_discrepancies_are_anomalies(self) -> None:
+        from app.trading.enums import ReconciliationKind as K
+
+        stats = build_stats(
+            [], target_risk_percent=None,
+            reconciler_events=[
+                self._event(K.ORPHAN_POSITION), self._event(K.STOP_MISSING),
+                self._event(K.CLOSED_STOP_LOSS),
+            ],
+        )
+        anomalies = detect_anomalies(stats, max_price_drift_ratio=D("0.3"))
+        assert (
+            "сверка с биржей: расхождений 2 (позиция без сделки — 1, позиция без стопа — 1)"
+            in anomalies
+        )
+
+    def test_closures_are_a_digest_line_not_anomaly(self) -> None:
+        from app.trading.enums import ReconciliationKind as K
+
+        stats = build_stats(
+            [], target_risk_percent=None,
+            reconciler_events=[self._event(K.CLOSED_STOP_LOSS), self._event(K.CLOSED_TAKE_PROFIT)],
+        )
+        assert detect_anomalies(stats, max_price_drift_ratio=D("0.3")) == []
+        text = render_execution_digest(stats, max_price_drift_ratio=D("0.3"))
+        assert "Сверка с биржей: закрыто по стопу — 1, по тейку — 1" in text

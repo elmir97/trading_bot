@@ -445,3 +445,25 @@ async def test_execution_slippage_reaches_the_digest_through_the_db(ctx) -> None
 
     text = bot.sent_messages[0][1]
     assert "Проскальзывание исполнения (на «Да» → исполнение): среднее +0.3%" in text
+
+
+async def test_reconciler_discrepancy_reaches_the_digest_through_the_db(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Шаг 15.6: событие reconciler за окно — в «Аномалиях» сводки."""
+    from app.database.models.reconciliation_event import ReconciliationEvent
+    from app.trading.enums import ReconciliationKind
+
+    daily, session, user, bot, settings = ctx
+    session.add(ReconciliationEvent(
+        user_id=user.id, symbol="LINK-USDT", kind=ReconciliationKind.ORPHAN_POSITION,
+        dedup_key="orphan:LINK-USDT:LONG:1", detail="позиция без сделки",
+    ))
+    await session.flush()
+
+    now, _tz_offset, today_local, local_hour = _call_args(
+        user, settings, local_hour=settings.exec_daily_digest_hour
+    )
+    await daily._maybe_send_execution_digest(
+        session, user, user.settings, now, today_local, local_hour
+    )
+
+    assert "сверка с биржей: расхождений 1 (позиция без сделки — 1)" in bot.sent_messages[0][1]

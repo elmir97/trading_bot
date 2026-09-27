@@ -45,7 +45,14 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 from app.database.models.execution_order import ExecutionOrder
-from app.trading.enums import ObservationStage, OrderStatus, TradeSide
+from app.database.models.reconciliation_event import ReconciliationEvent
+from app.trading.enums import (
+    ANOMALY_KINDS,
+    ObservationStage,
+    OrderStatus,
+    ReconciliationKind,
+    TradeSide,
+)
 from app.workers.base import fmt_decimal
 from app.workers.scanner import ScanCycleStats
 
@@ -137,6 +144,11 @@ class ExecutionDigestStats:
     # в худшую сторону по направлению сделки. Только реальные входы.
     entry_slippage_percents: list[Decimal] = field(default_factory=list)
 
+    # Шаг 15.6: события reconciler за окно — расхождения (в «Аномалии») и
+    # факты: закрытия фактом биржи, разрешённые входы (строка сводки).
+    reconciler_anomalies: dict[ReconciliationKind, int] = field(default_factory=dict)
+    reconciler_facts: dict[ReconciliationKind, int] = field(default_factory=dict)
+
     risk_deviations: list[RiskDeviation] = field(default_factory=list)
     undersized: list[RiskDeviation] = field(default_factory=list)
 
@@ -200,6 +212,7 @@ def build_stats(
     target_risk_percent: Decimal | None,
     ready_signals: int = 0,
     unprotected: list[ExecutionOrder] | None = None,
+    reconciler_events: list[ReconciliationEvent] | None = None,
 ) -> ExecutionDigestStats:
     """rows — строки execution_orders (role=ENTRY) за окно сводки одного
     пользователя (скользящие 24 часа, не календарные сутки — см. докстринг
@@ -214,6 +227,11 @@ def build_stats(
     stats.unprotected = [
         (row.symbol, row.position_side.value) for row in (unprotected or [])
     ]
+    for event in reconciler_events or []:
+        bucket = (
+            stats.reconciler_anomalies if event.kind in ANOMALY_KINDS else stats.reconciler_facts
+        )
+        bucket[event.kind] = bucket.get(event.kind, 0) + 1
 
     for row in rows:
         if row.status in _ENTRY_STATUSES:
@@ -291,6 +309,27 @@ def _execution_slippage_percent(row: ExecutionOrder) -> Decimal | None:
     return signed / row.price * Decimal(100)
 
 
+_RECONCILER_LABELS = {
+    ReconciliationKind.ORPHAN_POSITION: "позиция без сделки",
+    ReconciliationKind.QUANTITY_MISMATCH: "объём не сходится",
+    ReconciliationKind.STOP_MISSING: "позиция без стопа",
+    ReconciliationKind.AMBIGUOUS: "неоднозначно",
+    ReconciliationKind.CLOSED_STOP_LOSS: "закрыто по стопу",
+    ReconciliationKind.CLOSED_TAKE_PROFIT: "по тейку",
+    ReconciliationKind.CLOSED_OUTSIDE_BOT: "вне бота",
+    ReconciliationKind.PARTIAL_CLOSE: "частично",
+    ReconciliationKind.ENTRY_CONFIRMED: "вход найден",
+    ReconciliationKind.ENTRY_NOT_PLACED: "вход не выставлен",
+}
+
+
+def _by_kind(counts: dict[ReconciliationKind, int]) -> str:
+    return ", ".join(
+        f"{_RECONCILER_LABELS[kind]} — {count}"
+        for kind, count in sorted(counts.items(), key=lambda kv: -kv[1])
+    )
+
+
 def _signed_percent(value: Decimal) -> str:
     text = fmt_decimal(value.quantize(SLIPPAGE_PRECISION))
     return f"+{text}" if value > ZERO else text
@@ -357,6 +396,14 @@ def detect_anomalies(stats: ExecutionDigestStats, *, max_price_drift_ratio: Deci
                 anomalies.append(
                     f"гвард {code} срабатывает подозрительно часто: {count} из {total} попыток"
                 )
+
+    # Шаг 15.6: расхождения reconciler — журнал не правился, человек должен
+    # посмотреть сам. От одного случая.
+    if stats.reconciler_anomalies:
+        total = sum(stats.reconciler_anomalies.values())
+        anomalies.append(
+            f"сверка с биржей: расхождений {total} ({_by_kind(stats.reconciler_anomalies)})"
+        )
 
     # Реальный вход, отклонённый биржей, — от одного случая: сигнал был,
     # «Да» было, позиции нет. Код, а не текст — текст BingX меняется и
@@ -463,6 +510,10 @@ def render_execution_digest(
             f"{_signed_percent(avg_slippage)}%, худшее {_signed_percent(max(slippages))}% "
             f"— входов {len(slippages)}, «+» — в худшую сторону"
         )
+
+    if stats.reconciler_facts:
+        lines.append("")
+        lines.append(f"Сверка с биржей: {_by_kind(stats.reconciler_facts)}")
 
     lines.append("")
     if anomalies:
