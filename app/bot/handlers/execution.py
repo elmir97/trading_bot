@@ -777,6 +777,7 @@ async def _process_confirm(
         await _submit_real_order(
             callback.message, session, user, notification, slot, result, settings, cipher, now,
             planned_price=state.planned_price,
+            card_quantity=state.quote.order.quantity,
         )
         return
 
@@ -792,7 +793,12 @@ async def _process_confirm(
         # SAVEPOINT: та же техника, что и в _record_exchange_error — если
         # ловим гонку, откатываем только эту вставку, не всю сессию.
         async with session.begin_nested():
-            for row in build_execution_orders(order, status, price_drift_percent=drift):
+            # Карточка — то, что пользователь видел при показе (state), а
+            # order — перезапрос на «Да»: пара и есть дрейф и пересчёт объёма.
+            for row in build_execution_orders(
+                order, status, price_drift_percent=drift,
+                card_price=state.planned_price, card_quantity=state.quote.order.quantity,
+            ):
                 orders_repo.add(row)
             await orders_repo.flush()
     except IntegrityError as exc:
@@ -850,8 +856,13 @@ async def _submit_real_order(
     now: datetime,
     *,
     planned_price: Decimal,
+    card_quantity: Decimal,
 ) -> None:
     """Раздел 16 ТЗ, шаг 15.5.2 — реальная отправка ордера на биржу.
+
+    planned_price/card_quantity — цена и объём при показе карточки (снимок
+    _ConfirmationState), order — перезапрос на «Да». Карточка пишется в
+    ENTRY-строку (card_price/card_quantity) и в итоговое сообщение.
 
     Шаг 15.5.3: сразу после ответа биржи — промежуточное «проверяю
     исполнение…», затем read-back (verify_entry) тем же клиентом и под тем
@@ -943,7 +954,10 @@ async def _submit_real_order(
             await message.edit_text(render_refusal(leverage_refusal), reply_markup=None)
             return
 
-        entry_row = build_entry_order_pending(order, price_drift_percent=drift)
+        entry_row = build_entry_order_pending(
+            order, price_drift_percent=drift,
+            card_price=planned_price, card_quantity=card_quantity,
+        )
         orders_repo = ExecutionOrderRepository(session)
         try:
             # SAVEPOINT — та же техника, что у DRY_RUN выше: если ловим

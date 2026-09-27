@@ -648,6 +648,8 @@ def build_execution_orders(
     status: OrderStatus,
     *,
     price_drift_percent: Decimal | None = None,
+    card_price: Decimal | None = None,
+    card_quantity: Decimal | None = None,
 ) -> list[ExecutionOrder]:
     """Раздел 8 ТЗ: один вход — три строки execution_orders (вход, стоп,
     тейк), каждая со своим client_order_id. На 15.4 status=DRY_RUN —
@@ -671,6 +673,8 @@ def build_execution_orders(
             role=OrderRole.ENTRY,
             quantity=order.quantity,
             price=order.entry_price,
+            card_price=card_price,
+            card_quantity=card_quantity,
             status=status,
             price_drift_percent=price_drift_percent,
             notional=order.notional,
@@ -712,7 +716,11 @@ def build_execution_orders(
 
 
 def build_entry_order_pending(
-    order: OrderRequest, *, price_drift_percent: Decimal | None = None
+    order: OrderRequest,
+    *,
+    price_drift_percent: Decimal | None = None,
+    card_price: Decimal | None = None,
+    card_quantity: Decimal | None = None,
 ) -> ExecutionOrder:
     """Раздел 16 ТЗ, шаг 15.5.2 / раздел 8 ТЗ: ENTRY-строка со статусом
     PENDING для реальной отправки — вызывающий код обязан вставить и
@@ -736,6 +744,8 @@ def build_entry_order_pending(
         role=OrderRole.ENTRY,
         quantity=order.quantity,
         price=order.entry_price,
+        card_price=card_price,
+        card_quantity=card_quantity,
         status=OrderStatus.PENDING,
         price_drift_percent=price_drift_percent,
         notional=order.notional,

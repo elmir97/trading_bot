@@ -122,6 +122,8 @@ class FakeExchangeClient(ExchangeClient):
         self.conditional_error: Exception | None = None
         self.price = price
         self.balance = balance
+        # Актив баланса: USDT на LIVE, VST на DEMO (_QUOTE_ASSET_BY_MODE).
+        self.asset = "USDT"
         self.symbol_info = symbol_info
         self.restrictions = restrictions
         self.restrictions_error = restrictions_error
@@ -169,7 +171,7 @@ class FakeExchangeClient(ExchangeClient):
     async def get_balance(self, *, max_retries: int | None = None) -> Balance:
         self.balance_retries_seen.append(max_retries)
         return Balance(
-            asset="USDT", available=self.balance, used_margin=D("0"),
+            asset=self.asset, available=self.balance, used_margin=D("0"),
             unrealized_pnl=D("0"), equity=self.balance,
         )
 
@@ -757,6 +759,67 @@ async def test_confirm_yes_creates_dry_run_orders(ctx, bot, monkeypatch) -> None
     dry_run_texts = [t for t in bot.recorder.sent_texts() if "Сухой прогон" in t]
     assert len(dry_run_texts) == 1
     assert (user.id, notification.id) not in execution._confirmations
+
+
+async def _open_move_price_and_confirm(  # type: ignore[no-untyped-def]
+    dp, bot, notification, user, client, new_price: Decimal
+):
+    """Карточка при одной цене, «Да» — при другой: evaluate() на «Да»
+    перезапрашивает цену и пересчитывает объём. Возвращает снимок карточки."""
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
+    state = execution._confirmations[(user.id, notification.id)]
+    card = state.quote.order
+    client.price = new_price
+    await _feed(
+        dp, bot, 2,
+        make_callback(f"exn:yes:{notification.id}", message_id=state.message_id),
+    )
+    return card
+
+
+async def test_confirm_yes_dry_run_writes_card_snapshot(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """card_price/card_quantity — цена и объём при ПОКАЗЕ карточки, price/
+    quantity — перезапрос на «Да». Раньше карточка жила только в памяти."""
+    dp, session, user, client, _redis, _settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _notify(session, signal)
+
+    card = await _open_move_price_and_confirm(dp, bot, notification, user, client, D("100.2"))
+
+    entry = next(
+        o for o in await _orders_for_signal(session, signal.id) if o.role is OrderRole.ENTRY
+    )
+    assert entry.card_price == card.entry_price == D("100")
+    assert entry.price == D("100.2")
+    assert entry.card_quantity == card.quantity
+    assert entry.quantity != card.quantity  # стоп дальше — объём меньше
+    others = [o for o in await _orders_for_signal(session, signal.id) if o.role is not OrderRole.ENTRY]
+    assert all(o.card_price is None and o.card_quantity is None for o in others)
+
+
+async def test_confirm_yes_real_order_writes_card_snapshot(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    dp, session, user, client, _redis, settings = ctx
+    client.current_leverage = _leverage_info(long_leverage=10)
+    client.place_order_result = _order_result(order_id="555555")
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    settings.exec_dry_run = False
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _notify(session, signal)
+
+    card = await _open_move_price_and_confirm(dp, bot, notification, user, client, D("100.2"))
+
+    entry = next(
+        o for o in await _orders_for_signal(session, signal.id) if o.role is OrderRole.ENTRY
+    )
+    assert entry.card_price == D("100")
+    assert entry.price == D("100.2")
+    assert entry.card_quantity == card.quantity
+    assert entry.quantity != card.quantity
 
 
 async def _open_and_confirm(dp, bot, notification, user) -> None:  # type: ignore[no-untyped-def]
