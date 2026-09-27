@@ -97,9 +97,24 @@ Remote `origin` — приватный резервный репозиторий
    машине `core.autocrlf=true`, и без флага файлы уезжают с CRLF,
    а md5 не сходятся с коммитом
 3. Сверить md5 изменённых файлов с `git show HEAD:<path>`
-4. `docker compose up -d --build`
-5. `alembic upgrade head`
-6. Показать `docker compose ps` и последние 50 строк логов
+4. **Точка отката — ДО build.** Проверка, а не вера: id обязан
+   напечататься, иначе стоп, build не запускать
+   ```
+   TS=$(date -u +%Y%m%d_%H%M%S)
+   docker tag trading_bot-bot:latest trading_bot-bot:rollback_$TS
+   docker image inspect trading_bot-bot:rollback_$TS --format '{{.Id}}'
+   ```
+   Без тега старый образ после сборки становится безымянным и может
+   исчезнуть (27.09: `b11e08849a42` пропал между build и stop — отката
+   без пересборки не осталось)
+5. `docker compose up -d --build`
+6. `alembic upgrade head`
+7. Показать `docker compose ps` и последние 50 строк логов
+
+Откат кода: `docker tag trading_bot-bot:rollback_<ts> trading_bot-bot:latest
+&& docker compose up -d --no-deps bot`. Удалять rollback-тег
+(`docker rmi trading_bot-bot:rollback_<ts>`) — только после первого
+чистого «Цикл сканера завершён» на новом образе и с «да» владельца.
 
 **Миграции на проде — только после явного «да» владельца.** Порядок:
 свежий дамп → показать SQL офлайн-режимом alembic (без подключения
@@ -113,10 +128,12 @@ Upgrade идёт одной транзакцией: `alembic/env.py` обора�
 Падение посреди бэкфилла откатывает всё целиком.
 
 0. Репетиция на копии прода (ниже) — пройдена, отчёт принят
-1. Чек-ап прода, шаги 1-4 обычного деплоя (umask, дамп, снапшот, код, md5)
-2. `docker compose exec -T bot alembic upgrade <current>:<new> --sql` —
-   показать SQL, ждать «да»
-3. `docker compose build bot` — пока старый бот работает
+1. Чек-ап прода, шаги 1-4 обычного деплоя (umask, дамп, снапшот, код, md5,
+   **точка отката `rollback_<ts>` с проверкой `docker image inspect`**)
+2. `docker compose build bot` — пока старый бот работает
+3. `docker compose run --rm -T --no-deps bot alembic upgrade <current>:<new> --sql`
+   — показать SQL, ждать «да». Из НОВОГО образа: в работающем контейнере
+   старый код, файла миграции там нет
 4. `docker compose stop bot` — старый код не должен ни рассылать, ни
    обрабатывать «Да» во время миграции
 5. Проверки данных, от которых зависит миграция (SELECT)
@@ -135,10 +152,16 @@ Upgrade идёт одной транзакцией: `alembic/env.py` обора�
 ```
 docker compose run --rm --no-deps bot alembic downgrade -1   # НОВЫЙ образ — в нём файл миграции
 docker compose run --rm --no-deps bot alembic current        # == предыдущая ревизия
-# код из снапшота шага 1, распаковать поверх /opt/trading_bot
-docker compose build bot && docker compose up -d --no-deps bot
+docker tag trading_bot-bot:rollback_<ts> trading_bot-bot:latest   # образ шага 1
+docker compose up -d --no-deps bot
 docker compose logs --tail 50 bot
 ```
+
+Код на диске откатить из снапшота шага 1 (распаковать поверх
+/opt/trading_bot) — иначе следующая сборка снова соберёт новый код. Если
+rollback-тега нет — только так: снапшот и `docker compose build bot`.
+Nullable-колонка без бэкфилла downgrade не требует: старый код с ней
+работает, откатывается только образ.
 
 Порядок важен: сначала downgrade новым образом (старый образ не знает
 файла миграции), и только потом старый код. Если шаг 6 упал целиком,
