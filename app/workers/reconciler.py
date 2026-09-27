@@ -1,0 +1,519 @@
+"""Сверка журнала с биржей — фоновая задача (шаг 15.6, раздел 10 ТЗ).
+
+Решения — app/execution/reconciler.py (без I/O); здесь запросы к бирже,
+запись в журнал, события reconciliation_events и уведомления.
+
+Цикл пользователя: позиции (один запрос) → по каждой открытой сделке бота:
+позиция уменьшилась/исчезла → история ордеров → выходы фактом биржи или
+расхождение; раз в reconciler_stop_check_every циклов — openOrders, есть ли
+стоп → позиции без сделки в журнале → входы UNKNOWN/PENDING/SUBMITTED
+старше окна.
+
+Гонки с путём «Да»: пока в Redis жив хоть один exec:lock:* — цикл
+пропускается целиком (вход в полёте, и лимиты BingX секундные — не
+отнимаем их у «Да»); символы с незакрытым входом моложе окна не считаются
+«позицией без сделки». Двойная запись выхода невозможна: строка сделки под
+FOR UPDATE, статус перепроверяется, external_fill_id = orderId биржи под
+uq_fill_external_id. Ордеров reconciler не отправляет никогда.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from typing import Any
+
+from aiogram import Bot
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.config import Settings
+from app.core.logging import get_logger
+from app.core.security import SecretCipher
+from app.database.models.execution_order import ExecutionOrder
+from app.database.models.reconciliation_event import ReconciliationEvent
+from app.database.models.trade import Trade
+from app.database.repositories.execution_order import ExecutionOrderRepository
+from app.database.repositories.reconciliation_event import ReconciliationEventRepository
+from app.database.repositories.trade import TradeRepository
+from app.database.repositories.user import UserRepository
+from app.database.session import Database
+from app.exchanges.base import ExchangeClient, ExchangeError, OrderFill, Position
+from app.exchanges.bingx import _QUOTE_ASSET_BY_MODE
+from app.execution.reconciler import (
+    ORDER_NOT_EXIST_CODE,
+    UNRESOLVED_ENTRY_WINDOW,
+    BotTradeSnapshot,
+    Discrepancy,
+    ExitFill,
+    UnresolvedEntry,
+    decide_trade,
+    entry_is_due,
+    exchange_position,
+    needs_history,
+    orphan_positions,
+    resolve_entry,
+    stop_missing,
+)
+from app.services.exchange_factory import ExchangeFactory
+from app.trading.enums import (
+    FillSide,
+    OrderRole,
+    OrderStatus,
+    ReconciliationKind,
+    TradeSource,
+    TradeStatus,
+)
+from app.trading.journal import JournalError, TradeJournal
+from app.workers.base import fmt_decimal
+from app.workers.notifier import send_notification
+
+logger = get_logger(__name__)
+
+ZERO = Decimal(0)
+LOCK_PATTERN = "exec:lock:*"
+HISTORY_LIMIT = timedelta(days=7) - timedelta(minutes=1)
+
+_CLOSE_TEXT = {
+    ReconciliationKind.CLOSED_STOP_LOSS: "🛑 {symbol} {side} закрыта по стопу на бирже",
+    ReconciliationKind.CLOSED_TAKE_PROFIT: "🎯 {symbol} {side} закрыта по тейку на бирже",
+    ReconciliationKind.CLOSED_OUTSIDE_BOT: "⚠️ {symbol} {side} закрыта на бирже вне бота",
+    ReconciliationKind.PARTIAL_CLOSE: "⚠️ {symbol} {side} частично закрыта на бирже",
+}
+
+
+def _open_quantity(trade: Trade) -> Decimal:
+    entered = sum((f.quantity for f in trade.fills if f.fill_side is FillSide.ENTRY), ZERO)
+    exited = sum((f.quantity for f in trade.fills if f.fill_side is FillSide.EXIT), ZERO)
+    return entered - exited
+
+
+class Reconciler:
+    def __init__(
+        self,
+        bot: Bot,
+        db: Database,
+        settings: Settings,
+        cipher: SecretCipher,
+        redis: Any = None,
+    ) -> None:
+        self._bot = bot
+        self._db = db
+        self._settings = settings
+        self._cipher = cipher
+        self._redis = redis
+        self._cycle = 0
+
+    async def run(self) -> None:
+        self._cycle += 1
+        if await self._confirm_in_flight():
+            logger.info("Сверка пропущена: идёт подтверждение входа (exec:lock)")
+            return
+        # openOrders — на первом цикле после старта и дальше раз в N циклов.
+        every = max(self._settings.reconciler_stop_check_every, 1)
+        check_stops = (self._cycle - 1) % every == 0
+        async with self._db.session() as session:
+            user_ids = await ExecutionOrderRepository(session).users_with_real_entries()
+        for user_id in user_ids:
+            try:
+                async with self._db.session() as session:
+                    await self._reconcile_user(session, user_id, check_stops=check_stops)
+            except ExchangeError:
+                logger.warning(
+                    "Сверка пользователя не удалась — биржа", extra={"user_id": user_id},
+                    exc_info=True,
+                )
+            except Exception:
+                logger.exception("Сверка пользователя упала", extra={"user_id": user_id})
+
+    async def _confirm_in_flight(self) -> bool:
+        if self._redis is None:
+            return False
+        async for _key in self._redis.scan_iter(match=LOCK_PATTERN, count=100):
+            return True
+        return False
+
+    # --- Пользователь -----------------------------------------------------
+
+    async def _reconcile_user(
+        self, session: AsyncSession, user_id: int, *, check_stops: bool
+    ) -> None:
+        user = await UserRepository(session).get_by_id(user_id)
+        if user is None:
+            return
+        now = datetime.now(UTC)
+        mode = self._settings.bingx_allowed_exchange_mode
+        asset = _QUOTE_ASSET_BY_MODE[mode]
+        client = await ExchangeFactory(self._settings, self._cipher).for_user(
+            session, user_id, mode=mode
+        )
+        ctx = _UserCtx(session, user.telegram_id, user_id, asset, now)
+        try:
+            positions = await client.get_positions()
+            trades_repo = TradeRepository(session)
+            orders_repo = ExecutionOrderRepository(session)
+            open_trades = await trades_repo.list_open_for_reconcile(user_id)
+            unresolved = await orders_repo.list_unresolved_entries(user_id)
+
+            for trade in open_trades:
+                if trade.source is not TradeSource.SIGNAL_EXECUTION or not trade.fill_confirmed:
+                    continue
+                await self._reconcile_trade(ctx, client, trade, positions, check_stops)
+
+            in_flight = {
+                e.symbol for e in unresolved if now - e.created_at < UNRESOLVED_ENTRY_WINDOW
+            }
+            journal_open = {
+                (t.symbol, t.side)
+                for t in await trades_repo.list_open_for_reconcile(user_id)
+            }
+            orphans = orphan_positions(positions, journal_open, in_flight)
+            for found in orphans:
+                await self._discrepancy(ctx, found)
+            await self._resolve_missing(
+                ctx, ReconciliationKind.ORPHAN_POSITION, {d.dedup_key for d in orphans}
+            )
+
+            for entry in unresolved:
+                await self._resolve_unresolved_entry(ctx, client, entry, positions)
+            await session.commit()
+        finally:
+            await client.close()
+
+    # --- Сделка -----------------------------------------------------------
+
+    async def _reconcile_trade(
+        self,
+        ctx: _UserCtx,
+        client: ExchangeClient,
+        trade: Trade,
+        positions: list[Position],
+        check_stops: bool,
+    ) -> None:
+        conditionals = (
+            await ExecutionOrderRepository(ctx.session).conditionals_for_notification(
+                ctx.user_id, trade.notification_id
+            )
+            if trade.notification_id is not None
+            else []
+        )
+        stop_row = next((c for c in conditionals if c.role is OrderRole.STOP_LOSS), None)
+        take_row = next((c for c in conditionals if c.role is OrderRole.TAKE_PROFIT), None)
+        snapshot = BotTradeSnapshot(
+            trade_id=trade.id,
+            symbol=trade.symbol,
+            side=trade.side,
+            open_quantity=_open_quantity(trade),
+            opened_at=trade.opened_at,
+            stop_order_id=stop_row.exchange_order_id if stop_row else None,
+            take_order_id=take_row.exchange_order_id if take_row else None,
+            recorded_order_ids=frozenset(
+                f.external_fill_id for f in trade.fills if f.external_fill_id
+            ),
+        )
+        position = exchange_position(positions, trade.symbol, trade.side)
+
+        if not needs_history(snapshot, position):
+            await self._resolve_trade_discrepancies(ctx, trade.id)
+            if check_stops:
+                open_orders = await client.get_open_orders(trade.symbol)
+                missing = stop_missing(snapshot, position, open_orders)
+                if missing is not None:
+                    await self._discrepancy(ctx, missing, alarm=True)
+                else:
+                    await self._resolve_missing(
+                        ctx, ReconciliationKind.STOP_MISSING, set(),
+                        prefix=f"stop_missing:{trade.id}",
+                    )
+            return
+
+        start = max(trade.opened_at - timedelta(minutes=1), ctx.now - HISTORY_LIMIT)
+        orders = await client.get_all_orders(trade.symbol, start, ctx.now)
+        decision = decide_trade(snapshot, position, orders)
+        if decision.discrepancy is not None:
+            await self._discrepancy(ctx, decision.discrepancy)
+            return
+        if not decision.exits:
+            return
+        await self._record_exits(
+            ctx, trade.id, decision.exits, decision.closes_fully, stop_row, take_row
+        )
+
+    async def _record_exits(
+        self,
+        ctx: _UserCtx,
+        trade_id: int,
+        exits: list[ExitFill],
+        closes_fully: bool,
+        stop_row: ExecutionOrder | None,
+        take_row: ExecutionOrder | None,
+    ) -> None:
+        trades = TradeRepository(ctx.session)
+        trade = await trades.lock_for_reconcile(trade_id)
+        if trade is None or trade.status is not TradeStatus.OPEN:
+            return  # закрыли руками или параллельной сверкой — факт уже в журнале
+        journal = TradeJournal(trades)
+        for exit_fill in exits:
+            try:
+                async with ctx.session.begin_nested():
+                    await journal.close_trade(
+                        trade,
+                        exit_price=exit_fill.price,
+                        quantity=exit_fill.quantity,
+                        fee=exit_fill.fee,
+                        exit_reason=exit_fill.reason,
+                        closed_at=exit_fill.executed_at,
+                        external_fill_id=exit_fill.order_id,
+                    )
+            except (IntegrityError, JournalError):
+                logger.warning(
+                    "Выход уже записан или не записывается — пропускаю",
+                    extra={"trade_id": trade_id, "order_id": exit_fill.order_id},
+                    exc_info=True,
+                )
+                return
+            await self._fact(
+                ctx,
+                ReconciliationEvent(
+                    user_id=ctx.user_id, trade_id=trade.id, symbol=trade.symbol,
+                    kind=exit_fill.kind, dedup_key=f"close:{trade.id}:{exit_fill.order_id}",
+                    detail=f"{exit_fill.reason}: {exit_fill.quantity} по {exit_fill.price}",
+                ),
+                self._close_text(trade, exit_fill, ctx.asset),
+            )
+        if closes_fully:
+            # Условник, который сработал, — FILLED; второй биржа сняла сама
+            # при закрытии позиции (живьём 27.09: TP → CANCELLED) — CANCELED.
+            fired_kinds = {e.kind for e in exits}
+            fired_role = {
+                OrderRole.STOP_LOSS: ReconciliationKind.CLOSED_STOP_LOSS in fired_kinds,
+                OrderRole.TAKE_PROFIT: ReconciliationKind.CLOSED_TAKE_PROFIT in fired_kinds,
+            }
+            for row in (stop_row, take_row):
+                if row is None or row.status in (OrderStatus.FILLED, OrderStatus.CANCELED):
+                    continue
+                row.status = OrderStatus.FILLED if fired_role[row.role] else OrderStatus.CANCELED
+            triggered = {e.order_id for e in exits}
+            logger.info(
+                "Сделка закрыта сверкой с биржей",
+                extra={"trade_id": trade.id, "orders": sorted(triggered)},
+            )
+            await self._resolve_trade_discrepancies(ctx, trade.id)
+            await self._resolve_missing(
+                ctx, ReconciliationKind.STOP_MISSING, set(), prefix=f"stop_missing:{trade.id}"
+            )
+
+    @staticmethod
+    def _close_text(trade: Trade, exit_fill: ExitFill, asset: str) -> str:
+        head = _CLOSE_TEXT[exit_fill.kind].format(symbol=trade.symbol, side=trade.side.value)
+        lines = [
+            head,
+            f"Выход: {fmt_decimal(exit_fill.price)} · объём {fmt_decimal(exit_fill.quantity)}",
+            f"Комиссия выхода: {fmt_decimal(exit_fill.fee)} {asset}",
+        ]
+        if trade.status is TradeStatus.CLOSED and trade.pnl is not None:
+            lines.append(
+                f"PnL: {fmt_decimal(trade.pnl)} {asset} · комиссии вход+выход "
+                f"{fmt_decimal(trade.fees)} {asset}"
+            )
+            lines.append(f"📒 Сделка #{trade.id} закрыта в журнале")
+        else:
+            lines.append(f"📒 Сделка #{trade.id} остаётся открытой")
+        return "\n".join(lines)
+
+    # --- Вход с неизвестным исходом ---------------------------------------
+
+    async def _resolve_unresolved_entry(
+        self,
+        ctx: _UserCtx,
+        client: ExchangeClient,
+        entry: ExecutionOrder,
+        positions: list[Position],
+    ) -> None:
+        trades = TradeRepository(ctx.session)
+        # С исполнениями: подтверждение правит исполнение входа.
+        trade = await trades.lock_for_reconcile(entry.trade_id) if entry.trade_id else None
+        if entry.status is OrderStatus.SUBMITTED and trade is not None and trade.fill_confirmed:
+            return  # исполнение уже в журнале — разбирать нечего
+        snapshot = UnresolvedEntry(
+            execution_order_id=entry.id,
+            client_order_id=entry.client_order_id or "",
+            symbol=entry.symbol,
+            side=entry.position_side,
+            status=entry.status.value,
+            created_at=entry.created_at,
+            trade_id=entry.trade_id,
+        )
+        if not entry_is_due(snapshot, ctx.now):
+            return
+        lookup: OrderFill | None = None
+        not_found = False
+        try:
+            lookup = await client.get_order_fill(entry.symbol, snapshot.client_order_id)
+        except ExchangeError as exc:
+            if exc.code != ORDER_NOT_EXIST_CODE:
+                logger.warning(
+                    "Поиск входа по client_order_id не удался — повторю на следующем цикле",
+                    extra={"execution_order_id": entry.id, "code": exc.code},
+                )
+                return
+            not_found = True
+        position = exchange_position(positions, entry.symbol, entry.position_side)
+        resolution = resolve_entry(snapshot, lookup, not_found=not_found, position=position)
+
+        if resolution.discrepancy is not None:
+            await self._discrepancy(ctx, resolution.discrepancy)
+            return
+        await self._resolve_missing(
+            ctx, ReconciliationKind.AMBIGUOUS, set(), prefix=f"entry:{entry.id}"
+        )
+        if resolution.confirmed is not None:
+            await self._confirm_entry(ctx, entry, trade, resolution.confirmed)
+        elif resolution.not_placed:
+            entry.status = OrderStatus.NOT_PLACED
+            note = ""
+            if trade is not None and trade.status is TradeStatus.OPEN and not trade.fill_confirmed:
+                await TradeJournal(trades).cancel_trade(trade)
+                note = f"\nПредварительная сделка #{trade.id} отменена в журнале."
+            await self._fact(
+                ctx,
+                ReconciliationEvent(
+                    user_id=ctx.user_id, trade_id=entry.trade_id, execution_order_id=entry.id,
+                    symbol=entry.symbol, kind=ReconciliationKind.ENTRY_NOT_PLACED,
+                    dedup_key=f"entry:{entry.id}:not_placed",
+                    detail=f"{entry.client_order_id}: order not exist, позиции нет",
+                ),
+                f"ℹ️ Вход {entry.symbol} {entry.position_side.value} не выставлен на бирже "
+                f"(проверено через {int(UNRESOLVED_ENTRY_WINDOW.total_seconds() // 60)} мин, "
+                f"{entry.client_order_id}). Повторной отправки нет.{note}",
+            )
+
+    async def _confirm_entry(
+        self, ctx: _UserCtx, entry: ExecutionOrder, trade: Trade | None, fill: OrderFill
+    ) -> None:
+        entry.status = OrderStatus.FILLED
+        entry.exchange_order_id = entry.exchange_order_id or fill.order_id
+        text = (
+            f"✅ Вход {entry.symbol} {entry.position_side.value} найден на бирже: "
+            f"{fmt_decimal(fill.executed_qty)} по {fmt_decimal(fill.avg_price)}"
+        )
+        if trade is not None and trade.status is TradeStatus.OPEN and not trade.fill_confirmed:
+            entry_fill = next(
+                (f for f in trade.fills if f.fill_side is FillSide.ENTRY), None
+            )
+            if entry_fill is not None:
+                entry_fill.price = fill.avg_price
+                entry_fill.quantity = fill.executed_qty
+                entry_fill.fee = fill.fee
+                entry_fill.external_fill_id = fill.order_id
+                if fill.filled_at is not None:
+                    entry_fill.executed_at = fill.filled_at
+                    trade.opened_at = fill.filled_at
+            trade.fill_confirmed = True
+            raw_position = fill.raw.get("positionID") or fill.raw.get("positionId")
+            if raw_position not in (None, "", 0, "0"):
+                trade.external_position_id = str(raw_position)
+            TradeJournal(TradeRepository(ctx.session)).recalculate(trade)
+            text += f"\n📒 Сделка #{trade.id} подтверждена фактом биржи."
+        elif trade is None:
+            await self._discrepancy(
+                ctx,
+                Discrepancy(
+                    ReconciliationKind.AMBIGUOUS, f"entry:{entry.id}:no_trade", entry.symbol,
+                    f"вход {entry.client_order_id} исполнен на бирже, сделки в журнале нет — "
+                    "не создаю",
+                    execution_order_id=entry.id,
+                ),
+            )
+            return
+        await self._fact(
+            ctx,
+            ReconciliationEvent(
+                user_id=ctx.user_id, trade_id=entry.trade_id, execution_order_id=entry.id,
+                symbol=entry.symbol, kind=ReconciliationKind.ENTRY_CONFIRMED,
+                dedup_key=f"entry:{entry.id}:confirmed",
+                detail=f"{entry.client_order_id}: FILLED {fill.executed_qty} по {fill.avg_price}",
+            ),
+            text,
+        )
+
+    # --- События ----------------------------------------------------------
+
+    async def _fact(self, ctx: _UserCtx, event: ReconciliationEvent, text: str) -> None:
+        """Событие-факт (журнал уже приведён к бирже): сразу разрешено,
+        уведомление одно — повтор невозможен, сам факт записан один раз."""
+        event.resolved_at = ctx.now
+        ReconciliationEventRepository(ctx.session).add(event)
+        await ctx.session.flush()
+        if await send_notification(self._bot, ctx.telegram_id, text):
+            event.notified_at = datetime.now(UTC)
+
+    async def _discrepancy(
+        self, ctx: _UserCtx, found: Discrepancy, *, alarm: bool = False
+    ) -> None:
+        """Расхождение без однозначного факта: журнал не правится, одно
+        уведомление на открытое расхождение (дедуп по dedup_key)."""
+        repo = ReconciliationEventRepository(ctx.session)
+        ctx.active_keys.add(found.dedup_key)
+        if await repo.get_open(ctx.user_id, found.dedup_key) is not None:
+            return
+        event = repo.add(
+            ReconciliationEvent(
+                user_id=ctx.user_id, trade_id=found.trade_id,
+                execution_order_id=found.execution_order_id, symbol=found.symbol,
+                kind=found.kind, dedup_key=found.dedup_key, detail=found.detail,
+            )
+        )
+        await repo.flush()
+        if alarm:
+            text = (
+                f"⚠️ ПОЗИЦИЯ БЕЗ СТОПА: {found.symbol} — {found.detail}. Бот ордеров не "
+                "ставит — выставь стоп в BingX."
+            )
+        else:
+            text = (
+                f"⚠️ Сверка с биржей, {found.symbol}: {found.detail}. Журнал не изменён — "
+                "проверь BingX."
+            )
+        if await send_notification(self._bot, ctx.telegram_id, text):
+            event.notified_at = datetime.now(UTC)
+
+    async def _resolve_missing(
+        self,
+        ctx: _UserCtx,
+        kind: ReconciliationKind,
+        active: set[str],
+        *,
+        prefix: str | None = None,
+    ) -> None:
+        """Открытые расхождения вида kind, которых на этом цикле больше нет
+        (prefix — только ключи одной сделки/входа), — разрешены."""
+        for event in await ReconciliationEventRepository(ctx.session).list_open(
+            ctx.user_id, [kind]
+        ):
+            if prefix is not None and not event.dedup_key.startswith(prefix):
+                continue
+            if event.dedup_key not in active:
+                event.resolved_at = ctx.now
+
+    async def _resolve_trade_discrepancies(self, ctx: _UserCtx, trade_id: int) -> None:
+        for kind, prefix in (
+            (ReconciliationKind.QUANTITY_MISMATCH, f"qty:{trade_id}"),
+            (ReconciliationKind.AMBIGUOUS, f"ambiguous:{trade_id}:"),
+        ):
+            await self._resolve_missing(ctx, kind, set(), prefix=prefix)
+
+
+class _UserCtx:
+    """Состояние одного прохода по пользователю."""
+
+    def __init__(
+        self, session: AsyncSession, telegram_id: int, user_id: int, asset: str, now: datetime
+    ) -> None:
+        self.session = session
+        self.telegram_id = telegram_id
+        self.user_id = user_id
+        self.asset = asset
+        self.now = now
+        self.active_keys: set[str] = set()
+

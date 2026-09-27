@@ -232,6 +232,10 @@ class Settings(BaseSettings):
     # Доля оставшегося пути от входа до TP/SL, при которой считаем, что цена
     # "приблизилась" — 10 означает последние 10% дистанции.
     position_monitor_approach_percent: Decimal = Decimal("10")
+    # Шаг 15.6: сверка журнала с биржей (раздел 10 ТЗ). Штатный цикл — один
+    # запрос позиций; openOrders (есть ли стоп) — раз в N циклов.
+    reconciler_interval_seconds: int = 60
+    reconciler_stop_check_every: int = 5
     daily_jobs_interval_minutes: int = 15
     daily_summary_hour_local: int = 20
 

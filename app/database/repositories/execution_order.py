@@ -52,6 +52,48 @@ class ExecutionOrderRepository:
         )
         return {value for value in await self.session.scalars(stmt) if value}
 
+    async def conditionals_for_notification(
+        self, user_id: int, notification_id: int
+    ) -> list[ExecutionOrder]:
+        """Шаг 15.6: строки стопа и тейка входа — orderId условников биржи,
+        по которым reconciler узнаёт выход по стопу/тейку (triggerOrderId)."""
+        stmt = select(ExecutionOrder).where(
+            ExecutionOrder.user_id == user_id,
+            ExecutionOrder.notification_id == notification_id,
+            ExecutionOrder.role.in_((OrderRole.STOP_LOSS, OrderRole.TAKE_PROFIT)),
+        )
+        return list(await self.session.scalars(stmt))
+
+    async def list_unresolved_entries(self, user_id: int) -> list[ExecutionOrder]:
+        """Шаг 15.6: входы с неизвестным исходом — UNKNOWN, PENDING (процесс
+        упал между коммитом и ответом биржи) и SUBMITTED без подтверждения.
+        Окно (10 минут) проверяет reconciler: ему нужен и created_at."""
+        stmt = select(ExecutionOrder).where(
+            ExecutionOrder.user_id == user_id,
+            ExecutionOrder.role == OrderRole.ENTRY,
+            ExecutionOrder.client_order_id.is_not(None),
+            ExecutionOrder.status.in_(
+                (OrderStatus.UNKNOWN, OrderStatus.PENDING, OrderStatus.SUBMITTED)
+            ),
+        )
+        return list(await self.session.scalars(stmt))
+
+    async def users_with_real_entries(self) -> list[int]:
+        """Пользователи, у которых был хоть один реальный вход (не сухой
+        прогон и не наблюдение) — только их счета сверяет reconciler."""
+        stmt = (
+            select(ExecutionOrder.user_id)
+            .where(
+                ExecutionOrder.role == OrderRole.ENTRY,
+                ExecutionOrder.exchange_order_id.is_not(None)
+                | ExecutionOrder.status.in_(
+                    (OrderStatus.UNKNOWN, OrderStatus.PENDING, OrderStatus.SUBMITTED)
+                ),
+            )
+            .distinct()
+        )
+        return list(await self.session.scalars(stmt))
+
     async def list_by_signal(self, user_id: int, signal_id: int) -> list[ExecutionOrder]:
         stmt = select(ExecutionOrder).where(
             ExecutionOrder.user_id == user_id,

@@ -191,6 +191,31 @@ class TradeRepository:
         self.session.add(fill)
         return fill
 
+    async def list_open_for_reconcile(self, user_id: int) -> list[Trade]:
+        """Шаг 15.6: все открытые сделки пользователя с исполнениями —
+        reconciler сверяет с биржей сделки бота, а открытые сделки любого
+        источника нужны, чтобы не назвать чужую позицию «без сделки»."""
+        stmt = (
+            select(Trade)
+            .where(Trade.user_id == user_id, Trade.status == TradeStatus.OPEN)
+            .options(selectinload(Trade.fills))
+            .execution_options(populate_existing=True)
+        )
+        return list(await self.session.scalars(stmt))
+
+    async def lock_for_reconcile(self, trade_id: int) -> Trade | None:
+        """Строка сделки под FOR UPDATE — запись выхода reconciler'ом не
+        пересекается с ручным закрытием и параллельной сверкой."""
+        stmt = (
+            select(Trade)
+            .where(Trade.id == trade_id)
+            .with_for_update()
+            .options(selectinload(Trade.fills))
+            .execution_options(populate_existing=True)
+        )
+        trade: Trade | None = await self.session.scalar(stmt)
+        return trade
+
     async def bot_fill_external_ids(self, user_id: int) -> set[str]:
         """external_fill_id исполнений сделок бота (SIGNAL_EXECUTION): вход
         и выходы, записанные ботом и reconciler'ом. Импорт истории их не

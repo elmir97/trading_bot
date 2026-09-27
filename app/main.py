@@ -220,7 +220,7 @@ async def run() -> None:
     # зависят от build_dispatcher, а сам шифр не хранит состояния — второй
     # экземпляр с тем же ключом безвреден.
     background_jobs = BackgroundJobs(
-        bot, db, settings, SecretCipher(settings.encryption_key.get_secret_value())
+        bot, db, settings, SecretCipher(settings.encryption_key.get_secret_value()), redis
     )
     background_jobs.start()
 

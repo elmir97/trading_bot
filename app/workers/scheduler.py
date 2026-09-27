@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from aiogram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -18,6 +20,7 @@ from app.database.session import Database
 from app.workers.base import job_wrapper
 from app.workers.daily import DailyJobs
 from app.workers.positions import PositionMonitor
+from app.workers.reconciler import Reconciler
 from app.workers.scanner import SetupScanner
 
 logger = get_logger(__name__)
@@ -25,13 +28,21 @@ logger = get_logger(__name__)
 
 class BackgroundJobs:
     def __init__(
-        self, bot: Bot, db: Database, settings: Settings, cipher: SecretCipher
+        self,
+        bot: Bot,
+        db: Database,
+        settings: Settings,
+        cipher: SecretCipher,
+        redis: Any = None,
     ) -> None:
         self._settings = settings
         self._scheduler = AsyncIOScheduler(timezone="UTC")
         self._scanner = SetupScanner(bot, db, settings)
         self._positions = PositionMonitor(bot, db, settings)
         self._daily = DailyJobs(bot, db, settings, cipher, scanner=self._scanner)
+        # Шаг 15.6: сверка журнала с биржей. Redis — чтобы пропускать цикл,
+        # пока жив лок «Да» (вход в полёте).
+        self._reconciler = Reconciler(bot, db, settings, cipher, redis)
 
     def start(self) -> None:
         """Требование 8: пока BACKGROUND_JOBS_ENABLED=false — не регистрирует
@@ -57,6 +68,14 @@ class BackgroundJobs:
             max_instances=1,
         )
         self._scheduler.add_job(
+            job_wrapper("reconciler", self._reconciler.run),
+            "interval",
+            seconds=self._settings.reconciler_interval_seconds,
+            id="reconciler",
+            coalesce=True,
+            max_instances=1,
+        )
+        self._scheduler.add_job(
             job_wrapper("daily_jobs", self._daily.run),
             "interval",
             minutes=self._settings.daily_jobs_interval_minutes,
@@ -71,6 +90,7 @@ class BackgroundJobs:
                 "setup_scanner_minutes": self._settings.setup_scanner_interval_minutes,
                 "position_monitor_minutes": self._settings.position_monitor_interval_minutes,
                 "daily_jobs_minutes": self._settings.daily_jobs_interval_minutes,
+                "reconciler_seconds": self._settings.reconciler_interval_seconds,
             },
         )
 
