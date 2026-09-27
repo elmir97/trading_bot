@@ -18,7 +18,7 @@ from sqlalchemy import select
 
 from app.core.config import Settings
 from app.database.models.execution_order import ExecutionOrder
-from app.database.models.trade import Trade
+from app.database.models.trade import Trade, TradeFill
 from app.database.repositories.strategy import (
     MistakeTypeRepository,
     StrategyRepository,
@@ -40,6 +40,7 @@ from app.exchanges.base import (
 from app.services.import_service import HistoryImporter
 from app.services.user_service import UserService
 from app.trading.enums import (
+    FillSide,
     OrderRole,
     OrderSide,
     OrderStatus,
@@ -98,6 +99,7 @@ class FakeExchange(ExchangeClient):
 def fill(
     fid: str, minutes: int, *, entry: bool, price: str, qty: str = "0.1",
     order_id: str | None = None,
+    trigger_order_id: str | None = None,
 ) -> Fill:
     return Fill(
         external_id=fid,
@@ -110,6 +112,7 @@ def fill(
         realized_pnl=D(0),
         executed_at=BASE + timedelta(minutes=minutes),
         order_id=order_id,
+        trigger_order_id=trigger_order_id,
     )
 
 
@@ -310,3 +313,51 @@ async def test_fill_without_order_id_is_imported_with_warning(ctx, caplog) -> No
 
     assert result.trades_created == 1
     assert "возможен дубль" in caplog.text
+
+
+async def test_stop_exit_child_order_skipped_by_trigger_id(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Живая форма (SOL #4, 27.09): выход по стопу — дочерний ордер со своим
+    orderId, связь со стопом бота только через triggerOrderId. Раньше фильтр
+    смотрел один orderId, и выход бота проходил в импорт как чужой."""
+    user, repo, session = ctx
+    await _bot_order(session, user.id, "BOT-ENTRY")
+    await _bot_order(session, user.id, "BOT-STOP")
+    exchange = FakeExchange([
+        fill("b1", 0, entry=True, price="60000", order_id="BOT-ENTRY"),
+        fill("b2", 30, entry=False, price="59000", order_id="CHILD-OF-STOP",
+             trigger_order_id="BOT-STOP"),
+    ])
+    importer = HistoryImporter(exchange, repo, user.id)
+
+    result = await importer.import_period(BASE - timedelta(days=1), BASE + timedelta(days=1))
+
+    assert result.fills_skipped_bot == 2
+    assert result.trades_created == 0
+
+
+async def test_exit_recorded_on_bot_trade_is_skipped(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Закрытие позиции бота, которое reconciler уже записал в сделку бота
+    (external_fill_id = orderId биржи), — ручной маркет без triggerOrderId.
+    Импорт не заводит его второй раз."""
+    user, repo, session = ctx
+    trade = Trade(
+        user_id=user.id, symbol="BTC-USDT", side=TradeSide.LONG, quantity=D("0.1"),
+        entry_price=D("60000"), opened_at=BASE, source=TradeSource.SIGNAL_EXECUTION,
+    )
+    trade.fills = [
+        TradeFill(user_id=user.id, fill_side=FillSide.ENTRY, price=D("60000"),
+                  quantity=D("0.1"), executed_at=BASE, external_fill_id="BOT-ENTRY"),
+        TradeFill(user_id=user.id, fill_side=FillSide.EXIT, price=D("59500"),
+                  quantity=D("0.1"), executed_at=BASE + timedelta(minutes=20),
+                  external_fill_id="MANUAL-CLOSE-OF-BOT"),
+    ]
+    session.add(trade)
+    await session.flush()
+    exchange = FakeExchange([
+        fill("x1", 20, entry=False, price="59500", order_id="MANUAL-CLOSE-OF-BOT"),
+    ])
+    importer = HistoryImporter(exchange, repo, user.id)
+
+    result = await importer.import_period(BASE - timedelta(days=1), BASE + timedelta(days=1))
+
+    assert result.fills_skipped_bot == 1

@@ -226,9 +226,14 @@ class HistoryImporter:
 
         Исполнение без orderId отличить от ордеров бота нельзя — оно
         импортируется как раньше, но не тихо: warning о возможном дубле."""
+        # Три признака исполнения бота: orderId — его вход/условник
+        # (execution_orders); triggerOrderId — дочерний ордер сработавшего
+        # стопа/тейка бота (свой orderId, снято живьём 27.09); orderId среди
+        # исполнений сделок бота — выход, уже записанный reconciler'ом.
         bot_order_ids = await ExecutionOrderRepository(self._trades.session).exchange_order_ids(
             self._user_id
         )
+        bot_fill_ids = await self._trades.bot_fill_external_ids(self._user_id)
         kept: list[Fill] = []
         for f in fills:
             if f.order_id is None:
@@ -238,7 +243,11 @@ class HistoryImporter:
                     extra={"user_id": self._user_id, "fill_id": f.external_id, "symbol": f.symbol},
                 )
                 kept.append(f)
-            elif f.order_id in bot_order_ids:
+            elif (
+                f.order_id in bot_order_ids
+                or f.order_id in bot_fill_ids
+                or (f.trigger_order_id is not None and f.trigger_order_id in bot_order_ids)
+            ):
                 result.fills_skipped_bot += 1
             else:
                 kept.append(f)

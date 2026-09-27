@@ -15,7 +15,7 @@ from sqlalchemy.orm import selectinload
 
 from app.database.models.trade import Trade, TradeFill
 from app.database.models.user import User
-from app.trading.enums import TradeStatus
+from app.trading.enums import TradeSource, TradeStatus
 
 
 class TradeRepository:
@@ -190,6 +190,22 @@ class TradeRepository:
     def add_fill(self, fill: TradeFill) -> TradeFill:
         self.session.add(fill)
         return fill
+
+    async def bot_fill_external_ids(self, user_id: int) -> set[str]:
+        """external_fill_id исполнений сделок бота (SIGNAL_EXECUTION): вход
+        и выходы, записанные ботом и reconciler'ом. Импорт истории их не
+        заводит второй раз — ручное закрытие позиции бота на бирже
+        reconciler уже записал выходом этой сделки."""
+        stmt = (
+            select(TradeFill.external_fill_id)
+            .join(Trade, Trade.id == TradeFill.trade_id)
+            .where(
+                Trade.user_id == user_id,
+                Trade.source == TradeSource.SIGNAL_EXECUTION,
+                TradeFill.external_fill_id.is_not(None),
+            )
+        )
+        return {value for value in await self.session.scalars(stmt) if value}
 
     async def flush(self) -> None:
         await self.session.flush()
