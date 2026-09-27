@@ -1523,3 +1523,44 @@ def test_fill_carries_order_id_for_import_dedupe() -> None:
     }
     assert BingXClient._parse_fill({**base, "orderId": "555"}).order_id == "555"
     assert BingXClient._parse_fill(base).order_id is None
+
+
+class TestLiveFillsForm:
+    """Живая форма allFillOrders (демо, 27.09): время — ISO-строки
+    (filledTm с Z, filledTime с +08:00), объём — volume, связь выхода по
+    стопу с условником — triggerOrderId. Раньше разбор падал ValueError на
+    ISO и давал объём 0 (ждал executedQty/qty)."""
+
+    def _fills(self):  # type: ignore[no-untyped-def]
+        from tests.bingx_fixtures import live_items
+
+        return [
+            BingXClient._parse_fill(item)
+            for item in live_items("allFillOrders SOL (get_fills)")
+        ]
+
+    def test_entry_and_stop_exit_parsed(self) -> None:
+        entry, stop_exit = self._fills()
+        assert entry.executed_at == datetime(2026, 9, 27, 14, 15, 30, tzinfo=UTC)
+        assert stop_exit.executed_at == datetime(2026, 9, 27, 14, 40, 36, tzinfo=UTC)
+        assert (entry.is_entry, stop_exit.is_entry) == (True, False)
+        assert (entry.price, stop_exit.price) == (D("123.021"), D("121.611"))
+        # volume у биржи округлён (1362 при executedQty ордера 1362.07) —
+        # поле биржи, точнее allFillOrders объём не отдаёт.
+        assert entry.quantity == D("1362")
+        assert (entry.fee, stop_exit.fee) == (D("83.781520"), D("82.821383"))
+        assert entry.order_id == "2104213344135159808"
+        assert stop_exit.order_id == "2104219661398712320"
+
+    def test_trigger_order_id_links_exit_to_conditional(self) -> None:
+        entry, stop_exit = self._fills()
+        assert entry.trigger_order_id is None  # 0 у биржи — «не условный»
+        assert stop_exit.trigger_order_id == "2104213344721920001"
+
+    def test_missing_time_is_error_not_now(self) -> None:
+        from app.exchanges.base import ExchangeResponseError
+
+        item = {"symbol": "SOL-USDT", "orderId": "1", "side": "BUY", "positionSide": "LONG",
+                "price": "1", "volume": "1", "commission": "0"}
+        with pytest.raises(ExchangeResponseError):
+            BingXClient._parse_fill(item)

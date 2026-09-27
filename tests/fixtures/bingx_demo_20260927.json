@@ -1,0 +1,3080 @@
+{
+ "captured_at": "2026-09-27T18:13:57.165737+00:00",
+ "host": "demo",
+ "calls": [
+  {
+   "path": "/openApi/swap/v2/trade/order",
+   "params": {
+    "symbol": "LINK-USDT",
+    "orderId": "2104122757776154624"
+   },
+   "http_status": 200,
+   "rate_remain": "29",
+   "rate_expire_ms": "1000",
+   "code": 0,
+   "msg": "",
+   "top_keys": [
+    "code",
+    "data",
+    "msg"
+   ],
+   "data_type": "dict",
+   "data_keys": [
+    "order"
+   ],
+   "inner_key": "order",
+   "items": [
+    {
+     "keys": [
+      "actPrice",
+      "advanceAttr",
+      "avgPrice",
+      "clientOrderId",
+      "closePosition",
+      "commission",
+      "cumQuote",
+      "executedQty",
+      "is_twap",
+      "leverage",
+      "mainOrderId",
+      "onlyOnePosition",
+      "orderId",
+      "orderType",
+      "origQty",
+      "positionID",
+      "positionSide",
+      "postOnly",
+      "price",
+      "priceRate",
+      "profit",
+      "reduceOnly",
+      "side",
+      "status",
+      "stopGuaranteed",
+      "stopLoss",
+      "stopLossEntrustPrice",
+      "stopPrice",
+      "symbol",
+      "takeProfit",
+      "takeProfitEntrustPrice",
+      "time",
+      "trailingStopDistance",
+      "trailingStopRate",
+      "triggerOrderId",
+      "type",
+      "updateTime",
+      "workingType"
+     ],
+     "fields": {
+      "avgPrice": {
+       "value": "14.400",
+       "type": "str"
+      },
+      "clientOrderId": {
+       "value": "tj209u1e",
+       "type": "str"
+      },
+      "closePosition": {
+       "value": "false",
+       "type": "str"
+      },
+      "commission": {
+       "value": "-14.672461",
+       "type": "str"
+      },
+      "cumQuote": {
+       "value": "29345",
+       "type": "str"
+      },
+      "executedQty": {
+       "value": "2037.8",
+       "type": "str"
+      },
+      "leverage": {
+       "value": "10X",
+       "type": "str"
+      },
+      "mainOrderId": {
+       "value": "",
+       "type": "str"
+      },
+      "onlyOnePosition": {
+       "value": false,
+       "type": "bool"
+      },
+      "orderId": {
+       "value": 2104122757776154624,
+       "type": "int"
+      },
+      "orderType": {
+       "value": "",
+       "type": "str"
+      },
+      "origQty": {
+       "value": "2037.8",
+       "type": "str"
+      },
+      "positionID": {
+       "value": 2104122757805514754,
+       "type": "int"
+      },
+      "positionSide": {
+       "value": "LONG",
+       "type": "str"
+      },
+      "price": {
+       "value": "14.398",
+       "type": "str"
+      },
+      "profit": {
+       "value": "0.0000",
+       "type": "str"
+      },
+      "reduceOnly": {
+       "value": false,
+       "type": "bool"
+      },
+      "side": {
+       "value": "BUY",
+       "type": "str"
+      },
+      "status": {
+       "value": "FILLED",
+       "type": "str"
+      },
+      "stopGuaranteed": {
+       "value": "false",
+       "type": "str"
+      },
+      "stopLoss": {
+       "value": {
+        "keys": [
+         "price",
+         "quantity",
+         "stopGuaranteed",
+         "stopPrice",
+         "type",
+         "workingType"
+        ],
+        "fields": {
+         "price": {
+          "value": 0,
+          "type": "int"
+         },
+         "stopGuaranteed": {
+          "value": "",
+          "type": "str"
+         },
+         "stopPrice": {
+          "value": 0,
+          "type": "int"
+         },
+         "type": {
+          "value": "",
+          "type": "str"
+         },
+         "workingType": {
+          "value": "",
+          "type": "str"
+         }
+        }
+       },
+       "type": "dict"
+      },
+      "stopPrice": {
+       "value": "",
+       "type": "str"
+      },
+      "symbol": {
+       "value": "LINK-USDT",
+       "type": "str"
+      },
+      "takeProfit": {
+       "value": {
+        "keys": [
+         "price",
+         "quantity",
+         "stopGuaranteed",
+         "stopPrice",
+         "type",
+         "workingType"
+        ],
+        "fields": {
+         "price": {
+          "value": 0,
+          "type": "int"
+         },
+         "stopGuaranteed": {
+          "value": "",
+          "type": "str"
+         },
+         "stopPrice": {
+          "value": 0,
+          "type": "int"
+         },
+         "type": {
+          "value": "",
+          "type": "str"
+         },
+         "workingType": {
+          "value": "",
+          "type": "str"
+         }
+        }
+       },
+       "type": "dict"
+      },
+      "time": {
+       "value": 1790496932000,
+       "type": "int"
+      },
+      "triggerOrderId": {
+       "value": 0,
+       "type": "int"
+      },
+      "type": {
+       "value": "MARKET",
+       "type": "str"
+      },
+      "updateTime": {
+       "value": 1790496932828,
+       "type": "int"
+      },
+      "workingType": {
+       "value": "MARK_PRICE",
+       "type": "str"
+      }
+     }
+    }
+   ],
+   "label": "order #37 LINK-USDT ENTRY"
+  },
+  {
+   "path": "/openApi/swap/v2/trade/order",
+   "params": {
+    "symbol": "LINK-USDT",
+    "orderId": "2104122758140616705"
+   },
+   "http_status": 200,
+   "rate_remain": "28",
+   "rate_expire_ms": "767",
+   "code": 0,
+   "msg": "",
+   "top_keys": [
+    "code",
+    "data",
+    "msg"
+   ],
+   "data_type": "dict",
+   "data_keys": [
+    "order"
+   ],
+   "inner_key": "order",
+   "items": [
+    {
+     "keys": [
+      "actPrice",
+      "advanceAttr",
+      "avgPrice",
+      "clientOrderId",
+      "closePosition",
+      "commission",
+      "cumQuote",
+      "executedQty",
+      "is_twap",
+      "leverage",
+      "mainOrderId",
+      "onlyOnePosition",
+      "orderId",
+      "orderType",
+      "origQty",
+      "positionID",
+      "positionSide",
+      "postOnly",
+      "price",
+      "priceRate",
+      "profit",
+      "reduceOnly",
+      "side",
+      "status",
+      "stopGuaranteed",
+      "stopLoss",
+      "stopLossEntrustPrice",
+      "stopPrice",
+      "symbol",
+      "takeProfit",
+      "takeProfitEntrustPrice",
+      "time",
+      "trailingStopDistance",
+      "trailingStopRate",
+      "triggerOrderId",
+      "type",
+      "updateTime",
+      "workingType"
+     ],
+     "fields": {
+      "avgPrice": {
+       "value": "0.000",
+       "type": "str"
+      },
+      "clientOrderId": {
+       "value": "",
+       "type": "str"
+      },
+      "closePosition": {
+       "value": "",
+       "type": "str"
+      },
+      "commission": {
+       "value": "",
+       "type": "str"
+      },
+      "cumQuote": {
+       "value": "0",
+       "type": "str"
+      },
+      "executedQty": {
+       "value": "0.0",
+       "type": "str"
+      },
+      "leverage": {
+       "value": "10X",
+       "type": "str"
+      },
+      "mainOrderId": {
+       "value": "",
+       "type": "str"
+      },
+      "onlyOnePosition": {
+       "value": false,
+       "type": "bool"
+      },
+      "orderId": {
+       "value": 2104122758140616705,
+       "type": "int"
+      },
+      "orderType": {
+       "value": "",
+       "type": "str"
+      },
+      "origQty": {
+       "value": "2037.8",
+       "type": "str"
+      },
+      "positionID": {
+       "value": 0,
+       "type": "int"
+      },
+      "positionSide": {
+       "value": "LONG",
+       "type": "str"
+      },
+      "price": {
+       "value": "0.000",
+       "type": "str"
+      },
+      "profit": {
+       "value": "",
+       "type": "str"
+      },
+      "reduceOnly": {
+       "value": false,
+       "type": "bool"
+      },
+      "side": {
+       "value": "SELL",
+       "type": "str"
+      },
+      "status": {
+       "value": "NEW",
+       "type": "str"
+      },
+      "stopGuaranteed": {
+       "value": "",
+       "type": "str"
+      },
+      "stopLoss": {
+       "value": {
+        "keys": [
+         "price",
+         "quantity",
+         "stopGuaranteed",
+         "stopPrice",
+         "type",
+         "workingType"
+        ],
+        "fields": {
+         "price": {
+          "value": 0,
+          "type": "int"
+         },
+         "stopGuaranteed": {
+          "value": "",
+          "type": "str"
+         },
+         "stopPrice": {
+          "value": 0,
+          "type": "int"
+         },
+         "type": {
+          "value": "",
+          "type": "str"
+         },
+         "workingType": {
+          "value": "",
+          "type": "str"
+         }
+        }
+       },
+       "type": "dict"
+      },
+      "stopPrice": {
+       "value": "13.526",
+       "type": "str"
+      },
+      "symbol": {
+       "value": "LINK-USDT",
+       "type": "str"
+      },
+      "takeProfit": {
+       "value": {
+        "keys": [
+         "price",
+         "quantity",
+         "stopGuaranteed",
+         "stopPrice",
+         "type",
+         "workingType"
+        ],
+        "fields": {
+         "price": {
+          "value": 0,
+          "type": "int"
+         },
+         "stopGuaranteed": {
+          "value": "",
+          "type": "str"
+         },
+         "stopPrice": {
+          "value": 0,
+          "type": "int"
+         },
+         "type": {
+          "value": "",
+          "type": "str"
+         },
+         "workingType": {
+          "value": "",
+          "type": "str"
+         }
+        }
+       },
+       "type": "dict"
+      },
+      "time": {
+       "value": 1790496932908,
+       "type": "int"
+      },
+      "triggerOrderId": {
+       "value": 0,
+       "type": "int"
+      },
+      "type": {
+       "value": "STOP_MARKET",
+       "type": "str"
+      },
+      "updateTime": {
+       "value": 1790496932908,
+       "type": "int"
+      },
+      "workingType": {
+       "value": "MARK_PRICE",
+       "type": "str"
+      }
+     }
+    }
+   ],
+   "label": "order #38 LINK-USDT STOP_LOSS"
+  },
+  {
+   "path": "/openApi/swap/v2/trade/order",
+   "params": {
+    "symbol": "LINK-USDT",
+    "orderId": "2104122758140616704"
+   },
+   "http_status": 200,
+   "rate_remain": "27",
+   "rate_expire_ms": "558",
+   "code": 0,
+   "msg": "",
+   "top_keys": [
+    "code",
+    "data",
+    "msg"
+   ],
+   "data_type": "dict",
+   "data_keys": [
+    "order"
+   ],
+   "inner_key": "order",
+   "items": [
+    {
+     "keys": [
+      "actPrice",
+      "advanceAttr",
+      "avgPrice",
+      "clientOrderId",
+      "closePosition",
+      "commission",
+      "cumQuote",
+      "executedQty",
+      "is_twap",
+      "leverage",
+      "mainOrderId",
+      "onlyOnePosition",
+      "orderId",
+      "orderType",
+      "origQty",
+      "positionID",
+      "positionSide",
+      "postOnly",
+      "price",
+      "priceRate",
+      "profit",
+      "reduceOnly",
+      "side",
+      "status",
+      "stopGuaranteed",
+      "stopLoss",
+      "stopLossEntrustPrice",
+      "stopPrice",
+      "symbol",
+      "takeProfit",
+      "takeProfitEntrustPrice",
+      "time",
+      "trailingStopDistance",
+      "trailingStopRate",
+      "triggerOrderId",
+      "type",
+      "updateTime",
+      "workingType"
+     ],
+     "fields": {
+      "avgPrice": {
+       "value": "0.000",
+       "type": "str"
+      },
+      "clientOrderId": {
+       "value": "",
+       "type": "str"
+      },
+      "closePosition": {
+       "value": "",
+       "type": "str"
+      },
+      "commission": {
+       "value": "",
+       "type": "str"
+      },
+      "cumQuote": {
+       "value": "0",
+       "type": "str"
+      },
+      "executedQty": {
+       "value": "0.0",
+       "type": "str"
+      },
+      "leverage": {
+       "value": "10X",
+       "type": "str"
+      },
+      "mainOrderId": {
+       "value": "",
+       "type": "str"
+      },
+      "onlyOnePosition": {
+       "value": false,
+       "type": "bool"
+      },
+      "orderId": {
+       "value": 2104122758140616704,
+       "type": "int"
+      },
+      "orderType": {
+       "value": "",
+       "type": "str"
+      },
+      "origQty": {
+       "value": "2037.8",
+       "type": "str"
+      },
+      "positionID": {
+       "value": 0,
+       "type": "int"
+      },
+      "positionSide": {
+       "value": "LONG",
+       "type": "str"
+      },
+      "price": {
+       "value": "0.000",
+       "type": "str"
+      },
+      "profit": {
+       "value": "",
+       "type": "str"
+      },
+      "reduceOnly": {
+       "value": false,
+       "type": "bool"
+      },
+      "side": {
+       "value": "SELL",
+       "type": "str"
+      },
+      "status": {
+       "value": "NEW",
+       "type": "str"
+      },
+      "stopGuaranteed": {
+       "value": "",
+       "type": "str"
+      },
+      "stopLoss": {
+       "value": {
+        "keys": [
+         "price",
+         "quantity",
+         "stopGuaranteed",
+         "stopPrice",
+         "type",
+         "workingType"
+        ],
+        "fields": {
+         "price": {
+          "value": 0,
+          "type": "int"
+         },
+         "stopGuaranteed": {
+          "value": "",
+          "type": "str"
+         },
+         "stopPrice": {
+          "value": 0,
+          "type": "int"
+         },
+         "type": {
+          "value": "",
+          "type": "str"
+         },
+         "workingType": {
+          "value": "",
+          "type": "str"
+         }
+        }
+       },
+       "type": "dict"
+      },
+      "stopPrice": {
+       "value": "16.263",
+       "type": "str"
+      },
+      "symbol": {
+       "value": "LINK-USDT",
+       "type": "str"
+      },
+      "takeProfit": {
+       "value": {
+        "keys": [
+         "price",
+         "quantity",
+         "stopGuaranteed",
+         "stopPrice",
+         "type",
+         "workingType"
+        ],
+        "fields": {
+         "price": {
+          "value": 0,
+          "type": "int"
+         },
+         "stopGuaranteed": {
+          "value": "",
+          "type": "str"
+         },
+         "stopPrice": {
+          "value": 0,
+          "type": "int"
+         },
+         "type": {
+          "value": "",
+          "type": "str"
+         },
+         "workingType": {
+          "value": "",
+          "type": "str"
+         }
+        }
+       },
+       "type": "dict"
+      },
+      "time": {
+       "value": 1790496932908,
+       "type": "int"
+      },
+      "triggerOrderId": {
+       "value": 0,
+       "type": "int"
+      },
+      "type": {
+       "value": "TAKE_PROFIT_MARKET",
+       "type": "str"
+      },
+      "updateTime": {
+       "value": 1790496932908,
+       "type": "int"
+      },
+      "workingType": {
+       "value": "MARK_PRICE",
+       "type": "str"
+      }
+     }
+    }
+   ],
+   "label": "order #39 LINK-USDT TAKE_PROFIT"
+  },
+  {
+   "path": "/openApi/swap/v2/trade/order",
+   "params": {
+    "symbol": "SOL-USDT",
+    "orderId": "2104213344135159808"
+   },
+   "http_status": 200,
+   "rate_remain": "26",
+   "rate_expire_ms": "306",
+   "code": 0,
+   "msg": "",
+   "top_keys": [
+    "code",
+    "data",
+    "msg"
+   ],
+   "data_type": "dict",
+   "data_keys": [
+    "order"
+   ],
+   "inner_key": "order",
+   "items": [
+    {
+     "keys": [
+      "actPrice",
+      "advanceAttr",
+      "avgPrice",
+      "clientOrderId",
+      "closePosition",
+      "commission",
+      "cumQuote",
+      "executedQty",
+      "is_twap",
+      "leverage",
+      "mainOrderId",
+      "onlyOnePosition",
+      "orderId",
+      "orderType",
+      "origQty",
+      "positionID",
+      "positionSide",
+      "postOnly",
+      "price",
+      "priceRate",
+      "profit",
+      "reduceOnly",
+      "side",
+      "status",
+      "stopGuaranteed",
+      "stopLoss",
+      "stopLossEntrustPrice",
+      "stopPrice",
+      "symbol",
+      "takeProfit",
+      "takeProfitEntrustPrice",
+      "time",
+      "trailingStopDistance",
+      "trailingStopRate",
+      "triggerOrderId",
+      "type",
+      "updateTime",
+      "workingType"
+     ],
+     "fields": {
+      "avgPrice": {
+       "value": "123.021",
+       "type": "str"
+      },
+      "clientOrderId": {
+       "value": "tj215u1e",
+       "type": "str"
+      },
+      "closePosition": {
+       "value": "false",
+       "type": "str"
+      },
+      "commission": {
+       "value": "-83.781520",
+       "type": "str"
+      },
+      "cumQuote": {
+       "value": "167563",
+       "type": "str"
+      },
+      "executedQty": {
+       "value": "1362.07",
+       "type": "str"
+      },
+      "leverage": {
+       "value": "10X",
+       "type": "str"
+      },
+      "mainOrderId": {
+       "value": "",
+       "type": "str"
+      },
+      "onlyOnePosition": {
+       "value": false,
+       "type": "bool"
+      },
+      "orderId": {
+       "value": 2104213344135159808,
+       "type": "int"
+      },
+      "orderType": {
+       "value": "",
+       "type": "str"
+      },
+      "origQty": {
+       "value": "1362.07",
+       "type": "str"
+      },
+      "positionID": {
+       "value": 2104213344168714242,
+       "type": "int"
+      },
+      "positionSide": {
+       "value": "LONG",
+       "type": "str"
+      },
+      "price": {
+       "value": "122.944",
+       "type": "str"
+      },
+      "profit": {
+       "value": "0.0000",
+       "type": "str"
+      },
+      "reduceOnly": {
+       "value": false,
+       "type": "bool"
+      },
+      "side": {
+       "value": "BUY",
+       "type": "str"
+      },
+      "status": {
+       "value": "FILLED",
+       "type": "str"
+      },
+      "stopGuaranteed": {
+       "value": "false",
+       "type": "str"
+      },
+      "stopLoss": {
+       "value": {
+        "keys": [
+         "price",
+         "quantity",
+         "stopGuaranteed",
+         "stopPrice",
+         "type",
+         "workingType"
+        ],
+        "fields": {
+         "price": {
+          "value": 0,
+          "type": "int"
+         },
+         "stopGuaranteed": {
+          "value": "",
+          "type": "str"
+         },
+         "stopPrice": {
+          "value": 0,
+          "type": "int"
+         },
+         "type": {
+          "value": "",
+          "type": "str"
+         },
+         "workingType": {
+          "value": "",
+          "type": "str"
+         }
+        }
+       },
+       "type": "dict"
+      },
+      "stopPrice": {
+       "value": "",
+       "type": "str"
+      },
+      "symbol": {
+       "value": "SOL-USDT",
+       "type": "str"
+      },
+      "takeProfit": {
+       "value": {
+        "keys": [
+         "price",
+         "quantity",
+         "stopGuaranteed",
+         "stopPrice",
+         "type",
+         "workingType"
+        ],
+        "fields": {
+         "price": {
+          "value": 0,
+          "type": "int"
+         },
+         "stopGuaranteed": {
+          "value": "",
+          "type": "str"
+         },
+         "stopPrice": {
+          "value": 0,
+          "type": "int"
+         },
+         "type": {
+          "value": "",
+          "type": "str"
+         },
+         "workingType": {
+          "value": "",
+          "type": "str"
+         }
+        }
+       },
+       "type": "dict"
+      },
+      "time": {
+       "value": 1790518530000,
+       "type": "int"
+      },
+      "triggerOrderId": {
+       "value": 0,
+       "type": "int"
+      },
+      "type": {
+       "value": "MARKET",
+       "type": "str"
+      },
+      "updateTime": {
+       "value": 1790518530300,
+       "type": "int"
+      },
+      "workingType": {
+       "value": "MARK_PRICE",
+       "type": "str"
+      }
+     }
+    }
+   ],
+   "label": "order #40 SOL-USDT ENTRY"
+  },
+  {
+   "path": "/openApi/swap/v2/trade/order",
+   "params": {
+    "symbol": "SOL-USDT",
+    "orderId": "2104213344721920001"
+   },
+   "http_status": 200,
+   "rate_remain": "25",
+   "rate_expire_ms": "102",
+   "code": 0,
+   "msg": "",
+   "top_keys": [
+    "code",
+    "data",
+    "msg"
+   ],
+   "data_type": "dict",
+   "data_keys": [
+    "order"
+   ],
+   "inner_key": "order",
+   "items": [
+    {
+     "keys": [
+      "actPrice",
+      "advanceAttr",
+      "avgPrice",
+      "clientOrderId",
+      "closePosition",
+      "commission",
+      "cumQuote",
+      "executedQty",
+      "is_twap",
+      "leverage",
+      "mainOrderId",
+      "onlyOnePosition",
+      "orderId",
+      "orderType",
+      "origQty",
+      "positionID",
+      "positionSide",
+      "postOnly",
+      "price",
+      "priceRate",
+      "profit",
+      "reduceOnly",
+      "side",
+      "status",
+      "stopGuaranteed",
+      "stopLoss",
+      "stopLossEntrustPrice",
+      "stopPrice",
+      "symbol",
+      "takeProfit",
+      "takeProfitEntrustPrice",
+      "time",
+      "trailingStopDistance",
+      "trailingStopRate",
+      "triggerOrderId",
+      "type",
+      "updateTime",
+      "workingType"
+     ],
+     "fields": {
+      "avgPrice": {
+       "value": "121.611",
+       "type": "str"
+      },
+      "clientOrderId": {
+       "value": "",
+       "type": "str"
+      },
+      "closePosition": {
+       "value": "",
+       "type": "str"
+      },
+      "commission": {
+       "value": "-82.821383",
+       "type": "str"
+      },
+      "cumQuote": {
+       "value": "165643",
+       "type": "str"
+      },
+      "executedQty": {
+       "value": "1362.07",
+       "type": "str"
+      },
+      "leverage": {
+       "value": "10X",
+       "type": "str"
+      },
+      "mainOrderId": {
+       "value": "",
+       "type": "str"
+      },
+      "onlyOnePosition": {
+       "value": false,
+       "type": "bool"
+      },
+      "orderId": {
+       "value": 2104219661398712320,
+       "type": "int"
+      },
+      "orderType": {
+       "value": "",
+       "type": "str"
+      },
+      "origQty": {
+       "value": "1362.07",
+       "type": "str"
+      },
+      "positionID": {
+       "value": 0,
+       "type": "int"
+      },
+      "positionSide": {
+       "value": "LONG",
+       "type": "str"
+      },
+      "price": {
+       "value": "0",
+       "type": "str"
+      },
+      "profit": {
+       "value": "-1920.2749",
+       "type": "str"
+      },
+      "reduceOnly": {
+       "value": true,
+       "type": "bool"
+      },
+      "side": {
+       "value": "SELL",
+       "type": "str"
+      },
+      "status": {
+       "value": "FILLED",
+       "type": "str"
+      },
+      "stopGuaranteed": {
+       "value": "false",
+       "type": "str"
+      },
+      "stopLoss": {
+       "value": {
+        "keys": [
+         "price",
+         "quantity",
+         "stopGuaranteed",
+         "stopPrice",
+         "type",
+         "workingType"
+        ],
+        "fields": {
+         "price": {
+          "value": 0,
+          "type": "int"
+         },
+         "stopGuaranteed": {
+          "value": "",
+          "type": "str"
+         },
+         "stopPrice": {
+          "value": 0,
+          "type": "int"
+         },
+         "type": {
+          "value": "",
+          "type": "str"
+         },
+         "workingType": {
+          "value": "",
+          "type": "str"
+         }
+        }
+       },
+       "type": "dict"
+      },
+      "stopPrice": {
+       "value": "121.646",
+       "type": "str"
+      },
+      "symbol": {
+       "value": "SOL-USDT",
+       "type": "str"
+      },
+      "takeProfit": {
+       "value": {
+        "keys": [
+         "price",
+         "quantity",
+         "stopGuaranteed",
+         "stopPrice",
+         "type",
+         "workingType"
+        ],
+        "fields": {
+         "price": {
+          "value": 0,
+          "type": "int"
+         },
+         "stopGuaranteed": {
+          "value": "",
+          "type": "str"
+         },
+         "stopPrice": {
+          "value": 0,
+          "type": "int"
+         },
+         "type": {
+          "value": "",
+          "type": "str"
+         },
+         "workingType": {
+          "value": "",
+          "type": "str"
+         }
+        }
+       },
+       "type": "dict"
+      },
+      "time": {
+       "value": 1790520036000,
+       "type": "int"
+      },
+      "triggerOrderId": {
+       "value": 2104213344721920001,
+       "type": "int"
+      },
+      "type": {
+       "value": "STOP_MARKET",
+       "type": "str"
+      },
+      "updateTime": {
+       "value": 1790520036000,
+       "type": "int"
+      },
+      "workingType": {
+       "value": "MARK_PRICE",
+       "type": "str"
+      }
+     }
+    }
+   ],
+   "label": "order #41 SOL-USDT STOP_LOSS"
+  },
+  {
+   "path": "/openApi/swap/v2/trade/order",
+   "params": {
+    "symbol": "SOL-USDT",
+    "orderId": "2104213344721920000"
+   },
+   "http_status": 200,
+   "rate_remain": "29",
+   "rate_expire_ms": "1000",
+   "code": 0,
+   "msg": "",
+   "top_keys": [
+    "code",
+    "data",
+    "msg"
+   ],
+   "data_type": "dict",
+   "data_keys": [
+    "order"
+   ],
+   "inner_key": "order",
+   "items": [
+    {
+     "keys": [
+      "actPrice",
+      "advanceAttr",
+      "avgPrice",
+      "clientOrderId",
+      "closePosition",
+      "commission",
+      "cumQuote",
+      "executedQty",
+      "is_twap",
+      "leverage",
+      "mainOrderId",
+      "onlyOnePosition",
+      "orderId",
+      "orderType",
+      "origQty",
+      "positionID",
+      "positionSide",
+      "postOnly",
+      "price",
+      "priceRate",
+      "profit",
+      "reduceOnly",
+      "side",
+      "status",
+      "stopGuaranteed",
+      "stopLoss",
+      "stopLossEntrustPrice",
+      "stopPrice",
+      "symbol",
+      "takeProfit",
+      "takeProfitEntrustPrice",
+      "time",
+      "trailingStopDistance",
+      "trailingStopRate",
+      "triggerOrderId",
+      "type",
+      "updateTime",
+      "workingType"
+     ],
+     "fields": {
+      "avgPrice": {
+       "value": "0.000",
+       "type": "str"
+      },
+      "clientOrderId": {
+       "value": "",
+       "type": "str"
+      },
+      "closePosition": {
+       "value": "false",
+       "type": "str"
+      },
+      "commission": {
+       "value": "0.000000",
+       "type": "str"
+      },
+      "cumQuote": {
+       "value": "0",
+       "type": "str"
+      },
+      "executedQty": {
+       "value": "0.00",
+       "type": "str"
+      },
+      "leverage": {
+       "value": "10X",
+       "type": "str"
+      },
+      "mainOrderId": {
+       "value": "",
+       "type": "str"
+      },
+      "onlyOnePosition": {
+       "value": false,
+       "type": "bool"
+      },
+      "orderId": {
+       "value": 2104213344721920000,
+       "type": "int"
+      },
+      "orderType": {
+       "value": "",
+       "type": "str"
+      },
+      "origQty": {
+       "value": "1362.07",
+       "type": "str"
+      },
+      "positionID": {
+       "value": 2104213344168714242,
+       "type": "int"
+      },
+      "positionSide": {
+       "value": "LONG",
+       "type": "str"
+      },
+      "price": {
+       "value": "0",
+       "type": "str"
+      },
+      "profit": {
+       "value": "0.0000",
+       "type": "str"
+      },
+      "reduceOnly": {
+       "value": true,
+       "type": "bool"
+      },
+      "side": {
+       "value": "SELL",
+       "type": "str"
+      },
+      "status": {
+       "value": "CANCELLED",
+       "type": "str"
+      },
+      "stopGuaranteed": {
+       "value": "false",
+       "type": "str"
+      },
+      "stopLoss": {
+       "value": {
+        "keys": [
+         "price",
+         "quantity",
+         "stopGuaranteed",
+         "stopPrice",
+         "type",
+         "workingType"
+        ],
+        "fields": {
+         "price": {
+          "value": 0,
+          "type": "int"
+         },
+         "stopGuaranteed": {
+          "value": "",
+          "type": "str"
+         },
+         "stopPrice": {
+          "value": 0,
+          "type": "int"
+         },
+         "type": {
+          "value": "",
+          "type": "str"
+         },
+         "workingType": {
+          "value": "",
+          "type": "str"
+         }
+        }
+       },
+       "type": "dict"
+      },
+      "stopPrice": {
+       "value": "126.077",
+       "type": "str"
+      },
+      "symbol": {
+       "value": "SOL-USDT",
+       "type": "str"
+      },
+      "takeProfit": {
+       "value": {
+        "keys": [
+         "price",
+         "quantity",
+         "stopGuaranteed",
+         "stopPrice",
+         "type",
+         "workingType"
+        ],
+        "fields": {
+         "price": {
+          "value": 0,
+          "type": "int"
+         },
+         "stopGuaranteed": {
+          "value": "",
+          "type": "str"
+         },
+         "stopPrice": {
+          "value": 0,
+          "type": "int"
+         },
+         "type": {
+          "value": "",
+          "type": "str"
+         },
+         "workingType": {
+          "value": "",
+          "type": "str"
+         }
+        }
+       },
+       "type": "dict"
+      },
+      "time": {
+       "value": 1790518530387,
+       "type": "int"
+      },
+      "triggerOrderId": {
+       "value": 2104213344721920000,
+       "type": "int"
+      },
+      "type": {
+       "value": "TAKE_PROFIT_MARKET",
+       "type": "str"
+      },
+      "updateTime": {
+       "value": 1790520036485,
+       "type": "int"
+      },
+      "workingType": {
+       "value": "MARK_PRICE",
+       "type": "str"
+      }
+     }
+    }
+   ],
+   "label": "order #42 SOL-USDT TAKE_PROFIT"
+  },
+  {
+   "path": "/openApi/swap/v2/user/positions",
+   "params": {},
+   "http_status": 200,
+   "rate_remain": "9",
+   "rate_expire_ms": "1000",
+   "code": 0,
+   "msg": "",
+   "top_keys": [
+    "code",
+    "data",
+    "msg"
+   ],
+   "data_type": "list",
+   "items": [
+    {
+     "keys": [
+      "availableAmt",
+      "avgPrice",
+      "createTime",
+      "currency",
+      "initialMargin",
+      "isolated",
+      "leverage",
+      "liquidationPrice",
+      "margin",
+      "markPrice",
+      "maxMarginReduction",
+      "minIncreaseMargin",
+      "onlyOnePosition",
+      "pnlRatio",
+      "positionAmt",
+      "positionId",
+      "positionSide",
+      "positionValue",
+      "realisedProfit",
+      "riskRate",
+      "symbol",
+      "unrealizedProfit",
+      "updateTime"
+     ],
+     "fields": {
+      "availableAmt": {
+       "value": "2037.8",
+       "type": "str"
+      },
+      "avgPrice": {
+       "value": "14.400",
+       "type": "str"
+      },
+      "createTime": {
+       "value": 1790496932828,
+       "type": "int"
+      },
+      "isolated": {
+       "value": true,
+       "type": "bool"
+      },
+      "leverage": {
+       "value": 10,
+       "type": "int"
+      },
+      "markPrice": {
+       "value": "14.140",
+       "type": "str"
+      },
+      "onlyOnePosition": {
+       "value": false,
+       "type": "bool"
+      },
+      "positionAmt": {
+       "value": "2037.8",
+       "type": "str"
+      },
+      "positionId": {
+       "value": "2104122757805514754",
+       "type": "str"
+      },
+      "positionSide": {
+       "value": "LONG",
+       "type": "str"
+      },
+      "realisedProfit": {
+       "value": "-17.5484",
+       "type": "str"
+      },
+      "symbol": {
+       "value": "LINK-USDT",
+       "type": "str"
+      },
+      "unrealizedProfit": {
+       "value": "-530.4101",
+       "type": "str"
+      },
+      "updateTime": {
+       "value": 1790524808139,
+       "type": "int"
+      }
+     }
+    }
+   ],
+   "label": "positions all"
+  },
+  {
+   "path": "/openApi/swap/v2/trade/openOrders",
+   "params": {
+    "symbol": "LINK-USDT"
+   },
+   "http_status": 200,
+   "rate_remain": "4",
+   "rate_expire_ms": "1000",
+   "code": 0,
+   "msg": "",
+   "top_keys": [
+    "code",
+    "data",
+    "msg"
+   ],
+   "data_type": "dict",
+   "data_keys": [
+    "orders"
+   ],
+   "inner_key": "orders",
+   "items": [
+    {
+     "keys": [
+      "actPrice",
+      "advanceAttr",
+      "avgPrice",
+      "clientOrderId",
+      "closePosition",
+      "commission",
+      "cumQuote",
+      "executedQty",
+      "is_twap",
+      "leverage",
+      "mainOrderId",
+      "onlyOnePosition",
+      "orderId",
+      "orderType",
+      "origQty",
+      "positionID",
+      "positionSide",
+      "postOnly",
+      "price",
+      "priceRate",
+      "profit",
+      "reduceOnly",
+      "side",
+      "status",
+      "stopGuaranteed",
+      "stopLoss",
+      "stopLossEntrustPrice",
+      "stopPrice",
+      "symbol",
+      "takeProfit",
+      "takeProfitEntrustPrice",
+      "time",
+      "trailingStopDistance",
+      "trailingStopRate",
+      "triggerOrderId",
+      "type",
+      "updateTime",
+      "workingType"
+     ],
+     "fields": {
+      "avgPrice": {
+       "value": "14.400",
+       "type": "str"
+      },
+      "clientOrderId": {
+       "value": "",
+       "type": "str"
+      },
+      "closePosition": {
+       "value": "false",
+       "type": "str"
+      },
+      "commission": {
+       "value": "",
+       "type": "str"
+      },
+      "cumQuote": {
+       "value": "0",
+       "type": "str"
+      },
+      "executedQty": {
+       "value": "0.0",
+       "type": "str"
+      },
+      "leverage": {
+       "value": "10X",
+       "type": "str"
+      },
+      "mainOrderId": {
+       "value": "",
+       "type": "str"
+      },
+      "onlyOnePosition": {
+       "value": false,
+       "type": "bool"
+      },
+      "orderId": {
+       "value": 2104122758140616705,
+       "type": "int"
+      },
+      "orderType": {
+       "value": "",
+       "type": "str"
+      },
+      "origQty": {
+       "value": "2037.8",
+       "type": "str"
+      },
+      "positionID": {
+       "value": 2104122757805514754,
+       "type": "int"
+      },
+      "positionSide": {
+       "value": "LONG",
+       "type": "str"
+      },
+      "price": {
+       "value": "0.000",
+       "type": "str"
+      },
+      "profit": {
+       "value": "",
+       "type": "str"
+      },
+      "reduceOnly": {
+       "value": true,
+       "type": "bool"
+      },
+      "side": {
+       "value": "SELL",
+       "type": "str"
+      },
+      "status": {
+       "value": "NEW",
+       "type": "str"
+      },
+      "stopGuaranteed": {
+       "value": "",
+       "type": "str"
+      },
+      "stopLoss": {
+       "value": {
+        "keys": [
+         "price",
+         "quantity",
+         "stopGuaranteed",
+         "stopPrice",
+         "type",
+         "workingType"
+        ],
+        "fields": {
+         "price": {
+          "value": 0,
+          "type": "int"
+         },
+         "stopGuaranteed": {
+          "value": "",
+          "type": "str"
+         },
+         "stopPrice": {
+          "value": 0,
+          "type": "int"
+         },
+         "type": {
+          "value": "",
+          "type": "str"
+         },
+         "workingType": {
+          "value": "",
+          "type": "str"
+         }
+        }
+       },
+       "type": "dict"
+      },
+      "stopPrice": {
+       "value": "13.526",
+       "type": "str"
+      },
+      "symbol": {
+       "value": "LINK-USDT",
+       "type": "str"
+      },
+      "takeProfit": {
+       "value": {
+        "keys": [
+         "price",
+         "quantity",
+         "stopGuaranteed",
+         "stopPrice",
+         "type",
+         "workingType"
+        ],
+        "fields": {
+         "price": {
+          "value": 0,
+          "type": "int"
+         },
+         "stopGuaranteed": {
+          "value": "",
+          "type": "str"
+         },
+         "stopPrice": {
+          "value": 0,
+          "type": "int"
+         },
+         "type": {
+          "value": "",
+          "type": "str"
+         },
+         "workingType": {
+          "value": "",
+          "type": "str"
+         }
+        }
+       },
+       "type": "dict"
+      },
+      "time": {
+       "value": 1790496932908,
+       "type": "int"
+      },
+      "triggerOrderId": {
+       "value": 0,
+       "type": "int"
+      },
+      "type": {
+       "value": "STOP_MARKET",
+       "type": "str"
+      },
+      "updateTime": {
+       "value": 1790496932908,
+       "type": "int"
+      },
+      "workingType": {
+       "value": "MARK_PRICE",
+       "type": "str"
+      }
+     }
+    },
+    {
+     "keys": [
+      "actPrice",
+      "advanceAttr",
+      "avgPrice",
+      "clientOrderId",
+      "closePosition",
+      "commission",
+      "cumQuote",
+      "executedQty",
+      "is_twap",
+      "leverage",
+      "mainOrderId",
+      "onlyOnePosition",
+      "orderId",
+      "orderType",
+      "origQty",
+      "positionID",
+      "positionSide",
+      "postOnly",
+      "price",
+      "priceRate",
+      "profit",
+      "reduceOnly",
+      "side",
+      "status",
+      "stopGuaranteed",
+      "stopLoss",
+      "stopLossEntrustPrice",
+      "stopPrice",
+      "symbol",
+      "takeProfit",
+      "takeProfitEntrustPrice",
+      "time",
+      "trailingStopDistance",
+      "trailingStopRate",
+      "triggerOrderId",
+      "type",
+      "updateTime",
+      "workingType"
+     ],
+     "fields": {
+      "avgPrice": {
+       "value": "14.400",
+       "type": "str"
+      },
+      "clientOrderId": {
+       "value": "",
+       "type": "str"
+      },
+      "closePosition": {
+       "value": "false",
+       "type": "str"
+      },
+      "commission": {
+       "value": "",
+       "type": "str"
+      },
+      "cumQuote": {
+       "value": "0",
+       "type": "str"
+      },
+      "executedQty": {
+       "value": "0.0",
+       "type": "str"
+      },
+      "leverage": {
+       "value": "10X",
+       "type": "str"
+      },
+      "mainOrderId": {
+       "value": "",
+       "type": "str"
+      },
+      "onlyOnePosition": {
+       "value": false,
+       "type": "bool"
+      },
+      "orderId": {
+       "value": 2104122758140616704,
+       "type": "int"
+      },
+      "orderType": {
+       "value": "",
+       "type": "str"
+      },
+      "origQty": {
+       "value": "2037.8",
+       "type": "str"
+      },
+      "positionID": {
+       "value": 2104122757805514754,
+       "type": "int"
+      },
+      "positionSide": {
+       "value": "LONG",
+       "type": "str"
+      },
+      "price": {
+       "value": "0.000",
+       "type": "str"
+      },
+      "profit": {
+       "value": "",
+       "type": "str"
+      },
+      "reduceOnly": {
+       "value": true,
+       "type": "bool"
+      },
+      "side": {
+       "value": "SELL",
+       "type": "str"
+      },
+      "status": {
+       "value": "NEW",
+       "type": "str"
+      },
+      "stopGuaranteed": {
+       "value": "",
+       "type": "str"
+      },
+      "stopLoss": {
+       "value": {
+        "keys": [
+         "price",
+         "quantity",
+         "stopGuaranteed",
+         "stopPrice",
+         "type",
+         "workingType"
+        ],
+        "fields": {
+         "price": {
+          "value": 0,
+          "type": "int"
+         },
+         "stopGuaranteed": {
+          "value": "",
+          "type": "str"
+         },
+         "stopPrice": {
+          "value": 0,
+          "type": "int"
+         },
+         "type": {
+          "value": "",
+          "type": "str"
+         },
+         "workingType": {
+          "value": "",
+          "type": "str"
+         }
+        }
+       },
+       "type": "dict"
+      },
+      "stopPrice": {
+       "value": "16.263",
+       "type": "str"
+      },
+      "symbol": {
+       "value": "LINK-USDT",
+       "type": "str"
+      },
+      "takeProfit": {
+       "value": {
+        "keys": [
+         "price",
+         "quantity",
+         "stopGuaranteed",
+         "stopPrice",
+         "type",
+         "workingType"
+        ],
+        "fields": {
+         "price": {
+          "value": 0,
+          "type": "int"
+         },
+         "stopGuaranteed": {
+          "value": "",
+          "type": "str"
+         },
+         "stopPrice": {
+          "value": 0,
+          "type": "int"
+         },
+         "type": {
+          "value": "",
+          "type": "str"
+         },
+         "workingType": {
+          "value": "",
+          "type": "str"
+         }
+        }
+       },
+       "type": "dict"
+      },
+      "time": {
+       "value": 1790496932908,
+       "type": "int"
+      },
+      "triggerOrderId": {
+       "value": 0,
+       "type": "int"
+      },
+      "type": {
+       "value": "TAKE_PROFIT_MARKET",
+       "type": "str"
+      },
+      "updateTime": {
+       "value": 1790496932908,
+       "type": "int"
+      },
+      "workingType": {
+       "value": "MARK_PRICE",
+       "type": "str"
+      }
+     }
+    }
+   ],
+   "label": "openOrders LINK"
+  },
+  {
+   "path": "/openApi/swap/v2/trade/openOrders",
+   "params": {
+    "symbol": "SOL-USDT"
+   },
+   "http_status": 200,
+   "rate_remain": "3",
+   "rate_expire_ms": "799",
+   "code": 0,
+   "msg": "",
+   "top_keys": [
+    "code",
+    "data",
+    "msg"
+   ],
+   "data_type": "dict",
+   "data_keys": [
+    "orders"
+   ],
+   "inner_key": "orders",
+   "items": [],
+   "label": "openOrders SOL"
+  },
+  {
+   "path": "/openApi/swap/v2/trade/allOrders",
+   "params": {
+    "symbol": "SOL-USDT",
+    "startTime": 1790380800000,
+    "endTime": 1790532837165,
+    "limit": 50
+   },
+   "http_status": 200,
+   "rate_remain": "4",
+   "rate_expire_ms": "1000",
+   "code": 0,
+   "msg": "",
+   "top_keys": [
+    "code",
+    "data",
+    "msg"
+   ],
+   "data_type": "dict",
+   "data_keys": [
+    "orders"
+   ],
+   "inner_key": "orders",
+   "items": [
+    {
+     "keys": [
+      "actPrice",
+      "advanceAttr",
+      "avgPrice",
+      "clientOrderId",
+      "closePosition",
+      "commission",
+      "cumQuote",
+      "executedQty",
+      "is_twap",
+      "leverage",
+      "mainOrderId",
+      "onlyOnePosition",
+      "orderId",
+      "orderType",
+      "origQty",
+      "positionID",
+      "positionSide",
+      "postOnly",
+      "price",
+      "priceRate",
+      "profit",
+      "reduceOnly",
+      "side",
+      "status",
+      "stopGuaranteed",
+      "stopLoss",
+      "stopLossEntrustPrice",
+      "stopPrice",
+      "symbol",
+      "takeProfit",
+      "takeProfitEntrustPrice",
+      "time",
+      "trailingStopDistance",
+      "trailingStopRate",
+      "triggerOrderId",
+      "type",
+      "updateTime",
+      "workingType"
+     ],
+     "fields": {
+      "avgPrice": {
+       "value": "123.021",
+       "type": "str"
+      },
+      "clientOrderId": {
+       "value": "tj215u1e",
+       "type": "str"
+      },
+      "closePosition": {
+       "value": "",
+       "type": "str"
+      },
+      "commission": {
+       "value": "-83.781520",
+       "type": "str"
+      },
+      "cumQuote": {
+       "value": "167563",
+       "type": "str"
+      },
+      "executedQty": {
+       "value": "1362.07",
+       "type": "str"
+      },
+      "leverage": {
+       "value": "10X",
+       "type": "str"
+      },
+      "mainOrderId": {
+       "value": "",
+       "type": "str"
+      },
+      "onlyOnePosition": {
+       "value": false,
+       "type": "bool"
+      },
+      "orderId": {
+       "value": 2104213344135159808,
+       "type": "int"
+      },
+      "orderType": {
+       "value": "",
+       "type": "str"
+      },
+      "origQty": {
+       "value": "1362.07",
+       "type": "str"
+      },
+      "positionID": {
+       "value": 2104213344168714242,
+       "type": "int"
+      },
+      "positionSide": {
+       "value": "LONG",
+       "type": "str"
+      },
+      "price": {
+       "value": "0",
+       "type": "str"
+      },
+      "profit": {
+       "value": "0.0000",
+       "type": "str"
+      },
+      "reduceOnly": {
+       "value": false,
+       "type": "bool"
+      },
+      "side": {
+       "value": "BUY",
+       "type": "str"
+      },
+      "status": {
+       "value": "FILLED",
+       "type": "str"
+      },
+      "stopGuaranteed": {
+       "value": "false",
+       "type": "str"
+      },
+      "stopLoss": {
+       "value": {
+        "keys": [
+         "price",
+         "quantity",
+         "stopGuaranteed",
+         "stopPrice",
+         "type",
+         "workingType"
+        ],
+        "fields": {
+         "price": {
+          "value": 0,
+          "type": "int"
+         },
+         "stopGuaranteed": {
+          "value": "",
+          "type": "str"
+         },
+         "stopPrice": {
+          "value": 0,
+          "type": "int"
+         },
+         "type": {
+          "value": "",
+          "type": "str"
+         },
+         "workingType": {
+          "value": "",
+          "type": "str"
+         }
+        }
+       },
+       "type": "dict"
+      },
+      "stopPrice": {
+       "value": "",
+       "type": "str"
+      },
+      "symbol": {
+       "value": "SOL-USDT",
+       "type": "str"
+      },
+      "takeProfit": {
+       "value": {
+        "keys": [
+         "price",
+         "quantity",
+         "stopGuaranteed",
+         "stopPrice",
+         "type",
+         "workingType"
+        ],
+        "fields": {
+         "price": {
+          "value": 0,
+          "type": "int"
+         },
+         "stopGuaranteed": {
+          "value": "",
+          "type": "str"
+         },
+         "stopPrice": {
+          "value": 0,
+          "type": "int"
+         },
+         "type": {
+          "value": "",
+          "type": "str"
+         },
+         "workingType": {
+          "value": "",
+          "type": "str"
+         }
+        }
+       },
+       "type": "dict"
+      },
+      "time": {
+       "value": 1790518530000,
+       "type": "int"
+      },
+      "triggerOrderId": {
+       "value": 0,
+       "type": "int"
+      },
+      "type": {
+       "value": "MARKET",
+       "type": "str"
+      },
+      "updateTime": {
+       "value": 1790518530000,
+       "type": "int"
+      },
+      "workingType": {
+       "value": "MARK_PRICE",
+       "type": "str"
+      }
+     }
+    },
+    {
+     "keys": [
+      "actPrice",
+      "advanceAttr",
+      "avgPrice",
+      "clientOrderId",
+      "closePosition",
+      "commission",
+      "cumQuote",
+      "executedQty",
+      "is_twap",
+      "leverage",
+      "mainOrderId",
+      "onlyOnePosition",
+      "orderId",
+      "orderType",
+      "origQty",
+      "positionID",
+      "positionSide",
+      "postOnly",
+      "price",
+      "priceRate",
+      "profit",
+      "reduceOnly",
+      "side",
+      "status",
+      "stopGuaranteed",
+      "stopLoss",
+      "stopLossEntrustPrice",
+      "stopPrice",
+      "symbol",
+      "takeProfit",
+      "takeProfitEntrustPrice",
+      "time",
+      "trailingStopDistance",
+      "trailingStopRate",
+      "triggerOrderId",
+      "type",
+      "updateTime",
+      "workingType"
+     ],
+     "fields": {
+      "avgPrice": {
+       "value": "0.000",
+       "type": "str"
+      },
+      "clientOrderId": {
+       "value": "",
+       "type": "str"
+      },
+      "closePosition": {
+       "value": "",
+       "type": "str"
+      },
+      "commission": {
+       "value": "0.000000",
+       "type": "str"
+      },
+      "cumQuote": {
+       "value": "0",
+       "type": "str"
+      },
+      "executedQty": {
+       "value": "0.00",
+       "type": "str"
+      },
+      "leverage": {
+       "value": "10X",
+       "type": "str"
+      },
+      "mainOrderId": {
+       "value": "",
+       "type": "str"
+      },
+      "onlyOnePosition": {
+       "value": false,
+       "type": "bool"
+      },
+      "orderId": {
+       "value": 2104213344721920000,
+       "type": "int"
+      },
+      "orderType": {
+       "value": "",
+       "type": "str"
+      },
+      "origQty": {
+       "value": "1362.07",
+       "type": "str"
+      },
+      "positionID": {
+       "value": 2104213344168714242,
+       "type": "int"
+      },
+      "positionSide": {
+       "value": "LONG",
+       "type": "str"
+      },
+      "price": {
+       "value": "0",
+       "type": "str"
+      },
+      "profit": {
+       "value": "0.0000",
+       "type": "str"
+      },
+      "reduceOnly": {
+       "value": true,
+       "type": "bool"
+      },
+      "side": {
+       "value": "SELL",
+       "type": "str"
+      },
+      "status": {
+       "value": "CANCELLED",
+       "type": "str"
+      },
+      "stopGuaranteed": {
+       "value": "false",
+       "type": "str"
+      },
+      "stopLoss": {
+       "value": {
+        "keys": [
+         "price",
+         "quantity",
+         "stopGuaranteed",
+         "stopPrice",
+         "type",
+         "workingType"
+        ],
+        "fields": {
+         "price": {
+          "value": 0,
+          "type": "int"
+         },
+         "stopGuaranteed": {
+          "value": "",
+          "type": "str"
+         },
+         "stopPrice": {
+          "value": 0,
+          "type": "int"
+         },
+         "type": {
+          "value": "",
+          "type": "str"
+         },
+         "workingType": {
+          "value": "",
+          "type": "str"
+         }
+        }
+       },
+       "type": "dict"
+      },
+      "stopPrice": {
+       "value": "126.077",
+       "type": "str"
+      },
+      "symbol": {
+       "value": "SOL-USDT",
+       "type": "str"
+      },
+      "takeProfit": {
+       "value": {
+        "keys": [
+         "price",
+         "quantity",
+         "stopGuaranteed",
+         "stopPrice",
+         "type",
+         "workingType"
+        ],
+        "fields": {
+         "price": {
+          "value": 0,
+          "type": "int"
+         },
+         "stopGuaranteed": {
+          "value": "",
+          "type": "str"
+         },
+         "stopPrice": {
+          "value": 0,
+          "type": "int"
+         },
+         "type": {
+          "value": "",
+          "type": "str"
+         },
+         "workingType": {
+          "value": "",
+          "type": "str"
+         }
+        }
+       },
+       "type": "dict"
+      },
+      "time": {
+       "value": 1790518530000,
+       "type": "int"
+      },
+      "triggerOrderId": {
+       "value": 2104213344721920000,
+       "type": "int"
+      },
+      "type": {
+       "value": "TAKE_PROFIT_MARKET",
+       "type": "str"
+      },
+      "updateTime": {
+       "value": 1790520036000,
+       "type": "int"
+      },
+      "workingType": {
+       "value": "MARK_PRICE",
+       "type": "str"
+      }
+     }
+    },
+    {
+     "keys": [
+      "actPrice",
+      "advanceAttr",
+      "avgPrice",
+      "clientOrderId",
+      "closePosition",
+      "commission",
+      "cumQuote",
+      "executedQty",
+      "is_twap",
+      "leverage",
+      "mainOrderId",
+      "onlyOnePosition",
+      "orderId",
+      "orderType",
+      "origQty",
+      "positionID",
+      "positionSide",
+      "postOnly",
+      "price",
+      "priceRate",
+      "profit",
+      "reduceOnly",
+      "side",
+      "status",
+      "stopGuaranteed",
+      "stopLoss",
+      "stopLossEntrustPrice",
+      "stopPrice",
+      "symbol",
+      "takeProfit",
+      "takeProfitEntrustPrice",
+      "time",
+      "trailingStopDistance",
+      "trailingStopRate",
+      "triggerOrderId",
+      "type",
+      "updateTime",
+      "workingType"
+     ],
+     "fields": {
+      "avgPrice": {
+       "value": "121.611",
+       "type": "str"
+      },
+      "clientOrderId": {
+       "value": "",
+       "type": "str"
+      },
+      "closePosition": {
+       "value": "",
+       "type": "str"
+      },
+      "commission": {
+       "value": "-82.821383",
+       "type": "str"
+      },
+      "cumQuote": {
+       "value": "165643",
+       "type": "str"
+      },
+      "executedQty": {
+       "value": "1362.07",
+       "type": "str"
+      },
+      "leverage": {
+       "value": "10X",
+       "type": "str"
+      },
+      "mainOrderId": {
+       "value": "",
+       "type": "str"
+      },
+      "onlyOnePosition": {
+       "value": false,
+       "type": "bool"
+      },
+      "orderId": {
+       "value": 2104219661398712320,
+       "type": "int"
+      },
+      "orderType": {
+       "value": "",
+       "type": "str"
+      },
+      "origQty": {
+       "value": "1362.07",
+       "type": "str"
+      },
+      "positionID": {
+       "value": 2104213344168714242,
+       "type": "int"
+      },
+      "positionSide": {
+       "value": "LONG",
+       "type": "str"
+      },
+      "price": {
+       "value": "0",
+       "type": "str"
+      },
+      "profit": {
+       "value": "-1920.2749",
+       "type": "str"
+      },
+      "reduceOnly": {
+       "value": true,
+       "type": "bool"
+      },
+      "side": {
+       "value": "SELL",
+       "type": "str"
+      },
+      "status": {
+       "value": "FILLED",
+       "type": "str"
+      },
+      "stopGuaranteed": {
+       "value": "false",
+       "type": "str"
+      },
+      "stopLoss": {
+       "value": {
+        "keys": [
+         "price",
+         "quantity",
+         "stopGuaranteed",
+         "stopPrice",
+         "type",
+         "workingType"
+        ],
+        "fields": {
+         "price": {
+          "value": 0,
+          "type": "int"
+         },
+         "stopGuaranteed": {
+          "value": "",
+          "type": "str"
+         },
+         "stopPrice": {
+          "value": 0,
+          "type": "int"
+         },
+         "type": {
+          "value": "",
+          "type": "str"
+         },
+         "workingType": {
+          "value": "",
+          "type": "str"
+         }
+        }
+       },
+       "type": "dict"
+      },
+      "stopPrice": {
+       "value": "121.646",
+       "type": "str"
+      },
+      "symbol": {
+       "value": "SOL-USDT",
+       "type": "str"
+      },
+      "takeProfit": {
+       "value": {
+        "keys": [
+         "price",
+         "quantity",
+         "stopGuaranteed",
+         "stopPrice",
+         "type",
+         "workingType"
+        ],
+        "fields": {
+         "price": {
+          "value": 0,
+          "type": "int"
+         },
+         "stopGuaranteed": {
+          "value": "",
+          "type": "str"
+         },
+         "stopPrice": {
+          "value": 0,
+          "type": "int"
+         },
+         "type": {
+          "value": "",
+          "type": "str"
+         },
+         "workingType": {
+          "value": "",
+          "type": "str"
+         }
+        }
+       },
+       "type": "dict"
+      },
+      "time": {
+       "value": 1790520036000,
+       "type": "int"
+      },
+      "triggerOrderId": {
+       "value": 2104213344721920001,
+       "type": "int"
+      },
+      "type": {
+       "value": "STOP_MARKET",
+       "type": "str"
+      },
+      "updateTime": {
+       "value": 1790520036000,
+       "type": "int"
+      },
+      "workingType": {
+       "value": "MARK_PRICE",
+       "type": "str"
+      }
+     }
+    }
+   ],
+   "label": "allOrders SOL"
+  },
+  {
+   "path": "/openApi/swap/v2/trade/allFillOrders",
+   "params": {
+    "symbol": "SOL-USDT",
+    "startTs": 1790380800000,
+    "endTs": 1790532837165
+   },
+   "http_status": 200,
+   "rate_remain": "4",
+   "rate_expire_ms": "1000",
+   "code": 0,
+   "msg": "",
+   "top_keys": [
+    "code",
+    "data",
+    "msg"
+   ],
+   "data_type": "dict",
+   "data_keys": [
+    "fill_orders"
+   ],
+   "inner_key": "fill_orders",
+   "items": [
+    {
+     "keys": [
+      "amount",
+      "clientOrderID",
+      "commission",
+      "currency",
+      "filledTime",
+      "filledTm",
+      "liquidatedMarginRatio",
+      "liquidatedPrice",
+      "onlyOnePosition",
+      "orderId",
+      "positionSide",
+      "price",
+      "side",
+      "symbol",
+      "triggerOrderId",
+      "type",
+      "volume"
+     ],
+     "fields": {
+      "clientOrderID": {
+       "value": "",
+       "type": "str"
+      },
+      "commission": {
+       "value": "-83.781520",
+       "type": "str"
+      },
+      "filledTime": {
+       "value": "2026-09-27T22:15:30.000+08:00",
+       "type": "str"
+      },
+      "onlyOnePosition": {
+       "value": false,
+       "type": "bool"
+      },
+      "orderId": {
+       "value": "2104213344135159808",
+       "type": "str"
+      },
+      "positionSide": {
+       "value": "LONG",
+       "type": "str"
+      },
+      "price": {
+       "value": "123.021",
+       "type": "str"
+      },
+      "side": {
+       "value": "BUY",
+       "type": "str"
+      },
+      "symbol": {
+       "value": "SOL-USDT",
+       "type": "str"
+      },
+      "triggerOrderId": {
+       "value": 0,
+       "type": "int"
+      },
+      "type": {
+       "value": "MARKET",
+       "type": "str"
+      },
+      "volume": {
+       "value": "1362",
+       "type": "str"
+      },
+      "amount": {
+       "value": "167563.0400",
+       "type": "str"
+      },
+      "filledTm": {
+       "value": "2026-09-27T14:15:30.000Z",
+       "type": "str"
+      },
+      "currency": {
+       "value": "USDT",
+       "type": "str"
+      }
+     }
+    },
+    {
+     "keys": [
+      "amount",
+      "clientOrderID",
+      "commission",
+      "currency",
+      "filledTime",
+      "filledTm",
+      "liquidatedMarginRatio",
+      "liquidatedPrice",
+      "onlyOnePosition",
+      "orderId",
+      "positionSide",
+      "price",
+      "side",
+      "symbol",
+      "triggerOrderId",
+      "type",
+      "volume"
+     ],
+     "fields": {
+      "clientOrderID": {
+       "value": "",
+       "type": "str"
+      },
+      "commission": {
+       "value": "-82.821383",
+       "type": "str"
+      },
+      "filledTime": {
+       "value": "2026-09-27T22:40:36.000+08:00",
+       "type": "str"
+      },
+      "onlyOnePosition": {
+       "value": false,
+       "type": "bool"
+      },
+      "orderId": {
+       "value": "2104219661398712320",
+       "type": "str"
+      },
+      "positionSide": {
+       "value": "LONG",
+       "type": "str"
+      },
+      "price": {
+       "value": "121.611",
+       "type": "str"
+      },
+      "side": {
+       "value": "SELL",
+       "type": "str"
+      },
+      "symbol": {
+       "value": "SOL-USDT",
+       "type": "str"
+      },
+      "triggerOrderId": {
+       "value": 2104213344721920001,
+       "type": "int"
+      },
+      "type": {
+       "value": "STOP",
+       "type": "str"
+      },
+      "volume": {
+       "value": "1362",
+       "type": "str"
+      },
+      "amount": {
+       "value": "165642.7651",
+       "type": "str"
+      },
+      "filledTm": {
+       "value": "2026-09-27T14:40:36.000Z",
+       "type": "str"
+      },
+      "currency": {
+       "value": "USDT",
+       "type": "str"
+      }
+     }
+    }
+   ],
+   "label": "allFillOrders SOL (get_fills)"
+  },
+  {
+   "path": "/openApi/swap/v1/trade/positionHistory",
+   "params": {
+    "symbol": "SOL-USDT",
+    "startTs": 1790380800000,
+    "endTs": 1790532837165
+   },
+   "http_status": 200,
+   "rate_remain": "39",
+   "rate_expire_ms": "1000",
+   "code": 0,
+   "msg": "",
+   "top_keys": [
+    "code",
+    "data",
+    "msg"
+   ],
+   "data_type": "dict",
+   "data_keys": [
+    "positionHistory"
+   ],
+   "inner_key": "positionHistory",
+   "items": [
+    {
+     "keys": [
+      "avgClosePrice",
+      "avgPrice",
+      "closeAllPositions",
+      "closePositionAmt",
+      "isolated",
+      "leverage",
+      "netProfit",
+      "openTime",
+      "positionAmt",
+      "positionCommission",
+      "positionId",
+      "positionSide",
+      "realisedProfit",
+      "symbol",
+      "totalFunding",
+      "updateTime"
+     ],
+     "fields": {
+      "avgClosePrice": {
+       "value": "121.611",
+       "type": "str"
+      },
+      "avgPrice": {
+       "value": "123.021",
+       "type": "str"
+      },
+      "closeAllPositions": {
+       "value": true,
+       "type": "bool"
+      },
+      "closePositionAmt": {
+       "value": "1362.07",
+       "type": "str"
+      },
+      "isolated": {
+       "value": true,
+       "type": "bool"
+      },
+      "leverage": {
+       "value": 10,
+       "type": "int"
+      },
+      "netProfit": {
+       "value": "-2086.8778",
+       "type": "str"
+      },
+      "openTime": {
+       "value": 1790518530000,
+       "type": "int"
+      },
+      "positionAmt": {
+       "value": "1362.07",
+       "type": "str"
+      },
+      "positionCommission": {
+       "value": "-166.602902565",
+       "type": "str"
+      },
+      "positionId": {
+       "value": "2104213344168714242",
+       "type": "str"
+      },
+      "positionSide": {
+       "value": "LONG",
+       "type": "str"
+      },
+      "realisedProfit": {
+       "value": "-1920.2749",
+       "type": "str"
+      },
+      "symbol": {
+       "value": "SOL-USDT",
+       "type": "str"
+      },
+      "totalFunding": {
+       "value": "0",
+       "type": "str"
+      },
+      "updateTime": {
+       "value": 1790520036000,
+       "type": "int"
+      }
+     }
+    }
+   ],
+   "label": "positionHistory SOL"
+  }
+ ],
+ "_note": "Живые ответы демо BingX (open-api-vst), GET, 27.09.2026. Для каждого элемента: keys — все ключи ответа (кроме apiKey/secret/sign*), fields — значения по allowlist с исходным типом. Ключей и подписей нет. SOL #4 закрыта стопом 14:40:36 UTC, LINK #3 открыта с живыми SL/TP."
+}

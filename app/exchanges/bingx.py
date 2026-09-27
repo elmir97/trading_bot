@@ -143,6 +143,26 @@ def _ms_to_dt(value: Any) -> datetime:
     return datetime.fromtimestamp(int(value) / 1000, tz=UTC)
 
 
+def _exchange_time(value: Any, field: str) -> datetime:
+    """Время из ответа BingX: миллисекунды (int или строка цифр) или ISO-строка.
+
+    allFillOrders отдаёт ISO (снято живьём 27.09: filledTm —
+    "2026-09-27T14:15:30.000Z", filledTime — "…T22:15:30.000+08:00"),
+    остальные ручки — миллисекунды. Нет значения или не разбирается —
+    ошибка, не «сейчас»: время исполнения задним числом не выдумываем."""
+    if isinstance(value, int) or (isinstance(value, str) and value.isdigit()):
+        return datetime.fromtimestamp(int(value) / 1000, tz=UTC)
+    if isinstance(value, str) and value:
+        try:
+            moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ExchangeResponseError(f"Не удалось разобрать время {field}: {value!r}") from exc
+        if moment.tzinfo is None:
+            raise ExchangeResponseError(f"Время {field} без часового пояса: {value!r}")
+        return moment.astimezone(UTC)
+    raise ExchangeResponseError(f"В ответе нет времени {field}")
+
+
 def _optional_ms_to_dt(value: Any) -> datetime | None:
     """Мягкий разбор времени (шаг 15.5.4): нет или не число → None, а не
     ошибка и не 1970-01-01."""
@@ -791,7 +811,12 @@ class BingXClient(ExchangeClient):
         order_side = str(item.get("side", "BUY")).upper()
         is_entry = (side is TradeSide.LONG) == (order_side == "BUY")
 
-        executed_at = item.get("filledTime") or item.get("time") or 0
+        # Живая форма allFillOrders (демо, 27.09): filledTm (ISO, UTC) и
+        # filledTime (ISO, +08:00); миллисекундное time — у прежних фикстур.
+        time_field = next(
+            (name for name in ("filledTm", "filledTime", "time") if item.get(name)), "filledTm"
+        )
+        trigger = item.get("triggerOrderId")
 
         return Fill(
             external_id=str(
@@ -803,14 +828,18 @@ class BingXClient(ExchangeClient):
             price=_to_decimal(
                 item.get("avgPrice") or item.get("price"), "price"
             ),
+            # volume — живое имя объёма. Биржа его округляет (1362 при
+            # executedQty ордера 1362.07, снято 27.09); amount/price тоже не
+            # точен — точнее allFillOrders объём не отдаёт.
             quantity=_to_decimal(
-                item.get("executedQty") or item.get("qty"), "quantity"
+                item.get("executedQty") or item.get("qty") or item.get("volume"), "quantity"
             ),
             fee=abs(_to_decimal(item.get("commission") or item.get("fee"), "fee")),
             realized_pnl=_to_decimal(item.get("profit"), "profit"),
-            executed_at=_ms_to_dt(executed_at) if executed_at else datetime.now(UTC),
+            executed_at=_exchange_time(item.get(time_field), time_field),
             position_id=str(item.get("positionId")) if item.get("positionId") else None,
             order_id=str(item.get("orderId")) if item.get("orderId") else None,
+            trigger_order_id=str(trigger) if trigger not in (None, "", 0, "0") else None,
         )
 
     # --- Торговые методы (этап 15.2) ----------------------------------------

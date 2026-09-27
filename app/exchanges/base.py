@@ -216,6 +216,10 @@ class Fill:
     # исполнения ордеров бота (сделка бота уже в журнале). None — биржа не
     # отдала orderId (имя поля в allFillOrders — синтетика до 15.5.5).
     order_id: str | None = None
+    # Условный ордер, срабатывание которого породило это исполнение (выход по
+    # стопу/тейку — отдельный дочерний ордер с triggerOrderId = orderId
+    # условника, снято живьём 27.09). None — исполнение не по условнику.
+    trigger_order_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
