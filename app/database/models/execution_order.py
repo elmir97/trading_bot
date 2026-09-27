@@ -98,6 +98,13 @@ class ExecutionOrder(IntPKMixin, TimestampMixin, Base):
     # ENTRY-строк-наблюдений (раздел 12а) сюда пишется цена на момент
     # карточки/попытки — справочно, как и у обычного маркет-входа.
     price: Mapped[Decimal | None] = mapped_column(PriceNumeric)
+    # Цена и объём на момент ПОКАЗА карточки. На «Да» evaluate() перезапрашивает
+    # цену и пересчитывает объём — в price/quantity ENTRY-строки входа ложатся
+    # уже они («на «Да»»). Пара card_* → price/quantity и есть дрейф до «Да» и
+    # пересчёт объёма. Только ENTRY-строка входа (DRY_RUN и реальная
+    # отправка); NULL у наблюдений и у строк до миграции 407583974eb1.
+    card_price: Mapped[Decimal | None] = mapped_column(PriceNumeric)
+    card_quantity: Mapped[Decimal | None] = mapped_column(QuantityNumeric)
     # Цена срабатывания для STOP_MARKET/TAKE_PROFIT_MARKET. NULL у ENTRY.
     trigger_price: Mapped[Decimal | None] = mapped_column(PriceNumeric)
 
