@@ -315,13 +315,22 @@ def render_confirmation(
     price_precision = quote.symbol_info.price_precision
     quantity_precision = quote.symbol_info.quantity_precision
 
+    # Зона сигнала, не её середина: «сигнал был на <середина>» читалось как
+    # цена сигнала, которой не было. Середина — опора дрейфа (гвард
+    # PRICE_DRIFT, сводка), поэтому дрейф подписан «от середины зоны».
     drift_note = ""
-    reference = signal_reference_price(notification)
     drift_pct = price_drift_percent(order.entry_price, notification)
-    if reference is not None and drift_pct is not None:
+    zone_low, zone_high = notification.entry_low, notification.entry_high
+    if drift_pct is not None and zone_low is not None and zone_high is not None:
         drift_note = (
-            f" (сигнал был на {fmt_price(reference, price_precision)}, "
-            f"дрейф {fmt_ratio(drift_pct)}%)"
+            f" (зона сигнала {fmt_price(zone_low, price_precision)}–"
+            f"{fmt_price(zone_high, price_precision)}, "
+            f"дрейф {fmt_ratio(drift_pct)}% от середины зоны)"
+        )
+    elif drift_pct is not None:
+        reference = signal_reference_price(notification)
+        drift_note = (
+            f" (сигнал {fmt_price(reference, price_precision)}, дрейф {fmt_ratio(drift_pct)}%)"
         )
 
     stop_pct = abs(order.entry_price - order.stop_loss) / order.entry_price * Decimal(100)

@@ -92,7 +92,7 @@ class _EntryZone(Protocol):
 
 def signal_reference_price(signal: _EntryZone) -> Decimal | None:
     """Опорная цена сигнала для дрейфа — середина entry-зоны (раздел 5 ТЗ:
-    карточка показывает "сигнал был на ...")."""
+    на карточке — зона сигнала, дрейф подписан «от середины зоны»)."""
     if signal.entry_low is not None and signal.entry_high is not None:
         return (signal.entry_low + signal.entry_high) / 2
     return signal.entry_low or signal.entry_high

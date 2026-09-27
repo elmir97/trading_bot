@@ -2491,6 +2491,24 @@ async def test_card_amounts_in_balance_asset_not_hardcoded_usdt(ctx, bot, monkey
     assert "USDT" not in card.replace("BTC-USDT", "")  # имя символа — не сумма
 
 
+async def test_card_shows_signal_zone_not_zone_middle(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Карточка называет зону сигнала (entry_low–entry_high), а не её
+    середину: «сигнал был на 100.5» читалось как цена сигнала, которой
+    не было. Дрейф по-прежнему считается от середины зоны."""
+    dp, session, user, client, _redis, _settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _notify(session, signal)
+
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
+
+    [card] = [t for t in bot.recorder.sent_texts() if "Цена сейчас" in t]
+    assert "Цена сейчас: 100 (зона сигнала 100–101, дрейф 0.5% от середины зоны)" in card
+    assert "сигнал был на" not in card and "100.5" not in card
+
+
 async def test_readback_amounts_in_balance_asset_not_hardcoded_usdt(  # type: ignore[no-untyped-def]
     ctx, bot, monkeypatch
 ) -> None:
