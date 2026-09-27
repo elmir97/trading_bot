@@ -33,6 +33,7 @@ from aiogram.types import CallbackQuery, Chat, Message, Update
 from aiogram.types import User as TgUser
 from sqlalchemy import select
 
+from app.bot.formatting import fmt_qty
 from app.bot.handlers import execution
 from app.bot.keyboards.execution import ExecutionCB
 from app.core.config import Settings
@@ -2376,7 +2377,10 @@ async def test_real_order_intermediate_then_readback_result_same_message(  # typ
     assert same_message[0] == "⏳ Ордер отправлен, проверяю исполнение…"
     final = same_message[-1]
     assert final.startswith("✅ Вход исполнен: BTC-USDT")
-    assert "Цена: 100.3 (карточка 100, проскальзывание в худшую сторону 0.3%" in final
+    assert "Цены: зона сигнала 100–101 · карточка 100 · на «Да» 100 · исполнение 100.3" in final
+    assert "Дрейф до «Да»: без изменения" in final
+    assert "Проскальзывание исполнения: в худшую сторону 0.3%" in final
+    assert "Объём пересчитан" not in final  # цена на «Да» та же — объём тот же
     assert "комиссия 0.05 USDT" in final
     assert "Стоп: 97 (id 8001)" in final
     assert "Тейк: 110 (id 8002)" in final
@@ -2411,24 +2415,62 @@ async def test_failed_stop_rescue_alarm_sent_as_separate_message(  # type: ignor
 
 
 @pytest.mark.parametrize(
-    "side,avg,expected",
+    "side,to_price,expected",
     [
-        (TradeSide.LONG, "100.3", "проскальзывание в худшую сторону 0.3% (0.23 USDT)"),
-        (TradeSide.LONG, "99.7", "проскальзывание в лучшую сторону 0.3% (0.23 USDT)"),
-        (TradeSide.SHORT, "99.7", "проскальзывание в худшую сторону 0.3% (0.23 USDT)"),
-        (TradeSide.SHORT, "100.3", "проскальзывание в лучшую сторону 0.3% (0.23 USDT)"),
-        (TradeSide.LONG, "100", "без проскальзывания"),
-        (TradeSide.SHORT, "100", "без проскальзывания"),
+        (TradeSide.LONG, "100.3", "в худшую сторону 0.3% (0.23 USDT)"),
+        (TradeSide.LONG, "99.7", "в лучшую сторону 0.3% (0.23 USDT)"),
+        (TradeSide.SHORT, "99.7", "в худшую сторону 0.3% (0.23 USDT)"),
+        (TradeSide.SHORT, "100.3", "в лучшую сторону 0.3% (0.23 USDT)"),
+        (TradeSide.LONG, "100", "без изменения"),
+        (TradeSide.SHORT, "100", "без изменения"),
     ],
 )
-def test_slippage_described_in_words_by_trade_side(side, avg, expected) -> None:  # type: ignore[no-untyped-def]
-    """Сторона — по направлению сделки: LONG хуже, если купил дороже
-    карточки; SHORT хуже, если продал дешевле. Словами, не знаком."""
-    text = execution.describe_slippage(
-        side=side, planned_price=D("100"), avg_price=D(avg), quantity=D("0.75"),
+def test_price_move_described_in_words_by_trade_side(side, to_price, expected) -> None:  # type: ignore[no-untyped-def]
+    """Сторона — по направлению сделки: LONG хуже, если цена выросла;
+    SHORT хуже, если упала. Словами, не знаком. Одна функция на дрейф до
+    «Да» и на проскальзывание исполнения."""
+    text = execution.describe_price_move(
+        side=side, from_price=D("100"), to_price=D(to_price), quantity=D("0.75"),
         quote_asset="USDT",
     )
     assert text == expected
+
+
+async def test_readback_splits_drift_and_slippage_and_reports_requantity(  # type: ignore[no-untyped-def]
+    ctx, bot, monkeypatch
+) -> None:
+    """Сделка #3 27.09: карточка 14.393, на «Да» 14.398, исполнение 14.4 —
+    сообщение показало одно «проскальзывание» 0.05% от карточки, смешав
+    дрейф до «Да» и проскальзывание биржи, а пересчитанный объём не
+    упомянуло. Здесь: карточка 100, на «Да» 100.2, исполнение 100.3."""
+    dp, session, user, client, _redis, settings = ctx
+    client.current_leverage = _leverage_info(long_leverage=10)
+    client.place_order_result = _order_result(order_id="555555")
+    client.fill_overrides = {"avgPrice": "100.3"}
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    settings.exec_dry_run = False
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _notify(session, signal)
+
+    card = await _open_move_price_and_confirm(dp, bot, notification, user, client, D("100.2"))
+
+    [final] = [
+        m.text for m in bot.recorder.calls
+        if isinstance(m, EditMessageText) and "Вход исполнен" in (m.text or "")
+    ]
+    entry = next(
+        o for o in await _orders_for_signal(session, signal.id) if o.role is OrderRole.ENTRY
+    )
+    assert "Цены: зона сигнала 100–101 · карточка 100 · на «Да» 100.2 · исполнение 100.3" in final
+    assert "Дрейф до «Да»: в худшую сторону 0.2%" in final
+    assert "Проскальзывание исполнения: в худшую сторону 0.1%" in final
+    assert (
+        f"Объём пересчитан на «Да»: {fmt_qty(card.quantity, 3)} → "
+        f"{fmt_qty(entry.quantity, 3)} BTC"
+    ) in final
+    assert "середин" not in final and "100.5" not in final  # середина зоны — только в расчётах
 
 
 async def test_card_amounts_in_balance_asset_not_hardcoded_usdt(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]

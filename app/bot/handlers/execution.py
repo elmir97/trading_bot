@@ -165,26 +165,25 @@ def _render_rejection_message(error_code: str | None) -> str:
 READBACK_PENDING_TEXT = "⏳ Ордер отправлен, проверяю исполнение…"
 
 
-def describe_slippage(
+def describe_price_move(
     *,
     side: TradeSide,
-    planned_price: Decimal,
-    avg_price: Decimal,
+    from_price: Decimal,
+    to_price: Decimal,
     quantity: Decimal,
     quote_asset: str,
 ) -> str:
-    """Шаг 15.5.3: проскальзывание словами, не знаком. Худшая сторона — по
-    направлению сделки: LONG купил дороже карточки, SHORT продал дешевле."""
-    if avg_price == planned_price:
-        return "без проскальзывания"
-    worse = avg_price > planned_price if side is TradeSide.LONG else avg_price < planned_price
-    diff = abs(avg_price - planned_price)
-    pct = diff / planned_price * Decimal(100)
+    """Сдвиг цены словами, не знаком — для «дрейфа до «Да»» (карточка → на
+    «Да») и «проскальзывания исполнения» (на «Да» → исполнение). Худшая
+    сторона — по направлению сделки: LONG — цена выросла, SHORT — упала.
+    Сумма — разница на quantity в активе баланса."""
+    if to_price == from_price:
+        return "без изменения"
+    worse = to_price > from_price if side is TradeSide.LONG else to_price < from_price
+    diff = abs(to_price - from_price)
+    pct = diff / from_price * Decimal(100)
     direction = "в худшую сторону" if worse else "в лучшую сторону"
-    return (
-        f"проскальзывание {direction} {fmt_ratio(pct)}% "
-        f"({fmt_amount(diff * quantity)} {quote_asset})"
-    )
+    return f"{direction} {fmt_ratio(pct)}% ({fmt_amount(diff * quantity)} {quote_asset})"
 
 
 _CONDITIONAL_TEXT = {
@@ -223,16 +222,24 @@ def render_journal_line(journal: JournalOutcome | None) -> str | None:
 
 def render_readback(
     order: OrderRequest,
-    planned_price: Decimal,
+    card_price: Decimal,
     readback: ReadbackResult,
     symbol_info_precision: tuple[int, int],
     journal: JournalOutcome | None = None,
     *,
     quote_asset: str,
+    card_quantity: Decimal,
+    signal_zone: tuple[Decimal | None, Decimal | None],
 ) -> str:
-    """Шаг 15.5.3: итог после read-back — фактическая цена против цены на
-    карточке (проскальзывание словами), объём, комиссия, стоп и тейк с id.
-    Журнал сделки — не здесь (15.5.4)."""
+    """Шаг 15.5.3: итог после read-back — цены, объём, комиссия, стоп и тейк
+    с id. Журнал сделки — строкой render_journal_line (15.5.4).
+
+    Четыре цены под постоянными именами: зона сигнала (entry_low–entry_high
+    уведомления; середина — только для расчётов), карточка (при показе),
+    на «Да» (перезапрос, order.entry_price), исполнение (avgPrice). Раньше
+    «карточка» против исполнения смешивала два эффекта: дрейф до «Да»
+    зависит от скорости нажатия, проскальзывание исполнения — от биржи.
+    Объём тоже пересчитывается на «Да» — если изменился, отдельная строка."""
     price_precision, quantity_precision = symbol_info_precision
     side_label = order.position_side.label
     fill = readback.fill
@@ -250,22 +257,43 @@ def render_readback(
         lines.append(f"✅ Вход исполнен: {order.symbol} · {side_label}")
     else:
         lines.append(f"⚠️ Вход отправлен, исполнение не подтверждено: {order.symbol} · {side_label}")
+
+    def price(value: Decimal) -> str:
+        return fmt_price(value, price_precision)
+
+    prices: list[str] = []
+    zone_low, zone_high = signal_zone
+    if zone_low is not None and zone_high is not None:
+        prices.append(f"зона сигнала {price(zone_low)}–{price(zone_high)}")
+    prices.append(f"карточка {price(card_price)}")
+    prices.append(f"на «Да» {price(order.entry_price)}")
     if fill is not None:
-        slippage = describe_slippage(
-            side=order.position_side,
-            planned_price=planned_price,
-            avg_price=fill.avg_price,
-            quantity=fill.executed_qty,
-            quote_asset=quote_asset,
+        prices.append(f"исполнение {price(fill.avg_price)}")
+    lines.append("Цены: " + " · ".join(prices))
+
+    # Обе суммы — на один и тот же объём (исполненный, если он известен):
+    # тогда дрейф + проскальзывание = весь сдвиг от карточки до исполнения.
+    money_quantity = fill.executed_qty if fill is not None else order.quantity
+    drift = describe_price_move(
+        side=order.position_side, from_price=card_price, to_price=order.entry_price,
+        quantity=money_quantity, quote_asset=quote_asset,
+    )
+    lines.append(f"Дрейф до «Да»: {drift}")
+    base_asset = order.symbol.split("-")[0]
+    if fill is not None:
+        slippage = describe_price_move(
+            side=order.position_side, from_price=order.entry_price, to_price=fill.avg_price,
+            quantity=fill.executed_qty, quote_asset=quote_asset,
         )
-        lines.append(
-            f"Цена: {fmt_price(fill.avg_price, price_precision)} "
-            f"(карточка {fmt_price(planned_price, price_precision)}, {slippage})"
-        )
-        base_asset = order.symbol.split("-")[0]
+        lines.append(f"Проскальзывание исполнения: {slippage}")
         lines.append(
             f"Объём: {fmt_qty(fill.executed_qty, quantity_precision)} {base_asset} · "
             f"комиссия {fmt_amount(fill.fee)} {quote_asset}"
+        )
+    if card_quantity != order.quantity:
+        lines.append(
+            f"Объём пересчитан на «Да»: {fmt_qty(card_quantity, quantity_precision)} → "
+            f"{fmt_qty(order.quantity, quantity_precision)} {base_asset}"
         )
     lines.append(
         f"Стоп: {_describe_conditional(readback.stop, price_precision)} · "
@@ -1072,6 +1100,8 @@ async def _submit_real_order(
             (result.symbol_info.price_precision, result.symbol_info.quantity_precision),
             journal,
             quote_asset=result.quote_asset,
+            card_quantity=card_quantity,
+            signal_zone=(notification.entry_low, notification.entry_high),
         ),
         reply_markup=None,
     )
