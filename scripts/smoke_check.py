@@ -10,12 +10,16 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal as D
+from typing import Any, NoReturn
 
 sys.path.insert(0, ".")
 
+import aiohttp
+import httpx
 from sqlalchemy import delete, select
 from sqlalchemy.engine import make_url
 
@@ -41,6 +45,78 @@ REQUIRED_DB_NAME = "trading_bot_test"
 
 problems: list[str] = []
 checks = {"total": 0, "passed": 0}
+
+# --- Запрет сети --------------------------------------------------------------
+#
+# Заглушки методов BingXClient (раздел [14] ниже) закрывают только известные
+# вызовы: новый метод без заглушки уходил на биржу с фейковым ключом (так было
+# с get_positions на 15.5.4а, BingX ответил 100413). Поэтому сеть запрещена
+# целиком на уровне транспорта, классом, а не экземпляром: любой клиент,
+# созданный где угодно (ExchangeFactory.public_client()/for_user(),
+# AI-провайдер, aiogram), и до установки запрета тоже.
+#
+# Исключение намеренно не httpx.HTTPError: BingXClient._request превратил бы
+# его в ExchangeUnavailableError с повторами, и хендлер показал бы «биржа
+# недоступна» вместо причины. Хендлер или middleware всё равно могут поймать
+# исключение — поэтому каждая попытка сначала пишется в blocked_requests, и
+# main() по непустому списку завершается с exit 1 независимо от проверок.
+
+
+class NetworkBlockedError(RuntimeError):
+    """Сетевой запрос из smoke_check — запрещён."""
+
+
+blocked_requests: list[str] = []
+_BOT_TOKEN_IN_URL = re.compile(r"/bot[^/]+/")
+
+
+def _block(method: str, url: object) -> NoReturn:
+    # URL Bot API несёт токен в пути (/bot<token>/getMe) — в вывод не пускаем.
+    line = f"{method} {_BOT_TOKEN_IN_URL.sub('/bot<token>/', str(url))}"
+    blocked_requests.append(line)
+    print(f"  ✗ СЕТЬ: {line}")
+    raise NetworkBlockedError(f"Сеть запрещена в smoke_check: {line}")
+
+
+async def _blocked_httpx_async(self: Any, request: httpx.Request) -> NoReturn:
+    _block(request.method, request.url)
+
+
+def _blocked_httpx_sync(self: Any, request: httpx.Request) -> NoReturn:
+    _block(request.method, request.url)
+
+
+async def _blocked_aiohttp(
+    self: Any, method: str, str_or_url: object, *args: Any, **kwargs: Any
+) -> NoReturn:
+    _block(method, str_or_url)
+
+
+_NETWORK_GUARDS: tuple[tuple[type, str, Any], ...] = (
+    (httpx.AsyncHTTPTransport, "handle_async_request", _blocked_httpx_async),
+    (httpx.HTTPTransport, "handle_request", _blocked_httpx_sync),
+    # Нижний уровень aiohttp: через него идут и make_request, и
+    # stream_content у aiogram AiohttpSession. Приватный API — отсюда
+    # проверка существования ниже.
+    (aiohttp.ClientSession, "_request", _blocked_aiohttp),
+)
+
+
+def _install_network_guard() -> None:
+    """Проверка существования — явным if, не assert: assert снимается
+    под python -O, а setattr на отсутствующий атрибут молча создал бы
+    новый, оставив настоящий путь в сеть открытым (после переименования
+    в новой версии библиотеки)."""
+    for owner, name, _ in _NETWORK_GUARDS:
+        if not callable(getattr(owner, name, None)):
+            print(
+                f"Отказ: {owner.__module__}.{owner.__qualname__}.{name} не найден — "
+                "запрет сети не встанет. Версия библиотеки сменила внутренний API; "
+                "поправь _NETWORK_GUARDS."
+            )
+            sys.exit(1)
+    for owner, name, blocked in _NETWORK_GUARDS:
+        setattr(owner, name, blocked)
 
 
 def _ensure_test_database(database_url: str) -> None:
@@ -139,6 +215,7 @@ async def main() -> None:
     settings = get_settings()
     _ensure_test_database(settings.database_url.get_secret_value())
     _ensure_execution_enabled(settings.trading_execution_enabled)
+    _install_network_guard()
 
     sim, tg, db, redis = await build()
 
@@ -164,6 +241,11 @@ async def main() -> None:
 
     print("\n" + "=" * 60)
     print(f"Проверок: {checks['total']}, успешно: {checks['passed']}")
+    if blocked_requests:
+        print(f"\nЗАБЛОКИРОВАНЫ СЕТЕВЫЕ ЗАПРОСЫ ({len(blocked_requests)}):")
+        for line in blocked_requests:
+            print(f"  • {line}")
+        print("Код smoke_check дошёл до сети — нужна заглушка или это дефект.")
     if problems:
         print(f"\nПРОБЛЕМЫ ({len(problems)}):")
         for p in problems:
@@ -172,8 +254,9 @@ async def main() -> None:
         # code всегда 0, и упавшая проверка (например, execution_orders не
         # DRY_RUN) тонет в выводе, а не останавливает деплой/CI.
         sys.exit(1)
-    else:
-        print("Проблем не найдено.")
+    if blocked_requests:
+        sys.exit(1)
+    print("Проблем не найдено.")
 
 
 async def _run_scenarios(sim, tg, db, redis, settings) -> None:  # type: ignore[no-untyped-def]
@@ -362,7 +445,9 @@ async def _run_scenarios(sim, tg, db, redis, settings) -> None:  # type: ignore[
 # хендлер сам строит BingXClient внутри ExchangeFactory.for_user(), поэтому
 # патчим пять leaf-методов на классе на время сценария и возвращаем
 # оригиналы в finally. ExchangeFactory и MarketDataService не подменяются:
-# расшифровка ключей, выбор режима/хоста, кэш — всё настоящее.
+# расшифровка ключей, выбор режима/хоста, кэш — всё настоящее. Метод без
+# заглушки в сеть не уйдёт — упрётся в запрет сети (_install_network_guard)
+# и уронит прогон строкой «✗ СЕТЬ».
 
 # Снято вручную: GET https://open-api.bingx.com/openApi/swap/v2/quote/contracts
 # 2026-09-11, запись для symbol="BTC-USDT". price_precision/quantity_precision/
@@ -433,8 +518,8 @@ async def _seed_execution_fixtures(  # type: ignore[no-untyped-def]
             # Раздел 8 ТЗ: отметка сразу свежая — иначе _build_quote() при
             # check_permissions=True (открытие карточки) сходит за
             # get_api_restrictions() в РЕАЛЬНЫЙ BingXClient (не патчится
-            # ниже вместе с get_ticker/get_symbols/get_balance) с фейковым
-            # ключом. Сети в смоук-тесте нет и не будет.
+            # ниже вместе с get_ticker/get_symbols/get_balance) — и упрётся
+            # в запрет сети (_install_network_guard), уронив прогон.
             permissions_checked_at=datetime.now(UTC),
         )
         creds.api_key_encrypted = cipher.encrypt("smoke-test-fake-api-key")
