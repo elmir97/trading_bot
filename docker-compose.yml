@@ -60,6 +60,9 @@ services:
     build: .
     container_name: trading_bot
     restart: unless-stopped
+    # Единственный путь секретов в контейнер: .env в образ не копируется
+    # (.dockerignore). Settings читает и файл .env, но в контейнере его нет —
+    # ключ, пропавший отсюда, молча уйдёт в дефолт из app/core/config.py.
     env_file: .env
     environment:
       REDIS_URL: redis://redis:6379/0

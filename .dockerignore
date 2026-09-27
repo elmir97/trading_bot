@@ -1,0 +1,12 @@
+# Контекст сборки — весь /opt/trading_bot на сервере, включая файлы, которые
+# живут только там. Секреты попадают в контейнер через env_file в
+# docker-compose.yml, не через образ: без этого .env (и его .env.bak*) лежал
+# в каждом образе и в кэше сборки.
+.env
+.env.*
+docker-compose.override.yml
+logs/
+.git
+**/__pycache__
+*.pyc
+.venv
