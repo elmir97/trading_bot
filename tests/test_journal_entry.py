@@ -324,3 +324,31 @@ def test_bot_trade_card_warns_to_close_on_exchange_first() -> None:
     assert BOT_TRADE_WARNING not in trade_card(
         _card_trade(TradeSource.SIGNAL_EXECUTION, TradeStatus.CLOSED)
     )
+
+
+async def test_filled_entry_keeps_position_id_and_entry_order_id(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Шаг 15.6: reconciler узнаёт позицию сделки по positionId (живьём —
+    positionID в ответе ордера входа, int), а исполнение входа — по orderId
+    биржи: импорт и повторная сверка не заводят его второй раз."""
+    session, user, slot, n = ctx
+    order = _order(user.id, slot.id, n.id)
+    entry = await _entry(session, order, OrderStatus.FILLED)
+    readback = _readback(OrderStatus.FILLED, fill=_fill(positionID=2104213344168714242))
+
+    outcome = await _record(session, entry, order, n, readback)
+
+    assert outcome is not None
+    trade = outcome.trade
+    assert trade.external_position_id == "2104213344168714242"
+    await session.refresh(trade, ["fills"])
+    assert [f.external_fill_id for f in trade.fills] == ["9001"]
+
+
+async def test_unconfirmed_entry_has_no_position_id(ctx) -> None:  # type: ignore[no-untyped-def]
+    session, user, slot, n = ctx
+    order = _order(user.id, slot.id, n.id)
+    entry = await _entry(session, order, OrderStatus.UNKNOWN)
+
+    outcome = await _record(session, entry, order, n, _readback(OrderStatus.UNKNOWN, fill=None))
+
+    assert outcome is not None and outcome.trade.external_position_id is None

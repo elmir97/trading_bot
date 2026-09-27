@@ -66,6 +66,7 @@ class TradeJournal:
         signal_id: int | None = None,
         notification_id: int | None = None,
         fill_confirmed: bool = True,
+        external_fill_id: str | None = None,
     ) -> Trade:
         """Создаёт сделку вместе с первым исполнением.
 
@@ -149,6 +150,9 @@ class TradeJournal:
                 quantity=quantity,
                 fee=fee,
                 executed_at=moment,
+                # orderId биржи у входа бота (шаг 15.6): по нему импорт и
+                # сверка узнают это исполнение и не заводят его повторно.
+                external_fill_id=external_fill_id,
             )
         ]
         # По той же причине инициализируем и mistakes: у новой сделки их
@@ -215,8 +219,13 @@ class TradeJournal:
         fee: Decimal = ZERO,
         exit_reason: str | None = None,
         closed_at: datetime | None = None,
+        external_fill_id: str | None = None,
     ) -> Trade:
         """Закрывает сделку целиком или частично.
+
+        external_fill_id — orderId биржи у выхода, записанного reconciler'ом
+        (шаг 15.6): повторная запись того же выхода упирается в
+        uq_fill_external_id, а не закрывает сделку второй раз.
 
         quantity=None означает «закрыть весь оставшийся объём» — самый
         частый случай, поэтому он и является поведением по умолчанию.
@@ -243,6 +252,7 @@ class TradeJournal:
             quantity=closing_qty,
             fee=fee,
             executed_at=moment,
+            external_fill_id=external_fill_id,
         )
 
         if exit_reason:

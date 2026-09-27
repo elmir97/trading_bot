@@ -214,3 +214,34 @@ async def test_daily_trade_count(ctx) -> None:  # type: ignore[no-untyped-def]
         user.id, now - timedelta(hours=1), now + timedelta(hours=1)
     )
     assert count == 3
+
+
+async def test_close_trade_records_external_fill_id_once(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Шаг 15.6: выход, записанный reconciler'ом, несёт orderId биржи —
+    повторная запись того же выхода падает на uq_fill_external_id, а не
+    закрывает сделку дважды."""
+    from sqlalchemy.exc import IntegrityError
+
+    journal, trade, session = await _open_for_external_close(ctx)
+    await journal.close_trade(
+        trade, exit_price=D("99"), quantity=D("0.5"), fee=D("0.1"),
+        external_fill_id="2104219661398712320",
+    )
+    exits = [f for f in trade.fills if f.external_fill_id == "2104219661398712320"]
+    assert len(exits) == 1
+
+    with pytest.raises(IntegrityError):
+        async with session.begin_nested():
+            await journal.close_trade(
+                trade, exit_price=D("99"), quantity=D("0.5"), fee=D("0.1"),
+                external_fill_id="2104219661398712320",
+            )
+
+
+async def _open_for_external_close(ctx):  # type: ignore[no-untyped-def]
+    user, journal, _repo, session = ctx
+    trade = await journal.open_trade(
+        user_id=user.id, symbol="SOL-USDT", side=TradeSide.LONG,
+        entry_price=D("100"), quantity=D("1"),
+    )
+    return journal, trade, session

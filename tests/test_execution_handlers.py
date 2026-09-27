@@ -2037,6 +2037,10 @@ async def test_two_notifications_same_slot_distinct_client_order_ids(  # type: i
     signal.fingerprint = "fp-second"
     signal.stop_loss = D("96")
     await session.flush()
+    if not dry_run:
+        # У биржи orderId уникален; с 15.6 он — external_fill_id исполнения
+        # входа (uq_fill_external_id), одинаковый id двух входов не бывает.
+        client.place_order_result = _order_result(order_id="9002")
     second = await _notify(session, signal)
     await _open_and_confirm(dp, bot, second, user)
 

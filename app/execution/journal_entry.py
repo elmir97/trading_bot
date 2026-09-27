@@ -78,6 +78,15 @@ def _entry_past_stop(side: TradeSide, entry_price: Decimal, stop_loss: Decimal) 
     return entry_price <= stop_loss if side is TradeSide.LONG else entry_price >= stop_loss
 
 
+def _position_id(raw: dict[str, object]) -> str | None:
+    """positionID ответа ордера входа (живьём — int, у несработавшего
+    условника 0). Тот же id — positionId в /user/positions и positionHistory."""
+    value = raw.get("positionID") or raw.get("positionId")
+    if value in (None, "", 0, "0"):
+        return None
+    return str(value)
+
+
 async def record_entry_trade(
     *,
     session: AsyncSession,
@@ -166,6 +175,11 @@ async def record_entry_trade(
                 signal_id=order.signal_id,
                 notification_id=order.notification_id,
                 fill_confirmed=confirmed,
+                # Шаг 15.6: позиция и исполнение входа — по id биржи, только из
+                # подтверждённого факта. У предварительной сделки их нет:
+                # reconciler дозаполнит, когда найдёт ордер.
+                external_position_id=_position_id(fill.raw) if confirmed and fill else None,
+                external_fill_id=fill.order_id if confirmed and fill else None,
             )
     except IntegrityError as exc:
         # Параллельная запись (reconciler 15.6 против хендлера) уже создала
