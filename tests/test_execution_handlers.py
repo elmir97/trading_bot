@@ -2425,9 +2425,38 @@ def test_slippage_described_in_words_by_trade_side(side, avg, expected) -> None:
     """Сторона — по направлению сделки: LONG хуже, если купил дороже
     карточки; SHORT хуже, если продал дешевле. Словами, не знаком."""
     text = execution.describe_slippage(
-        side=side, planned_price=D("100"), avg_price=D(avg), quantity=D("0.75")
+        side=side, planned_price=D("100"), avg_price=D(avg), quantity=D("0.75"),
+        quote_asset="USDT",
     )
     assert text == expected
+
+
+async def test_card_amounts_in_balance_asset_not_hardcoded_usdt(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Демо-счёт — VST: суммы карточки в активе баланса, не «USDT»."""
+    dp, session, user, client, _redis, _settings = ctx
+    client.asset = "VST"
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _notify(session, signal)
+
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
+
+    [card] = [t for t in bot.recorder.sent_texts() if "нотионал" in t]
+    assert "VST нотионал" in card and "маржа" in card and "VST =" in card
+    assert "USDT" not in card.replace("BTC-USDT", "")  # имя символа — не сумма
+
+
+async def test_readback_amounts_in_balance_asset_not_hardcoded_usdt(  # type: ignore[no-untyped-def]
+    ctx, bot, monkeypatch
+) -> None:
+    _session, _user, _notification, edits = await _real_confirm(
+        ctx, bot, monkeypatch, asset="VST"
+    )
+    [final] = [t for t in edits if "Вход исполнен" in t]
+    assert "комиссия" in final and "VST" in final
+    assert "USDT" not in final.replace("BTC-USDT", "")  # имя символа — не сумма
 
 
 # ---------------------------------------------------------------------------

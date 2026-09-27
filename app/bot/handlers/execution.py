@@ -166,7 +166,12 @@ READBACK_PENDING_TEXT = "⏳ Ордер отправлен, проверяю и�
 
 
 def describe_slippage(
-    *, side: TradeSide, planned_price: Decimal, avg_price: Decimal, quantity: Decimal
+    *,
+    side: TradeSide,
+    planned_price: Decimal,
+    avg_price: Decimal,
+    quantity: Decimal,
+    quote_asset: str,
 ) -> str:
     """Шаг 15.5.3: проскальзывание словами, не знаком. Худшая сторона — по
     направлению сделки: LONG купил дороже карточки, SHORT продал дешевле."""
@@ -178,7 +183,7 @@ def describe_slippage(
     direction = "в худшую сторону" if worse else "в лучшую сторону"
     return (
         f"проскальзывание {direction} {fmt_ratio(pct)}% "
-        f"({fmt_amount(diff * quantity)} USDT)"
+        f"({fmt_amount(diff * quantity)} {quote_asset})"
     )
 
 
@@ -222,6 +227,8 @@ def render_readback(
     readback: ReadbackResult,
     symbol_info_precision: tuple[int, int],
     journal: JournalOutcome | None = None,
+    *,
+    quote_asset: str,
 ) -> str:
     """Шаг 15.5.3: итог после read-back — фактическая цена против цены на
     карточке (проскальзывание словами), объём, комиссия, стоп и тейк с id.
@@ -249,6 +256,7 @@ def render_readback(
             planned_price=planned_price,
             avg_price=fill.avg_price,
             quantity=fill.executed_qty,
+            quote_asset=quote_asset,
         )
         lines.append(
             f"Цена: {fmt_price(fill.avg_price, price_precision)} "
@@ -257,7 +265,7 @@ def render_readback(
         base_asset = order.symbol.split("-")[0]
         lines.append(
             f"Объём: {fmt_qty(fill.executed_qty, quantity_precision)} {base_asset} · "
-            f"комиссия {fmt_amount(fill.fee)} USDT"
+            f"комиссия {fmt_amount(fill.fee)} {quote_asset}"
         )
     lines.append(
         f"Стоп: {_describe_conditional(readback.stop, price_precision)} · "
@@ -289,15 +297,16 @@ def render_confirmation(
         )
 
     stop_pct = abs(order.entry_price - order.stop_loss) / order.entry_price * Decimal(100)
+    asset = quote.quote_asset
 
     lines = [
         f"<b>{order.symbol} · {order.position_side.label} · маркет</b>",
         f"Цена сейчас: {fmt_price(order.entry_price, price_precision)}{drift_note}",
         f"Объём: {fmt_qty(order.quantity, quantity_precision)} {base_asset} ≈ "
-        f"{fmt_amount(order.notional)} USDT нотионал",
-        f"Плечо: {order.leverage}x, маржа {fmt_amount(order.margin)} USDT",
+        f"{fmt_amount(order.notional)} {asset} нотионал",
+        f"Плечо: {order.leverage}x, маржа {fmt_amount(order.margin)} {asset}",
         f"Стоп: {fmt_price(order.stop_loss, price_precision)}  (−{fmt_ratio(stop_pct)}%)  "
-        f"риск {fmt_amount(order.risk_amount)} USDT = {fmt_ratio(order.risk_percent)}% депозита",
+        f"риск {fmt_amount(order.risk_amount)} {asset} = {fmt_ratio(order.risk_percent)}% депозита",
         f"Тейк: {fmt_price(order.take_profit, price_precision)}  "
         f"RR 1:{fmt_ratio(order.risk_reward)}",
         "",
@@ -1062,6 +1071,7 @@ async def _submit_real_order(
             readback,
             (result.symbol_info.price_precision, result.symbol_info.quantity_precision),
             journal,
+            quote_asset=result.quote_asset,
         ),
         reply_markup=None,
     )

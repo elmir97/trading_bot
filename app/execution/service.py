@@ -126,6 +126,10 @@ class ExecutionQuote:
     # Шаг 15.5.4: equity счёта, от которого посчитан объём, — в журнал
     # (Trade.account_balance_at_entry, база для pnl_percent при закрытии).
     account_balance: Decimal
+    # Валюта суммы на карточке и в итоге исполнения — актив того же баланса:
+    # USDT на LIVE, VST на DEMO (BingXClient._QUOTE_ASSET_BY_MODE). Не
+    # хардкод: на демо суммы в VST.
+    quote_asset: str
 
     @property
     def total_risk_after_percent(self) -> Decimal:
@@ -513,7 +517,8 @@ class ExecutionService:
             price_precision=symbol_info.price_precision,
         )
 
-        balance = (await self._client.get_balance(max_retries=call_retries)).equity
+        balance_row = await self._client.get_balance(max_retries=call_retries)
+        balance = balance_row.equity
 
         # Шаг 15.5.4а: позиции биржи — только на карточке. На «Да» их читает
         # _submit_real_order (handlers/execution.py) тем же клиентом, что
@@ -640,6 +645,7 @@ class ExecutionService:
             symbol_info=symbol_info,
             dual_side_position=dual_side_position,
             account_balance=balance,
+            quote_asset=balance_row.asset,
         )
 
 
