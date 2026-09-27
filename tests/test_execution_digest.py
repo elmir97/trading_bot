@@ -622,3 +622,29 @@ class TestExecutionSlippage:
             target_risk_percent=None,
         )
         assert stats.entry_slippage_percents == []
+
+
+class TestRejectedAnomaly:
+    """Отказ биржи на реальном входе — аномалия от одного случая, с кодом
+    BingX (error_code REJECTED-строки), не с текстом ответа."""
+
+    def test_single_rejection_is_anomaly_with_exchange_code(self) -> None:
+        rows = [_row(OrderStatus.REJECTED, error_code="101204")]
+        stats = build_stats(rows, target_risk_percent=None)
+        anomalies = detect_anomalies(stats, max_price_drift_ratio=D("0.3"))
+        assert "биржа отклонила вход: 1 (код 101204 — 1)" in anomalies
+
+    def test_rejections_grouped_by_code(self) -> None:
+        rows = [
+            _row(OrderStatus.REJECTED, error_code="101204"),
+            _row(OrderStatus.REJECTED, error_code="80001"),
+            _row(OrderStatus.REJECTED, error_code="101204"),
+        ]
+        stats = build_stats(rows, target_risk_percent=None)
+        anomalies = detect_anomalies(stats, max_price_drift_ratio=D("0.3"))
+        assert "биржа отклонила вход: 3 (код 101204 — 2, код 80001 — 1)" in anomalies
+
+    def test_no_rejection_no_anomaly(self) -> None:
+        stats = build_stats([_row(OrderStatus.FILLED)], target_risk_percent=None)
+        anomalies = detect_anomalies(stats, max_price_drift_ratio=D("0.3"))
+        assert not any("отклонила" in a for a in anomalies)

@@ -104,6 +104,9 @@ class ExecutionDigestStats:
     # такая строка разбирается так же, как UNKNOWN.
     submitted: int = 0
     rejected: int = 0
+    # Отказ биржи на реальном входе — по коду BingX (error_code REJECTED-
+    # строки, str(exc.code)), не по тексту ответа.
+    rejected_by_code: dict[str, int] = field(default_factory=dict)
     unknown: int = 0
     pending: int = 0
     # Шаг 15.5.3: вход, исполнение которого подтверждено read-back.
@@ -228,6 +231,8 @@ def build_stats(
             stats.filled += 1
         elif row.status is OrderStatus.REJECTED:
             stats.rejected += 1
+            code = row.error_code or "?"
+            stats.rejected_by_code[code] = stats.rejected_by_code.get(code, 0) + 1
         elif row.status is OrderStatus.UNKNOWN:
             stats.unknown += 1
         elif row.status is OrderStatus.PENDING:
@@ -350,6 +355,16 @@ def detect_anomalies(stats: ExecutionDigestStats, *, max_price_drift_ratio: Deci
                 anomalies.append(
                     f"гвард {code} срабатывает подозрительно часто: {count} из {total} попыток"
                 )
+
+    # Реальный вход, отклонённый биржей, — от одного случая: сигнал был,
+    # «Да» было, позиции нет. Код, а не текст — текст BingX меняется и
+    # переводится, код — нет.
+    if stats.rejected:
+        by_code = ", ".join(
+            f"код {code} — {count}"
+            for code, count in sorted(stats.rejected_by_code.items(), key=lambda kv: -kv[1])
+        )
+        anomalies.append(f"биржа отклонила вход: {stats.rejected} ({by_code})")
 
     if stats.unknown or stats.pending:
         anomalies.append(
