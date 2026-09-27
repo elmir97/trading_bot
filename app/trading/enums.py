@@ -205,6 +205,11 @@ class OrderStatus(StrEnum):
     биржа/сеть). Класс исключения — в error_code, error_message пуст: в
     тексте ошибки может быть тело ответа биржи. Стадия — в
     ExecutionOrder.stage.
+
+    NOT_PLACED — шаг 15.6: reconciler после окна (10 минут) не нашёл ордер
+    по client_order_id (BingX 109421 «order not exist»), и позиции по
+    символу и стороне нет. Окончательное «ордер не выставлен» ставит только
+    reconciler (раздел 8 ТЗ); повторной отправки нет никогда.
     """
 
     PENDING = "PENDING"
@@ -218,6 +223,35 @@ class OrderStatus(StrEnum):
     DECLINED = "DECLINED"
     EXPIRED = "EXPIRED"
     ERROR = "ERROR"
+    NOT_PLACED = "NOT_PLACED"
+
+
+class ReconciliationKind(StrEnum):
+    """Что нашёл reconciler (шаг 15.6) — строка reconciliation_events.
+
+    Закрытия и разрешённые входы — события-факты: журнал приведён к бирже,
+    пользователь уведомлён. Остальные — расхождения без однозначного факта:
+    журнал не правится, уведомление одно на расхождение (дедуп по
+    dedup_key), и они идут в «Аномалии» сводки (ANOMALY_KINDS)."""
+
+    CLOSED_STOP_LOSS = "CLOSED_STOP_LOSS"
+    CLOSED_TAKE_PROFIT = "CLOSED_TAKE_PROFIT"
+    CLOSED_OUTSIDE_BOT = "CLOSED_OUTSIDE_BOT"
+    PARTIAL_CLOSE = "PARTIAL_CLOSE"
+    ENTRY_CONFIRMED = "ENTRY_CONFIRMED"
+    ENTRY_NOT_PLACED = "ENTRY_NOT_PLACED"
+    ORPHAN_POSITION = "ORPHAN_POSITION"
+    QUANTITY_MISMATCH = "QUANTITY_MISMATCH"
+    STOP_MISSING = "STOP_MISSING"
+    AMBIGUOUS = "AMBIGUOUS"
+
+
+ANOMALY_KINDS = frozenset({
+    ReconciliationKind.ORPHAN_POSITION,
+    ReconciliationKind.QUANTITY_MISMATCH,
+    ReconciliationKind.STOP_MISSING,
+    ReconciliationKind.AMBIGUOUS,
+})
 
 
 class ObservationStage(StrEnum):
