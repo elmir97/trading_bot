@@ -282,7 +282,9 @@ def _execution_slippage_percent(row: ExecutionOrder) -> Decimal | None:
     entry_price плановая, проскальзывание из неё выдумано. row.trade
     загружен заранее (ExecutionOrderRepository.list_entries_between)."""
     trade = row.trade
-    if trade is None or not trade.fill_confirmed or row.price is None or row.price <= ZERO:
+    if trade is None or not trade.fill_confirmed or trade.entry_price is None:
+        return None
+    if row.price is None or row.price <= ZERO:
         return None
     diff = trade.entry_price - row.price
     signed = diff if row.position_side is TradeSide.LONG else -diff

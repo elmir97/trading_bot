@@ -797,7 +797,8 @@ async def test_confirm_yes_dry_run_writes_card_snapshot(ctx, bot, monkeypatch) -
     assert entry.price == D("100.2")
     assert entry.card_quantity == card.quantity
     assert entry.quantity != card.quantity  # стоп дальше — объём меньше
-    others = [o for o in await _orders_for_signal(session, signal.id) if o.role is not OrderRole.ENTRY]
+    orders = await _orders_for_signal(session, signal.id)
+    others = [o for o in orders if o.role is not OrderRole.ENTRY]
     assert all(o.card_price is None and o.card_quantity is None for o in others)
 
 
