@@ -32,6 +32,7 @@ __all__ = [
     "ExchangeCredentials",
     "ExecutionOrder",
     "MistakeType",
+    "ReconciliationEvent",
     "SignalNotification",
     "SignalRecord",
     "Strategy",

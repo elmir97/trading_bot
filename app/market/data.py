@@ -51,7 +51,7 @@ class MarketDataService:
                 result[symbol] = await self._cache.get_or_fetch(
                     f"mark:{self._client.name}:{symbol}",
                     TTL_TICKER,
-                    lambda symbol=symbol: self._client.get_mark_price(symbol),  # type: ignore[misc]
+                    lambda symbol=symbol: self._client.get_mark_price(symbol),
                 )
             except Exception:
                 logger.warning("Не удалось получить mark price", extra={"symbol": symbol})

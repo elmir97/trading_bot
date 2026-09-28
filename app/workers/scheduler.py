@@ -68,7 +68,7 @@ class BackgroundJobs:
             max_instances=1,
         )
         self._scheduler.add_job(
-            job_wrapper("reconciler", self._reconciler.run),
+            job_wrapper("reconciler", self._reconciler.run, quiet=True),
             "interval",
             seconds=self._settings.reconciler_interval_seconds,
             id="reconciler",

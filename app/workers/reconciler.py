@@ -445,6 +445,10 @@ class Reconciler:
         event.resolved_at = ctx.now
         ReconciliationEventRepository(ctx.session).add(event)
         await ctx.session.flush()
+        logger.info(
+            "Сверка: факт биржи записан",
+            extra={"kind": event.kind.value, "trade_id": event.trade_id, "symbol": event.symbol},
+        )
         if await send_notification(self._bot, ctx.telegram_id, text):
             event.notified_at = datetime.now(UTC)
 
@@ -465,6 +469,10 @@ class Reconciler:
             )
         )
         await repo.flush()
+        logger.info(
+            "Сверка: расхождение",
+            extra={"kind": found.kind.value, "dedup_key": found.dedup_key, "symbol": found.symbol},
+        )
         if alarm:
             text = (
                 f"⚠️ ПОЗИЦИЯ БЕЗ СТОПА: {found.symbol} — {found.detail}. Бот ордеров не "

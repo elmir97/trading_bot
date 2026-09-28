@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Awaitable, Callable
 from decimal import Decimal
@@ -34,13 +35,19 @@ def fmt_decimal(value: Decimal | None) -> str:
     return f"{normalized:f}"
 
 
-def job_wrapper(name: str, func: Callable[[], Awaitable[None]]) -> Callable[[], Awaitable[None]]:
+def job_wrapper(
+    name: str, func: Callable[[], Awaitable[None]], *, quiet: bool = False
+) -> Callable[[], Awaitable[None]]:
     """Оборачивает job логированием начала/конца цикла и перехватом исключений.
 
     Исключение логируется целиком (logger.exception) и проглатывается: сам
     факт, что один цикл сканера или монитора упал, не должен ронять процесс
     бота и не должен помешать следующему тику того же job'а или другим job'ам.
+
+    quiet — начало/конец цикла на DEBUG (reconciler: цикл раз в минуту, на
+    INFO он сам пишет только действия). Падение — ERROR всегда.
     """
+    level = logging.DEBUG if quiet else logging.INFO
 
     async def wrapped() -> None:
         started = time.monotonic()
@@ -48,14 +55,15 @@ def job_wrapper(name: str, func: Callable[[], Awaitable[None]]) -> Callable[[], 
         # LOG_JSON=false (как на проде) форматтер печатает только message,
         # extra-поля в plain-режиме не видны — иначе все три задачи
         # выглядели бы в логе одинаково.
-        logger.info(f"Фоновый цикл начат: {name}", extra={"job": name})
+        logger.log(level, f"Фоновый цикл начат: {name}", extra={"job": name})
         try:
             await func()
         except Exception:
             logger.exception(f"Фоновый цикл упал: {name}", extra={"job": name})
         else:
             elapsed_ms = int((time.monotonic() - started) * 1000)
-            logger.info(
+            logger.log(
+                level,
                 f"Фоновый цикл завершён: {name} ({elapsed_ms} мс)",
                 extra={"job": name, "elapsed_ms": elapsed_ms},
             )

@@ -241,7 +241,7 @@ async def _rows(db, symbol: str) -> dict[OrderRole, ExecutionOrder]:  # type: ig
 
 
 async def test_sol_closed_by_stop_on_exchange_is_closed_in_journal(ctx) -> None:  # type: ignore[no-untyped-def]
-    settings, db, session, user, demo = ctx
+    settings, db, session, user, _demo = ctx
     sol_id, link_id = await _seed_live(session, user.id)
     bot = FakeBot()
 
@@ -265,7 +265,7 @@ async def test_sol_closed_by_stop_on_exchange_is_closed_in_journal(ctx) -> None:
 
 
 async def test_second_run_writes_and_notifies_nothing(ctx) -> None:  # type: ignore[no-untyped-def]
-    settings, db, session, user, demo = ctx
+    settings, db, session, user, _demo = ctx
     sol_id, _link_id = await _seed_live(session, user.id)
     bot = FakeBot()
     await _run_reconciler(settings, db, bot)
