@@ -16,6 +16,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from enum import StrEnum
 from typing import Any
 
 from app.trading.enums import OrderSide, TradeSide
@@ -334,6 +335,16 @@ class ApiRestrictions:
     enable_spot_and_margin_trading: bool
 
 
+class MarginType(StrEnum):
+    """Режим маржи символа — GET /openApi/swap/v2/trade/marginType
+    (28.09, живьём на демо: data.marginType = "ISOLATED" для LINK и SOL).
+    Плечо от стопа (app/execution/leverage.py) и проверка ликвидации
+    в read-back рассчитаны на изолированную маржу."""
+
+    ISOLATED = "ISOLATED"
+    CROSSED = "CROSSED"
+
+
 @dataclass(frozen=True, slots=True)
 class LeverageInfo:
     """Текущее и максимальное плечо по символу — GET /openApi/swap/v2/
@@ -558,6 +569,15 @@ class ExchangeClient(ABC):
         хосте). Возвращает bool напрямую, без обёртки-датакласса — как
         get_funding_rate выше, для единственного скалярного значения."""
         ...
+
+    async def get_margin_type(
+        self, symbol: str, *, max_retries: int | None = None
+    ) -> MarginType:
+        """Режим маржи символа (28.09). Не abstractmethod: клиент, который
+        его не умеет, отвечает явной ошибкой — вызывающий код
+        (app/services/margin_mode.py) превращает её в отказ
+        MARGIN_MODE_UNKNOWN, а не в молчаливое «изолированная»."""
+        raise ExchangeResponseError(f"{self.name}: режим маржи не поддерживается")
 
     # --- Торговые методы (нужен ключ с правом Perpetual Futures Trading) ---
     #

@@ -55,6 +55,7 @@ from app.exchanges.base import (
     ExchangeResponseError,
     ExchangeUnavailableError,
     LeverageInfo,
+    MarginType,
     OrderResult,
     Position,
     SymbolInfo,
@@ -106,6 +107,8 @@ class FakeExchangeClient(ExchangeClient):
         restrictions_error: Exception | None = None,
         dual_side_position: bool = True,
         position_mode_error: Exception | None = None,
+        margin_type: MarginType = MarginType.ISOLATED,
+        margin_type_error: Exception | None = None,
         current_leverage: object = None,
         leverage_error: Exception | None = None,
         set_leverage_error: Exception | None = None,
@@ -134,6 +137,11 @@ class FakeExchangeClient(ExchangeClient):
         self.dual_side_position = dual_side_position
         self.position_mode_error = position_mode_error
         self.get_position_mode_calls = 0
+        # 28.09: режим маржи символа — по умолчанию изолированная, как
+        # живые LINK и SOL на демо.
+        self.margin_type = margin_type
+        self.margin_type_error = margin_type_error
+        self.margin_type_symbols_seen: list[str] = []
         # Раздел 16 ТЗ, шаг 15.5.2: плечо и реальная отправка.
         self.current_leverage = current_leverage
         self.leverage_error = leverage_error
@@ -213,6 +221,12 @@ class FakeExchangeClient(ExchangeClient):
         if self.position_mode_error is not None:
             raise self.position_mode_error
         return self.dual_side_position
+
+    async def get_margin_type(self, symbol, *, max_retries=None):
+        self.margin_type_symbols_seen.append(symbol)
+        if self.margin_type_error is not None:
+            raise self.margin_type_error
+        return self.margin_type
 
     async def set_leverage(self, symbol, leverage, *, position_side=None):
         self.submit_calls.append((
@@ -1925,6 +1939,7 @@ def _exchange_calls(client: FakeExchangeClient) -> int:
         + len(client.symbols_retries_seen)
         + len(client.submit_calls)
         + client.get_position_mode_calls
+        + len(client.margin_type_symbols_seen)
     )
 
 
@@ -2716,3 +2731,87 @@ async def test_liquidation_unreadable_is_warning_not_alarm(ctx, bot, monkeypatch
     [final] = [t for t in edits if "Вход исполнен" in t]
     assert "Цену ликвидации проверить не удалось" in final
     assert not any("ЛИКВИДАЦИЯ" in t for t in bot.recorder.sent_texts())
+
+
+# ---------------------------------------------------------------------------
+# 28.09: режим маржи символа — только изолированная
+# ---------------------------------------------------------------------------
+
+
+async def test_crossed_margin_refused_on_card(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Кросс-маржа — отказ MARGIN_NOT_ISOLATED на карточке, раньше тикера:
+    плечо от стопа и проверка ликвидации рассчитаны на изолированную."""
+    dp, session, user, client, _redis, _settings = ctx
+    client.margin_type = MarginType.CROSSED
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _notify(session, signal)
+
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
+
+    texts = bot.recorder.sent_texts()
+    assert len(texts) == 1
+    assert (
+        f"Маржа по {signal.symbol} кросс — переключи на изолированную в BingX" in texts[0]
+    )
+    assert (user.id, notification.id) not in execution._confirmations
+    assert client.margin_type_symbols_seen == [signal.symbol]
+    assert client.ticker_retries_seen == []
+    [row] = await _orders_for_signal(session, signal.id)
+    assert row.status is OrderStatus.REFUSED
+    assert row.error_code == "MARGIN_NOT_ISOLATED"
+    assert row.stage == "card"
+
+
+async def test_margin_type_failure_refused_and_not_cached(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Сбой чтения режима маржи — MARGIN_MODE_UNKNOWN, не «открыл бы»
+    вслепую; неудача не кэшируется — повторная карточка спрашивает снова."""
+    dp, session, user, client, _redis, _settings = ctx
+    client.margin_type_error = ExchangeUnavailableError("BingX не ответил")
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _notify(session, signal)
+
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
+
+    texts = bot.recorder.sent_texts()
+    assert "Не удалось проверить режим маржи" in texts[0]
+    assert (user.id, notification.id) not in execution._confirmations
+    [row] = await _orders_for_signal(session, signal.id)
+    assert row.error_code == "MARGIN_MODE_UNKNOWN"
+
+    client.margin_type_error = None
+    await _feed(dp, bot, 2, make_callback(f"exn:open:{notification.id}", message_id=1))
+    assert client.margin_type_symbols_seen == [signal.symbol, signal.symbol]
+    assert (user.id, notification.id) in execution._confirmations
+
+
+async def test_margin_type_read_on_card_not_reread_on_confirm(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Как режим позиций: чтение только на карточке, на «Да» — из
+    ExecutionQuote.margin_type. Число запросов пути «Да» (и TTL лока) не
+    меняется."""
+    dp, session, user, client, _redis, _settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _notify(session, signal)
+
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
+    state = execution._confirmations[(user.id, notification.id)]
+    assert state.quote.margin_type is MarginType.ISOLATED
+    assert client.margin_type_symbols_seen == [signal.symbol]
+
+    await _feed(
+        dp, bot, 2,
+        make_callback(f"exn:yes:{notification.id}", message_id=state.message_id),
+    )
+    assert client.margin_type_symbols_seen == [signal.symbol]
+    assert len(await _orders_for_signal(session, signal.id)) == 3

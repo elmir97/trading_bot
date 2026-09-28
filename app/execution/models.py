@@ -38,6 +38,11 @@ class ExecutionRefusalCode(StrEnum):
     # известного режима невозможно собрать правильно. См.
     # app/services/position_mode.py.
     POSITION_MODE_UNKNOWN = "POSITION_MODE_UNKNOWN"
+    # 28.09: режим маржи символа не удалось прочитать (по образцу
+    # POSITION_MODE_UNKNOWN) и маржа кросс — плечо от стопа и проверка
+    # ликвидации рассчитаны на изолированную. См. app/services/margin_mode.py.
+    MARGIN_MODE_UNKNOWN = "MARGIN_MODE_UNKNOWN"
+    MARGIN_NOT_ISOLATED = "MARGIN_NOT_ISOLATED"
     NO_TRADING_KEY = "NO_TRADING_KEY"
     # Этап 15.4в: показанный в настройках счёт (LIVE/DEMO) не совпадает с
     # тем, что разрешён конфигом (Settings.bingx_trading_mode) — см.

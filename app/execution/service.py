@@ -44,11 +44,18 @@ from app.database.models.user import User
 from app.database.repositories.execution_order import ExecutionOrderRepository
 from app.database.repositories.signal_notification import SignalNotificationRepository
 from app.database.repositories.trade import TradeRepository
-from app.exchanges.base import ExchangeClient, ExchangeError, SymbolInfo, TpSlSpec
+from app.exchanges.base import (
+    ExchangeClient,
+    ExchangeError,
+    MarginType,
+    SymbolInfo,
+    TpSlSpec,
+)
 from app.execution.guards import (
     GuardInputs,
     check_execution_enabled,
     check_live_orders_allowed,
+    check_margin_isolated,
     check_mode_allowed,
     check_no_exchange_position,
     check_permissions_trustworthy,
@@ -127,6 +134,9 @@ class ExecutionQuote:
     # перезапрашивается — несётся отсюда дальше, тем же принципом, что
     # planned_price в _ConfirmationState.
     dual_side_position: bool
+    # 28.09: режим маржи символа, снят на карточке — на «Да» несётся
+    # отсюда (known_margin_type в _build_quote), как dual_side_position.
+    margin_type: MarginType
     # Шаг 15.5.4: equity счёта, от которого посчитан объём, — в журнал
     # (Trade.account_balance_at_entry, база для pnl_percent при закрытии).
     account_balance: Decimal
@@ -366,6 +376,7 @@ class ExecutionService:
         key_can_trade_futures: bool,
         permissions_trustworthy: bool = True,
         dual_side_position: bool | None = None,
+        margin_type: MarginType | None = None,
         selected_exchange_mode: ExchangeKeyMode,
         planned_price: Decimal | None = None,
         now: datetime | None = None,
@@ -473,6 +484,11 @@ class ExecutionService:
             selected_mode=selected_exchange_mode, allowed_mode=allowed_exchange_mode
         ):
             return await refuse(refusal)
+        # 28.09: после ключа и контура — без ключа режим маржи не читается,
+        # честный отказ там NO_TRADING_KEY, а не «не удалось проверить».
+        if refusal := check_margin_isolated(symbol=symbol, margin_type=margin_type):
+            return await refuse(refusal)
+        assert margin_type is not None
 
         # Шаг 15.5.2а: 3а-4а — только своя БД, до первого запроса к бирже.
         slot_active = slot.status is SignalRecordStatus.ACTIVE
@@ -672,6 +688,7 @@ class ExecutionService:
             account_balance=balance,
             quote_asset=balance_row.asset,
             max_leverage=plan.max_leverage,
+            margin_type=margin_type,
         )
 
 

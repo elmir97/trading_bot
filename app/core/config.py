@@ -179,6 +179,10 @@ class Settings(BaseSettings):
     # ключа, и промах кэша здесь дешевле (один лишний GET, не поход за
     # apiRestrictions с более тяжёлыми последствиями отказа).
     exec_position_mode_ttl_seconds: int = 300
+    # 28.09: режим маржи символа (ISOLATED/CROSSED) — тот же механизм, что
+    # режим позиций: приватный TTLCache в памяти, сбой не кэшируется,
+    # читается только на карточке, на «Да» — из ExecutionQuote.
+    exec_margin_type_ttl_seconds: int = 300
     exec_min_rr: Decimal = Decimal("1.5")
     # Taker-комиссия BingX на ногу — вход маркетом и выход условником (оба
     # исполняются как taker). Биржевую ставку не читаем: живьём на демо

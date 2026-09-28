@@ -23,7 +23,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from app.core.numfmt import fmt_num, fmt_price
-from app.exchanges.base import SymbolInfo
+from app.exchanges.base import MarginType, SymbolInfo
 from app.execution.models import ExecutionRefusal
 from app.execution.models import ExecutionRefusalCode as Code
 from app.execution.sizing import SizingResult, calculate_size
@@ -106,6 +106,26 @@ def check_position_mode_known(*, known: bool) -> ExecutionRefusal | None:
     if not known:
         return ExecutionRefusal(
             Code.POSITION_MODE_UNKNOWN, "Не удалось проверить режим позиций аккаунта."
+        )
+    return None
+
+
+# --- MARGIN_MODE_UNKNOWN / MARGIN_NOT_ISOLATED (28.09) ----------------------
+# Тот же образец, что POSITION_MODE_UNKNOWN: режим маржи читается на
+# карточке (app/services/margin_mode.py), на «Да» несётся из ExecutionQuote.
+
+
+def check_margin_isolated(
+    *, symbol: str, margin_type: MarginType | None
+) -> ExecutionRefusal | None:
+    if margin_type is None:
+        return ExecutionRefusal(
+            Code.MARGIN_MODE_UNKNOWN, f"Не удалось проверить режим маржи по {symbol}."
+        )
+    if margin_type is not MarginType.ISOLATED:
+        return ExecutionRefusal(
+            Code.MARGIN_NOT_ISOLATED,
+            f"Маржа по {symbol} кросс — переключи на изолированную в BingX",
         )
     return None
 

@@ -30,6 +30,7 @@ from app.exchanges.base import (
     ExchangeClient,
     Fill,
     Kline,
+    MarginType,
     Position,
     SymbolInfo,
     Ticker,
@@ -243,6 +244,7 @@ async def test_execution_disabled_refuses_without_touching_exchange(ctx) -> None
         user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=True,
+        margin_type=MarginType.ISOLATED,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
     )
     assert isinstance(result, ExecutionRefusal)
@@ -269,6 +271,7 @@ async def test_execution_disabled_writes_refused_observation_without_price(ctx) 
         user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=True,
+        margin_type=MarginType.ISOLATED,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
     )
     assert isinstance(result, ExecutionRefusal)
@@ -306,6 +309,7 @@ async def test_max_positions_refused_observation_captures_price_and_drift(ctx) -
         user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=True,
+        margin_type=MarginType.ISOLATED,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
     )
     assert isinstance(result, ExecutionRefusal)
@@ -332,6 +336,7 @@ async def test_no_trading_key_refuses(ctx) -> None:  # type: ignore[no-untyped-d
         user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=False, key_can_trade_futures=False,
         dual_side_position=True,
+        margin_type=MarginType.ISOLATED,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
     )
     assert isinstance(result, ExecutionRefusal)
@@ -352,6 +357,7 @@ async def test_mode_not_allowed_refuses(ctx) -> None:  # type: ignore[no-untyped
         user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=True,
+        margin_type=MarginType.ISOLATED,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
     )
     assert isinstance(result, ExecutionRefusal)
@@ -402,6 +408,7 @@ async def test_valid_ready_signal_returns_quote(ctx) -> None:  # type: ignore[no
         user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=True,
+        margin_type=MarginType.ISOLATED,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
     )
     assert isinstance(result, ExecutionQuote)
@@ -434,6 +441,7 @@ async def test_signal_already_used_refuses(ctx) -> None:  # type: ignore[no-unty
         user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=True,
+        margin_type=MarginType.ISOLATED,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
     )
     assert isinstance(result, ExecutionRefusal)
@@ -458,6 +466,7 @@ async def test_existing_position_on_symbol_refuses(ctx) -> None:  # type: ignore
         user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=True,
+        margin_type=MarginType.ISOLATED,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
     )
     assert isinstance(result, ExecutionRefusal)
@@ -503,6 +512,7 @@ async def test_existing_position_refuses_opposite_side_too(ctx) -> None:  # type
         user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=True,
+        margin_type=MarginType.ISOLATED,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
     )
     assert isinstance(result, ExecutionRefusal)
@@ -527,6 +537,7 @@ async def test_max_positions_refuses(ctx) -> None:  # type: ignore[no-untyped-de
         user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=True,
+        margin_type=MarginType.ISOLATED,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
     )
     assert isinstance(result, ExecutionRefusal)
@@ -553,6 +564,7 @@ async def test_price_drift_refuses_on_second_evaluation(ctx) -> None:  # type: i
         user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=True,
+        margin_type=MarginType.ISOLATED,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
     )
     assert isinstance(first, ExecutionQuote)
@@ -563,6 +575,7 @@ async def test_price_drift_refuses_on_second_evaluation(ctx) -> None:  # type: i
         user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=True,
+        margin_type=MarginType.ISOLATED,
         selected_exchange_mode=ExchangeKeyMode.LIVE,
         planned_price=planned_price, now=NOW,
     )
@@ -597,6 +610,7 @@ async def test_signal_stale_refuses_on_first_evaluation(ctx) -> None:  # type: i
         user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=True,
+        margin_type=MarginType.ISOLATED,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
     )
     assert isinstance(result, ExecutionRefusal)
@@ -624,6 +638,7 @@ async def test_signal_stale_does_not_refuse_move_toward_stop(ctx) -> None:  # ty
         user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=True,
+        margin_type=MarginType.ISOLATED,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
     )
     assert isinstance(result, ExecutionQuote)
@@ -677,6 +692,7 @@ async def test_position_mode_unknown_refuses_before_trading_key_check(ctx) -> No
         user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=None,
+        margin_type=MarginType.ISOLATED,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
     )
     assert isinstance(result, ExecutionRefusal)
@@ -704,6 +720,7 @@ async def test_valid_signal_carries_dual_side_position_on_quote(ctx) -> None:  #
         user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=False,
+        margin_type=MarginType.ISOLATED,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
     )
     assert isinstance(result, ExecutionQuote)
@@ -736,6 +753,7 @@ async def test_symbol_data_unavailable_refuses(ctx) -> None:  # type: ignore[no-
         user=user, notification=notification, slot=signal, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=True,
+        margin_type=MarginType.ISOLATED,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW,
     )
     assert isinstance(result, ExecutionRefusal)
@@ -792,6 +810,7 @@ async def test_refusal_stage_card_without_planned_price_confirm_with_it(ctx) -> 
         "user": user, "notification": notification, "slot": signal, "plan": user.trading_plan,
         "has_trading_key": True, "key_can_trade_futures": True,
         "dual_side_position": True,
+        "margin_type": MarginType.ISOLATED,
         "selected_exchange_mode": ExchangeKeyMode.LIVE, "now": NOW,
     }
     await service.evaluate(**kwargs)
@@ -834,6 +853,7 @@ async def test_confirm_stage_uses_fail_fast_reads_card_stage_does_not(ctx) -> No
         "user": user, "notification": notification, "slot": signal, "plan": user.trading_plan,
         "has_trading_key": True, "key_can_trade_futures": True,
         "dual_side_position": True,
+        "margin_type": MarginType.ISOLATED,
         "selected_exchange_mode": ExchangeKeyMode.LIVE, "now": NOW,
     }
 
@@ -868,6 +888,7 @@ async def _evaluate(service, user, notification, slot, **kwargs):  # type: ignor
         user=user, notification=notification, slot=slot, plan=user.trading_plan,
         has_trading_key=True, key_can_trade_futures=True,
         dual_side_position=True,
+        margin_type=MarginType.ISOLATED,
         selected_exchange_mode=ExchangeKeyMode.LIVE, now=NOW, **kwargs,
     )
 

@@ -59,7 +59,7 @@ from app.database.repositories.execution_order import ExecutionOrderRepository
 from app.database.repositories.signal import SignalRepository
 from app.database.repositories.signal_notification import SignalNotificationRepository
 from app.database.session import Database
-from app.exchanges.base import ExchangeAuthError, ExchangeError
+from app.exchanges.base import ExchangeAuthError, ExchangeError, MarginType
 from app.exchanges.bingx import bingx_position_side
 from app.execution.guards import check_live_orders_allowed
 from app.execution.journal_entry import JournalOutcome, record_entry_trade
@@ -84,6 +84,7 @@ from app.execution.service import (
 from app.market.cache import TTLCache
 from app.market.data import MarketDataService
 from app.services.exchange_factory import ExchangeFactory
+from app.services.margin_mode import refresh_margin_type
 from app.services.permissions import refresh_permissions
 from app.services.position_mode import refresh_position_mode
 from app.trading.enums import ObservationStage, OrderStatus, SignalLevel, TradeSide
@@ -127,6 +128,9 @@ _background_tasks: set[asyncio.Task[None]] = set()
 # аккаунта, отдельный кэш от _market_cache (тот публичный и общий на
 # процесс по конструкции) — см. app/services/position_mode.py.
 _position_mode_cache = TTLCache()
+# 28.09: режим маржи — тот же приватный кэш, ключ с символом. См.
+# app/services/margin_mode.py.
+_margin_type_cache = TTLCache()
 
 
 def _parse_id(data: str | None, prefix: str) -> int | None:
@@ -448,6 +452,7 @@ async def _build_quote(
     planned_price: Decimal | None,
     check_permissions: bool,
     known_dual_side_position: bool | None = None,
+    known_margin_type: MarginType | None = None,
 ) -> _EvaluationResult:
     """guards.NO_TRADING_KEY срабатывает до сетевого похода на биржу — поэтому
     без ключа безопасно использовать публичный клиент: ExecutionService.evaluate()
@@ -468,7 +473,10 @@ async def _build_quote(
     что и check_permissions, но для режима позиций: на «Да» не
     перезапрашиваем, несём значение из ExecutionQuote карточки, которая
     уже была показана (state.quote.dual_side_position в _process_confirm).
-    При check_permissions=True игнорируется — там читаем заново."""
+    При check_permissions=True игнорируется — там читаем заново.
+
+    known_margin_type: 28.09 — то же для режима маржи символа
+    (state.quote.margin_type)."""
     allowed_mode = settings.bingx_allowed_exchange_mode
     selected_mode = user.settings.active_exchange_mode
 
@@ -505,6 +513,14 @@ async def _build_quote(
         )
         dual_side_position = position_mode_outcome.dual_side_position
 
+    margin_type = known_margin_type
+    if has_trading_key and check_permissions:
+        margin_outcome = await refresh_margin_type(
+            _margin_type_cache, client, user.id, slot.symbol,
+            ttl_seconds=settings.exec_margin_type_ttl_seconds,
+        )
+        margin_type = margin_outcome.margin_type
+
     market = MarketDataService(client, _market_cache)
     service = ExecutionService(session=session, settings=settings, client=client, market=market)
     try:
@@ -517,6 +533,7 @@ async def _build_quote(
             key_can_trade_futures=key_can_trade_futures,
             permissions_trustworthy=permissions_trustworthy,
             dual_side_position=dual_side_position,
+            margin_type=margin_type,
             selected_exchange_mode=selected_mode,
             planned_price=planned_price,
         )
@@ -797,6 +814,7 @@ async def _process_confirm(
         session, user, notification, slot, plan, settings, cipher,
         planned_price=state.planned_price, check_permissions=False,
         known_dual_side_position=state.quote.dual_side_position,
+        known_margin_type=state.quote.margin_type,
     )
 
     if isinstance(result, str):
@@ -814,6 +832,7 @@ async def _process_confirm(
                 session, user, notification, slot, plan, settings, cipher,
                 planned_price=None, check_permissions=False,
                 known_dual_side_position=state.quote.dual_side_position,
+                known_margin_type=state.quote.margin_type,
             )
             await callback.message.answer(
                 "↻ Цена ушла дальше допустимого. Пересчитал карточку:"

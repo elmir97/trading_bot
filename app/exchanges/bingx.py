@@ -41,6 +41,7 @@ from app.exchanges.base import (
     HistoryOrder,
     Kline,
     LeverageInfo,
+    MarginType,
     OpenOrder,
     OrderFill,
     OrderResult,
@@ -90,6 +91,9 @@ MAX_HISTORY_WINDOW = timedelta(days=7)
 # страница bingx-api.github.io отдаёт только SPA-шелл). Версия отдельно
 # от остальных путей этого файла, не переиспользуем v2 по аналогии.
 POSITION_SIDE_DUAL = "/openApi/swap/v1/positionSide/dual"
+# Режим маржи символа: data = {"marginType": "ISOLATED", "symbol": ...}
+# (28.09, живой GET на демо-хосте для LINK-USDT и SOL-USDT).
+TRADE_MARGIN_TYPE = "/openApi/swap/v2/trade/marginType"
 
 # Валюта маржи зависит от контура: LIVE торгует настоящими USDT, DEMO —
 # виртуальными VST (см. app/bot/handlers/settings.py:626). get_balance()
@@ -994,6 +998,22 @@ class BingXClient(ExchangeClient):
                 f"В ответе {POSITION_SIDE_DUAL} нет поля dualSidePosition"
             )
         return bool(data["dualSidePosition"])
+
+    async def get_margin_type(
+        self, symbol: str, *, max_retries: int | None = None
+    ) -> MarginType:
+        """28.09: GET TRADE_MARGIN_TYPE, чтение, обычный retry. Строгий
+        разбор: нет поля или незнакомое значение — ExchangeResponseError,
+        не подставленное «ISOLATED»."""
+        data = await self._request(
+            TRADE_MARGIN_TYPE, {"symbol": symbol}, signed=True, max_retries=max_retries
+        )
+        raw = data.get("marginType") if isinstance(data, dict) else None
+        if raw not in tuple(MarginType):
+            raise ExchangeResponseError(
+                f"В ответе {TRADE_MARGIN_TYPE} нет понятного marginType"
+            )
+        return MarginType(raw)
 
     async def set_leverage(
         self, symbol: str, leverage: int, *, position_side: str | None = None
