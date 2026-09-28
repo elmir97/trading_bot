@@ -435,8 +435,13 @@ async def test_pnl_1r_falls_back_to_stop_distance(ctx) -> None:  # type: ignore[
     assert "больше 0.01R (18.44" in event.detail
 
 
-async def test_pnl_not_checked_without_1r(ctx) -> None:  # type: ignore[no-untyped-def]
-    """Ни risk_amount, ни стопа — сверять не с чем: не расхождение."""
+async def test_lock_pnl_not_checked_without_1r(ctx) -> None:  # type: ignore[no-untyped-def]
+    """ЗАМОК: ни risk_amount, ни стопа — сверять не с чем, это не расхождение.
+
+    Отрицательный тест: на коде до 28.09 падает только из-за отсутствия
+    ReconciliationKind.PNL_MISMATCH (AttributeError), не по поведению —
+    старый код аномалию тоже не создаёт. Держит сверку от ложной тревоги,
+    если 1R неизвестен; удалять как «проходящий и без правки» нельзя."""
     settings, db, session, user, _demo = ctx
     sol_id, _link_id = await _seed_live(session, user.id, sol_entry="123.000")
     await _drop_entry_risk(session, sol_id, None)
