@@ -22,6 +22,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from decimal import Decimal
 
+from app.analysis.indicators import volume_ratio
 from app.analysis.patterns import detect_confirmation, is_strong_body
 from app.analysis.signals import (
     MarketContext,
@@ -44,8 +45,14 @@ ZERO = Decimal(0)
 # «уверенное закрытие», а не заглядывание на пару тиков.
 BREAKOUT_MIN_CLOSE_ATR = Decimal("0.15")
 
-# Всплеск объёма при истинном пробое.
+# Всплеск объёма при истинном пробое. НЕ фильтр: условие «Объём пробоя»
+# на карточке READY информационное (28.09) — сигнал не отбрасывается,
+# ниже порога оно просто показано невыполненным. Решение о фильтре — по
+# отчёту исходов (scripts/signal_outcomes.py).
 BREAKOUT_MIN_VOLUME_RATIO = Decimal("1.3")
+
+# Окно среднего объёма — то же, что у MarketContext.volume_ratio.
+VOLUME_RATIO_PERIOD = 20
 
 # Насколько близко цена должна вернуться к уровню, чтобы это считалось
 # ретестом.
@@ -63,6 +70,18 @@ STOP_BUFFER_ATR = Decimal("0.2")
 
 # Минимальное соотношение риск/прибыль по методологии.
 MIN_RISK_REWARD = Decimal("2")
+
+# Имя информационного условия на карточке READY (не фильтр, см.
+# BREAKOUT_MIN_VOLUME_RATIO).
+BREAKOUT_VOLUME_CONDITION_NAME = "Объём пробоя"
+
+
+def _index_after(conditions: list[SignalCondition], name: str) -> int:
+    """Позиция сразу за условием name — чтобы строка читалась рядом."""
+    for i, condition in enumerate(conditions):
+        if condition.name == name:
+            return i + 1
+    return len(conditions)
 
 
 def round_price(value: Decimal) -> Decimal:
@@ -283,6 +302,24 @@ class BreakoutRetest(SetupDetector):
                 level_price=level.price,
             )
 
+        # Объём пробоя — только здесь, на готовом сигнале. В WAIT-ветки
+        # условие не попадает: движок выбирает WAIT по числу выполненных
+        # условий, а classify_signal отличает FORMING по единственному
+        # невыполненному, — лишнее условие там меняло бы вердикт.
+        breakout_volume = self._breakout_volume_ratio(context, breakout_index)
+        conditions.insert(
+            _index_after(conditions, "Пробой уровня"),
+            SignalCondition(
+                BREAKOUT_VOLUME_CONDITION_NAME,
+                breakout_volume is not None
+                and breakout_volume >= BREAKOUT_MIN_VOLUME_RATIO,
+                f"×{breakout_volume:.2f} от среднего за {VOLUME_RATIO_PERIOD} "
+                f"(порог {BREAKOUT_MIN_VOLUME_RATIO})"
+                if breakout_volume is not None
+                else "Объём не рассчитан",
+            ),
+        )
+
         return Signal(
             symbol=context.symbol,
             timeframe=context.timeframe,
@@ -293,6 +330,8 @@ class BreakoutRetest(SetupDetector):
             stop_loss=stop,
             take_profit_1=target_price,
             risk_reward=risk_reward,
+            breakout_volume_ratio=breakout_volume,
+            breakout_at=context.candles[breakout_index].open_time,
             confidence=self._confidence(context, level, confirmation.strength),
             confirmation=confirmation.description,
             note=f"Цель: {target_source}",
@@ -304,6 +343,18 @@ class BreakoutRetest(SetupDetector):
             ),
             conditions=conditions,
         )
+
+    @staticmethod
+    def _breakout_volume_ratio(
+        context: MarketContext, breakout_index: int
+    ) -> Decimal | None:
+        """Объём пробойной свечи к среднему за VOLUME_RATIO_PERIOD — тот же
+        расчёт, что у MarketContext.volume_ratio, но в точке пробоя, а не на
+        последней свече. None — если истории на окно не хватает."""
+        volumes = [c.volume for c in context.candles[: breakout_index + 1]]
+        if len(volumes) < VOLUME_RATIO_PERIOD:
+            return None
+        return volume_ratio(volumes, VOLUME_RATIO_PERIOD)[-1]
 
     @staticmethod
     def _retest_happened(
@@ -358,14 +409,6 @@ class BreakoutRetest(SetupDetector):
             candle = candles[i]
             if not is_strong_body(candle):
                 continue
-            if context.volume_ratio is not None and (
-                context.volume_ratio < BREAKOUT_MIN_VOLUME_RATIO
-            ):
-                # Объём проверяем по последнему значению: точное
-                # значение на момент пробоя потребовало бы хранить весь
-                # ряд, а сигнал всё равно оценивается сейчас.
-                pass
-
             for level in context.levels:
                 if looking_long and not level.is_resistance:
                     continue
@@ -584,6 +627,7 @@ class EMAPullback(SetupDetector):
             stop_loss=stop,
             take_profit_1=target_price,
             risk_reward=risk_reward,
+            ema50_distance_atr=distance / atr if atr else None,
             confidence=self._confidence(context, confirmation.strength),
             confirmation=confirmation.description,
             # 28.09: как у BreakoutRetest. На READY note в fingerprint не

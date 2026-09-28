@@ -107,6 +107,13 @@ class Signal:
     # Источник take_profit_1 (28.09): уровень или 2R по формуле. None — у
     # WAIT и у сигналов, собранных не детектором.
     target_source: TargetSource | None = None
+    # Признаки для отчёта исходов (28.09, scripts/signal_outcomes.py) —
+    # сканер пишет их в слот и снимок уведомления. Только у READY.
+    # BreakoutRetest: объём пробойной свечи к среднему за 20 и её open_time.
+    breakout_volume_ratio: Decimal | None = None
+    breakout_at: datetime | None = None
+    # EMAPullback: |цена − EMA50| / ATR — глубина касания.
+    ema50_distance_atr: Decimal | None = None
 
     confidence: int = 0            # 0..10
     confirmation: str = ""

@@ -460,3 +460,73 @@ class TestValidateGeometry:
         assert signal.direction is SignalDirection.WAIT
         assert signal.note == "геометрия нарушена"
         assert not signal.is_actionable
+
+
+# --- признаки сигнала и условие «Объём пробоя» (28.09) ----------------------
+
+BREAKOUT_INDEX = 216  # пробойная свеча breakout_retest_chart (объём 3000)
+
+
+def _expected_breakout_ratio(chart: list[Kline]) -> Decimal:
+    volumes = [c.volume for c in chart[: BREAKOUT_INDEX + 1]]
+    return volumes[-1] / (sum(volumes[-20:]) / 20)
+
+
+class TestBreakoutVolumeCondition:
+    def test_ready_carries_breakout_volume_and_time(self) -> None:
+        chart = breakout_retest_chart()
+        signal = BreakoutRetest().detect(build_context(chart))
+
+        assert signal.is_actionable, signal.note
+        assert signal.breakout_volume_ratio == _expected_breakout_ratio(chart)
+        assert signal.breakout_at == chart[BREAKOUT_INDEX].open_time
+        # Не последний объём: у последней свечи он другой.
+        assert signal.breakout_volume_ratio != build_context(chart).volume_ratio
+
+    def test_condition_follows_breakout_and_passes_on_spike(self) -> None:
+        signal = BreakoutRetest().detect(build_context(breakout_retest_chart()))
+        names = [c.name for c in signal.conditions]
+        i = names.index(setups.BREAKOUT_VOLUME_CONDITION_NAME)
+        assert names[i - 1] == "Пробой уровня"
+        condition = signal.conditions[i]
+        assert condition.passed
+        assert "порог 1.3" in condition.detail
+
+    def test_low_volume_shown_failed_but_signal_ready(self) -> None:
+        chart = breakout_retest_chart()
+        b = chart[BREAKOUT_INDEX]
+        chart[BREAKOUT_INDEX] = candle(
+            BREAKOUT_INDEX, float(b.open), float(b.high), float(b.low), float(b.close),
+            volume=1000,
+        )
+        signal = BreakoutRetest().detect(build_context(chart))
+
+        assert signal.is_actionable, signal.note
+        assert signal.breakout_volume_ratio is not None
+        assert signal.breakout_volume_ratio < setups.BREAKOUT_MIN_VOLUME_RATIO
+        [condition] = [
+            c for c in signal.conditions if c.name == setups.BREAKOUT_VOLUME_CONDITION_NAME
+        ]
+        assert not condition.passed
+        assert condition.detail.startswith(f"×{signal.breakout_volume_ratio:.2f}")
+
+    @pytest.mark.parametrize("cut", [3, 1])  # ретеста нет / подтверждения нет
+    def test_lock_wait_has_no_volume_condition(self, cut: int) -> None:
+        """В WAIT условия нет — иначе меняется выбор движка и FORMING."""
+        signal = BreakoutRetest().detect(build_context(breakout_retest_chart()[:-cut]))
+        assert signal.direction is SignalDirection.WAIT
+        assert setups.BREAKOUT_VOLUME_CONDITION_NAME not in [c.name for c in signal.conditions]
+        assert signal.breakout_volume_ratio is None
+        assert signal.breakout_at is None
+
+
+class TestEMAPullbackDistanceFeature:
+    @pytest.mark.parametrize("mirror", [False, True])
+    def test_ready_carries_ema50_distance_in_atr(self, mirror: bool) -> None:
+        context = pullback_context(mirror=mirror)
+        signal = EMAPullback().detect(context)
+        assert signal.is_actionable, signal.note
+        assert context.ema50 is not None and context.atr is not None
+        assert signal.ema50_distance_atr == abs(context.price - context.ema50) / context.atr
+        assert signal.breakout_volume_ratio is None
+        assert signal.breakout_at is None
