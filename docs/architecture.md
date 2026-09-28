@@ -27,7 +27,7 @@
 ### Смена бота — выполнено 28.09
 
 Новый бот — **`@postfactumTrade_bot`, id 8867032918**; старый `@elmir_trading_journal_bot`
-(id 8690367328) — токен отозвать. Токен только в `/opt/trading_bot/.env` через
+(id 8690367328) — бот удалён 28.09, токен недействителен. Токен только в `/opt/trading_bot/.env` через
 `env_file`, в образе его нет — смена без пересборки (правка `.env` + recreate).
 Подробности — `docs/handoff.md`, раздел 28.09. Ниже — исходное решение.
 
@@ -66,7 +66,7 @@
   (1.69 МБ с 06.09). На проде `LOG_JSON=false`
 - В логе старта видно `environment=dev` — что читает эту настройку, не выяснено
 - Бот `@postfactumTrade_bot`, id 8867032918 (с 28.09); прежний
-  `@elmir_trading_journal_bot`, id 8690367328 — токен отозвать
+  `@elmir_trading_journal_bot`, id 8690367328 — бот удалён 28.09, токен недействителен
 - Локально: `C:\Users\vladz\OneDrive\Desktop\trading\trading_bot`
 - Часовой пояс пользователя `Asia/Yekaterinburg`, сервер в UTC
 

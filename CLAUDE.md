@@ -83,7 +83,7 @@ docker compose exec bot python -m scripts.check_redis
 машине настроен.
 
 Бот — `@postfactumTrade_bot`, id 8867032918 (с 28.09; прежний
-`@elmir_trading_journal_bot`, id 8690367328 — токен отозвать). Токен и прочие секреты
+`@elmir_trading_journal_bot`, id 8690367328 — бот удалён 28.09, токен недействителен). Токен и прочие секреты
 приходят в контейнер только через `env_file: .env`, в образе их нет (`.dockerignore`).
 Смена токена — правка `/opt/trading_bot/.env` + `docker compose up -d --no-deps
 --force-recreate bot`, без пересборки. Токен не печатать: только префикс до `:` (id
