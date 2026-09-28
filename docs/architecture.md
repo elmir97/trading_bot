@@ -24,7 +24,12 @@
 Цепочка миграций: `ddace081d9fb` → `f3a92c7e1b0d` → `b4c1e9a7d203` → `4f3837b79361`
 → `c8e2d51a9f04`.
 
-### Смена бота — решено, отложено до окна между 15.5 и 15.7
+### Смена бота — выполнено 28.09
+
+Новый бот — **`@postfactumTrade_bot`, id 8867032918**; старый `@elmir_trading_journal_bot`
+(id 8690367328) — токен отозвать. Токен только в `/opt/trading_bot/.env` через
+`env_file`, в образе его нет — смена без пересборки (правка `.env` + recreate).
+Подробности — `docs/handoff.md`, раздел 28.09. Ниже — исходное решение.
 
 Владелец хочет другой публичный адрес. **Username бота в Telegram не меняется** — он
 задаётся один раз при создании; в BotFather есть только Edit Name (отображаемое имя),
@@ -60,7 +65,8 @@
 - Логи: `/opt/trading_bot/logs/bot.log` смонтирован в хост, ротации нет
   (1.69 МБ с 06.09). На проде `LOG_JSON=false`
 - В логе старта видно `environment=dev` — что читает эту настройку, не выяснено
-- Бот `@elmir_trading_journal_bot`, id 8690367328 (планируется замена)
+- Бот `@postfactumTrade_bot`, id 8867032918 (с 28.09); прежний
+  `@elmir_trading_journal_bot`, id 8690367328 — токен отозвать
 - Локально: `C:\Users\vladz\OneDrive\Desktop\trading\trading_bot`
 - Часовой пояс пользователя `Asia/Yekaterinburg`, сервер в UTC
 
