@@ -254,6 +254,9 @@ class ReconciliationKind(StrEnum):
     QUANTITY_MISMATCH = "QUANTITY_MISMATCH"
     STOP_MISSING = "STOP_MISSING"
     AMBIGUOUS = "AMBIGUOUS"
+    # 28.09: при полном закрытии PnL журнала разошёлся с profit биржи минус
+    # комиссии больше чем на 0.01R. Журнал не правится.
+    PNL_MISMATCH = "PNL_MISMATCH"
 
 
 ANOMALY_KINDS = frozenset({
@@ -261,6 +264,7 @@ ANOMALY_KINDS = frozenset({
     ReconciliationKind.QUANTITY_MISMATCH,
     ReconciliationKind.STOP_MISSING,
     ReconciliationKind.AMBIGUOUS,
+    ReconciliationKind.PNL_MISMATCH,
 })
 
 

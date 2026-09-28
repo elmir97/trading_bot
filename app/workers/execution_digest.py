@@ -138,6 +138,8 @@ class ExecutionDigestStats:
     # UNKNOWN/PENDING — не входы, в средние не идут.
     entry_risk_percents: list[Decimal] = field(default_factory=list)
     entry_risk_rewards: list[Decimal] = field(default_factory=list)
+    # 28.09: RR с комиссией — только у строк после миграции 19c5c0deedca.
+    entry_risk_rewards_net: list[Decimal] = field(default_factory=list)
     entry_drift_percents: list[Decimal] = field(default_factory=list)
     # Проскальзывание исполнения: цена на «Да» (execution_orders.price) →
     # исполнение (trades.entry_price при fill_confirmed), в процентах, «+» —
@@ -289,6 +291,8 @@ def _collect_entry_numbers(
         _check_risk_deviation(stats, row, target_risk_percent)
     if row.risk_reward is not None:
         stats.entry_risk_rewards.append(row.risk_reward)
+    if row.risk_reward_net is not None:
+        stats.entry_risk_rewards_net.append(row.risk_reward_net)
     if row.price_drift_percent is not None:
         stats.entry_drift_percents.append(row.price_drift_percent)
 
@@ -314,6 +318,7 @@ _RECONCILER_LABELS = {
     ReconciliationKind.QUANTITY_MISMATCH: "объём не сходится",
     ReconciliationKind.STOP_MISSING: "позиция без стопа",
     ReconciliationKind.AMBIGUOUS: "неоднозначно",
+    ReconciliationKind.PNL_MISMATCH: "PnL не сходится с биржей",
     ReconciliationKind.CLOSED_STOP_LOSS: "закрыто по стопу",
     ReconciliationKind.CLOSED_TAKE_PROFIT: "по тейку",
     ReconciliationKind.CLOSED_OUTSIDE_BOT: "вне бота",
@@ -496,7 +501,11 @@ def render_execution_digest(
         )
     if stats.entry_risk_rewards:
         avg_rr = sum(stats.entry_risk_rewards, ZERO) / len(stats.entry_risk_rewards)
-        lines.append(f"Средний RR: {fmt_decimal(avg_rr)}")
+        net = stats.entry_risk_rewards_net
+        net_note = (
+            f" · с комиссией {fmt_decimal(sum(net, ZERO) / len(net))}" if net else ""
+        )
+        lines.append(f"Средний RR: {fmt_decimal(avg_rr)}{net_note}")
     if stats.entry_drift_percents:
         avg_drift = sum(stats.entry_drift_percents, ZERO) / len(stats.entry_drift_percents)
         lines.append(

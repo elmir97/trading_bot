@@ -361,6 +361,7 @@ class SetupScanner:
         record.stop_loss = signal.stop_loss
         record.take_profit = signal.take_profit_1
         record.confidence = signal.confidence if level is SignalLevel.READY else None
+        record.target_source = signal.target_source if level is SignalLevel.READY else None
         # Точность нужна и карточке, и графику — запрашивается один раз (кэш
         # символов живёт час). FORMING цен в тексте не показывает.
         precision = (

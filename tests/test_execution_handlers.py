@@ -75,6 +75,7 @@ from app.trading.enums import (
     OrderType,
     SignalDirection,
     SignalLevel,
+    TargetSource,
     TradeSide,
     TradeStatus,
 )
@@ -2815,3 +2816,50 @@ async def test_margin_type_read_on_card_not_reread_on_confirm(ctx, bot, monkeypa
     )
     assert client.margin_type_symbols_seen == [signal.symbol]
     assert len(await _orders_for_signal(session, signal.id)) == 3
+
+
+# ---------------------------------------------------------------------------
+# 28.09, блоки A и B в БД: RR с комиссией в строке входа, «Цель» на карточке
+# ---------------------------------------------------------------------------
+
+
+async def test_dry_run_entry_row_keeps_rr_net(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """ENTRY-строка хранит RR с комиссией рядом с RR без неё; у ног SL/TP
+    обоих нет."""
+    dp, session, user, client, _redis, _settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _notify(session, signal)
+
+    await _open_and_confirm(dp, bot, notification, user)
+
+    orders = {o.role: o for o in await _orders_for_signal(session, signal.id)}
+    entry = orders[OrderRole.ENTRY]
+    assert entry.risk_reward is not None and entry.risk_reward_net is not None
+    assert D("0") < entry.risk_reward_net < entry.risk_reward
+    assert orders[OrderRole.STOP_LOSS].risk_reward_net is None
+
+
+async def test_card_target_line_only_with_source(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Снимок с источником — «Цель: уровень X» на карточке; уведомление до
+    миграции (target_source NULL) — строки «Цель» нет."""
+    dp, session, user, client, _redis, _settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    with_source = _signal(user.id, target_source=TargetSource.LEVEL)
+    old = _signal(user.id, timeframe="1h", fingerprint="fp-old")
+    session.add_all([with_source, old])
+    await session.flush()
+    notification = await _notify(session, with_source)
+    old_notification = await _notify(session, old)
+    assert notification.target_source is TargetSource.LEVEL
+    assert old_notification.target_source is None
+
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
+    await _feed(dp, bot, 2, make_callback(f"exn:open:{old_notification.id}", message_id=2))
+
+    cards = [t for t in bot.recorder.sent_texts() if "Цена сейчас" in t]
+    assert len(cards) == 2
+    assert "\nЦель: уровень 110" in cards[0]
+    assert "Цель" not in cards[1]

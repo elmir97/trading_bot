@@ -28,7 +28,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base, IntPKMixin, PriceNumeric, TimestampMixin
-from app.trading.enums import SignalDirection, SignalLevel, SignalRecordStatus
+from app.trading.enums import SignalDirection, SignalLevel, SignalRecordStatus, TargetSource
 
 if TYPE_CHECKING:
     from app.database.models.user import User
@@ -78,6 +78,10 @@ class SignalRecord(IntPKMixin, TimestampMixin, Base):
     stop_loss: Mapped[Decimal | None] = mapped_column(PriceNumeric)
     take_profit: Mapped[Decimal | None] = mapped_column(PriceNumeric)
     confidence: Mapped[int | None] = mapped_column(SmallInteger)
+    # 28.09: источник цели READY (уровень / 2R по формуле); у FORMING — NULL.
+    target_source: Mapped[TargetSource | None] = mapped_column(
+        Enum(TargetSource, native_enum=False, length=16)
+    )
 
     # Готовый текст уведомления — рендерится один раз при обнаружении,
     # чтобы формат сообщения не зависел от того, что доживёт до отправки.

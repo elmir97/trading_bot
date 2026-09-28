@@ -23,7 +23,7 @@ triggerOrderId = orderId условника (снято живьём 27.09, SOL 
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 
@@ -74,6 +74,9 @@ class ExitFill:
     executed_at: datetime
     reason: str
     kind: ReconciliationKind
+    # profit биржи по ордеру (allOrders), без комиссий — в trade_fills для
+    # сверки PnL при полном закрытии.
+    realized_pnl: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +178,7 @@ def decide_trade(
             ExitFill(
                 order_id=order.order_id, price=order.avg_price, quantity=order.executed_qty,
                 fee=order.fee, executed_at=order.updated_at, reason=reason, kind=kind,
+                realized_pnl=order.realized_pnl,
             )
         )
 
@@ -192,11 +196,46 @@ def decide_trade(
     decision.closes_fully = remaining_on_exchange == ZERO
     if not decision.closes_fully:
         for i, e in enumerate(exits):
-            exits[i] = ExitFill(
-                e.order_id, e.price, e.quantity, e.fee, e.executed_at, e.reason,
-                ReconciliationKind.PARTIAL_CLOSE,
-            )
+            exits[i] = replace(e, kind=ReconciliationKind.PARTIAL_CLOSE)
     return decision
+
+
+# Допуск сверки PnL — доля 1R (решение 28.09).
+PNL_TOLERANCE_R = Decimal("0.01")
+
+
+def pnl_mismatch(
+    *,
+    trade_id: int,
+    symbol: str,
+    journal_pnl: Decimal,
+    fees: Decimal,
+    exits_realized_pnl: list[Decimal],
+    risk_amount: Decimal,
+) -> Discrepancy | None:
+    """Полностью закрытая сделка: PnL журнала против profit биржи по всем
+    выходам минус все комиссии (вход и выходы — trade.fees). Расхождение
+    больше PNL_TOLERANCE_R × 1R — аномалия, журнал не правится.
+
+    Выходы без profit биржи (ручные, до 28.09) и неизвестный 1R вызывающий
+    отсекает сам — сюда приходят только сравнимые числа."""
+    tolerance = risk_amount * PNL_TOLERANCE_R
+    exchange_pnl = sum(exits_realized_pnl, ZERO) - fees
+    diff = journal_pnl - exchange_pnl
+    if abs(diff) <= tolerance:
+        return None
+    return Discrepancy(
+        ReconciliationKind.PNL_MISMATCH, f"pnl:{trade_id}", symbol,
+        f"PnL журнала {_num(journal_pnl)}, по бирже {_num(exchange_pnl)} (profit "
+        f"{_num(sum(exits_realized_pnl, ZERO))} − комиссии {_num(fees)}), разница "
+        f"{_num(diff)} больше {PNL_TOLERANCE_R}R ({_num(tolerance)})",
+        trade_id=trade_id,
+    )
+
+
+def _num(value: Decimal) -> str:
+    text = f"{value.quantize(Decimal('0.00000001')):f}"
+    return text.rstrip("0").rstrip(".") if "." in text else text
 
 
 def stop_missing(

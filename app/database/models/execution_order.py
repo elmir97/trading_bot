@@ -140,6 +140,9 @@ class ExecutionOrder(IntPKMixin, TimestampMixin, Base):
     risk_amount: Mapped[Decimal | None] = mapped_column(PriceNumeric)
     risk_percent: Mapped[Decimal | None] = mapped_column(PriceNumeric)
     risk_reward: Mapped[Decimal | None] = mapped_column(PriceNumeric)
+    # 28.09: RR с taker-комиссией (как на карточке и в гварде). risk_reward
+    # выше — без комиссии, как раньше.
+    risk_reward_net: Mapped[Decimal | None] = mapped_column(PriceNumeric)
 
     user: Mapped[User] = relationship()
     signal: Mapped[SignalRecord | None] = relationship()

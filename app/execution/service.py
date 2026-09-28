@@ -732,6 +732,7 @@ def build_execution_orders(
             risk_amount=order.risk_amount,
             risk_percent=order.risk_percent,
             risk_reward=order.risk_reward,
+            risk_reward_net=order.risk_reward_net,
         ),
         ExecutionOrder(
             user_id=order.user_id,
@@ -803,6 +804,7 @@ def build_entry_order_pending(
         risk_amount=order.risk_amount,
         risk_percent=order.risk_percent,
         risk_reward=order.risk_reward,
+        risk_reward_net=order.risk_reward_net,
     )
 
 
@@ -824,6 +826,7 @@ def build_observation_order(
     risk_amount: Decimal | None = None,
     risk_percent: Decimal | None = None,
     risk_reward: Decimal | None = None,
+    risk_reward_net: Decimal | None = None,
     error_code: str | None = None,
     error_message: str | None = None,
     stage: ObservationStage | None = None,
@@ -852,6 +855,7 @@ def build_observation_order(
         risk_amount=risk_amount,
         risk_percent=risk_percent,
         risk_reward=risk_reward,
+        risk_reward_net=risk_reward_net,
         error_code=error_code,
         error_message=error_message,
         stage=stage.value if stage is not None else None,
@@ -908,4 +912,5 @@ def build_observation_order_from_quote(
         risk_amount=order.risk_amount,
         risk_percent=order.risk_percent,
         risk_reward=order.risk_reward,
+        risk_reward_net=order.risk_reward_net,
     )

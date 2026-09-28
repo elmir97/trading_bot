@@ -52,6 +52,7 @@ from app.execution.reconciler import (
     exchange_position,
     needs_history,
     orphan_positions,
+    pnl_mismatch,
     resolve_entry,
     stop_missing,
 )
@@ -264,6 +265,7 @@ class Reconciler:
                         exit_reason=exit_fill.reason,
                         closed_at=exit_fill.executed_at,
                         external_fill_id=exit_fill.order_id,
+                        exchange_realized_pnl=exit_fill.realized_pnl,
                     )
             except (IntegrityError, JournalError):
                 logger.warning(
@@ -302,6 +304,50 @@ class Reconciler:
             await self._resolve_missing(
                 ctx, ReconciliationKind.STOP_MISSING, set(), prefix=f"stop_missing:{trade.id}"
             )
+            # closed_at, не status: mypy сузил status до OPEN проверкой выше,
+            # а close_trade меняет его на месте.
+            if trade.closed_at is not None:
+                await self._check_pnl(ctx, trade)
+
+    async def _check_pnl(self, ctx: _UserCtx, trade: Trade) -> None:
+        """28.09: PnL журнала против биржи при полном закрытии (PNL_MISMATCH).
+        Не сверяем, если у части выходов нет profit биржи (ручные, записанные
+        до 28.09) или 1R неизвестен — это не расхождение, а нехватка данных."""
+        exits = [f for f in trade.fills if f.fill_side is FillSide.EXIT]
+        realized = [f.exchange_realized_pnl for f in exits]
+        entry = await ExecutionOrderRepository(ctx.session).entry_for_trade(
+            ctx.user_id, trade.id
+        )
+        risk_amount = entry.risk_amount if entry is not None else None
+        if (risk_amount is None or risk_amount <= 0) and trade.entry_price and trade.stop_loss:
+            entry_qty = sum(
+                (f.quantity for f in trade.fills if f.fill_side is FillSide.ENTRY), Decimal(0)
+            )
+            risk_amount = abs(trade.entry_price - trade.stop_loss) * entry_qty
+        if (
+            trade.pnl is None
+            or not exits
+            or any(value is None for value in realized)
+            or risk_amount is None
+            or risk_amount <= 0
+        ):
+            logger.info(
+                "PnL с биржей не сверен: не хватает данных",
+                extra={"trade_id": trade.id, "exits": len(exits)},
+            )
+            return
+        found = pnl_mismatch(
+            trade_id=trade.id,
+            symbol=trade.symbol,
+            journal_pnl=trade.pnl,
+            fees=trade.fees,
+            exits_realized_pnl=[value for value in realized if value is not None],
+            risk_amount=risk_amount,
+        )
+        if found is not None:
+            # Сделка закрыта — ждать исчезновения расхождения нечего: событие
+            # сразу разрешено, уведомление одно.
+            await self._discrepancy(ctx, found, resolve_now=True)
 
     @staticmethod
     def _close_text(trade: Trade, exit_fill: ExitFill, asset: str) -> str:
@@ -453,7 +499,12 @@ class Reconciler:
             event.notified_at = datetime.now(UTC)
 
     async def _discrepancy(
-        self, ctx: _UserCtx, found: Discrepancy, *, alarm: bool = False
+        self,
+        ctx: _UserCtx,
+        found: Discrepancy,
+        *,
+        alarm: bool = False,
+        resolve_now: bool = False,
     ) -> None:
         """Расхождение без однозначного факта: журнал не правится, одно
         уведомление на открытое расхождение (дедуп по dedup_key)."""
@@ -466,6 +517,7 @@ class Reconciler:
                 user_id=ctx.user_id, trade_id=found.trade_id,
                 execution_order_id=found.execution_order_id, symbol=found.symbol,
                 kind=found.kind, dedup_key=found.dedup_key, detail=found.detail,
+                resolved_at=ctx.now if resolve_now else None,
             )
         )
         await repo.flush()

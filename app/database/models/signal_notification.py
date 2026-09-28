@@ -23,7 +23,7 @@ from sqlalchemy import DateTime, Enum, ForeignKey, Index, SmallInteger, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base, IntPKMixin, PriceNumeric
-from app.trading.enums import SignalDirection, SignalLevel
+from app.trading.enums import SignalDirection, SignalLevel, TargetSource
 
 if TYPE_CHECKING:
     from app.database.models.signal import SignalRecord
@@ -61,6 +61,11 @@ class SignalNotification(IntPKMixin, Base):
     stop_loss: Mapped[Decimal | None] = mapped_column(PriceNumeric)
     take_profit: Mapped[Decimal | None] = mapped_column(PriceNumeric)
     confidence: Mapped[int | None] = mapped_column(SmallInteger)
+    # 28.09: источник цели — строка «Цель: …» на карточке. NULL у
+    # уведомлений до миграции 19c5c0deedca — строки нет.
+    target_source: Mapped[TargetSource | None] = mapped_column(
+        Enum(TargetSource, native_enum=False, length=16)
+    )
 
     notified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     # notified_at + TTL сигнала (Settings.setup_scanner_ttl_hours), фиксируется
@@ -92,6 +97,7 @@ class SignalNotification(IntPKMixin, Base):
             stop_loss=slot.stop_loss,
             take_profit=slot.take_profit,
             confidence=slot.confidence,
+            target_source=slot.target_source,
             notified_at=notified_at,
             expires_at=expires_at,
         )

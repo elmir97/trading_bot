@@ -64,6 +64,21 @@ class ExecutionOrderRepository:
         )
         return list(await self.session.scalars(stmt))
 
+    async def entry_for_trade(self, user_id: int, trade_id: int) -> ExecutionOrder | None:
+        """28.09: ENTRY-строка входа сделки — её risk_amount задаёт 1R для
+        сверки PnL с биржей (PNL_MISMATCH)."""
+        stmt = (
+            select(ExecutionOrder)
+            .where(
+                ExecutionOrder.user_id == user_id,
+                ExecutionOrder.trade_id == trade_id,
+                ExecutionOrder.role == OrderRole.ENTRY,
+            )
+            .order_by(ExecutionOrder.id.desc())
+            .limit(1)
+        )
+        return (await self.session.scalars(stmt)).first()
+
     async def list_unresolved_entries(self, user_id: int) -> list[ExecutionOrder]:
         """Шаг 15.6: входы с неизвестным исходом — UNKNOWN, PENDING (процесс
         упал между коммитом и ответом биржи) и SUBMITTED без подтверждения.

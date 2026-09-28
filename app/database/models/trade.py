@@ -250,6 +250,10 @@ class TradeFill(IntPKMixin, Base):
         DateTime(timezone=True), nullable=False
     )
     external_fill_id: Mapped[str | None] = mapped_column(String(64))
+    # 28.09: profit биржи по закрывающему ордеру (allOrders), без комиссий —
+    # пишет reconciler. По ним при полном закрытии сверяется PnL журнала
+    # (PNL_MISMATCH). NULL у входов, ручных и старых выходов.
+    exchange_realized_pnl: Mapped[Decimal | None] = mapped_column(MoneyNumeric)
 
     trade: Mapped[Trade] = relationship(back_populates="fills")
 

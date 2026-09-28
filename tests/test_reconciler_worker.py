@@ -23,6 +23,7 @@ from sqlalchemy.orm import selectinload
 from app.core.config import Settings
 from app.core.security import SecretCipher
 from app.database.models.execution_order import ExecutionOrder
+from app.database.models.reconciliation_event import ReconciliationEvent
 from app.database.models.signal import SignalRecord
 from app.database.models.signal_notification import SignalNotification
 from app.database.models.trade import Trade
@@ -37,6 +38,7 @@ from app.trading.enums import (
     OrderSide,
     OrderStatus,
     OrderType,
+    ReconciliationKind,
     SignalDirection,
     SignalLevel,
     TradeSide,
@@ -182,7 +184,7 @@ def _row(user_id: int, nid: int, symbol: str, role: OrderRole, status: OrderStat
 
 async def _bot_trade(  # type: ignore[no-untyped-def]
     session, user_id: int, symbol: str, *, entry: str, qty: str, entry_id: str,
-    stop_id: str, take_id: str, opened_at: datetime, fee: str,
+    stop_id: str, take_id: str, opened_at: datetime, fee: str, risk_amount: str | None = None,
 ) -> Trade:
     n = await _notification(session, user_id, symbol)
     trade = await TradeJournal(TradeRepository(session)).open_trade(
@@ -192,7 +194,7 @@ async def _bot_trade(  # type: ignore[no-untyped-def]
     )
     session.add_all([
         _row(user_id, n.id, symbol, OrderRole.ENTRY, OrderStatus.FILLED, entry_id,
-             trade_id=trade.id),
+             trade_id=trade.id, risk_amount=D(risk_amount) if risk_amount else None),
         _row(user_id, n.id, symbol, OrderRole.STOP_LOSS, OrderStatus.SUBMITTED, stop_id),
         _row(user_id, n.id, symbol, OrderRole.TAKE_PROFIT, OrderStatus.SUBMITTED, take_id),
     ])
@@ -200,10 +202,11 @@ async def _bot_trade(  # type: ignore[no-untyped-def]
     return trade
 
 
-async def _seed_live(session, user_id: int) -> tuple[int, int]:  # type: ignore[no-untyped-def]
+async def _seed_live(session, user_id: int, sol_entry: str = "123.021") -> tuple[int, int]:  # type: ignore[no-untyped-def]
+    # risk_amount — живой риск SOL #4 с карточки: 1R для сверки PnL (28.09).
     sol = await _bot_trade(
-        session, user_id, "SOL-USDT", entry="123.021", qty="1362.07", entry_id=SOL_ENTRY,
-        stop_id=SOL_STOP, take_id=SOL_TAKE, fee="83.781520",
+        session, user_id, "SOL-USDT", entry=sol_entry, qty="1362.07", entry_id=SOL_ENTRY,
+        stop_id=SOL_STOP, take_id=SOL_TAKE, fee="83.781520", risk_amount="1766.609542",
         opened_at=datetime(2026, 9, 27, 14, 15, 30, 300000, tzinfo=UTC),
     )
     link = await _bot_trade(
@@ -345,3 +348,102 @@ async def test_unknown_entry_inside_window_untouched(ctx) -> None:  # type: igno
 
     assert (await _rows(db, "ADA-USDT"))[OrderRole.ENTRY].status is OrderStatus.UNKNOWN
     assert "/openApi/swap/v2/trade/order" not in demo.calls
+
+
+# ---------------------------------------------------------------------------
+# 28.09, блок C: PnL журнала против биржи при полном закрытии
+# ---------------------------------------------------------------------------
+
+
+async def _events(db, user_id: int) -> list[ReconciliationEvent]:  # type: ignore[no-untyped-def]
+    async with db.session() as s:
+        stmt = select(ReconciliationEvent).where(ReconciliationEvent.user_id == user_id)
+        return list(await s.scalars(stmt))
+
+
+async def test_sol_exit_keeps_exchange_profit_and_pnl_matches(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Живой SOL #4: profit биржи −1920.2749, минус комиссии 166.602903 —
+    −2086.877803; журнал −2087.121603. Разница 0.24 < 0.01R (17.67) —
+    расхождения нет, лишнего уведомления нет."""
+    settings, db, session, user, _demo = ctx
+    sol_id, _link_id = await _seed_live(session, user.id)
+    bot = FakeBot()
+
+    await _run_reconciler(settings, db, bot)
+
+    sol = await _trade(db, sol_id)
+    assert sol.pnl == D("-2087.121603")
+    [exit_fill] = [f for f in sol.fills if f.external_fill_id == SOL_CHILD]
+    assert exit_fill.exchange_realized_pnl == D("-1920.2749")
+    [entry_fill] = [f for f in sol.fills if f.external_fill_id == SOL_ENTRY]
+    assert entry_fill.exchange_realized_pnl is None
+    assert not [e for e in await _events(db, user.id) if e.kind is ReconciliationKind.PNL_MISMATCH]
+    assert len(bot.sent) == 1
+
+
+async def test_pnl_mismatch_is_anomaly_notified_once(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Вход в журнале 123.000 вместо биржевых 123.021: PnL журнала на 28.36
+    выше биржевого — больше 0.01R. Журнал не правится, событие
+    PNL_MISMATCH сразу разрешено (сделка закрыта), уведомление одно."""
+    settings, db, session, user, _demo = ctx
+    sol_id, _link_id = await _seed_live(session, user.id, sol_entry="123.000")
+    bot = FakeBot()
+
+    await _run_reconciler(settings, db, bot)
+
+    sol = await _trade(db, sol_id)
+    assert sol.status is TradeStatus.CLOSED
+    assert sol.pnl == D("-2058.518133")  # журнал не правится
+    [event] = [e for e in await _events(db, user.id) if e.kind is ReconciliationKind.PNL_MISMATCH]
+    assert event.trade_id == sol_id
+    assert event.dedup_key == f"pnl:{sol_id}"
+    assert event.resolved_at is not None and event.notified_at is not None
+    assert "PnL журнала -2058.518133, по бирже -2086.877803" in event.detail
+    assert len(bot.sent) == 2
+    assert "Сверка с биржей, SOL-USDT: PnL журнала" in bot.sent[1]
+
+    await _run_reconciler(settings, db, bot)
+    assert len(bot.sent) == 2
+
+
+async def _drop_entry_risk(session, trade_id: int, stop_loss: str | None) -> None:  # type: ignore[no-untyped-def]
+    from sqlalchemy import update
+
+    await session.execute(
+        update(ExecutionOrder)
+        .where(ExecutionOrder.trade_id == trade_id, ExecutionOrder.role == OrderRole.ENTRY)
+        .values(risk_amount=None)
+    )
+    await session.execute(
+        update(Trade).where(Trade.id == trade_id)
+        .values(stop_loss=D(stop_loss) if stop_loss else None)
+    )
+    await session.commit()
+
+
+async def test_pnl_1r_falls_back_to_stop_distance(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Нет risk_amount у ENTRY — 1R = |вход − стоп| × объём входа:
+    |123.000 − 121.646| × 1362.07 = 1844.28, допуск 18.44 < 28.36."""
+    settings, db, session, user, _demo = ctx
+    sol_id, _link_id = await _seed_live(session, user.id, sol_entry="123.000")
+    await _drop_entry_risk(session, sol_id, "121.646")
+    bot = FakeBot()
+
+    await _run_reconciler(settings, db, bot)
+
+    [event] = [e for e in await _events(db, user.id) if e.kind is ReconciliationKind.PNL_MISMATCH]
+    assert "больше 0.01R (18.44" in event.detail
+
+
+async def test_pnl_not_checked_without_1r(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Ни risk_amount, ни стопа — сверять не с чем: не расхождение."""
+    settings, db, session, user, _demo = ctx
+    sol_id, _link_id = await _seed_live(session, user.id, sol_entry="123.000")
+    await _drop_entry_risk(session, sol_id, None)
+    bot = FakeBot()
+
+    await _run_reconciler(settings, db, bot)
+
+    assert (await _trade(db, sol_id)).status is TradeStatus.CLOSED
+    assert not [e for e in await _events(db, user.id) if e.kind is ReconciliationKind.PNL_MISMATCH]
+    assert len(bot.sent) == 1

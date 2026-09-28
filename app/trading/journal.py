@@ -181,6 +181,7 @@ class TradeJournal:
         fee: Decimal = ZERO,
         executed_at: datetime | None = None,
         external_fill_id: str | None = None,
+        exchange_realized_pnl: Decimal | None = None,
     ) -> Trade:
         """Добавляет исполнение и пересчитывает агрегаты.
 
@@ -202,6 +203,7 @@ class TradeJournal:
                 fee=fee,
                 executed_at=executed_at or datetime.now(UTC),
                 external_fill_id=external_fill_id,
+                exchange_realized_pnl=exchange_realized_pnl,
             )
         )
         self.recalculate(trade)
@@ -220,6 +222,7 @@ class TradeJournal:
         exit_reason: str | None = None,
         closed_at: datetime | None = None,
         external_fill_id: str | None = None,
+        exchange_realized_pnl: Decimal | None = None,
     ) -> Trade:
         """Закрывает сделку целиком или частично.
 
@@ -253,6 +256,7 @@ class TradeJournal:
             fee=fee,
             executed_at=moment,
             external_fill_id=external_fill_id,
+            exchange_realized_pnl=exchange_realized_pnl,
         )
 
         if exit_reason:

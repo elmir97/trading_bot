@@ -27,7 +27,13 @@ from app.database.repositories.user import UserRepository
 from app.database.session import Database
 from app.exchanges.base import ExchangeUnavailableError, Kline, SymbolInfo
 from app.services.user_service import UserService
-from app.trading.enums import MarketStructure, SignalDirection, SignalLevel, SignalRecordStatus
+from app.trading.enums import (
+    MarketStructure,
+    SignalDirection,
+    SignalLevel,
+    SignalRecordStatus,
+    TargetSource,
+)
 from app.workers.scanner import SetupScanner
 from tests.conftest import cleanup_user
 
@@ -751,3 +757,34 @@ async def test_forming_notification_writes_snapshot_without_button(ctx) -> None:
     assert n.level is SignalLevel.FORMING
     assert n.direction is None
     assert bot.sent_markups == [None]
+
+
+# --- 28.09, блок B: источник цели в слоте и снимке ------------------------
+
+
+async def test_ready_target_source_on_slot_and_snapshot(ctx) -> None:  # type: ignore[no-untyped-def]
+    user, session, repo, scanner, _bot, _ = ctx
+    signal = replace(_ready_signal(), target_source=TargetSource.FORMULA_2R)
+
+    await scanner._handle_signal(
+        repo, user, signal, "BTC-USDT", "4h", want_ready=True, want_forming=True
+    )
+    await session.flush()
+
+    record = await repo.get_active_slot(user.id, "BTC-USDT", "4h", SignalLevel.READY)
+    assert record is not None
+    assert record.target_source is TargetSource.FORMULA_2R
+    assert "Цель: 2R по формуле — 106\n" in record.detail
+    [n] = await _notifications(session, user.id)
+    assert n.target_source is TargetSource.FORMULA_2R
+
+
+async def test_forming_slot_has_no_target_source(ctx) -> None:  # type: ignore[no-untyped-def]
+    user, session, repo, scanner, _bot, _ = ctx
+    await scanner._handle_signal(
+        repo, user, _forming_signal(), "BTC-USDT", "4h", want_ready=True, want_forming=True
+    )
+    await session.flush()
+    record = await repo.get_active_slot(user.id, "BTC-USDT", "4h", SignalLevel.FORMING)
+    assert record is not None
+    assert record.target_source is None

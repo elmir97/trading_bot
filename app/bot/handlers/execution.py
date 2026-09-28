@@ -44,6 +44,7 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.analysis.signals import target_line
 from app.bot.formatting import fmt_amount, fmt_price, fmt_qty, fmt_ratio
 from app.bot.handlers.exchange import _describe, _market_cache
 from app.bot.keyboards.execution import ExecutionCB, confirm_keyboard, expired_keyboard
@@ -360,6 +361,13 @@ def render_confirmation(
             f" · с комиссией 1:{fmt_ratio(order.risk_reward_net)}"
             if order.risk_reward_net is not None
             else ""
+        ),
+        # 28.09: источник цели из снимка уведомления; у старых — строки нет.
+        *(
+            [target_line(fmt_price(notification.take_profit, price_precision),
+                         notification.target_source)]
+            if notification.target_source is not None
+            else []
         ),
         "",
         f"Открытых позиций сейчас: {quote.open_positions_count} из "
