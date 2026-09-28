@@ -654,11 +654,34 @@ class TestReconcilerInDigest:
     """Шаг 15.6: расхождения reconciler — «Аномалии», факты — строка сводки."""
 
     @staticmethod
-    def _event(kind):  # type: ignore[no-untyped-def]
+    def _event(kind, *, delivered: bool = True, symbol: str = "LINK-USDT"):  # type: ignore[no-untyped-def]
+        # 28.09: недоставленное — отдельная аномалия; по умолчанию доставлено.
+        from datetime import UTC, datetime
+
         from app.database.models.reconciliation_event import ReconciliationEvent
 
         return ReconciliationEvent(
-            user_id=1, symbol="LINK-USDT", kind=kind, dedup_key=f"k:{kind}", detail="d",
+            user_id=1, symbol=symbol, kind=kind, dedup_key=f"k:{kind}", detail="d",
+            notified_at=datetime.now(UTC) if delivered else None,
+        )
+
+    def test_undelivered_notifications_are_an_anomaly(self) -> None:
+        """28.09: уведомление сверки так и не ушло (ещё в переотправке или
+        отказ) — строка в «Аномалиях» с последним по виду и символу."""
+        from app.trading.enums import ReconciliationKind as K
+
+        stats = build_stats(
+            [], target_risk_percent=None,
+            reconciler_events=[
+                self._event(K.CLOSED_TAKE_PROFIT),
+                self._event(K.STOP_MISSING, delivered=False, symbol="LINK-USDT"),
+                self._event(K.CLOSED_STOP_LOSS, delivered=False, symbol="SOL-USDT"),
+            ],
+        )
+        anomalies = detect_anomalies(stats, max_price_drift_ratio=D("0.3"))
+        assert (
+            "уведомления сверки не доставлены — 2 (последнее: закрыто по стопу, SOL-USDT)"
+            in anomalies
         )
 
     def test_discrepancies_are_anomalies(self) -> None:

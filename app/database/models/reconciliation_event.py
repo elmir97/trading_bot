@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Index, String, Text, func, text
+from sqlalchemy import DateTime, Enum, ForeignKey, Index, Integer, String, Text, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database.base import Base, IntPKMixin
@@ -33,6 +33,12 @@ class ReconciliationEvent(IntPKMixin, Base):
             postgresql_where=text("resolved_at IS NULL"),
         ),
         Index("ix_reconciliation_events_user_created", "user_id", "created_at"),
+        # 28.09: выборка на переотправку — reconciler каждый цикл.
+        Index(
+            "ix_reconciliation_events_undelivered",
+            "user_id",
+            postgresql_where=text("notified_at IS NULL AND gave_up_at IS NULL"),
+        ),
     )
 
     user_id: Mapped[int] = mapped_column(
@@ -59,6 +65,16 @@ class ReconciliationEvent(IntPKMixin, Base):
     )
     notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # 28.09, уведомления «хотя бы один раз» (app/execution/redelivery.py):
+    # notify_text — полный текст сообщения, detail остаётся коротким для
+    # сводки; attempts — для диагностики; last_attempt_at — расписание
+    # редкого режима; gave_up_at — отказ (старше 24 ч или бот заблокирован).
+    notify_text: Mapped[str | None] = mapped_column(Text)
+    attempts: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    gave_up_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     def __repr__(self) -> str:
         return f"<ReconciliationEvent {self.kind} {self.dedup_key}>"

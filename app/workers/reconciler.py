@@ -33,6 +33,7 @@ from app.core.security import SecretCipher
 from app.database.models.execution_order import ExecutionOrder
 from app.database.models.reconciliation_event import ReconciliationEvent
 from app.database.models.trade import Trade
+from app.database.models.user import User
 from app.database.repositories.execution_order import ExecutionOrderRepository
 from app.database.repositories.reconciliation_event import ReconciliationEventRepository
 from app.database.repositories.trade import TradeRepository
@@ -56,6 +57,12 @@ from app.execution.reconciler import (
     resolve_entry,
     stop_missing,
 )
+from app.execution.redelivery import (
+    REDELIVERY_FAST,
+    REDELIVERY_SLOW_INTERVAL,
+    late_notice,
+    redelivery_due,
+)
 from app.services.exchange_factory import ExchangeFactory
 from app.trading.enums import (
     FillSide,
@@ -66,6 +73,7 @@ from app.trading.enums import (
     TradeStatus,
 )
 from app.trading.journal import JournalError, TradeJournal
+from app.trading.risk import tz_offset_for
 from app.workers.base import fmt_decimal
 from app.workers.notifier import Delivery, send_notification
 
@@ -115,6 +123,13 @@ class Reconciler:
         check_stops = (self._cycle - 1) % every == 0
         async with self._db.session() as session:
             user_ids = await ExecutionOrderRepository(session).users_with_real_entries()
+        # 28.09: переотправка — до запросов к бирже и в своей транзакции:
+        # недоступность BingX не должна задерживать уведомления. События
+        # бывают только у пользователей с реальными входами.
+        try:
+            await self._redeliver(user_ids)
+        except Exception:
+            logger.exception("Переотправка уведомлений сверки упала")
         for user_id in user_ids:
             try:
                 async with self._db.session() as session:
@@ -126,6 +141,62 @@ class Reconciler:
                 )
             except Exception:
                 logger.exception("Сверка пользователя упала", extra={"user_id": user_id})
+
+    async def _redeliver(self, user_ids: list[int]) -> None:
+        """Уведомления «хотя бы один раз» (28.09): события с notified_at IS
+        NULL — по расписанию app/execution/redelivery.py. Старше
+        reconciler_notify_max_age_hours — отказ с WARNING; первый цикл после
+        быстрого окна — один ERROR."""
+        max_age = timedelta(hours=self._settings.reconciler_notify_max_age_hours)
+        async with self._db.session() as session:
+            pending = await ReconciliationEventRepository(session).list_undelivered(user_ids)
+            now = datetime.now(UTC)
+            for event, user in pending:
+                decision = redelivery_due(
+                    created_at=event.created_at,
+                    last_attempt_at=event.last_attempt_at,
+                    now=now,
+                    fast=REDELIVERY_FAST,
+                    slow_interval=REDELIVERY_SLOW_INTERVAL,
+                    max_age=max_age,
+                )
+                extra = {
+                    "event_id": event.id, "kind": event.kind.value, "symbol": event.symbol,
+                    "attempts": event.attempts,
+                }
+                if decision.expired:
+                    event.gave_up_at = now
+                    logger.warning(
+                        "Уведомление сверки не доставлено за "
+                        f"{self._settings.reconciler_notify_max_age_hours} ч — отказ",
+                        extra=extra,
+                    )
+                    continue
+                if not decision.due:
+                    continue
+                if decision.entering_slow:
+                    logger.error(
+                        "Уведомление сверки не доставлено за "
+                        f"{int(REDELIVERY_FAST.total_seconds() // 60)} мин — дальше раз в "
+                        f"{int(REDELIVERY_SLOW_INTERVAL.total_seconds() // 60)} мин",
+                        extra=extra,
+                    )
+                text = _redelivery_text(event, user, now)
+                await self._attempt(event, user.telegram_id, now, text)
+
+    async def _attempt(
+        self, event: ReconciliationEvent, telegram_id: int, now: datetime, text: str
+    ) -> Delivery:
+        """Одна попытка доставки события. notified_at — только после
+        успеха; бот заблокирован — отказ без повторов (gave_up_at)."""
+        event.attempts = (event.attempts or 0) + 1
+        event.last_attempt_at = now
+        delivery = await send_notification(self._bot, telegram_id, text)
+        if delivery is Delivery.DELIVERED:
+            event.notified_at = datetime.now(UTC)
+        elif delivery is Delivery.FORBIDDEN:
+            event.gave_up_at = now
+        return delivery
 
     async def _confirm_in_flight(self) -> bool:
         if self._redis is None:
@@ -489,14 +560,14 @@ class Reconciler:
         """Событие-факт (журнал уже приведён к бирже): сразу разрешено,
         уведомление одно — повтор невозможен, сам факт записан один раз."""
         event.resolved_at = ctx.now
+        event.notify_text = text
         ReconciliationEventRepository(ctx.session).add(event)
         await ctx.session.flush()
         logger.info(
             "Сверка: факт биржи записан",
             extra={"kind": event.kind.value, "trade_id": event.trade_id, "symbol": event.symbol},
         )
-        if await send_notification(self._bot, ctx.telegram_id, text) is Delivery.DELIVERED:
-            event.notified_at = datetime.now(UTC)
+        await self._attempt(event, ctx.telegram_id, ctx.now, text)
 
     async def _discrepancy(
         self,
@@ -512,19 +583,6 @@ class Reconciler:
         ctx.active_keys.add(found.dedup_key)
         if await repo.get_open(ctx.user_id, found.dedup_key) is not None:
             return
-        event = repo.add(
-            ReconciliationEvent(
-                user_id=ctx.user_id, trade_id=found.trade_id,
-                execution_order_id=found.execution_order_id, symbol=found.symbol,
-                kind=found.kind, dedup_key=found.dedup_key, detail=found.detail,
-                resolved_at=ctx.now if resolve_now else None,
-            )
-        )
-        await repo.flush()
-        logger.info(
-            "Сверка: расхождение",
-            extra={"kind": found.kind.value, "dedup_key": found.dedup_key, "symbol": found.symbol},
-        )
         if alarm:
             text = (
                 f"⚠️ ПОЗИЦИЯ БЕЗ СТОПА: {found.symbol} — {found.detail}. Бот ордеров не "
@@ -535,8 +593,20 @@ class Reconciler:
                 f"⚠️ Сверка с биржей, {found.symbol}: {found.detail}. Журнал не изменён — "
                 "проверь BingX."
             )
-        if await send_notification(self._bot, ctx.telegram_id, text) is Delivery.DELIVERED:
-            event.notified_at = datetime.now(UTC)
+        event = repo.add(
+            ReconciliationEvent(
+                user_id=ctx.user_id, trade_id=found.trade_id,
+                execution_order_id=found.execution_order_id, symbol=found.symbol,
+                kind=found.kind, dedup_key=found.dedup_key, detail=found.detail,
+                resolved_at=ctx.now if resolve_now else None, notify_text=text,
+            )
+        )
+        await repo.flush()
+        logger.info(
+            "Сверка: расхождение",
+            extra={"kind": found.kind.value, "dedup_key": found.dedup_key, "symbol": found.symbol},
+        )
+        await self._attempt(event, ctx.telegram_id, ctx.now, text)
 
     async def _resolve_missing(
         self,
@@ -562,6 +632,21 @@ class Reconciler:
             (ReconciliationKind.AMBIGUOUS, f"ambiguous:{trade_id}:"),
         ):
             await self._resolve_missing(ctx, kind, set(), prefix=prefix)
+
+
+def _redelivery_text(event: ReconciliationEvent, user: User, now: datetime) -> str:
+    """Текст переотправки: сохранённый notify_text (у событий до 28.09 его
+    нет — собираем из символа и detail) и, если событие старше 2 мин, первой
+    строкой «⏱ Событие от HH:MM (доставлено с опозданием)» в поясе
+    пользователя."""
+    body = event.notify_text or (
+        f"⚠️ Сверка с биржей, {event.symbol}: {event.detail}. Проверь BingX."
+    )
+    timezone = user.settings.timezone if user.settings is not None else None
+    notice = late_notice(
+        created_at=event.created_at, now=now, tz_offset_hours=tz_offset_for(timezone)
+    )
+    return f"{notice}\n{body}" if notice else body
 
 
 class _UserCtx:

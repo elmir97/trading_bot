@@ -452,3 +452,172 @@ async def test_lock_pnl_not_checked_without_1r(ctx) -> None:  # type: ignore[no-
     assert (await _trade(db, sol_id)).status is TradeStatus.CLOSED
     assert not [e for e in await _events(db, user.id) if e.kind is ReconciliationKind.PNL_MISMATCH]
     assert len(bot.sent) == 1
+
+
+# --- 28.09: уведомления сверки «хотя бы один раз» -------------------------------
+
+
+class NetworkFailBot(FakeBot):
+    async def send_message(self, chat_id: int, text: str, reply_markup=None) -> None:  # type: ignore[no-untyped-def]
+        from aiogram.exceptions import TelegramNetworkError
+
+        raise TelegramNetworkError(method=None, message="Request timeout error")  # type: ignore[arg-type]
+
+
+class ForbiddenBot(FakeBot):
+    async def send_message(self, chat_id: int, text: str, reply_markup=None) -> None:  # type: ignore[no-untyped-def]
+        from aiogram.exceptions import TelegramForbiddenError
+
+        self.sent.append(text)
+        raise TelegramForbiddenError(method=None, message="forbidden")  # type: ignore[arg-type]
+
+
+async def _pending_event(  # type: ignore[no-untyped-def]
+    session, user_id: int, *, age: timedelta, last_attempt_age: timedelta | None = None,
+    text: str = "🛑 SOL-USDT LONG закрыта по стопу на бирже",
+) -> int:
+    """Событие-факт, уведомление о котором не ушло: notified_at IS NULL."""
+    now = datetime.now(UTC)
+    event = ReconciliationEvent(
+        user_id=user_id, symbol="SOL-USDT", kind=ReconciliationKind.CLOSED_STOP_LOSS,
+        dedup_key=f"close:test:{age}", detail="Стоп-лосс на бирже", created_at=now - age,
+        resolved_at=now - age, notify_text=text, attempts=1,
+        last_attempt_at=(now - last_attempt_age) if last_attempt_age is not None else now - age,
+    )
+    session.add(event)
+    await session.commit()
+    return event.id
+
+
+async def _event(db, event_id: int) -> ReconciliationEvent:  # type: ignore[no-untyped-def]
+    async with db.session() as s:
+        event = await s.get(ReconciliationEvent, event_id)
+        assert event is not None
+        return event
+
+
+class _DownFactory:
+    """Биржа недоступна: сверка пользователя падает на for_user."""
+
+    def __init__(self, settings, cipher) -> None:  # type: ignore[no-untyped-def]
+        pass
+
+    async def for_user(self, session, user_id, exchange="bingx", mode=None):  # type: ignore[no-untyped-def]
+        from app.exchanges.base import ExchangeUnavailableError
+
+        raise ExchangeUnavailableError("BingX недоступен")
+
+
+async def test_failed_close_notification_is_resent_next_cycle(ctx) -> None:  # type: ignore[no-untyped-def]
+    """SOL #4 закрыта стопом, Telegram лёг на уведомлении: событие остаётся с
+    notified_at NULL и текстом; следующий цикл отправляет его. Раньше повтора
+    не было — закрытие терялось."""
+    settings, db, session, user, _demo = ctx
+    await _seed_live(session, user.id)
+
+    await _run_reconciler(settings, db, NetworkFailBot())
+    events = await _events(db, user.id)
+    [event] = [e for e in events if e.kind is ReconciliationKind.CLOSED_STOP_LOSS]
+    assert event.notified_at is None
+    assert event.attempts == 1
+    assert event.notify_text is not None and "закрыта по стопу" in event.notify_text
+
+    bot = FakeBot()
+    await _run_reconciler(settings, db, bot)
+    assert [t for t in bot.sent if "закрыта по стопу" in t] == [event.notify_text]
+    resent = await _event(db, event.id)
+    assert resent.notified_at is not None
+    assert resent.attempts == 2
+
+
+async def test_resend_works_while_exchange_is_down(ctx, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import app.workers.reconciler as reconciler_module
+
+    settings, db, session, user, _demo = ctx
+    event_id = await _pending_event(session, user.id, age=timedelta(minutes=1))
+    monkeypatch.setattr(reconciler_module, "ExchangeFactory", _DownFactory)
+
+    bot = FakeBot()
+    await _run_reconciler(settings, db, bot)
+
+    assert bot.sent == ["🛑 SOL-USDT LONG закрыта по стопу на бирже"]
+    assert (await _event(db, event_id)).notified_at is not None
+
+
+async def test_late_resend_has_event_time_in_user_tz(ctx, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import app.workers.reconciler as reconciler_module
+    from app.trading.risk import tz_offset_for
+
+    settings, db, session, user, _demo = ctx
+    event_id = await _pending_event(session, user.id, age=timedelta(minutes=10))
+    created = (await _event(db, event_id)).created_at
+    monkeypatch.setattr(reconciler_module, "ExchangeFactory", _DownFactory)
+
+    bot = FakeBot()
+    await _run_reconciler(settings, db, bot)
+
+    local = created + timedelta(hours=tz_offset_for(user.settings.timezone))
+    assert bot.sent == [
+        f"⏱ Событие от {local:%H:%M} (доставлено с опозданием)\n"
+        "🛑 SOL-USDT LONG закрыта по стопу на бирже"
+    ]
+
+
+async def test_slow_mode_error_once_then_every_ten_minutes(ctx, monkeypatch, caplog) -> None:  # type: ignore[no-untyped-def]
+    import logging
+
+    import app.workers.reconciler as reconciler_module
+
+    settings, db, session, user, _demo = ctx
+    event_id = await _pending_event(
+        session, user.id, age=timedelta(minutes=31), last_attempt_age=timedelta(minutes=2)
+    )
+    monkeypatch.setattr(reconciler_module, "ExchangeFactory", _DownFactory)
+
+    with caplog.at_level(logging.WARNING, logger="app.workers.reconciler"):
+        await _run_reconciler(settings, db, NetworkFailBot())
+        await _run_reconciler(settings, db, NetworkFailBot())
+
+    errors = [
+        r for r in caplog.records
+        if r.levelno == logging.ERROR and "за 30 мин" in r.getMessage()
+    ]
+    assert len(errors) == 1
+    # Первая попытка редкого режима — сразу, вторая — не раньше чем через 10 мин.
+    assert (await _event(db, event_id)).attempts == 2
+
+
+async def test_older_than_max_age_is_given_up_with_warning(ctx, monkeypatch, caplog) -> None:  # type: ignore[no-untyped-def]
+    import logging
+
+    import app.workers.reconciler as reconciler_module
+
+    settings, db, session, user, _demo = ctx
+    event_id = await _pending_event(session, user.id, age=timedelta(hours=25))
+    monkeypatch.setattr(reconciler_module, "ExchangeFactory", _DownFactory)
+
+    bot = FakeBot()
+    with caplog.at_level(logging.WARNING, logger="app.workers.reconciler"):
+        await _run_reconciler(settings, db, bot)
+
+    assert bot.sent == []
+    event = await _event(db, event_id)
+    assert event.gave_up_at is not None and event.notified_at is None
+    assert [r for r in caplog.records if r.levelno == logging.WARNING and "отказ" in r.getMessage()]
+
+
+async def test_forbidden_gives_up_without_retry(ctx, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import app.workers.reconciler as reconciler_module
+
+    settings, db, session, user, _demo = ctx
+    event_id = await _pending_event(session, user.id, age=timedelta(minutes=1))
+    monkeypatch.setattr(reconciler_module, "ExchangeFactory", _DownFactory)
+
+    forbidden = ForbiddenBot()
+    await _run_reconciler(settings, db, forbidden)
+    assert (await _event(db, event_id)).gave_up_at is not None
+
+    bot = FakeBot()
+    await _run_reconciler(settings, db, bot)
+    assert len(forbidden.sent) == 1
+    assert bot.sent == []

@@ -7,8 +7,10 @@ from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.database.models.reconciliation_event import ReconciliationEvent
+from app.database.models.user import User
 from app.trading.enums import ReconciliationKind
 
 
@@ -49,6 +51,25 @@ class ReconciliationEventRepository:
             ReconciliationEvent.created_at < end,
         )
         return list(await self.session.scalars(stmt))
+
+    async def list_undelivered(
+        self, user_ids: Iterable[int]
+    ) -> list[tuple[ReconciliationEvent, User]]:
+        """28.09: события на переотправку — не доставлены и не отказаны,
+        старые первыми. Пользователь — для telegram_id и часового пояса строки
+        «доставлено с опозданием»."""
+        stmt = (
+            select(ReconciliationEvent, User)
+            .join(User, User.id == ReconciliationEvent.user_id)
+            .options(selectinload(User.settings))
+            .where(
+                ReconciliationEvent.user_id.in_(list(user_ids)),
+                ReconciliationEvent.notified_at.is_(None),
+                ReconciliationEvent.gave_up_at.is_(None),
+            )
+            .order_by(ReconciliationEvent.created_at, ReconciliationEvent.id)
+        )
+        return [(event, user) for event, user in (await self.session.execute(stmt)).all()]
 
     async def flush(self) -> None:
         await self.session.flush()

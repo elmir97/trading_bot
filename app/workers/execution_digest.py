@@ -42,6 +42,7 @@ build_stats() принимает готовое число ready_signals пар�
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from app.database.models.execution_order import ExecutionOrder
@@ -57,6 +58,8 @@ from app.workers.base import fmt_decimal
 from app.workers.scanner import ScanCycleStats
 
 ZERO = Decimal(0)
+# Ключ сортировки для события без created_at (ещё не записано в БД).
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 # "расчётный риск отклонился от заданного больше чем на 10%" (раздел 12а).
 RISK_DEVIATION_RATIO = Decimal("0.10")
@@ -150,6 +153,10 @@ class ExecutionDigestStats:
     # факты: закрытия фактом биржи, разрешённые входы (строка сводки).
     reconciler_anomalies: dict[ReconciliationKind, int] = field(default_factory=dict)
     reconciler_facts: dict[ReconciliationKind, int] = field(default_factory=dict)
+    # 28.09: события окна, уведомление о которых так и не доставлено (ещё в
+    # переотправке или отказ) — и последнее из них (вид, символ).
+    undelivered: int = 0
+    last_undelivered: tuple[ReconciliationKind, str] | None = None
 
     risk_deviations: list[RiskDeviation] = field(default_factory=list)
     undersized: list[RiskDeviation] = field(default_factory=list)
@@ -234,6 +241,13 @@ def build_stats(
             stats.reconciler_anomalies if event.kind in ANOMALY_KINDS else stats.reconciler_facts
         )
         bucket[event.kind] = bucket.get(event.kind, 0) + 1
+    undelivered = sorted(
+        (e for e in reconciler_events or [] if e.notified_at is None),
+        key=lambda e: (e.created_at or _EPOCH, e.id or 0),
+    )
+    stats.undelivered = len(undelivered)
+    if undelivered:
+        stats.last_undelivered = (undelivered[-1].kind, undelivered[-1].symbol)
 
     for row in rows:
         if row.status in _ENTRY_STATUSES:
@@ -408,6 +422,15 @@ def detect_anomalies(stats: ExecutionDigestStats, *, max_price_drift_ratio: Deci
         total = sum(stats.reconciler_anomalies.values())
         anomalies.append(
             f"сверка с биржей: расхождений {total} ({_by_kind(stats.reconciler_anomalies)})"
+        )
+
+    # 28.09: уведомление сверки так и не ушло — человек мог не узнать о
+    # закрытии или тревоге. От одного случая.
+    if stats.undelivered and stats.last_undelivered is not None:
+        kind, symbol = stats.last_undelivered
+        anomalies.append(
+            f"уведомления сверки не доставлены — {stats.undelivered} "
+            f"(последнее: {_RECONCILER_LABELS[kind]}, {symbol})"
         )
 
     # Реальный вход, отклонённый биржей, — от одного случая: сигнал был,

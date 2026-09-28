@@ -268,6 +268,9 @@ class Settings(BaseSettings):
     # запрос позиций; openOrders (есть ли стоп) — раз в N циклов.
     reconciler_interval_seconds: int = 60
     reconciler_stop_check_every: int = 5
+    # 28.09: недоставленное уведомление сверки переотправляется до этого
+    # возраста (расписание — app/execution/redelivery.py), дальше — отказ.
+    reconciler_notify_max_age_hours: int = 24
     daily_jobs_interval_minutes: int = 15
     daily_summary_hour_local: int = 20
 
