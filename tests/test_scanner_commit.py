@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -129,7 +130,9 @@ async def ctx(monkeypatch, unique_telegram_id):  # type: ignore[no-untyped-def]
 
     async def fake_build_context(symbol, timeframe):  # type: ignore[no-untyped-def]
         current["symbol"] = symbol
-        return object()  # не None — иначе сканер возьмёт wait_signal
+        # Не None — иначе сканер возьмёт wait_signal. Признаки READY (28.09)
+        # сканер берёт из контекста — atr и volume_ratio обязаны быть.
+        return SimpleNamespace(atr=None, volume_ratio=None)
 
     async def fake_symbol_info(symbol):  # type: ignore[no-untyped-def]
         return None
