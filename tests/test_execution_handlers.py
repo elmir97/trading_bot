@@ -2863,3 +2863,126 @@ async def test_card_target_line_only_with_source(ctx, bot, monkeypatch) -> None:
     assert len(cards) == 2
     assert "\nЦель: уровень 110" in cards[0]
     assert "Цель" not in cards[1]
+
+
+# ---------------------------------------------------------------------------
+# 28.09: тревоги read-back — событием и «хотя бы один раз»; сбой Telegram не
+# обрывает путь «Да»
+# ---------------------------------------------------------------------------
+
+
+async def _readback_events(session, user_id: int) -> list:  # type: ignore[no-untyped-def]
+    from app.database.models.reconciliation_event import ReconciliationEvent
+
+    stmt = (
+        select(ReconciliationEvent)
+        .where(ReconciliationEvent.user_id == user_id)
+        .execution_options(populate_existing=True)
+    )
+    return list(await session.scalars(stmt))
+
+
+def _telegram_fails_on(monkeypatch, bot, predicate) -> None:  # type: ignore[no-untyped-def]
+    """Вызов Bot, подходящий под predicate, падает сетевой ошибкой Telegram
+    (после записи в recorder — видно, что попытка была и в каком порядке)."""
+    from aiogram.exceptions import TelegramNetworkError
+
+    recorder = bot.recorder
+
+    async def fake_call(self, method, request_timeout=None):  # type: ignore[no-untyped-def]
+        if predicate(method):
+            recorder.calls.append(method)
+            raise TelegramNetworkError(method=method, message="Request timeout error")
+        return await recorder(self, method, request_timeout)
+
+    monkeypatch.setattr(Bot, "__call__", fake_call)
+
+
+def _is_liquidation_alarm(method) -> bool:  # type: ignore[no-untyped-def]
+    return isinstance(method, SendMessage) and (method.text or "").startswith(
+        "⚠️ ЛИКВИДАЦИЯ РАНЬШЕ СТОПА"
+    )
+
+
+async def test_liquidation_alarm_is_event_delivered_once(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    session, user, _n, _edits = await _real_confirm(
+        ctx, bot, monkeypatch, positions_after_entry=[_own_position("98")]
+    )
+    [trade] = await _user_trades(session, user.id)
+    [event] = await _readback_events(session, user.id)
+
+    assert event.kind.value == "LIQUIDATION_BEFORE_STOP"
+    assert event.notify_text.startswith("⚠️ ЛИКВИДАЦИЯ РАНЬШЕ СТОПА: BTC-USDT LONG")
+    assert event.detail == "ликвидация раньше стопа"
+    assert event.trade_id == trade.id
+    assert event.resolved_at is not None
+    assert event.notified_at is not None
+    assert event.attempts == 1
+
+
+async def test_stop_rescue_failed_is_event(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    session, user, _n, _edits = await _real_confirm(
+        ctx, bot, monkeypatch, attach_conditionals=False,
+        conditional_error=ExchangeResponseError("отказ", code=80012, payload=None),
+    )
+    kinds = [e.kind.value for e in await _readback_events(session, user.id)]
+    assert kinds == ["STOP_RESCUE_FAILED"]
+
+
+async def test_entry_past_stop_is_event(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    session, user, _n, _edits = await _real_confirm(
+        ctx, bot, monkeypatch, fill_overrides={"avgPrice": "96.5"}
+    )
+    [event] = await _readback_events(session, user.id)
+    assert event.kind.value == "ENTRY_PAST_STOP"
+    assert event.notify_text.startswith("⚠️ Вход исполнен за уровнем стопа")
+    assert event.notified_at is not None
+
+
+async def test_alarm_send_failure_leaves_event_for_redelivery(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _telegram_fails_on(monkeypatch, bot, _is_liquidation_alarm)
+    session, user, _n, _edits = await _real_confirm(
+        ctx, bot, monkeypatch, positions_after_entry=[_own_position("98")]
+    )
+    [event] = await _readback_events(session, user.id)
+    assert event.kind.value == "LIQUIDATION_BEFORE_STOP"
+    assert event.notified_at is None  # переотправит reconciler
+    assert event.attempts == 1
+    assert event.gave_up_at is None
+
+
+async def test_alarm_before_card_and_summary_resent_when_edit_fails(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Итоговая правка карточки падает — тревога уже ушла (раньше правки), а
+    итог уходит новым сообщением."""
+    _telegram_fails_on(
+        monkeypatch, bot,
+        lambda m: isinstance(m, EditMessageText) and "Вход исполнен" in (m.text or ""),
+    )
+    session, user, _n, _edits = await _real_confirm(
+        ctx, bot, monkeypatch, positions_after_entry=[_own_position("98")]
+    )
+    calls = bot.recorder.calls
+    alarm_at = next(i for i, m in enumerate(calls) if _is_liquidation_alarm(m))
+    edit_at = next(
+        i for i, m in enumerate(calls)
+        if isinstance(m, EditMessageText) and "Вход исполнен" in (m.text or "")
+    )
+    assert alarm_at < edit_at
+    # Итог начинается с самой тревоги (render_readback), дальше — «Вход исполнен».
+    summaries = [t for t in bot.recorder.sent_texts() if "✅ Вход исполнен" in t]
+    assert len(summaries) == 1
+
+
+async def test_pending_text_edit_failure_does_not_abort_readback(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Ордер уже на бирже: сбой Telegram на «проверяю исполнение…» не должен
+    оборвать read-back и запись сделки в журнал."""
+    _telegram_fails_on(
+        monkeypatch, bot,
+        lambda m: isinstance(m, EditMessageText)
+        and m.text == "⏳ Ордер отправлен, проверяю исполнение…",
+    )
+    session, user, _n, edits = await _real_confirm(ctx, bot, monkeypatch)
+
+    [trade] = await _user_trades(session, user.id)
+    assert trade.fill_confirmed is True
+    assert any(t.startswith("✅ Вход исполнен") for t in edits)

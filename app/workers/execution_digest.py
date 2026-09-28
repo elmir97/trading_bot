@@ -339,6 +339,10 @@ _RECONCILER_LABELS = {
     ReconciliationKind.PARTIAL_CLOSE: "частично",
     ReconciliationKind.ENTRY_CONFIRMED: "вход найден",
     ReconciliationKind.ENTRY_NOT_PLACED: "вход не выставлен",
+    ReconciliationKind.STOP_RESCUE_FAILED: "стоп не выставлен при входе",
+    ReconciliationKind.STOP_UNVERIFIED: "стоп не подтверждён при входе",
+    ReconciliationKind.LIQUIDATION_BEFORE_STOP: "ликвидация раньше стопа",
+    ReconciliationKind.ENTRY_PAST_STOP: "вход за уровнем стопа",
 }
 
 

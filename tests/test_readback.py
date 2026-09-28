@@ -658,3 +658,36 @@ async def test_rejected_entry_is_not_read_back(ctx) -> None:  # type: ignore[no-
 
     assert client.calls == []
     assert result.stop is None
+
+
+# --- 28.09: тревога read-back несёт вид события reconciliation_events --------------
+# Вид берётся по имени внутри теста: на коде до 28.09 его нет, падают только эти.
+
+
+async def test_failed_rescue_alarm_has_event_kind(ctx) -> None:  # type: ignore[no-untyped-def]
+    session, user, slot, n, settings = ctx
+    order = _order(user.id, slot.id, n.id)
+    entry = await _entry(session, order)
+    client = FakeReadbackClient(
+        fills=[_fill()], open_orders=[[_our_take()]],
+        place_results=[ExchangeUnavailableError("timeout")],
+    )
+
+    result = await _verify(session, client, settings, entry, order)
+
+    [alarm] = result.alarms
+    assert alarm.kind.value == "STOP_RESCUE_FAILED"
+    assert alarm.text == "⚠️ ПОЗИЦИЯ БЕЗ СТОПА: BTC-USDT LONG 0.01 — поставь стоп руками."
+
+
+async def test_unverified_stop_alarm_has_event_kind(ctx) -> None:  # type: ignore[no-untyped-def]
+    session, user, slot, n, settings = ctx
+    order = _order(user.id, slot.id, n.id)
+    entry = await _entry(session, order)
+    client = FakeReadbackClient(fills=[_fill()], open_orders=[ExchangeUnavailableError("down")])
+
+    result = await _verify(session, client, settings, entry, order)
+
+    [alarm] = result.alarms
+    assert alarm.kind.value == "STOP_UNVERIFIED"
+    assert alarm.text.startswith("⚠️ СТОП НЕ ПОДТВЕРЖДЁН: BTC-USDT LONG 0.01")

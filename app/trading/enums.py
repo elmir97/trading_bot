@@ -257,6 +257,13 @@ class ReconciliationKind(StrEnum):
     # 28.09: при полном закрытии PnL журнала разошёлся с profit биржи минус
     # комиссии больше чем на 0.01R. Журнал не правится.
     PNL_MISMATCH = "PNL_MISMATCH"
+    # 28.09: тревоги read-back на пути «Да» — событием, чтобы доставка была
+    # «хотя бы один раз» (переотправляет reconciler). Пишет хендлер, не
+    # reconciler; событие сразу разрешено — это тревога о моменте.
+    STOP_RESCUE_FAILED = "STOP_RESCUE_FAILED"  # «ПОЗИЦИЯ БЕЗ СТОПА»
+    STOP_UNVERIFIED = "STOP_UNVERIFIED"  # «СТОП НЕ ПОДТВЕРЖДЁН» (openOrders не прочитан)
+    LIQUIDATION_BEFORE_STOP = "LIQUIDATION_BEFORE_STOP"
+    ENTRY_PAST_STOP = "ENTRY_PAST_STOP"
 
 
 ANOMALY_KINDS = frozenset({
@@ -265,6 +272,10 @@ ANOMALY_KINDS = frozenset({
     ReconciliationKind.STOP_MISSING,
     ReconciliationKind.AMBIGUOUS,
     ReconciliationKind.PNL_MISMATCH,
+    ReconciliationKind.STOP_RESCUE_FAILED,
+    ReconciliationKind.STOP_UNVERIFIED,
+    ReconciliationKind.LIQUIDATION_BEFORE_STOP,
+    ReconciliationKind.ENTRY_PAST_STOP,
 })
 
 

@@ -9,6 +9,7 @@ send_notification — так проверка настройки не разма
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from enum import StrEnum
 
 from aiogram import Bot
@@ -16,6 +17,7 @@ from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
 from aiogram.types import BufferedInputFile, InlineKeyboardMarkup
 
 from app.core.logging import get_logger
+from app.database.models.reconciliation_event import ReconciliationEvent
 from app.database.models.user import DEFAULT_NOTIFICATIONS, UserSettings
 
 logger = get_logger(__name__)
@@ -96,6 +98,23 @@ async def send_notification(
         )
         return Delivery.FAILED
     return Delivery.DELIVERED
+
+
+async def deliver_event(
+    bot: Bot, event: ReconciliationEvent, telegram_id: int, now: datetime, text: str
+) -> Delivery:
+    """Одна попытка доставки события reconciliation_events (28.09): и для
+    reconciler, и для тревог read-back на пути «Да». notified_at — только
+    после успеха; бот заблокирован — gave_up_at, без повторов; сбой сети —
+    событие остаётся на переотправку (app/execution/redelivery.py)."""
+    event.attempts = (event.attempts or 0) + 1
+    event.last_attempt_at = now
+    delivery = await send_notification(bot, telegram_id, text)
+    if delivery is Delivery.DELIVERED:
+        event.notified_at = datetime.now(UTC)
+    elif delivery is Delivery.FORBIDDEN:
+        event.gave_up_at = now
+    return delivery
 
 
 async def send_notification_photo(

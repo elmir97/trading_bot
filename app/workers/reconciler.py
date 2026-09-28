@@ -75,7 +75,7 @@ from app.trading.enums import (
 from app.trading.journal import JournalError, TradeJournal
 from app.trading.risk import tz_offset_for
 from app.workers.base import fmt_decimal
-from app.workers.notifier import Delivery, send_notification
+from app.workers.notifier import Delivery, deliver_event
 
 logger = get_logger(__name__)
 
@@ -187,16 +187,7 @@ class Reconciler:
     async def _attempt(
         self, event: ReconciliationEvent, telegram_id: int, now: datetime, text: str
     ) -> Delivery:
-        """Одна попытка доставки события. notified_at — только после
-        успеха; бот заблокирован — отказ без повторов (gave_up_at)."""
-        event.attempts = (event.attempts or 0) + 1
-        event.last_attempt_at = now
-        delivery = await send_notification(self._bot, telegram_id, text)
-        if delivery is Delivery.DELIVERED:
-            event.notified_at = datetime.now(UTC)
-        elif delivery is Delivery.FORBIDDEN:
-            event.gave_up_at = now
-        return delivery
+        return await deliver_event(self._bot, event, telegram_id, now, text)
 
     async def _confirm_in_flight(self) -> bool:
         if self._redis is None:

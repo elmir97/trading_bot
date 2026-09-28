@@ -39,7 +39,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -52,6 +52,8 @@ from app.core.config import Settings
 from app.core.locks import LockBusyError, RedisLike, RedisLock, confirm_lock_key
 from app.core.logging import get_logger
 from app.core.security import SecretCipher
+from app.database.models.execution_order import ExecutionOrder
+from app.database.models.reconciliation_event import ReconciliationEvent
 from app.database.models.signal import SignalRecord
 from app.database.models.signal_notification import SignalNotification
 from app.database.models.trading_plan import TradingPlan
@@ -68,6 +70,7 @@ from app.execution.models import ExecutionRefusal, ExecutionRefusalCode, OrderRe
 from app.execution.readback import (
     ConditionalOutcome,
     ConditionalState,
+    ReadbackAlarm,
     ReadbackResult,
     verify_entry,
 )
@@ -88,7 +91,14 @@ from app.services.exchange_factory import ExchangeFactory
 from app.services.margin_mode import refresh_margin_type
 from app.services.permissions import refresh_permissions
 from app.services.position_mode import refresh_position_mode
-from app.trading.enums import ObservationStage, OrderStatus, SignalLevel, TradeSide
+from app.trading.enums import (
+    ObservationStage,
+    OrderStatus,
+    ReconciliationKind,
+    SignalLevel,
+    TradeSide,
+)
+from app.workers.notifier import deliver_event, send_notification
 
 router = Router(name="execution")
 logger = get_logger(__name__)
@@ -1103,7 +1113,9 @@ async def _submit_real_order(
             )
             return
 
-        await message.edit_text(READBACK_PENDING_TEXT, reply_markup=None)
+        # 28.09: ордер уже на бирже — сбой Telegram на промежуточном тексте не
+        # должен оборвать read-back (проверку и спасение стопа) и журнал.
+        await _edit_quietly(message, READBACK_PENDING_TEXT)
         readback = await verify_entry(
             session=session,
             client=client,
@@ -1139,21 +1151,86 @@ async def _submit_real_order(
             "trade_id": journal.trade.id if journal else None,
         },
     )
-    await message.edit_text(
-        render_readback(
-            order,
-            planned_price,
-            readback,
-            (result.symbol_info.price_precision, result.symbol_info.quantity_precision),
-            journal,
-            quote_asset=result.quote_asset,
-            card_quantity=card_quantity,
-            signal_zone=(notification.entry_low, notification.entry_high),
-        ),
-        reply_markup=None,
+    # 28.09: тревоги — раньше итога и независимо от него. Событием в
+    # reconciliation_events (коммит до отправки), отдельным сообщением:
+    # правка сообщения не даёт уведомления. Не ушло — переотправит reconciler.
+    await _deliver_alarms(message, session, user, entry_row, readback, journal)
+    summary = render_readback(
+        order,
+        planned_price,
+        readback,
+        (result.symbol_info.price_precision, result.symbol_info.quantity_precision),
+        journal,
+        quote_asset=result.quote_asset,
+        card_quantity=card_quantity,
+        signal_zone=(notification.entry_low, notification.entry_high),
     )
-    # Тревоги — отдельными сообщениями: правка сообщения не даёт уведомления.
-    if readback.alarm:
-        await message.answer(readback.alarm)
+    if not await _edit_quietly(message, summary):
+        # Карточка осталась «проверяю исполнение…» — итог новым сообщением.
+        await send_notification(_bot_of(message), user.telegram_id, summary)
+
+
+# Детали событий-тревог read-back — коротко, для сводки; полный текст — в
+# notify_text.
+_ALARM_DETAIL = {
+    ReconciliationKind.STOP_RESCUE_FAILED: "стоп не выставлен при входе",
+    ReconciliationKind.STOP_UNVERIFIED: "стоп не подтверждён при входе",
+    ReconciliationKind.LIQUIDATION_BEFORE_STOP: "ликвидация раньше стопа",
+    ReconciliationKind.ENTRY_PAST_STOP: "вход исполнен за уровнем стопа",
+}
+
+
+def _bot_of(message: Message) -> Bot:
+    bot = message.bot
+    assert bot is not None, "сообщение апдейта без бота"
+    return bot
+
+
+async def _edit_quietly(message: Message, text: str) -> bool:
+    """Правка сообщения, которая не обрывает путь «Да» (28.09): после
+    отправки ордера сбой Telegram не должен остановить read-back, журнал и
+    тревоги. False — не отредактировалось, WARNING в лог."""
+    try:
+        await message.edit_text(text, reply_markup=None)
+    except TelegramAPIError:
+        logger.warning("Не удалось отредактировать сообщение пути «Да»", exc_info=True)
+        return False
+    return True
+
+
+async def _deliver_alarms(
+    message: Message,
+    session: AsyncSession,
+    user: User,
+    entry_row: ExecutionOrder,
+    readback: ReadbackResult,
+    journal: JournalOutcome | None,
+) -> None:
+    """Тревоги read-back и журнала — «хотя бы один раз» (28.09): событие
+    записано и закоммичено до отправки (упадёт процесс или Telegram —
+    переотправит reconciler), notified_at — только после успеха."""
+    alarms = list(readback.alarms)
     if journal is not None and journal.alarm:
-        await message.answer(journal.alarm)
+        alarms.append(ReadbackAlarm(ReconciliationKind.ENTRY_PAST_STOP, journal.alarm))
+    if not alarms:
+        return
+    now = datetime.now(UTC)
+    events = [
+        ReconciliationEvent(
+            user_id=user.id,
+            trade_id=journal.trade.id if journal is not None else None,
+            execution_order_id=entry_row.id,
+            symbol=entry_row.symbol,
+            kind=alarm.kind,
+            dedup_key=f"readback:{alarm.kind.value.lower()}:{entry_row.id}",
+            detail=_ALARM_DETAIL[alarm.kind],
+            notify_text=alarm.text,
+            resolved_at=now,
+        )
+        for alarm in alarms
+    ]
+    session.add_all(events)
+    await session.commit()
+    for event, alarm in zip(events, alarms, strict=True):
+        await deliver_event(_bot_of(message), event, user.telegram_id, now, alarm.text)
+    await session.commit()

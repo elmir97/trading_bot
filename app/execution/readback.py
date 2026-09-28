@@ -53,7 +53,14 @@ from app.exchanges.base import (
     ReadbackIncomplete,
 )
 from app.execution.models import OrderRequest
-from app.trading.enums import OrderRole, OrderSide, OrderStatus, OrderType, TradeSide
+from app.trading.enums import (
+    OrderRole,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    ReconciliationKind,
+    TradeSide,
+)
 
 logger = get_logger(__name__)
 
@@ -83,6 +90,16 @@ class ConditionalState:
     trigger_price: Decimal | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ReadbackAlarm:
+    """Тревога read-back (28.09): вид события reconciliation_events и текст.
+    Хендлер пишет её событием и шлёт отдельным сообщением «хотя бы один
+    раз» — переотправляет reconciler."""
+
+    kind: ReconciliationKind
+    text: str
+
+
 @dataclass(slots=True)
 class ReadbackResult:
     entry_status: OrderStatus
@@ -90,7 +107,12 @@ class ReadbackResult:
     stop: ConditionalState | None = None
     take: ConditionalState | None = None
     warnings: list[str] = field(default_factory=list)
-    alarm: str | None = None
+    alarms: list[ReadbackAlarm] = field(default_factory=list)
+
+    @property
+    def alarm(self) -> str | None:
+        """Все тревоги одним текстом — для итоговой карточки."""
+        return "\n".join(a.text for a in self.alarms) or None
 
     @property
     def checked(self) -> bool:
@@ -246,7 +268,7 @@ async def _check_liquidation(
         f"ликвидация {_num(liquidation)}, стоп {_num(stop)}, плечо {order.leverage}x. "
         "Уменьши плечо или закрой позицию в BingX."
     )
-    result.alarm = f"{result.alarm}\n{text}" if result.alarm else text
+    result.alarms.append(ReadbackAlarm(ReconciliationKind.LIQUIDATION_BEFORE_STOP, text))
     logger.error(
         "Ликвидация по ту сторону стопа",
         extra={
@@ -625,10 +647,11 @@ async def _mark_unverified(
         await session.commit()
         result.stop = ConditionalState(ConditionalOutcome.UNVERIFIED, None, order.stop_loss)
         qty = fill.executed_qty if fill is not None else order.quantity
-        result.alarm = (
+        result.alarms.append(ReadbackAlarm(
+            ReconciliationKind.STOP_UNVERIFIED,
             f"⚠️ СТОП НЕ ПОДТВЕРЖДЁН: {order.symbol} {order.position_side.value} "
-            f"{_num(qty)} — проверь позицию в BingX."
-        )
+            f"{_num(qty)} — проверь позицию в BingX.",
+        ))
     if take_row is None:
         result.take = ConditionalState(ConditionalOutcome.UNVERIFIED, None, order.take_profit)
 
@@ -638,10 +661,11 @@ def _raise_alarm_if_unprotected(
 ) -> None:
     if result.stop is not None and result.stop.outcome is ConditionalOutcome.RESCUE_FAILED:
         qty = fill.executed_qty if fill is not None else order.quantity
-        result.alarm = (
+        result.alarms.append(ReadbackAlarm(
+            ReconciliationKind.STOP_RESCUE_FAILED,
             f"⚠️ ПОЗИЦИЯ БЕЗ СТОПА: {order.symbol} {order.position_side.value} "
-            f"{_num(qty)} — поставь стоп руками."
-        )
+            f"{_num(qty)} — поставь стоп руками.",
+        ))
         logger.error(
             "Позиция без стопа: спасение стопа не удалось",
             extra={

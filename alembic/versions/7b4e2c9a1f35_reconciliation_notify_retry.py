@@ -13,7 +13,7 @@
 
 Бэкфилла нет: на проде одно событие, notified_at у него стоит.
 
-Новые виды событий (тревоги read-back: STOP_RESCUE_FAILED,
+Новые виды событий (тревоги read-back: STOP_RESCUE_FAILED, STOP_UNVERIFIED,
 LIQUIDATION_BEFORE_STOP, ENTRY_PAST_STOP) DDL не требуют — kind VARCHAR(32)
 без CHECK. downgrade переводит их в AMBIGUOUS (как PNL_MISMATCH в
 19c5c0deedca: старый код падает на незнакомом kind), колонки и индекс
@@ -35,7 +35,9 @@ down_revision = "19c5c0deedca"
 branch_labels = None
 depends_on = None
 
-_NEW_KINDS = ("STOP_RESCUE_FAILED", "LIQUIDATION_BEFORE_STOP", "ENTRY_PAST_STOP")
+_NEW_KINDS = (
+    "STOP_RESCUE_FAILED", "STOP_UNVERIFIED", "LIQUIDATION_BEFORE_STOP", "ENTRY_PAST_STOP",
+)
 
 
 def upgrade() -> None:
