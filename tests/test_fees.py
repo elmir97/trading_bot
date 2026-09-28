@@ -44,8 +44,10 @@ class TestRiskRewardNet:
         ) == D("1.86")  # (4 − 0.0005·196) / (2 + 0.0005·202) = 3.902 / 2.101
 
     def test_zero_fee_equals_gross(self) -> None:
-        kw = dict(entry_price=D("100"), stop_loss=D("97"), take_profit=D("106"),
-                  side=TradeSide.LONG)
+        kw = {
+            "entry_price": D("100"), "stop_loss": D("97"), "take_profit": D("106"),
+            "side": TradeSide.LONG,
+        }
         assert calculate_risk_reward_net(**kw, fee_rate=D("0")) == calculate_risk_reward(**kw)
 
 

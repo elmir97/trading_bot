@@ -60,8 +60,10 @@ class TestPnlMismatch:
         """Ровно 0.01R — ещё не расхождение; чуть больше — уже."""
         exchange = D("-1920.2749") - SOL_FEES
         edge = exchange + SOL_RISK * PNL_TOLERANCE_R
-        kw = dict(trade_id=4, symbol="SOL-USDT", fees=SOL_FEES,
-                  exits_realized_pnl=[D("-1920.2749")], risk_amount=SOL_RISK)
+        kw = {
+            "trade_id": 4, "symbol": "SOL-USDT", "fees": SOL_FEES,
+            "exits_realized_pnl": [D("-1920.2749")], "risk_amount": SOL_RISK,
+        }
         assert pnl_mismatch(journal_pnl=edge, **kw) is None  # type: ignore[arg-type]
         assert pnl_mismatch(journal_pnl=edge + D("0.00000001"), **kw) is not None  # type: ignore[arg-type]
 
@@ -104,11 +106,11 @@ class TestExitCarriesProfit:
 
 
 def _entry(**overrides: object) -> ExecutionOrder:
-    fields: dict[str, object] = dict(
-        user_id=1, symbol="SOL-USDT", side=OrderSide.BUY, position_side=TradeSide.LONG,
-        order_type=OrderType.MARKET, role=OrderRole.ENTRY, status=OrderStatus.DRY_RUN,
-        risk_percent=D("2"),
-    )
+    fields: dict[str, object] = {
+        "user_id": 1, "symbol": "SOL-USDT", "side": OrderSide.BUY,
+        "position_side": TradeSide.LONG, "order_type": OrderType.MARKET,
+        "role": OrderRole.ENTRY, "status": OrderStatus.DRY_RUN, "risk_percent": D("2"),
+    }
     fields.update(overrides)
     return ExecutionOrder(**fields)  # type: ignore[arg-type]
 

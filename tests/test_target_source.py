@@ -80,12 +80,12 @@ class TestTargetLine:
 
 
 def _ready(**overrides: object) -> Signal:
-    fields: dict[str, object] = dict(
-        symbol="SOL-USDT", timeframe="4h", direction=SignalDirection.LONG,
-        setup="Пробой с ретестом", entry_zone_low=D("122.5"), entry_zone_high=D("123"),
-        stop_loss=D("121.646"), take_profit_1=D("126.077"), risk_reward=D("2.4"),
-        confidence=7,
-    )
+    fields: dict[str, object] = {
+        "symbol": "SOL-USDT", "timeframe": "4h", "direction": SignalDirection.LONG,
+        "setup": "Пробой с ретестом", "entry_zone_low": D("122.5"),
+        "entry_zone_high": D("123"), "stop_loss": D("121.646"),
+        "take_profit_1": D("126.077"), "risk_reward": D("2.4"), "confidence": 7,
+    }
     fields.update(overrides)
     return Signal(**fields)  # type: ignore[arg-type]
 

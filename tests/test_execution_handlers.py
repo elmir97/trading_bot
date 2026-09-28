@@ -2702,7 +2702,7 @@ async def test_far_stop_lowers_leverage_below_plan(ctx, bot, monkeypatch) -> Non
 async def test_liquidation_before_stop_raises_alarm(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """LONG, стоп 97, ликвидация 98 — ликвидация раньше стопа: тревога
     отдельным сообщением и ERROR."""
-    session, user, notification, edits = await _real_confirm(
+    await _real_confirm(
         ctx, bot, monkeypatch, positions_after_entry=[_own_position("98")]
     )
     alarms = [t for t in bot.recorder.sent_texts() if t.startswith("⚠️ ЛИКВИДАЦИЯ РАНЬШЕ СТОПА")]
