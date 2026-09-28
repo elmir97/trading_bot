@@ -127,6 +127,15 @@ redis-server --appendonly no --save "" --maxmemory 256mb --maxmemory-policy noev
 - Реализация: `get_position_mode()`, `app/services/position_mode.py`, приватный
   in-memory `TTLCache` (300 с), неудача не кэшируется. Читается на построении карточки
 
+### Режим маржи — `GET /openApi/swap/v2/trade/marginType?symbol=` (28.09)
+
+- Значение в `data.marginType` (`ISOLATED`/`CROSSED`), ключи `marginType`, `symbol`;
+  LINK и SOL на демо — `ISOLATED`
+- Реализация: `get_margin_type()` → `MarginType`, строгий разбор;
+  `app/services/margin_mode.py` по образцу `position_mode` (кэш 300 с, ключ с
+  символом, неудача не кэшируется). Только карточка, на «Да» — из `ExecutionQuote`.
+  Кросс — отказ `MARGIN_NOT_ISOLATED`, сбой — `MARGIN_MODE_UNKNOWN`
+
 ### Плечо — `GET /openApi/swap/v2/trade/leverage?symbol=` (22.09)
 
 - Ключи: `longLeverage`, `shortLeverage`, `maxLongLeverage`, `maxShortLeverage`,
@@ -292,12 +301,17 @@ EMAPullback, вердикт LONG/SHORT/WAIT), AI-разбор, фоновые з
 ### Реализовано
 
 - `app/execution/`: `models.py`, `sizing.py`, `guards.py`, `service.py`, `leverage.py`
-- `app/services/permissions.py`, `app/services/position_mode.py`
+- `app/services/permissions.py`, `app/services/position_mode.py`,
+  `app/services/margin_mode.py` (28.09)
+- Плечо — от стопа (`entry_leverage` в `leverage.py`, план — потолок), объём и RR
+  гварда — с taker-комиссией (`EXEC_TAKER_FEE_RATE`), ликвидация проверяется в
+  read-back (28.09, разделы 6 и 9а ТЗ)
 - `app/bot/handlers/execution.py`: карточка, TTL 60 с, пересчёт при дрейфе
-- `app/core/locks.py`: `RedisLock` с Lua compare-and-delete. **TTL лока 173 с**
+- `app/core/locks.py`: `RedisLock` с Lua compare-and-delete. **TTL лока 183 с**
   (`Settings.confirm_lock_ttl_seconds`) по формуле
-  `ceil(http_timeout × (confirm_path_http_calls + 1)) + margin + read-back`: 15 запросов
-  худшего пути «Да» с 15.5.4а. Число обновляется в том шаге, где добавляется запрос
+  `ceil(http_timeout × (confirm_path_http_calls + 1)) + margin + read-back`: 16 запросов
+  худшего пути «Да» с 28.09 (+ `get_positions` проверки ликвидации; на проде до деплоя
+  блоков 28.09 — 15 и 173 с). Число обновляется в том шаге, где добавляется запрос
 - `app/workers/execution_digest.py`: сводка, правила аномалий, пороги выборки
 - Статусы `execution_orders`: `DRY_RUN`, `REFUSED`, `DECLINED`, `EXPIRED`, `ERROR` +
   исходные. `status` — `VARCHAR(16)`, не enum
@@ -315,7 +329,8 @@ EMAPullback, вердикт LONG/SHORT/WAIT), AI-разбор, фоновые з
 ### Порядок проверок в `evaluate()`
 
 `EXECUTION_DISABLED` → `LIVE_ORDERS_NOT_ALLOWED` → `PERMISSIONS_UNKNOWN` →
-`POSITION_MODE_UNKNOWN` → `NO_TRADING_KEY` → `MODE_NOT_ALLOWED` → остальные гварды
+`POSITION_MODE_UNKNOWN` → `NO_TRADING_KEY` → `MODE_NOT_ALLOWED` →
+`MARGIN_MODE_UNKNOWN` / `MARGIN_NOT_ISOLATED` (28.09) → остальные гварды
 раздела 7, включая `SIGNAL_STALE`, `SYMBOL_DATA_UNAVAILABLE`, `SYMBOL_NOT_ALLOWED`.
 
 `POSITION_EXISTS` сравнивает **только символ**, сторона намеренно не участвует: в one-way
@@ -340,6 +355,10 @@ EMAPullback, вердикт LONG/SHORT/WAIT), AI-разбор, фоновые з
 журнала. UNKNOWN/PENDING старше 10 минут — поиск по `client_order_id`, `NOT_PLACED` при
 «order not exist» без позиции. Ордеров не отправляет никогда; пропускает цикл при живом
 `exec:lock:*`. Подробно — раздел 10 ТЗ.
+
+С 28.09 (в коде, миграция `19c5c0deedca`): выход хранит `profit` биржи
+(`trade_fills.exchange_realized_pnl`); при полном закрытии PnL журнала сверяется с
+`Σ profit − комиссии`, расхождение больше 0.01R — аномалия `PNL_MISMATCH`.
 
 **15.7**: обычный риск-процент (решение владельца, результат сделок — его риск), но
 `EXEC_MAX_OPEN_POSITIONS=1` и один символ; расширение после 5 чистых исполнений подряд.

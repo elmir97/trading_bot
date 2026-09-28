@@ -26,7 +26,7 @@ DATABASE_URL=postgresql+asyncpg://test:test@localhost:5432/trading_bot_test
 **Прогон зелёный только при нуле skipped.** Без `DATABASE_URL` молча
 пропускается ~115 интеграционных тестов, и счёт врёт.
 
-Ориентир на 28.09.2026: 1078 passed, 0 skipped, 0 failed.
+Ориентир на 28.09.2026 (вечер, `4d7d8bc`): 1147 passed, 0 skipped, 0 failed.
 
 Число тестов в этом файле — ориентир на момент записи, а не факт. Перед
 тем как называть его в плане или отчёте, прогонять пакет и брать свежую
@@ -269,6 +269,7 @@ PY
    `bingx_base_url`, `bingx_demo_base_url`, `exec_symbol_whitelist`,
    `exec_max_open_positions`, `exec_max_total_risk_percent`,
    `confirm_lock_ttl_seconds`, `exec_position_mode_ttl_seconds`,
+   `exec_margin_type_ttl_seconds` (с блоков 28.09),
    `exec_daily_digest_hour`, `log_json`, `environment`.
    `bingx_base_url` — только публичный клиент; ключевой клиент в режиме
    demo ходит на `bingx_demo_base_url`
@@ -324,7 +325,7 @@ PY
 17. `PING`; `INFO memory` — `used_memory_human`, `maxmemory_human`
     (256M), `maxmemory_policy` (`noeviction`)
 18. `SCAN exec:lock:*` — счётчик и `TTL` каждого. `TTL` -1 или больше
-    `confirm_lock_ttl_seconds` (173 с 15.5.4а; 163 — 15.5.3) —
+    `confirm_lock_ttl_seconds` (183 с блоков 28.09; 173 — 15.5.4а; 163 — 15.5.3) —
     залипший лок
 
 ### G. BingX (demo, только GET)
