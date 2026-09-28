@@ -107,7 +107,13 @@ Remote `origin` — приватный резервный репозиторий
    `docker-compose.override.yml` — они живут только на сервере.
    Обязательно `git -c core.autocrlf=false archive HEAD`: на этой
    машине `core.autocrlf=true`, и без флага файлы уезжают с CRLF,
-   а md5 не сходятся с коммитом
+   а md5 не сходятся с коммитом.
+   `tar` под Windows (Git Bash) принимает `C:` в пути за удалённый хост
+   («Cannot connect to C: resolve failed») — `tar --force-local` или
+   относительный путь.
+   GNU tar: `--exclude` — **до** пути (`tar czf X --exclude=trading_bot/logs -C /opt
+   trading_bot`); после пути он не действует, и tar выходит с ошибкой (28.09,
+   снапшот пересоздавали)
 3. Сверить md5 изменённых файлов с `git show HEAD:<path>`
 4. **Точка отката — ДО build.** Проверка, а не вера: id обязан
    напечататься, иначе стоп, build не запускать
@@ -222,6 +228,12 @@ downgrade не нужен.
 **Скрипты на сервер — только через stdin** (`ssh … python - < file` или heredoc), не
 строкой с экранированием внутри `ssh '…'`: 28.09 экранирование дважды дало ложные
 числа.
+
+**Bash-скрипт через `ssh … 'bash -s' < file`: каждой docker-команде внутри — `</dev/null`**
+(`docker compose exec -T`, `docker compose run -T`, `docker run`, `docker exec` без
+`-i`). Иначе она читает stdin и съедает остаток скрипта: 28.09 репетиция миграции
+вышла молча сразу после `docker compose exec -T postgres pg_dump`, без ошибки. Команде,
+которой stdin нужен (`zcat dump | docker exec -i … psql`), — пайп, как обычно.
 
 ## Чек-ап прода перед деплоем
 

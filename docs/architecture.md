@@ -310,8 +310,8 @@ EMAPullback, вердикт LONG/SHORT/WAIT), AI-разбор, фоновые з
 - `app/core/locks.py`: `RedisLock` с Lua compare-and-delete. **TTL лока 183 с**
   (`Settings.confirm_lock_ttl_seconds`) по формуле
   `ceil(http_timeout × (confirm_path_http_calls + 1)) + margin + read-back`: 16 запросов
-  худшего пути «Да» с 28.09 (+ `get_positions` проверки ликвидации; на проде до деплоя
-  блоков 28.09 — 15 и 173 с). Число обновляется в том шаге, где добавляется запрос
+  худшего пути «Да» с 28.09 (+ `get_positions` проверки ликвидации; прод с `42efa3f`,
+  до него — 15 и 173 с). Число обновляется в том шаге, где добавляется запрос
 - `app/workers/execution_digest.py`: сводка, правила аномалий, пороги выборки
 - Статусы `execution_orders`: `DRY_RUN`, `REFUSED`, `DECLINED`, `EXPIRED`, `ERROR` +
   исходные. `status` — `VARCHAR(16)`, не enum
@@ -356,7 +356,7 @@ EMAPullback, вердикт LONG/SHORT/WAIT), AI-разбор, фоновые з
 «order not exist» без позиции. Ордеров не отправляет никогда; пропускает цикл при живом
 `exec:lock:*`. Подробно — раздел 10 ТЗ.
 
-С 28.09 (в коде, миграция `19c5c0deedca`): выход хранит `profit` биржи
+С 28.09 (прод `42efa3f`, миграция `19c5c0deedca`): выход хранит `profit` биржи
 (`trade_fills.exchange_realized_pnl`); при полном закрытии PnL журнала сверяется с
 `Σ profit − комиссии`, расхождение больше 0.01R — аномалия `PNL_MISMATCH`.
 
