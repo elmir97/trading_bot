@@ -58,6 +58,20 @@ _ENTRY_PATH_HTTP_CALLS = 7
 # 28.09 (блок D): + get_positions после условников — liquidationPrice против
 # стопа, одна попытка без повторов.
 _READBACK_FIXED_HTTP_CALLS = 1 + 2 + 2 + 1
+# 28.09: худший сон троттлера BingXClient._maybe_throttle на пути «Да».
+# Состояние лимита — по (метод, путь); сон возможен только на повторном
+# вызове того же ключа, если после первого остаток <= порога 20
+# (bingx_rate_limit_threshold). Окна приватных ручек — 1 с (сняты 28.09,
+# CLAUDE.md), сон <= 1 с на каждый такой повтор:
+#   GET  user/positions   — 2 вызова (гвард + ликвидация), лимит 10 → 1 сон
+#   POST trade/order      — 3 вызова (вход + 2 спасения), лимит ~10 → 2 сна
+#   GET  trade/openOrders — 2 вызова (чтение + перечтение), лимит 5 → 1 сон
+#   GET  trade/order      — до 4 чтений, лимит 30, остаток 29 > 20 → 0
+#   GET/POST trade/leverage, ticker, contracts, balance — по 1 → 0
+# Пересчёт после дрейфа (ticker/contracts/balance ×2) не хуже: balance 40,
+# публичные 500 — остаток выше порога.
+_CONFIRM_PATH_THROTTLE_SLEEPS = 4
+_PRIVATE_RATE_WINDOW_SECONDS = 1
 
 
 class Settings(BaseSettings):
@@ -348,6 +362,13 @@ class Settings(BaseSettings):
         ) / 1000
 
     @property
+    def confirm_path_throttle_seconds(self) -> int:
+        """Худший сон троттлера на пути «Да» (28.09): 4 повтора ключа с
+        остатком ниже порога × окно приватной ручки 1 с = 4 с. Разбор — у
+        _CONFIRM_PATH_THROTTLE_SLEEPS."""
+        return _CONFIRM_PATH_THROTTLE_SLEEPS * _PRIVATE_RATE_WINDOW_SECONDS
+
+    @property
     def confirm_lock_ttl_seconds(self) -> int:
         """TTL Redis-лока подтверждения (раздел 8 ТЗ / раздел 16 ТЗ, шаг
         15.5.1), выведенный из реальных таймаутов, а не литерал.
@@ -355,13 +376,15 @@ class Settings(BaseSettings):
         ttl = ceil(http_timeout_seconds × (confirm_path_http_calls + 1))
               + exec_confirm_lock_margin_seconds
               + ceil(confirm_path_sleep_seconds)
+              + confirm_path_throttle_seconds
 
         "+1" внутри множителя — явный запас сверх посчитанного числа
         запросов (раздел 16 ТЗ), отдельно от exec_confirm_lock_margin_seconds
         (тот покрывает локальную часть — БД, планировщик event loop, не
         сеть). Шаг 15.5.3: read-back под тем же локом — его вызовы входят в
-        confirm_path_http_calls, паузы — отдельным членом. При дефолтах:
-        ceil(10.0 × (16+1)) + 10 + ceil(2.5) = 170 + 10 + 3 = 183.
+        confirm_path_http_calls, паузы — отдельным членом. 28.09: сон
+        троттлера — ещё одним членом. При дефолтах:
+        ceil(10.0 × (16+1)) + 10 + ceil(2.5) + 4 = 170 + 10 + 3 + 4 = 187.
 
         При max_retries=1 на каждом из этих вызовов (см. п.1-2 разведки)
         бэкофф между попытками не наступает — цикл в BingXClient._request
@@ -383,6 +406,7 @@ class Settings(BaseSettings):
             math.ceil(self.http_timeout_seconds * (self.confirm_path_http_calls + 1))
             + self.exec_confirm_lock_margin_seconds
             + math.ceil(self.confirm_path_sleep_seconds)
+            + self.confirm_path_throttle_seconds
         )
 
     @property

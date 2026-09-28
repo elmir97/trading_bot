@@ -115,7 +115,8 @@ _FATAL_CODES = {100001, 100004, 100413, 100421}
 
 # Заголовки остатка лимита запросов. Проверено живым запросом на трёх
 # приватных ручках и двух публичных (раздел "троттлинг сканера"): лимит
-# отдельный на каждый ПУТЬ, не общий на ключ/IP — contracts сбрасывается
+# отдельный на каждый ПУТЬ и МЕТОД, не общий на ключ/IP (28.09: у
+# trade/order остаток после POST — 9, после GET — 29) — contracts сбрасывается
 # в полный остаток сразу после того, как ticker его подъел, а у balance/
 # positions/openOrders с одним и тем же ключом одновременно три разных
 # потолка (40/10/5). httpx.Headers регистронезависим, точный кейс заголовка
@@ -127,7 +128,7 @@ _HEADER_RATE_LIMIT_EXPIRE = "X-RateLimit-Requests-Expire"
 
 @dataclass(slots=True)
 class _RateLimitState:
-    """Остаток лимита по ОДНОМУ пути на момент последнего ответа.
+    """Остаток лимита по ОДНОЙ паре (метод, путь) на момент последнего ответа.
 
     expires_at — не время из заголовка, а расчётная точка на monotonic():
     заголовок отдаёт "сколько ещё мс до сброса окна", а не абсолютное
@@ -348,11 +349,12 @@ class BingXClient(ExchangeClient):
         self._max_retries = max_retries
         self._rate_limit_threshold = rate_limit_threshold
         self._rate_limit_throttle_enabled = rate_limit_throttle_enabled
-        # По пути, не общий на клиент — см. комментарий у _RateLimitState.
+        # По (метод, путь), не общий на клиент — см. комментарий у
+        # _HEADER_RATE_LIMIT_REMAIN.
         # Живёт, пока живёт сам клиент: смысл только у клиента, который
         # переживает больше одного вызова (сканер — см. app/workers/scanner.py),
         # у одноразовых клиентов хендлеров это просто пустой словарь.
-        self._rate_limits: dict[str, _RateLimitState] = {}
+        self._rate_limits: dict[tuple[str, str], _RateLimitState] = {}
         # Фактически отправленные запросы (считая повторы) — используется
         # для замера цикла сканера (app/workers/scanner.py), не для самого
         # троттлинга.
@@ -452,7 +454,7 @@ class BingXClient(ExchangeClient):
         send = self._client.get if method == "GET" else self._client.post
         retries = max_retries if max_retries is not None else self._max_retries
 
-        await self._maybe_throttle(path)
+        await self._maybe_throttle(method, path)
 
         last_error: Exception | None = None
 
@@ -477,7 +479,7 @@ class BingXClient(ExchangeClient):
                     extra={"path": path, "attempt": attempt},
                 )
             else:
-                self._update_rate_limit(path, response)
+                self._update_rate_limit(method, path, response)
                 try:
                     return self._parse(response, path)
                 except ExchangeRateLimitError as exc:
@@ -513,7 +515,7 @@ class BingXClient(ExchangeClient):
 
         await asyncio.sleep(seconds)
 
-    async def _maybe_throttle(self, path: str) -> None:
+    async def _maybe_throttle(self, method: str, path: str) -> None:
         """Притормаживает ПЕРЕД запросом, если по этому пути остаток мал
         (раздел "троттлинг сканера"). Постфактум-реакция на 429 (Retry-After
         в _parse) остаётся отдельно и не отменяется этим — это подстраховка
@@ -525,7 +527,7 @@ class BingXClient(ExchangeClient):
         значит "неизвестно" (см. комментарий у _HEADER_RATE_LIMIT_REMAIN)."""
         if not self._rate_limit_throttle_enabled:
             return
-        state = self._rate_limits.get(path)
+        state = self._rate_limits.get((method, path))
         if state is None:
             return
         remaining_seconds = state.expires_at - time.monotonic()
@@ -539,6 +541,7 @@ class BingXClient(ExchangeClient):
         logger.info(
             "Троттлинг BingX: мало остатка лимита, ждём конца окна",
             extra={
+                "method": method,
                 "path": path,
                 "remaining": state.remaining,
                 "wait_seconds": round(remaining_seconds, 3),
@@ -546,7 +549,7 @@ class BingXClient(ExchangeClient):
         )
         await self._sleep(remaining_seconds)
 
-    def _update_rate_limit(self, path: str, response: httpx.Response) -> None:
+    def _update_rate_limit(self, method: str, path: str, response: httpx.Response) -> None:
         """Разбирает заголовки остатка лимита (см. _HEADER_RATE_LIMIT_REMAIN).
 
         Их может не быть, или значение может быть неожиданным (сторонний
@@ -561,10 +564,19 @@ class BingXClient(ExchangeClient):
             expires_in_seconds = int(expire) / 1000
         except (TypeError, ValueError):
             return
-        self._rate_limits[path] = _RateLimitState(
+        self._rate_limits[(method, path)] = _RateLimitState(
             remaining=remaining,
             expires_at=time.monotonic() + expires_in_seconds,
         )
+        if method == "POST":
+            # POST — только путь входа (плечо, рыночный вход, условные
+            # ордера). Лимиты POST сняты одной строкой лога (trade/order ~10/1 с),
+            # у trade/leverage не сняты вовсе — копим фактом с каждого входа,
+            # без отдельных запросов (урок 28.09, CLAUDE.md). INFO: на проде INFO.
+            logger.info(
+                "Лимит BingX после POST",
+                extra={"path": path, "remaining": remaining, "expire_ms": int(expire)},
+            )
 
     def _parse(self, response: httpx.Response, path: str) -> Any:
         """Разбирает ответ, приводя ошибки биржи к понятным исключениям."""

@@ -2347,7 +2347,7 @@ async def test_callback_answered_before_first_exchange_call_on_yes(  # type: ign
     ctx, bot, monkeypatch
 ) -> None:
     """Telegram ждёт ответ на callback ~15 с, а путь «Да» с read-back — до
-    TTL лока (183 с): callback.answer() обязан уйти до первого HTTP к бирже."""
+    TTL лока (187 с): callback.answer() обязан уйти до первого HTTP к бирже."""
     dp, session, user, client, _redis, settings = ctx
     client.current_leverage = _leverage_info(long_leverage=10)
     client.place_order_result = _order_result()

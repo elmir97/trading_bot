@@ -248,7 +248,7 @@ class TestConfirmLockTtl:
     Settings; module-level skipif без DATABASE_URL пропускает и его вместе
     с остальными, это не отдельный источник правды о конфиге."""
 
-    def test_default_settings_give_183_seconds(self) -> None:
+    def test_default_settings_give_187_seconds(self) -> None:
         """Шаг 15.5.3: read-back под тем же локом (вариант A). Шаг 15.5.4а:
         7 вызовов входа (get_ticker, get_balance, get_symbol_info,
         get_positions, get_leverage, set_leverage, place_market_order) +
@@ -260,8 +260,9 @@ class TestConfirmLockTtl:
         assert settings.exec_confirm_lock_margin_seconds == 10
         assert settings.confirm_path_http_calls == 16
         assert settings.confirm_path_sleep_seconds == 2.5
-        # ceil(10.0 × (16+1)) + 10 + ceil(2.5) = 170 + 10 + 3 = 183
-        assert settings.confirm_lock_ttl_seconds == 183
+        assert settings.confirm_path_throttle_seconds == 4
+        # ceil(10.0 × (16+1)) + 10 + ceil(2.5) + 4 = 170 + 10 + 3 + 4 = 187
+        assert settings.confirm_lock_ttl_seconds == 187
 
     def test_formula_follows_timeout_margin_and_readback_settings(self) -> None:
         settings = _minimal_settings(
@@ -270,8 +271,16 @@ class TestConfirmLockTtl:
             exec_unknown_search_delay_ms=700, exec_open_orders_recheck_delay_ms=400,
         )
         # вызовов 7 + 2 + 6 = 15; пауз 0.7 + 1 × 0.3 + 0.4 = 1.4 с
-        # ceil(7.5 × (15+1)) + 5 + ceil(1.4) = 120 + 5 + 2 = 127
-        assert settings.confirm_lock_ttl_seconds == 127
+        # ceil(7.5 × (15+1)) + 5 + ceil(1.4) + 4 = 120 + 5 + 2 + 4 = 131
+        assert settings.confirm_lock_ttl_seconds == 131
+
+    def test_throttle_sleep_is_part_of_ttl(self) -> None:
+        """28.09: сон троттлера (4 повтора ключа × окно 1 с) входит в TTL —
+        раньше его не было в формуле вовсе."""
+        settings = _minimal_settings()
+        without_throttle = settings.confirm_lock_ttl_seconds - settings.confirm_path_throttle_seconds
+        assert settings.confirm_path_throttle_seconds == 4
+        assert without_throttle == 183
 
     def test_ttl_is_int_for_redislock(self) -> None:
         """RedisLock.__init__ ждёт ttl_seconds: int (app/core/locks.py)."""

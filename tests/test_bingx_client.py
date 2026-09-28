@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from datetime import UTC, datetime
 from decimal import Decimal
 from urllib.parse import unquote
@@ -1039,7 +1040,7 @@ class TestRateLimitThrottle:
         client = make_client(handler)
         await client.get_ticker("BTC-USDT")
 
-        state = client._rate_limits[QUOTE_TICKER]  # noqa: SLF001
+        state = client._rate_limits[("GET", QUOTE_TICKER)]  # noqa: SLF001
         assert state.remaining == 499
         await client.close()
 
@@ -1130,8 +1131,84 @@ class TestRateLimitThrottle:
         await client.get_ticker("BTC-USDT")
         await client.get_ticker("BTC-USDT")
 
-        assert QUOTE_TICKER not in client._rate_limits  # noqa: SLF001
+        assert ("GET", QUOTE_TICKER) not in client._rate_limits  # noqa: SLF001
         assert slept == []
+        await client.close()
+
+    async def test_get_low_remaining_does_not_throttle_post_on_same_path(self) -> None:
+        """28.09: лимит BingX — по (метод, путь). GET trade/leverage с малым
+        остатком не должен усыплять следующий POST того же пути (27.09 вход
+        LINK/SOL спал 1.0 с между get_leverage и set_leverage)."""
+        calls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request.method)
+            if request.method == "GET":
+                data = {"longLeverage": 5, "shortLeverage": 5, "maxLongLeverage": 50,
+                        "maxShortLeverage": 50}
+                return ok(data, rate_limit_headers(1, 10000))
+            return ok({"leverage": 7, "symbol": "BTC-USDT"}, rate_limit_headers(4, 10000))
+
+        client = make_client(handler, rate_limit_threshold=20)
+        slept: list[float] = []
+        client._sleep = lambda seconds: slept.append(seconds) or _noop()  # type: ignore[assignment]
+
+        await client.get_leverage("BTC-USDT")
+        await client.set_leverage("BTC-USDT", 7, position_side="LONG")
+
+        assert calls == ["GET", "POST"]
+        assert slept == []
+        await client.close()
+
+    async def test_post_keeps_own_low_remaining_across_get_on_same_path(self) -> None:
+        """POST с малым остатком, между ними GET того же пути с большим
+        остатком — второй POST всё равно ждёт: GET не перезатирает
+        состояние POST (раньше ключ был один на путь)."""
+
+        events: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            events.append(request.method)
+            if request.method == "GET":
+                data = {"longLeverage": 5, "shortLeverage": 5, "maxLongLeverage": 50,
+                        "maxShortLeverage": 50}
+                return ok(data, rate_limit_headers(29, 10000))
+            return ok({"leverage": 7, "symbol": "BTC-USDT"}, rate_limit_headers(4, 10000))
+
+        client = make_client(handler, rate_limit_threshold=20)
+        slept: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            events.append("sleep")
+            slept.append(seconds)
+
+        client._sleep = fake_sleep  # type: ignore[assignment]
+
+        await client.set_leverage("BTC-USDT", 7, position_side="LONG")
+        await client.get_leverage("BTC-USDT")
+        await client.set_leverage("BTC-USDT", 7, position_side="LONG")
+
+        # GET не ждёт (у него своё состояние), второй POST — ждёт.
+        assert events == ["POST", "GET", "sleep", "POST"]
+        assert 0 < slept[0] <= 10.0
+        await client.close()
+
+    async def test_post_logs_remaining_and_window_at_info(self, caplog) -> None:  # type: ignore[no-untyped-def]
+        """Лимиты POST-ручек пути входа копятся фактом с каждого входа —
+        INFO (на проде уровень INFO), без отдельных запросов."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return ok({"leverage": 7, "symbol": "BTC-USDT"}, rate_limit_headers(4, 1000))
+
+        client = make_client(handler)
+        with caplog.at_level(logging.INFO, logger="app.exchanges.bingx"):
+            await client.set_leverage("BTC-USDT", 7, position_side="LONG")
+
+        records = [r for r in caplog.records if r.getMessage() == "Лимит BingX после POST"]
+        assert len(records) == 1
+        assert records[0].levelno == logging.INFO
+        assert records[0].remaining == 4  # type: ignore[attr-defined]
+        assert records[0].expire_ms == 1000  # type: ignore[attr-defined]
         await client.close()
 
     async def test_request_count_increments_per_sent_request(self) -> None:
