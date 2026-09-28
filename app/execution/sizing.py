@@ -71,7 +71,13 @@ def calculate_size(
     side: TradeSide,
     leverage: int,
     symbol_info: SymbolInfo,
+    fee_rate: Decimal,
 ) -> SizingResult | ExecutionRefusal:
+    """fee_rate — taker-комиссия на ногу (Settings.exec_taker_fee_rate):
+    объём = риск / (|вход − стоп| + fee_rate × (вход + стоп)), чтобы убыток
+    на стопе вместе с комиссией входа и выхода не превышал риск по плану
+    (живьём #40 SOL: без комиссии убыток на стопе 1933 при риске 1767).
+    Обязательный параметр — молчаливый расчёт без комиссии был бы багом."""
     if leverage < 1:
         raise CalculationError("Плечо не может быть меньше 1")
 
@@ -90,10 +96,14 @@ def calculate_size(
         # guard-ов (например, из будущего service.py напрямую).
         return ExecutionRefusal(ExecutionRefusalCode.INVALID_LEVELS, str(exc))
 
-    # calculate_position_size уже квантует к 1e-12 — на порядки точнее
-    # любого реального quantityPrecision биржи, так что это округление не
-    # может само по себе перевернуть исход следующего округления вниз.
-    quantity = _round_down_to_step(raw.quantity, symbol_info.quantity_precision)
+    # Комиссия входа и выхода по стопу на единицу объёма — к дистанции.
+    # Квантование к 1e-12, как у calculate_position_size: на порядки точнее
+    # любого quantityPrecision биржи, исход округления вниз не переворачивает.
+    per_unit_loss = raw.stop_distance + fee_rate * (entry_price + stop_loss)
+    quantity = _round_down_to_step(
+        (raw.risk_amount / per_unit_loss).quantize(Decimal("0.000000000001")),
+        symbol_info.quantity_precision,
+    )
 
     if quantity <= ZERO:
         return ExecutionRefusal(

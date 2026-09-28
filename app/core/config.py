@@ -178,6 +178,11 @@ class Settings(BaseSettings):
     # apiRestrictions с более тяжёлыми последствиями отказа).
     exec_position_mode_ttl_seconds: int = 300
     exec_min_rr: Decimal = Decimal("1.5")
+    # Taker-комиссия BingX на ногу — вход маркетом и выход условником (оба
+    # исполняются как taker). Биржевую ставку не читаем: живьём на демо
+    # 0.05% (27.09, SOL/LINK вход и выход). Боевую сверить в префлайте 15.7.
+    # Входит в RR гварда INVALID_LEVELS и в объём (sizing), не в детекторы.
+    exec_taker_fee_rate: Decimal = Decimal("0.0005")
     exec_symbol_whitelist: str = Field(
         default="BTC-USDT,ETH-USDT",
         description="Через запятую. Пустая строка = ограничения нет.",
@@ -251,6 +256,17 @@ class Settings(BaseSettings):
         if not is_known(value, profile):
             known = ", ".join(sorted(pricing_for(profile)))
             raise ValueError(f"unknown AI_MODEL: {value} in profile {profile}. Known: {known}")
+        return value
+
+    @field_validator("exec_taker_fee_rate")
+    @classmethod
+    def _sane_fee_rate(cls, value: Decimal) -> Decimal:
+        """Ставка — доля, не проценты: 0.0005, а не 0.05. Ошибка на порядок
+        тихо съела бы весь RR или обнулила бы комиссию — роняем старт."""
+        if not Decimal(0) <= value < Decimal("0.01"):
+            raise ValueError(
+                f"EXEC_TAKER_FEE_RATE должен быть в [0; 0.01) — доля, не проценты: {value}"
+            )
         return value
 
     @field_validator("database_url")

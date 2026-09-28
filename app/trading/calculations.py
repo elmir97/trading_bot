@@ -178,6 +178,31 @@ def calculate_risk_reward(
     return _quantize(reward / risk, RR_PRECISION)
 
 
+def calculate_risk_reward_net(
+    *,
+    entry_price: Decimal,
+    stop_loss: Decimal,
+    take_profit: Decimal,
+    side: TradeSide,
+    fee_rate: Decimal,
+) -> Decimal:
+    """RR с комиссией: (|тейк − вход| − f_тейк) / (|вход − стоп| + f_стоп),
+    f = fee_rate × (вход + выход) — комиссия входа и выхода на единицу объёма.
+
+    Прибыль до тейка уменьшает комиссия входа и выхода по тейку, убыток до
+    стопа увеличивает комиссия входа и выхода по стопу. При fee_rate = 0 —
+    ровно calculate_risk_reward. Ошибки уровней — как у неё. Может быть ≤ 0,
+    если комиссия съедает всю прибыль до тейка: решает вызывающий код."""
+    calculate_risk_reward(
+        entry_price=entry_price, stop_loss=stop_loss, take_profit=take_profit, side=side
+    )
+    reward = (take_profit - entry_price) * side.direction - fee_rate * (entry_price + take_profit)
+    risk = stop_distance(entry_price=entry_price, stop_loss=stop_loss, side=side) + fee_rate * (
+        entry_price + stop_loss
+    )
+    return _quantize(reward / risk, RR_PRECISION)
+
+
 def calculate_realized_rr(
     *,
     entry_price: Decimal,

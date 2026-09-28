@@ -143,6 +143,10 @@ class OrderRequest:
     risk_amount: Decimal
     risk_percent: Decimal
     risk_reward: Decimal
+    # RR с taker-комиссией входа и выхода (Settings.exec_taker_fee_rate) — то,
+    # что сравнивает гвард INVALID_LEVELS. None — построено без расчёта
+    # комиссии (строки/тесты до 28.09).
+    risk_reward_net: Decimal | None = None
 
     @property
     def entry_client_order_id(self) -> str:

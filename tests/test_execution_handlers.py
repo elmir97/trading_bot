@@ -2619,3 +2619,18 @@ async def test_entry_past_stop_alarm_is_separate_message(ctx, bot, monkeypatch) 
     ]
     [trade] = await _user_trades(session, user.id)
     assert trade.stop_loss is None
+
+
+async def test_card_shows_rr_with_fee(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Карточка: RR без комиссии и с комиссией (гвард сравнивает второе)."""
+    dp, session, user, client, _redis, _settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _notify(session, signal)
+
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
+
+    [card] = [t for t in bot.recorder.sent_texts() if "Цена сейчас" in t]
+    assert "RR 1:3.33 · с комиссией 1:" in card

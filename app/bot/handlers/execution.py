@@ -345,7 +345,12 @@ def render_confirmation(
         f"Стоп: {fmt_price(order.stop_loss, price_precision)}  (−{fmt_ratio(stop_pct)}%)  "
         f"риск {fmt_amount(order.risk_amount)} {asset} = {fmt_ratio(order.risk_percent)}% депозита",
         f"Тейк: {fmt_price(order.take_profit, price_precision)}  "
-        f"RR 1:{fmt_ratio(order.risk_reward)}",
+        f"RR 1:{fmt_ratio(order.risk_reward)}"
+        + (
+            f" · с комиссией 1:{fmt_ratio(order.risk_reward_net)}"
+            if order.risk_reward_net is not None
+            else ""
+        ),
         "",
         f"Открытых позиций сейчас: {quote.open_positions_count} из "
         f"{settings.exec_max_open_positions}",

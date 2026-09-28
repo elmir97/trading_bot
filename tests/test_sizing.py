@@ -33,6 +33,7 @@ class TestRoundsDown:
         """risk_amount=10, дистанция=3 → 10/3 = 3.333... → вниз до 3.33,
         а не до 3.34, как дал бы обычный round()."""
         result = calculate_size(
+            fee_rate=D("0"),
             account_balance=D("1000"),
             risk_percent=D("1"),
             entry_price=D("100"),
@@ -46,6 +47,7 @@ class TestRoundsDown:
 
     def test_integer_precision_drops_fractional_part(self) -> None:
         result = calculate_size(
+            fee_rate=D("0"),
             account_balance=D("1000"),
             risk_percent=D("5"),
             entry_price=D("100"),
@@ -60,6 +62,7 @@ class TestRoundsDown:
 
     def test_short_side_rounds_down_the_same_way(self) -> None:
         result = calculate_size(
+            fee_rate=D("0"),
             account_balance=D("1000"),
             risk_percent=D("1"),
             entry_price=D("97"),
@@ -75,6 +78,7 @@ class TestRoundsDown:
 class TestMinimumLot:
     def test_below_min_quantity_refused(self) -> None:
         result = calculate_size(
+            fee_rate=D("0"),
             account_balance=D("1000"),
             risk_percent=D("1"),
             entry_price=D("100"),
@@ -90,6 +94,7 @@ class TestMinimumLot:
         """Риск настолько мал относительно дистанции, что объём после
         округления вниз до шага лота превращается в ровный ноль."""
         result = calculate_size(
+            fee_rate=D("0"),
             account_balance=D("10"),
             risk_percent=D("1"),
             entry_price=D("200"),
@@ -103,6 +108,7 @@ class TestMinimumLot:
 
     def test_below_min_notional_refused(self) -> None:
         result = calculate_size(
+            fee_rate=D("0"),
             account_balance=D("100"),
             risk_percent=D("0.1"),
             entry_price=D("10"),
@@ -120,6 +126,7 @@ class TestMinimumLot:
 class TestInsufficientMargin:
     def test_margin_exceeds_balance_refused(self) -> None:
         result = calculate_size(
+            fee_rate=D("0"),
             account_balance=D("100"),
             risk_percent=D("50"),
             entry_price=D("100"),
@@ -135,6 +142,7 @@ class TestInsufficientMargin:
         """Тот же расчёт, но с плечом 100x — margin делится на leverage и
         укладывается в баланс."""
         result = calculate_size(
+            fee_rate=D("0"),
             account_balance=D("100"),
             risk_percent=D("50"),
             entry_price=D("100"),
@@ -150,6 +158,7 @@ class TestInsufficientMargin:
 class TestZeroStopDistance:
     def test_entry_equals_stop_refused_not_raised(self) -> None:
         result = calculate_size(
+            fee_rate=D("0"),
             account_balance=D("1000"),
             risk_percent=D("1"),
             entry_price=D("100"),
@@ -166,6 +175,7 @@ class TestZeroStopDistance:
         stop_distance(), а не отдельный код: sizing не размножает коды сверх
         раздела 7 ТЗ."""
         result = calculate_size(
+            fee_rate=D("0"),
             account_balance=D("1000"),
             risk_percent=D("1"),
             entry_price=D("100"),

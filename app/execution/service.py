@@ -61,7 +61,11 @@ from app.execution.leverage import leverage_needs_update
 from app.execution.models import ExecutionRefusal, ExecutionRefusalCode, OrderRequest
 from app.execution.sizing import calculate_size, round_levels_toward_entry
 from app.market.data import MarketDataService
-from app.trading.calculations import PERCENT_PRECISION, calculate_risk_reward
+from app.trading.calculations import (
+    PERCENT_PRECISION,
+    calculate_risk_reward,
+    calculate_risk_reward_net,
+)
 from app.trading.enums import (
     ExchangeKeyMode,
     ObservationStage,
@@ -581,6 +585,7 @@ class ExecutionService:
             take_profit=take_profit,
             side=side,
             min_risk_reward=self._settings.exec_min_rr,
+            taker_fee_rate=self._settings.exec_taker_fee_rate,
             account_balance=balance,
             leverage=leverage,
             symbol_info=symbol_info,
@@ -599,6 +604,7 @@ class ExecutionService:
             side=side,
             leverage=leverage,
             symbol_info=symbol_info,
+            fee_rate=self._settings.exec_taker_fee_rate,
         )
         if isinstance(sizing, ExecutionRefusal):
             # run_guards() выше уже прогнал calculate_size() с теми же
@@ -612,6 +618,13 @@ class ExecutionService:
             stop_loss=stop_loss,
             take_profit=take_profit,
             side=side,
+        )
+        risk_reward_net = calculate_risk_reward_net(
+            entry_price=current_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            side=side,
+            fee_rate=self._settings.exec_taker_fee_rate,
         )
         risk_percent = (
             (sizing.risk_amount / balance * Decimal(100)).quantize(PERCENT_PRECISION)
@@ -636,6 +649,7 @@ class ExecutionService:
             risk_amount=sizing.risk_amount,
             risk_percent=risk_percent,
             risk_reward=risk_reward,
+            risk_reward_net=risk_reward_net,
         )
 
         return ExecutionQuote(

@@ -96,6 +96,7 @@ def _valid_inputs(**overrides: object) -> GuardInputs:
         "take_profit": D("106"),
         "side": TradeSide.LONG,
         "min_risk_reward": D("1.5"),
+        "taker_fee_rate": D("0"),
         "account_balance": D("1000"),
         "leverage": 5,
         "symbol_info": _symbol_info(),
@@ -512,6 +513,7 @@ class TestSignalStale:
 class TestValidLevels:
     def test_stop_on_wrong_side_refuses(self) -> None:
         refusal = check_valid_levels(
+            fee_rate=D("0"),
             entry_price=D("100"), stop_loss=D("105"), take_profit=D("110"),
             side=TradeSide.LONG, min_risk_reward=D("1.5"),
         )
@@ -522,6 +524,7 @@ class TestValidLevels:
         # Раздел про guards.py: entry_price тут — живая цена биржи, не цена
         # входа из сигнала, текст обязан называть оба числа явно.
         refusal = check_valid_levels(
+            fee_rate=D("0"),
             entry_price=D("100"), stop_loss=D("105"), take_profit=D("110"),
             side=TradeSide.LONG, min_risk_reward=D("1.5"),
         )
@@ -534,6 +537,7 @@ class TestValidLevels:
         # Живая цена дрейфанула настолько, что уже прошла тейк из сигнала —
         # calculate_risk_reward() отказывает по reward<=0, не stop_distance().
         refusal = check_valid_levels(
+            fee_rate=D("0"),
             entry_price=D("112"), stop_loss=D("97"), take_profit=D("110"),
             side=TradeSide.LONG, min_risk_reward=D("1.5"),
         )
@@ -545,6 +549,7 @@ class TestValidLevels:
 
     def test_rr_below_minimum_refuses(self) -> None:
         refusal = check_valid_levels(
+            fee_rate=D("0"),
             entry_price=D("100"), stop_loss=D("99"), take_profit=D("101"),
             side=TradeSide.LONG, min_risk_reward=D("1.5"),
         )
@@ -556,6 +561,7 @@ class TestValidLevels:
         # должен читаться как "сигнал был плохим": RR здесь пересчитан от
         # живой цены (entry_price), про это и должно быть сказано явно.
         refusal = check_valid_levels(
+            fee_rate=D("0"),
             entry_price=D("100"), stop_loss=D("99"), take_profit=D("101"),
             side=TradeSide.LONG, min_risk_reward=D("1.5"),
         )
@@ -565,6 +571,7 @@ class TestValidLevels:
 
     def test_valid_levels_pass(self) -> None:
         assert check_valid_levels(
+            fee_rate=D("0"),
             entry_price=D("100"), stop_loss=D("97"), take_profit=D("106"),
             side=TradeSide.LONG, min_risk_reward=D("1.5"),
         ) is None
@@ -609,6 +616,7 @@ class TestRefusalTextsUseFmtPrice:
 
     def test_invalid_levels_texts_have_no_trailing_zeros(self) -> None:
         wrong_stop = check_valid_levels(
+            fee_rate=D("0"),
             entry_price=D("760.000000000000"), stop_loss=self.STOP,
             take_profit=D("839.123000000000"), side=TradeSide.LONG,
             min_risk_reward=D("1.5"), price_precision=2,
@@ -616,6 +624,7 @@ class TestRefusalTextsUseFmtPrice:
         assert wrong_stop is not None
         assert "766.38" in wrong_stop.message and "0000" not in wrong_stop.message
         passed_tp = check_valid_levels(
+            fee_rate=D("0"),
             entry_price=D("850.000000000000"), stop_loss=self.STOP,
             take_profit=D("839.123000000000"), side=TradeSide.LONG,
             min_risk_reward=D("1.5"), price_precision=2,
@@ -625,6 +634,7 @@ class TestRefusalTextsUseFmtPrice:
 
     def test_low_rr_text_has_no_trailing_zeros(self) -> None:
         refusal = check_valid_levels(
+            fee_rate=D("0"),
             entry_price=D("774.545000000000"), stop_loss=self.STOP,
             take_profit=D("780.000000000000"), side=TradeSide.LONG,
             min_risk_reward=D("2.000000000000"), price_precision=2,
@@ -677,6 +687,7 @@ class TestPositionModeKnown:
 class TestSize:
     def test_forwards_sizing_refusal(self) -> None:
         sizing = calculate_size(
+            fee_rate=D("0"),
             account_balance=D("10"),
             risk_percent=D("1"),
             entry_price=D("100"),

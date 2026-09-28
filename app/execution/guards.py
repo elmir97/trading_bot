@@ -27,7 +27,12 @@ from app.exchanges.base import SymbolInfo
 from app.execution.models import ExecutionRefusal
 from app.execution.models import ExecutionRefusalCode as Code
 from app.execution.sizing import SizingResult, calculate_size
-from app.trading.calculations import CalculationError, calculate_risk_reward, stop_distance
+from app.trading.calculations import (
+    CalculationError,
+    calculate_risk_reward,
+    calculate_risk_reward_net,
+    stop_distance,
+)
 from app.trading.enums import ExchangeKeyMode, TradeSide
 
 ZERO = Decimal(0)
@@ -405,6 +410,7 @@ def check_valid_levels(
     take_profit: Decimal,
     side: TradeSide,
     min_risk_reward: Decimal,
+    fee_rate: Decimal,
     price_precision: int | None = None,
 ) -> ExecutionRefusal | None:
     """entry_price здесь — живая цена биржи на момент проверки, а не цена
@@ -435,12 +441,21 @@ def check_valid_levels(
             f"Цена уже прошла тейк: сейчас {fmt_price(entry_price, price_precision)}, "
             f"тейк {fmt_price(take_profit, price_precision)}.",
         )
-    if rr < min_risk_reward:
+    # Порог — по RR с комиссией (решение 28.09): цель 2R по формуле с
+    # комиссией 0.05% × 2 — это 1.65–1.86, не 2.
+    rr_net = calculate_risk_reward_net(
+        entry_price=entry_price,
+        stop_loss=stop_loss,
+        take_profit=take_profit,
+        side=side,
+        fee_rate=fee_rate,
+    )
+    if rr_net < min_risk_reward:
         return ExecutionRefusal(
             Code.INVALID_LEVELS,
-            f"RR 1:{fmt_num(rr)} ниже минимального 1:{fmt_num(min_risk_reward)} "
-            f"(пересчитан по текущей цене {fmt_price(entry_price, price_precision)}, "
-            f"не по цене сигнала на карточке).",
+            f"RR 1:{fmt_num(rr)} (с комиссией 1:{fmt_num(rr_net)}) ниже минимального "
+            f"1:{fmt_num(min_risk_reward)} (пересчитан по текущей цене "
+            f"{fmt_price(entry_price, price_precision)}, не по цене сигнала на карточке).",
         )
     return None
 
@@ -526,6 +541,8 @@ class GuardInputs:
     take_profit: Decimal
     side: TradeSide
     min_risk_reward: Decimal
+    # Taker-комиссия на ногу — RR гварда и объём считаются с ней.
+    taker_fee_rate: Decimal
     account_balance: Decimal
     leverage: int
     symbol_info: SymbolInfo
@@ -606,6 +623,7 @@ def run_guards(inputs: GuardInputs) -> ExecutionRefusal | None:
         take_profit=inputs.take_profit,
         side=inputs.side,
         min_risk_reward=inputs.min_risk_reward,
+        fee_rate=inputs.taker_fee_rate,
         price_precision=inputs.symbol_info.price_precision,
     ):
         return refusal
@@ -618,6 +636,7 @@ def run_guards(inputs: GuardInputs) -> ExecutionRefusal | None:
             side=inputs.side,
             leverage=inputs.leverage,
             symbol_info=inputs.symbol_info,
+            fee_rate=inputs.taker_fee_rate,
         )
     ):
         return refusal

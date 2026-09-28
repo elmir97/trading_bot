@@ -1035,6 +1035,7 @@ async def test_levels_rounded_toward_entry_and_sizing_uses_rounded_stop(  # type
         account_balance=D("1000"), risk_percent=user.trading_plan.risk_per_trade_percent,
         entry_price=D("100"), stop_loss=D(expected_stop), side=side,
         leverage=user.trading_plan.max_leverage, symbol_info=_symbol_info(),
+        fee_rate=_live_settings().exec_taker_fee_rate,
     )
     assert result.order.quantity == expected_size.quantity
 
@@ -1061,13 +1062,17 @@ async def test_min_rr_and_card_rr_use_rounded_levels(ctx) -> None:  # type: igno
     карточки считаются от ОКРУГЛЁННЫХ уровней — тех, что уходят на биржу.
     Сырой сетап 97.9 / 103.15 при цене 100 даёт RR ровно 1.5 (проходит
     exec_min_rr=1.5), а после округления тейка к входу (103.1) — 1.476:
-    отказ. Проходит и на коде до 15.5.4 — фиксирует поведение."""
+    отказ. Проходит и на коде до 15.5.4 — фиксирует поведение.
+
+    Комиссия (28.09) выключена: замок — про округление уровней, влияние
+    комиссии на гвард проверяют свои тесты (test_guards.py, TestValidLevelsFee)."""
     session, user, client, market = ctx
     signal = _signal(user.id, stop_loss=D("97.9"), take_profit=D("103.15"))
     session.add(signal)
     await session.flush()
     notification = await _snapshot(session, signal)
-    service = _service(session, _live_settings(), client, market)
+    no_fee = _live_settings().model_copy(update={"exec_taker_fee_rate": D("0")})
+    service = _service(session, no_fee, client, market)
 
     refused = await _evaluate(service, user, notification, signal)
 
