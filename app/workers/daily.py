@@ -52,6 +52,7 @@ from app.trading.statistics import Statistics, calculate_statistics
 from app.workers.base import fmt_decimal
 from app.workers.execution_digest import build_stats, render_execution_digest
 from app.workers.notifier import Delivery, notification_enabled, send_notification
+from app.workers.reconciler import Reconciler
 from app.workers.scanner import SetupScanner
 
 logger = get_logger(__name__)
@@ -85,6 +86,7 @@ class DailyJobs:
         cipher: SecretCipher,
         *,
         scanner: SetupScanner | None = None,
+        reconciler: Reconciler | None = None,
     ) -> None:
         self._bot = bot
         self._db = db
@@ -94,6 +96,8 @@ class DailyJobs:
         # сводке исполнения. None в тестах/там, где сводка исполнения не
         # нужна — не обязателен для работы остальных двух уведомлений.
         self._scanner = scanner
+        # 28.09: пульс reconciler для строки «Сверка:» сводки исполнения.
+        self._reconciler = reconciler
         # 28.09: рассылки, не доставленные из-за сбоя Telegram, — (user_id,
         # вид) → местная дата. Повтор идёт сам: дата отправки не проставлена,
         # следующий цикл (15 мин) попробует снова. Словарь нужен только для
@@ -303,6 +307,8 @@ class DailyJobs:
             stats,
             max_price_drift_ratio=self._settings.exec_max_price_drift_ratio,
             scan_cycle=scan_cycle,
+            reconciler=self._reconciler.pulse.window(now) if self._reconciler else None,
+            tz_offset_hours=tz_offset_for(settings_row.timezone),
         )
         if await self._deliver(user, "execution_digest", text, today_local):
             settings_row.execution_digest_last_sent_date = today_local

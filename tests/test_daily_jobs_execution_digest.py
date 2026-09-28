@@ -467,3 +467,27 @@ async def test_reconciler_discrepancy_reaches_the_digest_through_the_db(ctx) -> 
     )
 
     assert "сверка с биржей: расхождений 1 (позиция без сделки — 1)" in bot.sent_messages[0][1]
+
+
+async def test_digest_has_reconciler_pulse_line(ctx) -> None:  # type: ignore[no-untyped-def]
+    """28.09: строка «Сверка:» — пульс reconciler в сводке исполнения."""
+    from app.workers.reconciler import ReconcilerPulse
+
+    daily, session, user, bot, settings = ctx
+
+    class _Reconciler:
+        pulse = ReconcilerPulse(datetime.now(UTC) - timedelta(days=2))
+
+    _Reconciler.pulse.record_cycle(datetime.now(UTC) - timedelta(minutes=1), errors=0)
+    daily._reconciler = _Reconciler()
+    now, _tz_offset, today_local, local_hour = _call_args(
+        user, settings, local_hour=settings.exec_daily_digest_hour
+    )
+
+    await daily._maybe_send_execution_digest(
+        session, user, user.settings, now, today_local, local_hour
+    )
+
+    [(_chat, text)] = bot.sent_messages
+    assert "Сверка: циклов 1, последний " in text
+    assert text.rstrip().endswith("ошибок 0")

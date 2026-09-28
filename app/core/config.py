@@ -271,6 +271,9 @@ class Settings(BaseSettings):
     # 28.09: недоставленное уведомление сверки переотправляется до этого
     # возраста (расписание — app/execution/redelivery.py), дальше — отказ.
     reconciler_notify_max_age_hours: int = 24
+    # 28.09: INFO-строка «Пульс reconciler» раз в столько запусков (циклы и
+    # пропуски по локу). При интервале 60 с — раз в час, 24 строки в сутки.
+    reconciler_pulse_every: int = 60
     daily_jobs_interval_minutes: int = 15
     daily_summary_hour_local: int = 20
 

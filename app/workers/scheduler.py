@@ -39,10 +39,12 @@ class BackgroundJobs:
         self._scheduler = AsyncIOScheduler(timezone="UTC")
         self._scanner = SetupScanner(bot, db, settings)
         self._positions = PositionMonitor(bot, db, settings)
-        self._daily = DailyJobs(bot, db, settings, cipher, scanner=self._scanner)
         # Шаг 15.6: сверка журнала с биржей. Redis — чтобы пропускать цикл,
         # пока жив лок «Да» (вход в полёте).
         self._reconciler = Reconciler(bot, db, settings, cipher, redis)
+        self._daily = DailyJobs(
+            bot, db, settings, cipher, scanner=self._scanner, reconciler=self._reconciler
+        )
 
     def start(self) -> None:
         """Требование 8: пока BACKGROUND_JOBS_ENABLED=false — не регистрирует

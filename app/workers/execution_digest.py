@@ -42,8 +42,9 @@ build_stats() принимает готовое число ready_signals пар�
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from app.database.models.execution_order import ExecutionOrder
 from app.database.models.reconciliation_event import ReconciliationEvent
@@ -56,6 +57,10 @@ from app.trading.enums import (
 )
 from app.workers.base import fmt_decimal
 from app.workers.scanner import ScanCycleStats
+
+if TYPE_CHECKING:
+    # Только тип: сводке не нужен весь reconciler (биржа, журнал) при импорте.
+    from app.workers.reconciler import ReconcilerWindow
 
 ZERO = Decimal(0)
 # Ключ сортировки для события без created_at (ещё не записано в БД).
@@ -475,11 +480,26 @@ def _append_codes(lines: list[str], by_code: dict[str, int], *, indent: int) -> 
             lines.append(f"{' ' * indent}{code} — {count}")
 
 
+def render_reconciler_line(window: ReconcilerWindow, tz_offset_hours: int) -> str:
+    """28.09: пульс reconciler в сводке — «Сверка: циклов N, последний
+    HH:MM, ошибок E»; после рестарта внутри окна — «Сверка (с HH:MM): …».
+    Время — в поясе пользователя."""
+
+    def local(moment: datetime) -> str:
+        return f"{moment + timedelta(hours=tz_offset_hours):%H:%M}"
+
+    head = f"Сверка (с {local(window.started_at)})" if window.since_start else "Сверка"
+    last = local(window.last_cycle_at) if window.last_cycle_at is not None else "—"
+    return f"{head}: циклов {window.cycles}, последний {last}, ошибок {window.errors}"
+
+
 def render_execution_digest(
     stats: ExecutionDigestStats,
     *,
     max_price_drift_ratio: Decimal,
     scan_cycle: ScanCycleStats | None = None,
+    reconciler: ReconcilerWindow | None = None,
+    tz_offset_hours: int = 0,
 ) -> str:
     """Раздел 12а ТЗ, макет сводки. Корректна и при stats.total_attempts == 0
     (нули вместо деления на ноль, средние строки просто не печатаются).
@@ -566,5 +586,9 @@ def render_execution_digest(
             f"{scan_cycle.requests_made} запросов, "
             f"{fmt_decimal(Decimal(str(round(scan_cycle.duration_seconds, 1))))} с"
         )
+    if reconciler is not None:
+        if scan_cycle is None:
+            lines.append("")
+        lines.append(render_reconciler_line(reconciler, tz_offset_hours))
 
     return "\n".join(lines)

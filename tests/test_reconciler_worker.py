@@ -621,3 +621,34 @@ async def test_forbidden_gives_up_without_retry(ctx, monkeypatch) -> None:  # ty
     await _run_reconciler(settings, db, bot)
     assert len(forbidden.sent) == 1
     assert bot.sent == []
+
+
+# --- 28.09: пульс reconciler ----------------------------------------------------
+
+
+async def test_pulse_counts_lock_skip_and_exchange_error(ctx, monkeypatch, caplog) -> None:  # type: ignore[no-untyped-def]
+    """Пропуск по локу и сбой биржи — в пульсе; INFO после N запусков."""
+    import logging
+
+    import app.workers.reconciler as reconciler_module
+
+    settings, db, _session, _user, _demo = ctx
+    settings.reconciler_pulse_every = 2
+    monkeypatch.setattr(reconciler_module, "ExchangeFactory", _DownFactory)
+    redis = FakeRedis()
+    await redis.set("exec:lock:1:1", "1", ex=60)
+    cipher = SecretCipher(settings.encryption_key.get_secret_value())
+    reconciler = reconciler_module.Reconciler(FakeBot(), db, settings, cipher, redis)
+
+    with caplog.at_level(logging.INFO, logger="app.workers.reconciler"):
+        await reconciler.run()  # лок жив — пропуск
+        await redis.delete("exec:lock:1:1")
+        await reconciler.run()  # биржа лежит — ошибка сверки пользователя
+
+    [line] = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Пульс")]
+    assert line.startswith(
+        "Пульс reconciler: циклов 1 за 1 мин, пропущено по локу 1, ошибок 1, "
+        "событий 0, переотправлено 0, последний "
+    )
+    window = reconciler.pulse.window(datetime.now(UTC))
+    assert (window.cycles, window.errors, window.since_start) == (1, 1, True)

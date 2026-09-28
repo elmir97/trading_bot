@@ -19,6 +19,8 @@ uq_fill_external_id. Ордеров reconciler не отправляет ник�
 
 from __future__ import annotations
 
+from collections import deque
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -97,6 +99,74 @@ def _open_quantity(trade: Trade) -> Decimal:
     return entered - exited
 
 
+@dataclass(frozen=True, slots=True)
+class ReconcilerWindow:
+    """Пульс reconciler за окно сводки исполнения (28.09). since_start —
+    процесс стартовал внутри окна: счёт идёт «с HH:MM», а не за 24 ч."""
+
+    started_at: datetime
+    since_start: bool
+    cycles: int
+    errors: int
+    last_cycle_at: datetime | None
+
+
+class ReconcilerPulse:
+    """Счётчики reconciler в памяти (решение 28.09): рестарт их сбрасывает,
+    сводка пишет «с HH:MM». Два среза: окно для сводки (время циклов и
+    ошибки за последние сутки) и счётчики с прошлой INFO-строки пульса."""
+
+    def __init__(self, started_at: datetime) -> None:
+        self.started_at = started_at
+        self._cycles: deque[tuple[datetime, int]] = deque()
+        self._reset_log(started_at)
+
+    def _reset_log(self, now: datetime) -> None:
+        self.log_since = now
+        self.log_runs = 0
+        self.log_cycles = 0
+        self.log_skipped = 0
+        self.log_errors = 0
+        self.log_events = 0
+        self.log_redelivered = 0
+
+    def record_skip(self) -> None:
+        self.log_runs += 1
+        self.log_skipped += 1
+
+    def record_cycle(self, now: datetime, *, errors: int) -> None:
+        self._cycles.append((now, errors))
+        self.log_runs += 1
+        self.log_cycles += 1
+        self.log_errors += errors
+
+    def window(self, now: datetime, span: timedelta = timedelta(hours=24)) -> ReconcilerWindow:
+        start = now - span
+        while self._cycles and self._cycles[0][0] < start:
+            self._cycles.popleft()
+        return ReconcilerWindow(
+            started_at=self.started_at,
+            since_start=self.started_at > start,
+            cycles=len(self._cycles),
+            errors=sum(errors for _, errors in self._cycles),
+            last_cycle_at=self._cycles[-1][0] if self._cycles else None,
+        )
+
+    def log_if_due(self, now: datetime, every: int) -> None:
+        """INFO раз в every запусков (циклы + пропуски по локу)."""
+        if self.log_runs < max(every, 1):
+            return
+        minutes = max(round((now - self.log_since).total_seconds() / 60), 1)
+        last = self._cycles[-1][0] if self._cycles else None
+        logger.info(
+            f"Пульс reconciler: циклов {self.log_cycles} за {minutes} мин, "
+            f"пропущено по локу {self.log_skipped}, ошибок {self.log_errors}, "
+            f"событий {self.log_events}, переотправлено {self.log_redelivered}, "
+            f"последний {f'{last:%H:%M:%S} UTC' if last else '—'}"
+        )
+        self._reset_log(now)
+
+
 class Reconciler:
     def __init__(
         self,
@@ -112,12 +182,30 @@ class Reconciler:
         self._cipher = cipher
         self._redis = redis
         self._cycle = 0
+        self._cycle_errors = 0
+        # 28.09: пульс — INFO раз в reconciler_pulse_every запусков и строка
+        # «Сверка:» в сводке исполнения (DailyJobs читает pulse.window()).
+        self.pulse = ReconcilerPulse(datetime.now(UTC))
 
     async def run(self) -> None:
         self._cycle += 1
         if await self._confirm_in_flight():
             logger.info("Сверка пропущена: идёт подтверждение входа (exec:lock)")
+            self.pulse.record_skip()
+            self.pulse.log_if_due(datetime.now(UTC), self._settings.reconciler_pulse_every)
             return
+        self._cycle_errors = 0
+        try:
+            await self._run_cycle()
+        except Exception:
+            self._cycle_errors += 1
+            raise
+        finally:
+            now = datetime.now(UTC)
+            self.pulse.record_cycle(now, errors=self._cycle_errors)
+            self.pulse.log_if_due(now, self._settings.reconciler_pulse_every)
+
+    async def _run_cycle(self) -> None:
         # openOrders — на первом цикле после старта и дальше раз в N циклов.
         every = max(self._settings.reconciler_stop_check_every, 1)
         check_stops = (self._cycle - 1) % every == 0
@@ -129,17 +217,20 @@ class Reconciler:
         try:
             await self._redeliver(user_ids)
         except Exception:
+            self._cycle_errors += 1
             logger.exception("Переотправка уведомлений сверки упала")
         for user_id in user_ids:
             try:
                 async with self._db.session() as session:
                     await self._reconcile_user(session, user_id, check_stops=check_stops)
             except ExchangeError:
+                self._cycle_errors += 1
                 logger.warning(
                     "Сверка пользователя не удалась — биржа", extra={"user_id": user_id},
                     exc_info=True,
                 )
             except Exception:
+                self._cycle_errors += 1
                 logger.exception("Сверка пользователя упала", extra={"user_id": user_id})
 
     async def _redeliver(self, user_ids: list[int]) -> None:
@@ -182,7 +273,8 @@ class Reconciler:
                         extra=extra,
                     )
                 text = _redelivery_text(event, user, now)
-                await self._attempt(event, user.telegram_id, now, text)
+                if await self._attempt(event, user.telegram_id, now, text) is Delivery.DELIVERED:
+                    self.pulse.log_redelivered += 1
 
     async def _attempt(
         self, event: ReconciliationEvent, telegram_id: int, now: datetime, text: str
@@ -552,6 +644,7 @@ class Reconciler:
         уведомление одно — повтор невозможен, сам факт записан один раз."""
         event.resolved_at = ctx.now
         event.notify_text = text
+        self.pulse.log_events += 1
         ReconciliationEventRepository(ctx.session).add(event)
         await ctx.session.flush()
         logger.info(
@@ -593,6 +686,7 @@ class Reconciler:
             )
         )
         await repo.flush()
+        self.pulse.log_events += 1
         logger.info(
             "Сверка: расхождение",
             extra={"kind": found.kind.value, "dedup_key": found.dedup_key, "symbol": found.symbol},
