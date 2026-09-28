@@ -33,7 +33,7 @@ from app.database.models.signal_notification import SignalNotification
 from app.database.models.user import User
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
-from app.exchanges.base import Balance, Position, SymbolInfo, Ticker
+from app.exchanges.base import Balance, MarginType, Position, SymbolInfo, Ticker
 from app.exchanges.bingx import BingXClient
 from app.trading.enums import ExchangeKeyMode, SignalDirection, SignalLevel, SignalRecordStatus
 from scripts.simulate_chat import USER_ID, build  # noqa: E402
@@ -438,12 +438,13 @@ async def _run_scenarios(sim, tg, db, redis, settings) -> None:  # type: ignore[
 # get_balance. _build_quote() (app/bot/handlers/execution.py) добавляет
 # четвёртое место сама, ДО evaluate(): get_position_mode() — раздел 16 ТЗ,
 # шаг 15.5.1, гвард POSITION_MODE_UNKNOWN. Пятое — get_positions() карточки,
-# шаг 15.5.4а, гвард EXCHANGE_POSITION_EXISTS. Подставляем все пять на уровне
+# шаг 15.5.4а, гвард EXCHANGE_POSITION_EXISTS. Шестое — get_margin_type()
+# карточки (28.09, гвард MARGIN_NOT_ISOLATED). Подставляем все шесть на уровне
 # готовых типизированных методов BingXClient — то же, что делает
 # FakeExchangeClient в tests/test_execution_service.py, но там клиент
 # подставляется через конструктор ExecutionService, а здесь настоящий
 # хендлер сам строит BingXClient внутри ExchangeFactory.for_user(), поэтому
-# патчим пять leaf-методов на классе на время сценария и возвращаем
+# патчим шесть leaf-методов на классе на время сценария и возвращаем
 # оригиналы в finally. ExchangeFactory и MarketDataService не подменяются:
 # расшифровка ключей, выбор режима/хоста, кэш — всё настоящее. Метод без
 # заглушки в сеть не уйдёт — упрётся в запрет сети (_install_network_guard)
@@ -497,6 +498,11 @@ async def _fake_get_position_mode(self, *, max_retries=None) -> bool:  # type: i
 async def _fake_get_positions(self, *, max_retries=None) -> list[Position]:  # type: ignore[no-untyped-def]
     # Позиций на бирже нет — как в живом прогоне (a) шага 15.5.4а: пустой список.
     return []
+
+
+async def _fake_get_margin_type(self, symbol: str, *, max_retries=None) -> MarginType:  # type: ignore[no-untyped-def]
+    # Изолированная — как живые LINK и SOL на демо (28.09).
+    return MarginType.ISOLATED
 
 
 async def _seed_execution_fixtures(  # type: ignore[no-untyped-def]
@@ -603,12 +609,14 @@ async def _run_execution_scenario(sim, tg, db, redis, settings) -> None:  # type
         BingXClient.get_balance,
         BingXClient.get_position_mode,
         BingXClient.get_positions,
+        BingXClient.get_margin_type,
     )
     BingXClient.get_ticker = _fake_get_ticker
     BingXClient.get_symbols = _fake_get_symbols
     BingXClient.get_balance = _fake_get_balance
     BingXClient.get_position_mode = _fake_get_position_mode
     BingXClient.get_positions = _fake_get_positions
+    BingXClient.get_margin_type = _fake_get_margin_type
     try:
         text = await sim.tap_data(f"exn:open:{notification_id}")
         check("карточка: объём", has(text, "объём"), text[:300])
@@ -662,6 +670,7 @@ async def _run_execution_scenario(sim, tg, db, redis, settings) -> None:  # type
             BingXClient.get_balance,
             BingXClient.get_position_mode,
             BingXClient.get_positions,
+            BingXClient.get_margin_type,
         ) = originals
 
 
