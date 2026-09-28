@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from app.analysis.indicators import (
     atr as calc_atr,
 )
@@ -28,14 +30,57 @@ from app.analysis.setups import DEFAULT_DETECTORS, SetupDetector
 from app.analysis.signals import MarketContext, Signal, wait_signal
 from app.analysis.structure import detect_structure, find_levels
 from app.core.logging import get_logger
-from app.exchanges.base import SymbolInfo
+from app.exchanges.base import Kline, SymbolInfo
 from app.market.data import MarketDataService
-from app.trading.enums import SignalDirection, Timeframe
+from app.trading.enums import MarketStructure, SignalDirection, Timeframe
 
 logger = get_logger(__name__)
 
 # Свечей достаточно для EMA200 с запасом на разогрев.
 CANDLES_REQUIRED = 300
+
+
+def context_from_candles(
+    symbol: str,
+    timeframe: str,
+    candles: list[Kline],
+    *,
+    higher_timeframe: str | None = None,
+    higher_structure: MarketStructure | None = None,
+    higher_ema200: Decimal | None = None,
+) -> MarketContext:
+    """Индикаторы, структура и уровни по готовым свечам — ядро build_context.
+
+    Вынесено (28.09), чтобы отчёт исходов (scripts/signal_outcomes.py)
+    прогонял детектор на исторических свечах тем же расчётом, что сканер,
+    а не своей копией."""
+    closes = [c.close for c in candles]
+    highs = [c.high for c in candles]
+    lows = [c.low for c in candles]
+    volumes = [c.volume for c in candles]
+
+    atr_value = last_value(calc_atr(highs, lows, closes, 14))
+    structure = detect_structure(candles)
+    levels = find_levels(candles, atr_value) if atr_value else []
+
+    return MarketContext(
+        symbol=symbol,
+        timeframe=timeframe,
+        candles=candles,
+        price=closes[-1],
+        ema20=last_value(ema(closes, 20)),
+        ema50=last_value(ema(closes, 50)),
+        ema200=last_value(ema(closes, 200)),
+        rsi=last_value(calc_rsi(closes, 14)),
+        atr=atr_value,
+        macd_histogram=last_value(macd(closes).histogram),
+        volume_ratio=last_value(volume_ratio(volumes, 20)),
+        structure=structure.structure,
+        levels=levels,
+        higher_timeframe=higher_timeframe,
+        higher_structure=higher_structure,
+        higher_ema200=higher_ema200,
+    )
 
 
 class AnalysisEngine:
@@ -79,15 +124,6 @@ class AnalysisEngine:
             )
             return None
 
-        closes = [c.close for c in candles]
-        highs = [c.high for c in candles]
-        lows = [c.low for c in candles]
-        volumes = [c.volume for c in candles]
-
-        atr_value = last_value(calc_atr(highs, lows, closes, 14))
-        structure = detect_structure(candles)
-        levels = find_levels(candles, atr_value) if atr_value else []
-
         higher_tf: str | None = None
         higher_structure = None
         higher_ema200 = None
@@ -112,20 +148,10 @@ class AnalysisEngine:
                         ema([c.close for c in higher_candles], 200)
                     )
 
-        return MarketContext(
-            symbol=symbol,
-            timeframe=timeframe,
-            candles=candles,
-            price=closes[-1],
-            ema20=last_value(ema(closes, 20)),
-            ema50=last_value(ema(closes, 50)),
-            ema200=last_value(ema(closes, 200)),
-            rsi=last_value(calc_rsi(closes, 14)),
-            atr=atr_value,
-            macd_histogram=last_value(macd(closes).histogram),
-            volume_ratio=last_value(volume_ratio(volumes, 20)),
-            structure=structure.structure,
-            levels=levels,
+        return context_from_candles(
+            symbol,
+            timeframe,
+            candles,
             higher_timeframe=higher_tf,
             higher_structure=higher_structure,
             higher_ema200=higher_ema200,
