@@ -356,8 +356,8 @@ PY
 17. `PING`; `INFO memory` — `used_memory_human`, `maxmemory_human`
     (256M), `maxmemory_policy` (`noeviction`)
 18. `SCAN exec:lock:*` — счётчик и `TTL` каждого. `TTL` -1 или больше
-    `confirm_lock_ttl_seconds` (187 с `e194bb7` — сон троттлера в формуле; 183 —
-    блоки 28.09, прод `42efa3f`; 173 — 15.5.4а; 163 — 15.5.3) — залипший лок
+    `confirm_lock_ttl_seconds` (187 — прод с `eea28cc`, 28.09: сон троттлера в формуле;
+    183 — блоки 28.09; 173 — 15.5.4а; 163 — 15.5.3) — залипший лок
 
 ### G. BingX (demo, только GET)
 
