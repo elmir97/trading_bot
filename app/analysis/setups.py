@@ -32,7 +32,7 @@ from app.analysis.signals import (
 )
 from app.analysis.structure import Level, nearest_level
 from app.core.logging import get_logger
-from app.trading.enums import MarketStructure, SignalDirection
+from app.trading.enums import MarketStructure, SignalDirection, TargetSource
 
 logger = get_logger(__name__)
 
@@ -252,9 +252,11 @@ class BreakoutRetest(SetupDetector):
                 entry + risk * 2 if looking_long else entry - risk * 2
             )
             target_source = "цель 2R (уровней впереди нет)"
+            source = TargetSource.FORMULA_2R
         else:
             target_price = round_price(target_level.price)
             target_source = f"следующий уровень {target_level.price:.4f}"
+            source = TargetSource.LEVEL
 
         risk_reward = _rr(entry, stop, target_price)
         conditions.append(
@@ -295,6 +297,7 @@ class BreakoutRetest(SetupDetector):
             confirmation=confirmation.description,
             note=f"Цель: {target_source}",
             level_price=level.price,
+            target_source=source,
             invalidation=(
                 f"Закрытие {'ниже' if looking_long else 'выше'} "
                 f"{stop:.4f} отменяет сценарий"
@@ -541,8 +544,12 @@ class EMAPullback(SetupDetector):
             target_price = round_price(
                 entry + risk * 2 if looking_long else entry - risk * 2
             )
+            target_note = "цель 2R (уровней впереди нет)"
+            source = TargetSource.FORMULA_2R
         else:
             target_price = round_price(target_level.price)
+            target_note = f"следующий уровень {target_level.price:.4f}"
+            source = TargetSource.LEVEL
 
         risk_reward = _rr(entry, stop, target_price)
         conditions.append(
@@ -579,6 +586,10 @@ class EMAPullback(SetupDetector):
             risk_reward=risk_reward,
             confidence=self._confidence(context, confirmation.strength),
             confirmation=confirmation.description,
+            # 28.09: как у BreakoutRetest. На READY note в fingerprint не
+            # входит (только FORMING) — дедуп не меняется.
+            note=f"Цель: {target_note}",
+            target_source=source,
             invalidation=(
                 f"Закрытие {'ниже' if looking_long else 'выше'} "
                 f"{stop:.4f} ломает структуру"

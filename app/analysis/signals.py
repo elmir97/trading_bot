@@ -17,7 +17,7 @@ from decimal import Decimal
 
 from app.analysis.structure import Level
 from app.exchanges.base import Kline
-from app.trading.enums import MarketStructure, SignalDirection, TradeSide
+from app.trading.enums import MarketStructure, SignalDirection, TargetSource, TradeSide
 
 ZERO = Decimal(0)
 
@@ -104,6 +104,9 @@ class Signal:
     # Есть только у BreakoutRetest: у EMAPullback роль уровня играет сама
     # EMA50, отдельной горизонтальной линии для неё не нужно.
     level_price: Decimal | None = None
+    # Источник take_profit_1 (28.09): уровень или 2R по формуле. None — у
+    # WAIT и у сигналов, собранных не детектором.
+    target_source: TargetSource | None = None
 
     confidence: int = 0            # 0..10
     confirmation: str = ""
@@ -134,6 +137,17 @@ class Signal:
     @property
     def passed_conditions(self) -> list[SignalCondition]:
         return [c for c in self.conditions if c.passed]
+
+
+def target_line(price_text: str, source: TargetSource | None) -> str:
+    """Строка «Цель» уведомления и карточки: «Цель: уровень X» или
+    «Цель: 2R по формуле — X». Без источника (старые уведомления) — как
+    раньше, «Цель: X»."""
+    if source is TargetSource.LEVEL:
+        return f"Цель: уровень {price_text}"
+    if source is TargetSource.FORMULA_2R:
+        return f"Цель: 2R по формуле — {price_text}"
+    return f"Цель: {price_text}"
 
 
 def validate_geometry(

@@ -39,7 +39,7 @@ from app.analysis.classify import (
     classify_signal,
 )
 from app.analysis.engine import AnalysisEngine
-from app.analysis.signals import MarketContext, Signal, wait_signal
+from app.analysis.signals import MarketContext, Signal, target_line, wait_signal
 from app.bot.keyboards.execution import open_trade_button
 from app.core.config import Settings
 from app.core.logging import get_logger
@@ -130,13 +130,14 @@ def render_detail(
     по нулям: цена сигнала — round_price с 4 знаками, а у символа точность
     может быть меньше."""
     if level is SignalLevel.READY:
+        target = fmt_price(signal.take_profit_1, price_precision)
         return (
             f"🎯 <b>Сетап готов: {signal.symbol} · {signal.timeframe.upper()}</b>\n\n"
             f"{signal.setup} — {signal.direction.value}\n"
             f"Вход: {fmt_price(signal.entry_zone_low, price_precision)} – "
             f"{fmt_price(signal.entry_zone_high, price_precision)}\n"
             f"Стоп: {fmt_price(signal.stop_loss, price_precision)}\n"
-            f"Цель: {fmt_price(signal.take_profit_1, price_precision)}\n"
+            f"{target_line(target, signal.target_source)}\n"
             f"RR: 1:{fmt_decimal(signal.risk_reward)} · Качество: {signal.confidence}/10\n\n"
             f"<i>Проверь актуальность перед входом — рынок мог уйти с момента скана.</i>"
         )

@@ -115,6 +115,16 @@ class SignalLevel(StrEnum):
     FORMING = "FORMING"  # не хватает только подтверждающего паттерна
 
 
+class TargetSource(StrEnum):
+    """Откуда взялась цель READY-сигнала (28.09, блок B): следующий уровень
+    структуры или 2R по формуле, когда уровней впереди нет. В fingerprint
+    не входит — источник не делает сетап другим (тест-замок в
+    tests/test_target_source.py)."""
+
+    LEVEL = "LEVEL"
+    FORMULA_2R = "FORMULA_2R"
+
+
 class SignalRecordStatus(StrEnum):
     """Жизненный цикл строки в таблице signals."""
 
