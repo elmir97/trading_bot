@@ -7,7 +7,7 @@
 исполненному маркет-входу и условные ордера верхнего уровня в openOrders
 (во что превращаются вложенные TP/SL после исполнения входа) живьём не
 сняты. Форма элемента openOrders — от живого снимка 14.09
-(tests/test_bingx_client.py::TestGetOpenOrders, architecture.md), только
+(tests/test_bingx_client.py::TestGetOpenOrders, docs/architecture.md), только
 тип/stopPrice/сторона — условного ордера.
 """
 
