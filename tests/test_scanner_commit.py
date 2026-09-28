@@ -39,6 +39,7 @@ from app.database.session import Database
 from app.services.user_service import UserService
 from app.trading.enums import SignalDirection
 from app.workers import scanner as scanner_module
+from app.workers.notifier import Delivery
 from app.workers.scanner import SetupScanner
 
 pytestmark = pytest.mark.skipif(
@@ -158,7 +159,7 @@ def _install_send_probe(monkeypatch, probe):  # type: ignore[no-untyped-def]
         if sent:
             results.append(await probe(sent[0]))
         sent.append(_notification_id(reply_markup))
-        return True
+        return Delivery.DELIVERED
 
     monkeypatch.setattr(scanner_module, "send_notification", fake_send)
     return sent, results
@@ -249,7 +250,7 @@ async def test_slot_lock_released_before_pass_ends(ctx, monkeypatch) -> None:  #
 
     async def fake_send(bot_, telegram_id, text_, *, reply_markup=None):  # type: ignore[no-untyped-def]
         results.append(await lock_slot(0))
-        return True
+        return Delivery.DELIVERED
 
     monkeypatch.setattr(scanner_module, "send_notification", fake_send)
     await scanner.run()

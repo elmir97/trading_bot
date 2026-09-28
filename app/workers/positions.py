@@ -121,7 +121,6 @@ class PositionMonitor:
         moved_away = remaining > threshold * RESET_FACTOR
 
         if approaching and not already_notified:
-            setattr(trade, f"{kind}_approach_notified_at", datetime.now(UTC))
             label = "Take-Profit" if kind == "tp" else "Stop-Loss"
             percent = (remaining * 100).quantize(PERCENT_STEP, rounding=ROUND_HALF_UP)
             icon = "🎯" if kind == "tp" else "🛑"
@@ -131,7 +130,11 @@ class PositionMonitor:
                 f"{label}: {fmt_decimal(target)}\n"
                 f"Осталось: {fmt_decimal(percent)}% пути от входа"
             )
-            await send_notification(self._bot, trade.user.telegram_id, text)
+            delivery = await send_notification(self._bot, trade.user.telegram_id, text)
+            # Отметка — только после окончательного исхода (28.09): при сбое
+            # сети следующий цикл монитора повторит, если цена ещё в полосе.
+            if delivery.final:
+                setattr(trade, f"{kind}_approach_notified_at", datetime.now(UTC))
         elif moved_away and already_notified:
             # Цена ушла от цели дальше удвоенного порога — снимаем отметку,
             # повторное приближение снова даст уведомление.

@@ -57,6 +57,7 @@ from app.services.exchange_factory import ExchangeFactory
 from app.trading.enums import SignalLevel, SignalRecordStatus
 from app.workers.base import fmt_decimal
 from app.workers.notifier import (
+    Delivery,
     notification_enabled,
     send_notification,
     send_notification_photo,
@@ -429,14 +430,14 @@ class SetupScanner:
                         render_setup_chart, context, signal, level, precision
                     )
                 if photo is not None:
-                    delivered = await send_notification_photo(
+                    delivery = await send_notification_photo(
                         self._bot, user.telegram_id, photo, record.detail, reply_markup=keyboard
                     )
                 else:
-                    delivered = await send_notification(
+                    delivery = await send_notification(
                         self._bot, user.telegram_id, record.detail, reply_markup=keyboard
                     )
-                if not delivered:
+                if delivery is not Delivery.DELIVERED:
                     raise _NotDeliveredError
         except _NotDeliveredError:
             logger.warning(

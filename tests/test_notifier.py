@@ -98,3 +98,68 @@ async def test_reply_markup_forwarded_on_photo_fallback_to_text() -> None:
     assert bot.sent_photos == []
     assert bot.sent_messages == [(1, "подпись")]
     assert bot.sent_markups == [markup]
+
+
+# --- 28.09: исход отправки — Delivery, не bool ---------------------------------
+# Delivery берётся из модуля внутри теста: на старом коде его нет, и падать
+# должны только эти тесты, а не весь файл на импорте.
+
+
+class NetworkFailBot(FakeBot):
+    async def send_message(self, chat_id: int, text: str, reply_markup=None) -> None:  # type: ignore[no-untyped-def]
+        from aiogram.exceptions import TelegramNetworkError
+
+        raise TelegramNetworkError(method=None, message="Request timeout error")  # type: ignore[arg-type]
+
+
+class ForbiddenTextBot(FakeBot):
+    async def send_message(self, chat_id: int, text: str, reply_markup=None) -> None:  # type: ignore[no-untyped-def]
+        raise TelegramForbiddenError(method=None, message="forbidden")  # type: ignore[arg-type]
+
+
+async def test_delivered_on_success() -> None:
+    from app.workers import notifier
+
+    assert await send_notification(FakeBot(), 1, "текст") is notifier.Delivery.DELIVERED
+
+
+async def test_network_error_is_failed_not_final() -> None:
+    from app.workers import notifier
+
+    delivery = await send_notification(NetworkFailBot(), 1, "текст")
+    assert delivery is notifier.Delivery.FAILED
+    assert delivery.final is False
+
+
+async def test_forbidden_is_final_and_warns(caplog) -> None:  # type: ignore[no-untyped-def]
+    import logging
+
+    from app.workers import notifier
+
+    with caplog.at_level(logging.INFO, logger="app.workers.notifier"):
+        delivery = await send_notification(ForbiddenTextBot(), 1, "текст")
+
+    assert delivery is notifier.Delivery.FORBIDDEN
+    assert delivery.final is True
+    [record] = [r for r in caplog.records if "бот заблокирован" in r.getMessage()]
+    assert record.levelno == logging.WARNING
+
+
+async def test_photo_forbidden_is_forbidden() -> None:
+    from app.workers import notifier
+
+    assert (
+        await send_notification_photo(ForbiddenBot(), 1, b"png", "подпись")
+        is notifier.Delivery.FORBIDDEN
+    )
+
+
+def test_delivery_refuses_bool() -> None:
+    """StrEnum всегда истинен — «if await send_notification(...)» молча
+    считал бы доставленным и сбой. Приведение к bool обязано падать."""
+    import pytest
+
+    from app.workers import notifier
+
+    with pytest.raises(TypeError):
+        bool(notifier.Delivery.FAILED)

@@ -29,7 +29,7 @@ execution_orders и signals (см. app/workers/execution_digest.py), поэто�
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 from aiogram import Bot
@@ -51,7 +51,7 @@ from app.trading.risk import day_bounds, tz_offset_for
 from app.trading.statistics import Statistics, calculate_statistics
 from app.workers.base import fmt_decimal
 from app.workers.execution_digest import build_stats, render_execution_digest
-from app.workers.notifier import notification_enabled, send_notification
+from app.workers.notifier import Delivery, notification_enabled, send_notification
 from app.workers.scanner import SetupScanner
 
 logger = get_logger(__name__)
@@ -94,6 +94,42 @@ class DailyJobs:
         # сводке исполнения. None в тестах/там, где сводка исполнения не
         # нужна — не обязателен для работы остальных двух уведомлений.
         self._scanner = scanner
+        # 28.09: рассылки, не доставленные из-за сбоя Telegram, — (user_id,
+        # вид) → местная дата. Повтор идёт сам: дата отправки не проставлена,
+        # следующий цикл (15 мин) попробует снова. Словарь нужен только для
+        # WARNING «выброшено» после местной полуночи — в памяти, рестарт его
+        # теряет (тогда повтор всё равно будет, но без WARNING о выбросе).
+        self._undelivered: dict[tuple[int, str], date] = {}
+
+    async def _deliver(self, user: User, kind: str, text: str, today_local: date) -> bool:
+        """Отправка рассылки daily_jobs. True — исход окончательный
+        (доставлено или бот заблокирован): можно ставить дату отправки.
+        False — сбой сети, дата не ставится, повтор в следующем цикле."""
+        delivery = await send_notification(self._bot, user.telegram_id, text)
+        key = (user.id, kind)
+        extra = {"user_id": user.id, "kind": kind, "local_date": today_local.isoformat()}
+        if delivery is Delivery.FAILED:
+            self._undelivered[key] = today_local
+            logger.warning(
+                f"Рассылка не доставлена, повторю в следующем цикле: {kind}", extra=extra
+            )
+            return False
+        self._undelivered.pop(key, None)
+        if delivery is Delivery.DELIVERED:
+            logger.info(f"Рассылка отправлена: {kind}", extra=extra)
+        # FORBIDDEN — WARNING уже написан в notifier, повторять незачем.
+        return True
+
+    def _drop_stale_undelivered(self, user_id: int, today_local: date) -> None:
+        """Не ушедшее до местной полуночи — выбрасывается (решение 28.09):
+        вчерашние итоги сегодня уже не нужны."""
+        for (uid, kind), day in list(self._undelivered.items()):
+            if uid == user_id and day != today_local:
+                del self._undelivered[(uid, kind)]
+                logger.warning(
+                    f"Рассылка не доставлена до полуночи — выброшена: {kind}",
+                    extra={"user_id": user_id, "kind": kind, "local_date": day.isoformat()},
+                )
 
     async def run(self) -> None:
         now = datetime.now(UTC)
@@ -116,6 +152,7 @@ class DailyJobs:
         tz_offset = tz_offset_for(settings_row.timezone)
         today_local = (now + timedelta(hours=tz_offset)).date()
         local_hour = (now + timedelta(hours=tz_offset)).hour
+        self._drop_stale_undelivered(user.id, today_local)
 
         await self._maybe_send_summary(session, user, settings_row, now, tz_offset, today_local, local_hour)
         await self._maybe_send_loss_alert(session, user, settings_row, now, tz_offset, today_local)
@@ -146,8 +183,10 @@ class DailyJobs:
         equity = await service.starting_equity(user.id)
         stats = calculate_statistics(snapshots, starting_equity=equity)
 
-        settings_row.daily_summary_last_sent_date = today_local
-        await send_notification(self._bot, user.telegram_id, render_daily_summary(stats))
+        # Дата — только после окончательного исхода (28.09): сбой сети
+        # оставляет её пустой, следующий цикл повторит.
+        if await self._deliver(user, "daily_report", render_daily_summary(stats), today_local):
+            settings_row.daily_summary_last_sent_date = today_local
 
     async def _maybe_send_loss_alert(
         self,
@@ -194,14 +233,14 @@ class DailyJobs:
         if day_loss_pct < plan.max_daily_loss_percent:
             return
 
-        settings_row.daily_loss_alert_last_sent_date = today_local
         text = (
             f"🛑 <b>Дневной лимит убытка достигнут</b>\n\n"
             f"Убыток за день: −{fmt_decimal(day_loss_pct)}% при лимите "
             f"{fmt_decimal(plan.max_daily_loss_percent)}%.\n\n"
             f"Методология рекомендует закрыть торговый день."
         )
-        await send_notification(self._bot, user.telegram_id, text)
+        if await self._deliver(user, "daily_limit_reached", text, today_local):
+            settings_row.daily_loss_alert_last_sent_date = today_local
 
     async def _maybe_send_execution_digest(
         self,
@@ -259,11 +298,11 @@ class DailyJobs:
             reconciler_events=reconciler_events,
         )
 
-        settings_row.execution_digest_last_sent_date = today_local
         scan_cycle = self._scanner.last_cycle if self._scanner else None
         text = render_execution_digest(
             stats,
             max_price_drift_ratio=self._settings.exec_max_price_drift_ratio,
             scan_cycle=scan_cycle,
         )
-        await send_notification(self._bot, user.telegram_id, text)
+        if await self._deliver(user, "execution_digest", text, today_local):
+            settings_row.execution_digest_last_sent_date = today_local

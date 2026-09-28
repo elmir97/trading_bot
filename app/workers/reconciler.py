@@ -67,7 +67,7 @@ from app.trading.enums import (
 )
 from app.trading.journal import JournalError, TradeJournal
 from app.workers.base import fmt_decimal
-from app.workers.notifier import send_notification
+from app.workers.notifier import Delivery, send_notification
 
 logger = get_logger(__name__)
 
@@ -495,7 +495,7 @@ class Reconciler:
             "Сверка: факт биржи записан",
             extra={"kind": event.kind.value, "trade_id": event.trade_id, "symbol": event.symbol},
         )
-        if await send_notification(self._bot, ctx.telegram_id, text):
+        if await send_notification(self._bot, ctx.telegram_id, text) is Delivery.DELIVERED:
             event.notified_at = datetime.now(UTC)
 
     async def _discrepancy(
@@ -535,7 +535,7 @@ class Reconciler:
                 f"⚠️ Сверка с биржей, {found.symbol}: {found.detail}. Журнал не изменён — "
                 "проверь BingX."
             )
-        if await send_notification(self._bot, ctx.telegram_id, text):
+        if await send_notification(self._bot, ctx.telegram_id, text) is Delivery.DELIVERED:
             event.notified_at = datetime.now(UTC)
 
     async def _resolve_missing(

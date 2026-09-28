@@ -90,3 +90,29 @@ async def test_mark_price_parsed_from_live_premium_index_form() -> None:
     with pytest.raises(Exception, match="нет записи"):
         await client.get_mark_price("LINK-USDT")
     await client.close()
+
+
+class NetworkFailBot(FakeBot):
+    async def send_message(self, chat_id: int, text: str, reply_markup=None) -> None:  # type: ignore[no-untyped-def]
+        from aiogram.exceptions import TelegramNetworkError
+
+        raise TelegramNetworkError(method=None, message="Request timeout error")  # type: ignore[arg-type]
+
+
+async def test_failed_send_leaves_mark_and_next_cycle_retries() -> None:
+    """28.09: отметка приближения — только после доставки. Сбой сети не
+    ставит её, и следующий цикл при той же цене шлёт снова."""
+    trade = _sol()
+    failing = PositionMonitor(NetworkFailBot(), None, Settings())  # type: ignore[arg-type, call-arg]
+    await failing._check_target(
+        trade, D("121.69"), target=trade.stop_loss, kind="sl", threshold=D("0.10")
+    )
+    assert trade.sl_approach_notified_at is None
+
+    bot = FakeBot()
+    monitor = PositionMonitor(bot, None, Settings())  # type: ignore[arg-type, call-arg]
+    await monitor._check_target(
+        trade, D("121.69"), target=trade.stop_loss, kind="sl", threshold=D("0.10")
+    )
+    assert len(bot.sent) == 1
+    assert trade.sl_approach_notified_at is not None

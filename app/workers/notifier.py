@@ -9,6 +9,8 @@ send_notification — так проверка настройки не разма
 
 from __future__ import annotations
 
+from enum import StrEnum
+
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
 from aiogram.types import BufferedInputFile, InlineKeyboardMarkup
@@ -29,6 +31,27 @@ NOTIFICATION_LABELS: dict[str, str] = {
 }
 
 
+class Delivery(StrEnum):
+    """Исход отправки (28.09). Три исхода, не bool: «сбой сети» повторяют,
+    «бот заблокирован» — окончательный исход, повторять незачем.
+
+    Приведение к bool запрещено: StrEnum всегда истинен, и старая проверка
+    «if await send_notification(...)» молча считала бы доставленным любой
+    исход — пусть лучше падает."""
+
+    DELIVERED = "DELIVERED"
+    FAILED = "FAILED"  # сбой сети / API Telegram — повторить позже
+    FORBIDDEN = "FORBIDDEN"  # пользователь заблокировал бота — не повторять
+
+    @property
+    def final(self) -> bool:
+        """Повторять больше не нужно: доставлено или запрещено."""
+        return self is not Delivery.FAILED
+
+    def __bool__(self) -> bool:
+        raise TypeError("Delivery не приводится к bool — сравнивай с Delivery.*")
+
+
 def notification_enabled(settings: UserSettings | None, kind: str) -> bool:
     """Отсутствие настройки (в т.ч. у старых пользователей без нового ключа
     в JSONB) трактуется как "включено" — новые типы уведомлений по
@@ -45,11 +68,12 @@ async def send_notification(
     text: str,
     *,
     reply_markup: InlineKeyboardMarkup | None = None,
-) -> bool:
-    """True — сообщение доставлено. Сбой не пробрасывается (изоляция
-    получателей, см. docstring модуля), но вызывающий код может узнать о
-    нём — сканеру это нужно, чтобы не записать снимок неотправленного
-    уведомления (шаг 15.5.2а)."""
+) -> Delivery:
+    """Исход отправки. Сбой не пробрасывается (изоляция получателей, см.
+    docstring модуля), но вызывающий код знает о нём: сканеру это нужно,
+    чтобы не записать снимок неотправленного уведомления (шаг 15.5.2а),
+    остальным — чтобы ставить отметку доставки только после успеха и
+    повторять только FAILED (28.09)."""
     try:
         # reply_markup передаётся только когда задан: тестовые дублёры бота
         # (FakeBot) в существующих тестах принимают send_message(chat_id, text)
@@ -61,17 +85,17 @@ async def send_notification(
     except TelegramForbiddenError:
         # Пользователь заблокировал бота или удалил чат — это не сбой
         # доставки, который стоит ретраить, а устойчивое состояние.
-        logger.info(
+        logger.warning(
             "Уведомление не доставлено: бот заблокирован",
             extra={"telegram_id": telegram_id},
         )
-        return False
+        return Delivery.FORBIDDEN
     except TelegramAPIError:
         logger.exception(
             "Не удалось отправить уведомление", extra={"telegram_id": telegram_id}
         )
-        return False
-    return True
+        return Delivery.FAILED
+    return Delivery.DELIVERED
 
 
 async def send_notification_photo(
@@ -81,7 +105,7 @@ async def send_notification_photo(
     caption: str,
     *,
     reply_markup: InlineKeyboardMarkup | None = None,
-) -> bool:
+) -> Delivery:
     """Фото с подписью; при любой проблеме с фото (не только с сетью —
     сюда же попадает, например, подпись длиннее 1024 символов) откатывается
     на обычный текст, чтобы уведомление не терялось только из-за картинки."""
@@ -100,15 +124,15 @@ async def send_notification_photo(
                 caption=caption,
             )
     except TelegramForbiddenError:
-        logger.info(
+        logger.warning(
             "Уведомление не доставлено: бот заблокирован",
             extra={"telegram_id": telegram_id},
         )
-        return False
+        return Delivery.FORBIDDEN
     except Exception:
         logger.exception(
             "Не удалось отправить график, шлём текстом",
             extra={"telegram_id": telegram_id},
         )
         return await send_notification(bot, telegram_id, caption, reply_markup=reply_markup)
-    return True
+    return Delivery.DELIVERED
