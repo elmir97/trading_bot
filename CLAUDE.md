@@ -26,7 +26,7 @@ DATABASE_URL=postgresql+asyncpg://test:test@localhost:5432/trading_bot_test
 **Прогон зелёный только при нуле skipped.** Без `DATABASE_URL` молча
 пропускается ~115 интеграционных тестов, и счёт врёт.
 
-Ориентир на 28.09.2026 (вечер, `4d7d8bc`): 1147 passed, 0 skipped, 0 failed.
+Ориентир на 28.09.2026 (поздний вечер, `90fae6e`): 1189 passed, 0 skipped, 0 failed.
 
 Число тестов в этом файле — ориентир на момент записи, а не факт. Перед
 тем как называть его в плане или отчёте, прогонять пакет и брать свежую
@@ -292,7 +292,8 @@ PY
    `exec_max_open_positions`, `exec_max_total_risk_percent`,
    `confirm_lock_ttl_seconds`, `exec_position_mode_ttl_seconds`,
    `exec_margin_type_ttl_seconds` (с блоков 28.09),
-   `exec_daily_digest_hour`, `log_json`, `environment`.
+   `exec_daily_digest_hour`, `log_json`, `environment`,
+   `reconciler_notify_max_age_hours`, `reconciler_pulse_every` (с `c8306f9`/`90fae6e`).
    `bingx_base_url` — только публичный клиент; ключевой клиент в режиме
    demo ходит на `bingx_demo_base_url`
 
@@ -312,9 +313,14 @@ PY
     экземпляр бота
 12. Последние `Фоновый цикл завершён: setup_scanner|position_monitor|
     daily_jobs` и `Цикл сканера завершён` (символы, запросы,
-    длительность). Строки «Скан рынка» в логах нет. Отправка сводки
-    исполнения в лог не пишется — смотреть
-    `user_settings.execution_digest_last_sent_date` (пункт 14)
+    длительность). Строки «Скан рынка» в логах нет. С `27ac9db` рассылки
+    daily_jobs пишут INFO `Рассылка отправлена: daily_report|daily_limit_reached|
+    execution_digest`, сбой — WARNING `Рассылка не доставлена…` / `…выброшена`;
+    на коде до него — только `user_settings.execution_digest_last_sent_date`
+    (пункт 14). С `90fae6e` reconciler пишет `Пульс reconciler: …` раз в
+    `reconciler_pulse_every` запусков (60 — раз в час): последний не старше часа,
+    `ошибок` и `пропущено по локу` — флаг, если не 0. Плюс `Лимит BingX после POST`
+    (остаток и окно лимитов пути входа, с `e194bb7`) — копить в handoff
 
 ### E. База
 
@@ -328,7 +334,10 @@ PY
 14. `execution_orders` с окна деплоя: `status × stage`. Любая строка
     `PENDING`/`SUBMITTED`/`UNKNOWN` при `exec_dry_run=true` — флаг.
     Там же `user_settings.execution_digest_last_sent_date` — вчерашняя
-    дата, если час `EXEC_DAILY_DIGEST_HOUR` по локальному времени прошёл
+    дата, если час `EXEC_DAILY_DIGEST_HOUR` по локальному времени прошёл.
+    С миграции `7b4e2c9a1f35`: `reconciliation_events` с `notified_at IS NULL`
+    — недоставленные уведомления (`gave_up_at` NULL — ещё в переотправке, не
+    NULL — отказ); по `kind`, с `attempts` и возрастом
 15. `signal_notifications` с `level='READY'` по `notified_at` за 24 ч и с
     окна деплоя (события, не слоты); сколько из них дошло до карточки —
     distinct `notification_id` в `execution_orders`, кроме `REFUSED` на
@@ -347,8 +356,8 @@ PY
 17. `PING`; `INFO memory` — `used_memory_human`, `maxmemory_human`
     (256M), `maxmemory_policy` (`noeviction`)
 18. `SCAN exec:lock:*` — счётчик и `TTL` каждого. `TTL` -1 или больше
-    `confirm_lock_ttl_seconds` (183 с блоков 28.09; 173 — 15.5.4а; 163 — 15.5.3) —
-    залипший лок
+    `confirm_lock_ttl_seconds` (187 с `e194bb7` — сон троттлера в формуле; 183 —
+    блоки 28.09, прод `42efa3f`; 173 — 15.5.4а; 163 — 15.5.3) — залипший лок
 
 ### G. BingX (demo, только GET)
 

@@ -128,7 +128,7 @@ async def test_daily_summary_network_failure_keeps_date_and_retries(ctx) -> None
 
 
 async def test_loss_alert_network_failure_keeps_date_and_retries(ctx, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    daily, session, user, settings = ctx
+    daily, session, user, _settings = ctx
 
     async def for_user(*args, **kwargs):  # type: ignore[no-untyped-def]
         return _Client()

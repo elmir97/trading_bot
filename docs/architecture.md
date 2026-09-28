@@ -165,8 +165,16 @@ redis-server --appendonly no --save "" --maxmemory 256mb --maxmemory-policy noev
 `GET /openApi/swap/v3/quote/klines`, демо-хост: `x-ratelimit-requests-remain: 499`,
 `x-ratelimit-requests-expire: 10000`. Окно 10 секунд, порядка 500 запросов.
 
-- `_RateLimitState` **по пути**, не общий на клиент
-- `_maybe_throttle(path)` перед запросом, `_update_rate_limit()` после ответа
+- `_RateLimitState` **по (метод, путь)** (`e194bb7`), не общий на клиент: у
+  `trade/order` остаток после POST — 9 (~10/1 с), после GET — 29 (30/1 с)
+- `_maybe_throttle(method, path)` перед запросом, `_update_rate_limit()` после ответа;
+  после каждого POST (только путь входа) — INFO `Лимит BingX после POST` с остатком и
+  окном: лимиты POST копятся фактом, без отдельных запросов
+- Окна 28.09 (демо): приватные — 1 с (openOrders 5, positions 10, marginType 2,
+  leverage 5, order GET 30, balance 40), ticker — 10 с (500). Замер — один запрос на
+  ручку: 28.09 серия GET `marginType` дала 100410 и блок ручки на ~5 мин
+- TTL лока «Да» включает худший сон троттлера: 4 повтора ключа с остатком ниже порога ×
+  окно 1 с → **187 с** (`Settings.confirm_path_throttle_seconds`)
 - Отсутствие заголовков не роняет запрос и не трактуется как «остаток ноль»
 - `bingx_rate_limit_threshold` (20), `bingx_rate_limit_throttle_enabled` (`True`)
 
@@ -359,6 +367,27 @@ EMAPullback, вердикт LONG/SHORT/WAIT), AI-разбор, фоновые з
 С 28.09 (прод `42efa3f`, миграция `19c5c0deedca`): выход хранит `profit` биржи
 (`trade_fills.exchange_realized_pnl`); при полном закрытии PnL журнала сверяется с
 `Σ profit − комиссии`, расхождение больше 0.01R — аномалия `PNL_MISMATCH`.
+
+**Уведомления «хотя бы один раз»** (в коде 28.09, `27ac9db`…`90fae6e`, миграция
+`7b4e2c9a1f35`; не задеплоено). Дубль допустим, потеря — нет:
+
+- `send_notification` возвращает `Delivery`: `DELIVERED` / `FAILED` (сбой сети —
+  повторить) / `FORBIDDEN` (бот заблокирован — окончательно, WARNING). Приведение к bool
+  запрещено. Отметка доставки везде — только после окончательного исхода
+- daily_jobs (дневная сводка, тревога лимита, сводка исполнения): дата отправки после
+  успеха; сбой — повтор следующим циклом (15 мин) до местной полуночи, потом WARNING
+  «выброшена»
+- события `reconciliation_events` хранят `notify_text`; `notified_at IS NULL` —
+  reconciler переотправляет до запросов к бирже: 30 мин — каждый цикл, дальше раз в
+  10 мин (один ERROR при переходе), старше 24 ч — отказ (`gave_up_at`, WARNING).
+  Опоздавшее больше чем на 2 мин — первой строкой «⏱ Событие от HH:MM (доставлено с
+  опозданием)». Решения — `app/execution/redelivery.py` без I/O
+- тревоги read-back — тоже события (`STOP_RESCUE_FAILED`, `STOP_UNVERIFIED`,
+  `LIQUIDATION_BEFORE_STOP`, `ENTRY_PAST_STOP`): хендлер «Да» коммитит событие до
+  отправки, шлёт раньше итоговой карточки; сбой правок «проверяю…»/итога путь не обрывает,
+  итог без карточки — новым сообщением
+- пульс: `ReconcilerPulse` в памяти — INFO раз в `reconciler_pulse_every` запусков и
+  строка «Сверка: циклов N, последний HH:MM, ошибок E» в сводке исполнения
 
 **15.7**: обычный риск-процент (решение владельца, результат сделок — его риск), но
 `EXEC_MAX_OPEN_POSITIONS=1` и один символ; расширение после 5 чистых исполнений подряд.

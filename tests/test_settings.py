@@ -278,7 +278,8 @@ class TestConfirmLockTtl:
         """28.09: сон троттлера (4 повтора ключа × окно 1 с) входит в TTL —
         раньше его не было в формуле вовсе."""
         settings = _minimal_settings()
-        without_throttle = settings.confirm_lock_ttl_seconds - settings.confirm_path_throttle_seconds
+        throttle = settings.confirm_path_throttle_seconds
+        without_throttle = settings.confirm_lock_ttl_seconds - throttle
         assert settings.confirm_path_throttle_seconds == 4
         assert without_throttle == 183
 

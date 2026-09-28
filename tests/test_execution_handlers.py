@@ -2958,7 +2958,7 @@ async def test_alarm_before_card_and_summary_resent_when_edit_fails(ctx, bot, mo
         monkeypatch, bot,
         lambda m: isinstance(m, EditMessageText) and "Вход исполнен" in (m.text or ""),
     )
-    session, user, _n, _edits = await _real_confirm(
+    _session, _user, _n, _edits = await _real_confirm(
         ctx, bot, monkeypatch, positions_after_entry=[_own_position("98")]
     )
     calls = bot.recorder.calls
