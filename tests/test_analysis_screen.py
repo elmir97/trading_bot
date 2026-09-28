@@ -669,3 +669,30 @@ class TestEditOrReplace:
 
         message.delete.assert_awaited_once()
         message.answer.assert_awaited_once()
+
+
+class TestReadyCardInformationalCondition:
+    """28.09: «Объём пробоя» на READY — информационное условие. Раньше карточка
+    показывала только passed_conditions, и невыполненное пропадало бы."""
+
+    @staticmethod
+    def _ready(volume_passed: bool) -> Signal:
+        return replace(
+            _found(),
+            conditions=[
+                SignalCondition("Пробой уровня", True, "Пробит уровень 100.0000"),
+                SignalCondition(
+                    "Объём пробоя", volume_passed, "×1.05 от среднего за 20 (порог 1.3)"
+                ),
+            ],
+        )
+
+    def test_failed_informational_condition_shown_with_warning(self) -> None:
+        text = render_signal(self._ready(volume_passed=False), 2)
+        assert "⚠️ Объём пробоя: ×1.05 от среднего за 20 (порог 1.3)" in text
+        assert "✅ Пробой уровня" in text
+
+    def test_lock_passed_condition_keeps_check_mark(self) -> None:
+        text = render_signal(self._ready(volume_passed=True), 2)
+        assert "✅ Объём пробоя" in text
+        assert "⚠️" not in text

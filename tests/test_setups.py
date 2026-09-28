@@ -530,3 +530,27 @@ class TestEMAPullbackDistanceFeature:
         assert signal.ema50_distance_atr == abs(context.price - context.ema50) / context.atr
         assert signal.breakout_volume_ratio is None
         assert signal.breakout_at is None
+
+
+class TestStopPercent:
+    """Вход детектора — край зоны, дальний от стопа (закрытие подтверждающей
+    свечи), а не середина зоны исполнения."""
+
+    def test_long_uses_upper_edge(self) -> None:
+        from app.analysis.signals import stop_percent
+
+        assert stop_percent(SignalDirection.LONG, D(100), D(101), D(98)) == D(3) / D(101) * 100
+
+    def test_short_uses_lower_edge(self) -> None:
+        from app.analysis.signals import stop_percent
+
+        assert stop_percent(SignalDirection.SHORT, D(99), D(100), D(102)) == D(3) / D(99) * 100
+
+    @pytest.mark.parametrize(
+        ("direction", "stop"),
+        [(SignalDirection.WAIT, D(98)), (SignalDirection.LONG, None)],
+    )
+    def test_none_without_prices(self, direction: SignalDirection, stop: Decimal | None) -> None:
+        from app.analysis.signals import stop_percent
+
+        assert stop_percent(direction, D(100), D(101), stop) is None

@@ -107,3 +107,27 @@ def test_fingerprint_ignores_target_source() -> None:
         for source in (None, TargetSource.LEVEL, TargetSource.FORMULA_2R)
     }
     assert fingerprints == {build_fingerprint(base, SignalLevel.READY)}
+
+
+# --- 28.09: строка «Объём пробоя» в READY-уведомлении -----------------------
+
+
+def _plain_ready() -> Signal:
+    return Signal(
+        symbol="BTC-USDT", timeframe="4h", direction=SignalDirection.LONG,
+        setup="Пробой с ретестом", entry_zone_low=D("100"), entry_zone_high=D("101"),
+        stop_loss=D("98"), take_profit_1=D("106"), risk_reward=D("2.5"), confidence=7,
+    )
+
+
+def test_render_detail_ready_shows_breakout_volume_line() -> None:
+    signal = replace(_plain_ready(), breakout_volume_ratio=D("1.1234"))
+    text = render_detail(signal, SignalLevel.READY)
+    assert "\nОбъём пробоя ×1.12 (порог 1.3)\n" in text
+
+
+def test_lock_render_detail_without_breakout_volume_unchanged() -> None:
+    """Откат к EMA50 и старые сигналы — строки нет, текст прежний."""
+    text = render_detail(_plain_ready(), SignalLevel.READY)
+    assert "Объём пробоя" not in text
+    assert "/10\n\n<i>Проверь актуальность" in text

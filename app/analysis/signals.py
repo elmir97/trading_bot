@@ -157,6 +157,36 @@ def target_line(price_text: str, source: TargetSource | None) -> str:
     return f"Цель: {price_text}"
 
 
+def detector_entry(
+    direction: SignalDirection | None,
+    entry_low: Decimal | None,
+    entry_high: Decimal | None,
+) -> Decimal | None:
+    """Вход детектора — закрытие подтверждающей свечи: край зоны, дальний
+    от стопа (LONG — верхний, SHORT — нижний); другой край — уровень или
+    EMA50. От него считаются stop_pct в слоте и RR в отчёте исходов
+    (scripts/signal_outcomes.py). Не путать с signal_reference_price
+    исполнения — там середина зоны."""
+    if direction is SignalDirection.LONG:
+        return entry_high
+    if direction is SignalDirection.SHORT:
+        return entry_low
+    return None
+
+
+def stop_percent(
+    direction: SignalDirection | None,
+    entry_low: Decimal | None,
+    entry_high: Decimal | None,
+    stop_loss: Decimal | None,
+) -> Decimal | None:
+    """|вход − стоп| / вход × 100, вход — detector_entry. None без цен."""
+    entry = detector_entry(direction, entry_low, entry_high)
+    if entry is None or stop_loss is None or entry <= 0:
+        return None
+    return abs(entry - stop_loss) / entry * Decimal(100)
+
+
 def validate_geometry(
     direction: SignalDirection,
     entry_low: Decimal,

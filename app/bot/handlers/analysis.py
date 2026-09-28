@@ -147,9 +147,12 @@ def render_signal(signal: Signal, price_precision: int | None = None) -> str:
     if signal.note:
         lines.append(f"<i>{_prices(signal.note, price_precision)}</i>")
 
+    # У готового сигнала невыполненным бывает только информационное условие
+    # («Объём пробоя», 28.09) — не фильтр, поэтому ⚠️, а не ⬜.
     lines += ["", "<b>Условия сетапа:</b>"]
     lines += [
-        f"✅ {c.name}: {_prices(c.detail, price_precision)}" for c in signal.passed_conditions
+        f"{'✅' if c.passed else '⚠️'} {c.name}: {_prices(c.detail, price_precision)}"
+        for c in signal.conditions
     ]
 
     lines += [

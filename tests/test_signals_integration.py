@@ -788,3 +788,91 @@ async def test_forming_slot_has_no_target_source(ctx) -> None:  # type: ignore[n
     record = await repo.get_active_slot(user.id, "BTC-USDT", "4h", SignalLevel.FORMING)
     assert record is not None
     assert record.target_source is None
+
+
+# --- 28.09: признаки READY в слоте и снимке ---------------------------------
+
+
+async def test_ready_features_on_slot_and_snapshot(ctx) -> None:  # type: ignore[no-untyped-def]
+    user, session, repo, scanner, _bot, _ = ctx
+    breakout_at = datetime(2026, 9, 28, 4, tzinfo=UTC)
+    signal = replace(
+        _ready_signal(),
+        breakout_volume_ratio=D("1.75"),
+        breakout_at=breakout_at,
+    )
+
+    await scanner._handle_signal(
+        repo, user, signal, "BTC-USDT", "4h",
+        want_ready=True, want_forming=True, context=_context(),
+    )
+    await session.flush()
+
+    record = await repo.get_active_slot(user.id, "BTC-USDT", "4h", SignalLevel.READY)
+    assert record is not None
+    [n] = await _notifications(session, user.id)
+    # Вход LONG — верхний край зоны 101, стоп 98: 3 / 101 × 100.
+    stop_pct = D(3) / D(101) * D(100)
+    for row in (record, n):
+        assert row.atr == D("1.5")
+        assert row.volume_ratio_last == D("1.2")
+        assert row.stop_pct == stop_pct.quantize(D("1e-12"))
+        assert row.breakout_volume_ratio == D("1.75")
+        assert row.breakout_at == breakout_at
+        assert row.ema50_distance_atr is None
+    assert "Объём пробоя ×1.75 (порог 1.3)" in record.detail
+
+
+async def test_ready_ema_pullback_feature_on_snapshot(ctx) -> None:  # type: ignore[no-untyped-def]
+    user, session, repo, scanner, _bot, _ = ctx
+    signal = replace(
+        _ready_signal(), setup="Откат к EMA50", ema50_distance_atr=D("0.25")
+    )
+    await scanner._handle_signal(
+        repo, user, signal, "BTC-USDT", "4h",
+        want_ready=True, want_forming=True, context=_context(),
+    )
+    await session.flush()
+    [n] = await _notifications(session, user.id)
+    assert n.ema50_distance_atr == D("0.25")
+    assert n.breakout_volume_ratio is None and n.breakout_at is None
+
+
+async def test_lock_forming_features_are_null(ctx) -> None:  # type: ignore[no-untyped-def]
+    user, session, repo, scanner, _bot, _ = ctx
+    await scanner._handle_signal(
+        repo, user, _forming_signal(), "BTC-USDT", "4h",
+        want_ready=True, want_forming=True, context=_context(),
+    )
+    await session.flush()
+    record = await repo.get_active_slot(user.id, "BTC-USDT", "4h", SignalLevel.FORMING)
+    assert record is not None
+    [n] = await _notifications(session, user.id)
+    for row in (record, n):
+        for name in (
+            "atr", "volume_ratio_last", "stop_pct",
+            "breakout_volume_ratio", "breakout_at", "ema50_distance_atr",
+        ):
+            assert getattr(row, name) is None, name
+
+
+async def test_ready_after_forming_overwrites_null_features(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Слот READY переиспользуется: признаки прошлого READY не остаются в
+    новом — READY без пробоя (откат) обнуляет breakout_*."""
+    user, session, repo, scanner, _bot, _ = ctx
+    first = replace(_ready_signal(), breakout_volume_ratio=D("2"), breakout_at=datetime.now(UTC))
+    await scanner._handle_signal(
+        repo, user, first, "BTC-USDT", "4h",
+        want_ready=True, want_forming=True, context=_context(),
+    )
+    await session.flush()
+    second = replace(_ready_signal("99"), setup="Откат к EMA50", ema50_distance_atr=D("0.3"))
+    await scanner._handle_signal(
+        repo, user, second, "BTC-USDT", "4h",
+        want_ready=True, want_forming=True, context=_context(),
+    )
+    await session.flush()
+    record = await repo.get_active_slot(user.id, "BTC-USDT", "4h", SignalLevel.READY)
+    assert record is not None
+    assert record.breakout_volume_ratio is None and record.breakout_at is None
+    assert record.ema50_distance_atr == D("0.3")

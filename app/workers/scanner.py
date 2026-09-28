@@ -39,7 +39,14 @@ from app.analysis.classify import (
     classify_signal,
 )
 from app.analysis.engine import AnalysisEngine
-from app.analysis.signals import MarketContext, Signal, target_line, wait_signal
+from app.analysis.setups import BREAKOUT_MIN_VOLUME_RATIO
+from app.analysis.signals import (
+    MarketContext,
+    Signal,
+    stop_percent,
+    target_line,
+    wait_signal,
+)
 from app.bot.keyboards.execution import open_trade_button
 from app.core.config import Settings
 from app.core.logging import get_logger
@@ -139,8 +146,9 @@ def render_detail(
             f"{fmt_price(signal.entry_zone_high, price_precision)}\n"
             f"Стоп: {fmt_price(signal.stop_loss, price_precision)}\n"
             f"{target_line(target, signal.target_source)}\n"
-            f"RR: 1:{fmt_decimal(signal.risk_reward)} · Качество: {signal.confidence}/10\n\n"
-            f"<i>Проверь актуальность перед входом — рынок мог уйти с момента скана.</i>"
+            f"RR: 1:{fmt_decimal(signal.risk_reward)} · Качество: {signal.confidence}/10\n"
+            f"{_breakout_volume_line(signal)}"
+            f"\n<i>Проверь актуальность перед входом — рынок мог уйти с момента скана.</i>"
         )
     # signal.setup здесь бесполезен (см. docstring build_fingerprint) —
     # signal.note уже содержит конкретику детектора ("цена на ретесте,
@@ -148,6 +156,18 @@ def render_detail(
     return (
         f"🌱 <b>Формируется сетап: {signal.symbol} · {signal.timeframe.upper()}</b>\n\n"
         f"{signal.note}"
+    )
+
+
+def _breakout_volume_line(signal: Signal) -> str:
+    """Строка «Объём пробоя» READY-уведомления — только у пробоя. Не фильтр
+    (см. BREAKOUT_MIN_VOLUME_RATIO): видно, на каком объёме пробили. В
+    fingerprint не входит — детали уведомления его не меняют."""
+    if signal.breakout_volume_ratio is None:
+        return ""
+    return (
+        f"Объём пробоя ×{signal.breakout_volume_ratio:.2f} "
+        f"(порог {BREAKOUT_MIN_VOLUME_RATIO})\n"
     )
 
 
@@ -363,6 +383,25 @@ class SetupScanner:
         record.take_profit = signal.take_profit_1
         record.confidence = signal.confidence if level is SignalLevel.READY else None
         record.target_source = signal.target_source if level is SignalLevel.READY else None
+        # Признаки для отчёта исходов (scripts/signal_outcomes.py) — только у
+        # READY; FORMING пишет NULL, как confidence и target_source. Снимок
+        # уведомления копирует их из слота.
+        ready = level is SignalLevel.READY
+        record.atr = context.atr if ready and context is not None else None
+        record.volume_ratio_last = (
+            context.volume_ratio if ready and context is not None else None
+        )
+        record.stop_pct = (
+            stop_percent(
+                signal.direction, signal.entry_zone_low, signal.entry_zone_high,
+                signal.stop_loss,
+            )
+            if ready
+            else None
+        )
+        record.breakout_volume_ratio = signal.breakout_volume_ratio if ready else None
+        record.breakout_at = signal.breakout_at if ready else None
+        record.ema50_distance_atr = signal.ema50_distance_atr if ready else None
         # Точность нужна и карточке, и графику — запрашивается один раз (кэш
         # символов живёт час). FORMING цен в тексте не показывает.
         precision = (
