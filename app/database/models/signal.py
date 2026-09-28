@@ -27,7 +27,13 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.database.base import Base, IntPKMixin, PriceNumeric, TimestampMixin
+from app.database.base import (
+    Base,
+    IntPKMixin,
+    PriceNumeric,
+    RatioNumeric,
+    TimestampMixin,
+)
 from app.trading.enums import SignalDirection, SignalLevel, SignalRecordStatus, TargetSource
 
 if TYPE_CHECKING:
@@ -82,6 +88,18 @@ class SignalRecord(IntPKMixin, TimestampMixin, Base):
     target_source: Mapped[TargetSource | None] = mapped_column(
         Enum(TargetSource, native_enum=False, length=16)
     )
+
+    # 28.09, признаки READY для отчёта исходов (scripts/signal_outcomes.py).
+    # У FORMING и у строк до миграции ea93de72860d — NULL. В fingerprint не
+    # входят. Снимок уведомления копирует их (SignalNotification.snapshot_of).
+    atr: Mapped[Decimal | None] = mapped_column(PriceNumeric)
+    volume_ratio_last: Mapped[Decimal | None] = mapped_column(RatioNumeric)
+    stop_pct: Mapped[Decimal | None] = mapped_column(RatioNumeric)
+    # Только «Пробой с ретестом».
+    breakout_volume_ratio: Mapped[Decimal | None] = mapped_column(RatioNumeric)
+    breakout_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Только «Откат к EMA50».
+    ema50_distance_atr: Mapped[Decimal | None] = mapped_column(RatioNumeric)
 
     # Готовый текст уведомления — рендерится один раз при обнаружении,
     # чтобы формат сообщения не зависел от того, что доживёт до отправки.

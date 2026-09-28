@@ -43,6 +43,10 @@ MoneyNumeric = Numeric(20, 8)
 # Проценты: риск, PnL %, просадка.
 PercentNumeric = Numeric(12, 4)
 
+# Безразмерные признаки сигнала (отношения объёмов, расстояния в ATR, стоп
+# в % от входа) — считаются в Decimal полной точности, как цены.
+RatioNumeric = Numeric(28, 12)
+
 
 class TimestampMixin:
     """created_at/updated_at на стороne БД.

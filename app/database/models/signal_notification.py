@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import DateTime, Enum, ForeignKey, Index, SmallInteger, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.database.base import Base, IntPKMixin, PriceNumeric
+from app.database.base import Base, IntPKMixin, PriceNumeric, RatioNumeric
 from app.trading.enums import SignalDirection, SignalLevel, TargetSource
 
 if TYPE_CHECKING:
@@ -66,6 +66,14 @@ class SignalNotification(IntPKMixin, Base):
     target_source: Mapped[TargetSource | None] = mapped_column(
         Enum(TargetSource, native_enum=False, length=16)
     )
+    # 28.09: признаки READY на момент уведомления — копия слота, см.
+    # SignalRecord. NULL у FORMING и до миграции ea93de72860d.
+    atr: Mapped[Decimal | None] = mapped_column(PriceNumeric)
+    volume_ratio_last: Mapped[Decimal | None] = mapped_column(RatioNumeric)
+    stop_pct: Mapped[Decimal | None] = mapped_column(RatioNumeric)
+    breakout_volume_ratio: Mapped[Decimal | None] = mapped_column(RatioNumeric)
+    breakout_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ema50_distance_atr: Mapped[Decimal | None] = mapped_column(RatioNumeric)
 
     notified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     # notified_at + TTL сигнала (Settings.setup_scanner_ttl_hours), фиксируется
@@ -98,6 +106,12 @@ class SignalNotification(IntPKMixin, Base):
             take_profit=slot.take_profit,
             confidence=slot.confidence,
             target_source=slot.target_source,
+            atr=slot.atr,
+            volume_ratio_last=slot.volume_ratio_last,
+            stop_pct=slot.stop_pct,
+            breakout_volume_ratio=slot.breakout_volume_ratio,
+            breakout_at=slot.breakout_at,
+            ema50_distance_atr=slot.ema50_distance_atr,
             notified_at=notified_at,
             expires_at=expires_at,
         )

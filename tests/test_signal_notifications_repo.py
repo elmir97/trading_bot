@@ -119,6 +119,53 @@ async def test_snapshot_copies_slot_and_survives_slot_rewrite(ctx) -> None:  # t
     assert fetched.trade_opened_at is None
 
 
+async def test_snapshot_copies_signal_features(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Признаки READY (миграция ea93de72860d) снимок копирует из слота и не
+    теряет после перезаписи слота — отчёт исходов читает их из снимка."""
+    session, user, slot, repo = ctx
+    breakout_at = datetime(2026, 9, 28, 8, tzinfo=UTC)
+    slot.atr = D("1.5")
+    slot.volume_ratio_last = D("0.8")
+    slot.stop_pct = D("5.94059406")
+    slot.breakout_volume_ratio = D("1.25")
+    slot.breakout_at = breakout_at
+    await session.flush()
+    notification = repo.add(_notify(slot, NOW))
+    await repo.flush()
+    notification_id, user_id = notification.id, user.id
+
+    slot.atr = D("9")
+    slot.breakout_volume_ratio = None
+    slot.breakout_at = None
+    await session.flush()
+    session.expire_all()
+
+    fetched = await repo.get(notification_id, user_id)
+    assert fetched is not None
+    assert fetched.atr == D("1.5")
+    assert fetched.volume_ratio_last == D("0.8")
+    assert fetched.stop_pct == D("5.94059406")
+    assert fetched.breakout_volume_ratio == D("1.25")
+    assert fetched.breakout_at == breakout_at
+    assert fetched.ema50_distance_atr is None
+
+
+async def test_snapshot_features_null_by_default(ctx) -> None:  # type: ignore[no-untyped-def]
+    """FORMING и строки до миграции: признаков нет — NULL, а не ноль."""
+    session, user, slot, repo = ctx
+    notification = repo.add(_notify(slot, NOW))
+    await repo.flush()
+    notification_id, user_id = notification.id, user.id
+    session.expire_all()
+    fetched = await repo.get(notification_id, user_id)
+    assert fetched is not None
+    for name in (
+        "atr", "volume_ratio_last", "stop_pct",
+        "breakout_volume_ratio", "breakout_at", "ema50_distance_atr",
+    ):
+        assert getattr(fetched, name) is None, name
+
+
 async def test_get_foreign_user_returns_none(ctx) -> None:  # type: ignore[no-untyped-def]
     _session, user, slot, repo = ctx
     notification = repo.add(_notify(slot, NOW))
