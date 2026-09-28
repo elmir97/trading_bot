@@ -55,7 +55,9 @@ from app.trading.enums import ExchangeKeyMode
 # локом — ticker/symbol/balance дважды + get_positions карточки = 7 вызовов,
 # не больше пути отправки; худшим остаётся путь отправки с read-back.
 _ENTRY_PATH_HTTP_CALLS = 7
-_READBACK_FIXED_HTTP_CALLS = 1 + 2 + 2
+# 28.09 (блок D): + get_positions после условников — liquidationPrice против
+# стопа, одна попытка без повторов.
+_READBACK_FIXED_HTTP_CALLS = 1 + 2 + 2 + 1
 
 
 class Settings(BaseSettings):
@@ -183,6 +185,13 @@ class Settings(BaseSettings):
     # 0.05% (27.09, SOL/LINK вход и выход). Боевую сверить в префлайте 15.7.
     # Входит в RR гварда INVALID_LEVELS и в объём (sizing), не в детекторы.
     exec_taker_fee_rate: Decimal = Decimal("0.0005")
+    # Плечо входа — от стопа (28.09): min(plan.max_leverage,
+    # floor(1 / (стоп × EXEC_LIQ_BUFFER + EXEC_MAINT_MARGIN_RATE))). Буфер —
+    # во сколько раз ликвидация дальше стопа; поддерживающая маржа —
+    # калибровка по живой LINK: 10x изолированная, ликвидация 13.08 при входе
+    # 14.4 (9.17% = 1/10 − 0.83%). Режим маржи — изолированный.
+    exec_liq_buffer: Decimal = Decimal("1.5")
+    exec_maint_margin_rate: Decimal = Decimal("0.008")
     exec_symbol_whitelist: str = Field(
         default="BTC-USDT,ETH-USDT",
         description="Через запятую. Пустая строка = ограничения нет.",
@@ -269,6 +278,24 @@ class Settings(BaseSettings):
             )
         return value
 
+    @field_validator("exec_liq_buffer")
+    @classmethod
+    def _sane_liq_buffer(cls, value: Decimal) -> Decimal:
+        """Буфер < 1 значит «ликвидация ближе стопа» — ровно то, от чего
+        формула защищает."""
+        if value < Decimal(1):
+            raise ValueError(f"EXEC_LIQ_BUFFER должен быть ≥ 1: {value}")
+        return value
+
+    @field_validator("exec_maint_margin_rate")
+    @classmethod
+    def _sane_maint_margin(cls, value: Decimal) -> Decimal:
+        if not Decimal(0) <= value < Decimal("0.1"):
+            raise ValueError(
+                f"EXEC_MAINT_MARGIN_RATE должен быть в [0; 0.1) — доля, не проценты: {value}"
+            )
+        return value
+
     @field_validator("database_url")
     @classmethod
     def _require_async_driver(cls, value: SecretStr) -> SecretStr:
@@ -298,7 +325,7 @@ class Settings(BaseSettings):
     def confirm_path_http_calls(self) -> int:
         """Худший случай числа HTTP-вызовов на пути «Да» вместе с read-back
         (шаг 15.5.3) — см. комментарий у _ENTRY_PATH_HTTP_CALLS. При
-        дефолтах: 7 + (1 + 3) + 2 + 2 = 15."""
+        дефолтах: 7 + (1 + 3) + 2 + 2 + 1 = 16 (последний — ликвидация, 28.09)."""
         return (
             _ENTRY_PATH_HTTP_CALLS
             + self.exec_order_readback_attempts
@@ -330,7 +357,7 @@ class Settings(BaseSettings):
         (тот покрывает локальную часть — БД, планировщик event loop, не
         сеть). Шаг 15.5.3: read-back под тем же локом — его вызовы входят в
         confirm_path_http_calls, паузы — отдельным членом. При дефолтах:
-        ceil(10.0 × (15+1)) + 10 + ceil(2.5) = 160 + 10 + 3 = 173.
+        ceil(10.0 × (16+1)) + 10 + ceil(2.5) = 170 + 10 + 3 = 183.
 
         При max_retries=1 на каждом из этих вызовов (см. п.1-2 разведки)
         бэкофф между попытками не наступает — цикл в BingXClient._request

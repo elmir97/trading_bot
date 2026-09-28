@@ -150,6 +150,8 @@ class FakeExchangeClient(ExchangeClient):
         # max_retries=None, «Да» (_submit_real_order) — с max_retries=1.
         self.positions: list[Position] = []
         self.positions_error: Exception | None = None
+        # None — после входа то же, что до него (self.positions).
+        self.positions_after_entry: list[Position] | Exception | None = None
         self.positions_retries_seen: list[int | None] = []
 
     async def get_ticker(self, symbol: str, *, max_retries: int | None = None) -> Ticker:
@@ -178,6 +180,13 @@ class FakeExchangeClient(ExchangeClient):
 
     async def get_positions(self, *, max_retries: int | None = None) -> list[Position]:
         self.positions_retries_seen.append(max_retries)
+        entered = any(c[0] == "place_market_order" for c in self.submit_calls)
+        if entered and self.positions_after_entry is not None:
+            # 28.09: read-back читает позиции после входа (ликвидация против
+            # стопа) — там уже своя позиция, а на карточке и перед «Да» её нет.
+            if isinstance(self.positions_after_entry, Exception):
+                raise self.positions_after_entry
+            return self.positions_after_entry
         if self.positions_error is not None:
             raise self.positions_error
         return self.positions
@@ -875,8 +884,9 @@ async def test_confirm_yes_submits_real_order(ctx, bot, monkeypatch) -> None:  #
         "get_leverage", "place_market_order", "get_order_fill", "get_open_orders",
     ]
     # Шаг 15.5.4а: позиции биржи — на карточке (без ограничения повторов) и
-    # на «Да» клиентом отправки (max_retries=1).
-    assert client.positions_retries_seen == [None, 1]
+    # на «Да» клиентом отправки (max_retries=1); 28.09 — ещё раз в read-back
+    # (ликвидация против стопа, max_retries=1).
+    assert client.positions_retries_seen == [None, 1, 1]
 
     edits = [m.text for m in bot.recorder.calls if isinstance(m, EditMessageText)]
     assert "⏳ Ордер отправлен, проверяю исполнение…" in edits
@@ -2321,7 +2331,7 @@ async def test_callback_answered_before_first_exchange_call_on_yes(  # type: ign
     ctx, bot, monkeypatch
 ) -> None:
     """Telegram ждёт ответ на callback ~15 с, а путь «Да» с read-back — до
-    TTL лока (173 с): callback.answer() обязан уйти до первого HTTP к бирже."""
+    TTL лока (183 с): callback.answer() обязан уйти до первого HTTP к бирже."""
     dp, session, user, client, _redis, settings = ctx
     client.current_leverage = _leverage_info(long_leverage=10)
     client.place_order_result = _order_result()
@@ -2634,3 +2644,75 @@ async def test_card_shows_rr_with_fee(ctx, bot, monkeypatch) -> None:  # type: i
 
     [card] = [t for t in bot.recorder.sent_texts() if "Цена сейчас" in t]
     assert "RR 1:3.33 · с комиссией 1:" in card
+
+
+
+# ---------------------------------------------------------------------------
+# 28.09, блок D: плечо от стопа и ликвидация в read-back
+# ---------------------------------------------------------------------------
+
+
+def _own_position(liquidation: str | None) -> Position:
+    return Position(
+        symbol="BTC-USDT", side=TradeSide.LONG, quantity=D("1"), entry_price=D("100"),
+        mark_price=D("100"), leverage=10, unrealized_pnl=D("0"), margin=D("10"),
+        liquidation_price=D(liquidation) if liquidation is not None else None,
+    )
+
+
+async def test_far_stop_lowers_leverage_below_plan(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Стоп 13.84% (как #110 XRP) при потолке плана 10x → плечо 4x: при 10x
+    ликвидация (≈9.2%) наступила бы раньше стопа. Карточка называет потолок,
+    на «Да» set_leverage выставляет 4."""
+    dp, session, user, client, _redis, settings = ctx
+    client.current_leverage = _leverage_info(long_leverage=10)
+    client.place_order_result = _order_result(order_id="555555")
+    client.positions_after_entry = [_own_position("76")]
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    settings.exec_dry_run = False
+    signal = _signal(user.id, stop_loss=D("86.16"), take_profit=D("140"))
+    session.add(signal)
+    await session.flush()
+    notification = await _notify(session, signal)
+
+    await _open_and_confirm(dp, bot, notification, user)
+
+    [card] = [t for t in bot.recorder.sent_texts() if "Цена сейчас" in t]
+    assert "Плечо: 4x (план до 10x)" in card
+    leverage_calls = [c[1] for c in client.submit_calls if c[0] == "set_leverage"]
+    assert [c["leverage"] for c in leverage_calls] == [4]
+
+
+async def test_liquidation_before_stop_raises_alarm(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """LONG, стоп 97, ликвидация 98 — ликвидация раньше стопа: тревога
+    отдельным сообщением и ERROR."""
+    session, user, notification, edits = await _real_confirm(
+        ctx, bot, monkeypatch, positions_after_entry=[_own_position("98")]
+    )
+    alarms = [t for t in bot.recorder.sent_texts() if t.startswith("⚠️ ЛИКВИДАЦИЯ РАНЬШЕ СТОПА")]
+    assert len(alarms) == 1
+    assert "ликвидация 98" in alarms[0] and "стоп 97" in alarms[0]
+
+
+async def test_liquidation_beyond_stop_is_quiet(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _session, _user, _notification, edits = await _real_confirm(
+        ctx, bot, monkeypatch, positions_after_entry=[_own_position("90")]
+    )
+    client = ctx[3]
+    # Проверка была: одно чтение позиций после входа (max_retries=1), а не
+    # тишина от того, что её нет.
+    assert client.positions_retries_seen == [None, 1, 1]
+    assert not any("ЛИКВИДАЦИЯ" in t for t in bot.recorder.sent_texts())
+    assert not any("ликвидации проверить не удалось" in t for t in edits)
+
+
+async def test_liquidation_unreadable_is_warning_not_alarm(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Позиции после входа не прочитались — предупреждение в итоге
+    read-back, без тревоги."""
+    _session, _user, _notification, edits = await _real_confirm(
+        ctx, bot, monkeypatch,
+        positions_after_entry=ExchangeUnavailableError("BingX не ответил вовремя"),
+    )
+    [final] = [t for t in edits if "Вход исполнен" in t]
+    assert "Цену ликвидации проверить не удалось" in final
+    assert not any("ЛИКВИДАЦИЯ" in t for t in bot.recorder.sent_texts())

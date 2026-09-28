@@ -57,7 +57,7 @@ from app.execution.guards import (
     run_guards,
     run_signal_identity_guards,
 )
-from app.execution.leverage import leverage_needs_update
+from app.execution.leverage import entry_leverage, leverage_needs_update
 from app.execution.models import ExecutionRefusal, ExecutionRefusalCode, OrderRequest
 from app.execution.sizing import calculate_size, round_levels_toward_entry
 from app.market.data import MarketDataService
@@ -134,6 +134,9 @@ class ExecutionQuote:
     # USDT на LIVE, VST на DEMO (BingXClient._QUOTE_ASSET_BY_MODE). Не
     # хардкод: на демо суммы в VST.
     quote_asset: str
+    # Потолок плеча плана — для подписи «Плечо 4x (план до 10x)», когда
+    # плечо от стопа ниже него.
+    max_leverage: int
 
     @property
     def total_risk_after_percent(self) -> Decimal:
@@ -548,7 +551,15 @@ class ExecutionService:
         if day_pnl is not None and balance > ZERO:
             day_loss_percent = max(ZERO, -day_pnl / balance * Decimal(100))
 
-        leverage = plan.max_leverage
+        # Плечо — от стопа, план — потолок (28.09): ликвидация дальше стопа
+        # с запасом exec_liq_buffer. Уровни к этому моменту уже округлены.
+        leverage = entry_leverage(
+            entry_price=current_price,
+            stop_loss=stop_loss,
+            max_leverage=plan.max_leverage,
+            liq_buffer=self._settings.exec_liq_buffer,
+            maint_margin_rate=self._settings.exec_maint_margin_rate,
+        )
 
         guard_inputs = GuardInputs(
             execution_enabled=self._settings.trading_execution_enabled,
@@ -660,6 +671,7 @@ class ExecutionService:
             dual_side_position=dual_side_position,
             account_balance=balance,
             quote_asset=balance_row.asset,
+            max_leverage=plan.max_leverage,
         )
 
 

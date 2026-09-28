@@ -10,8 +10,40 @@
 
 from __future__ import annotations
 
+from decimal import ROUND_FLOOR, Decimal
+
 from app.exchanges.base import LeverageInfo
 from app.trading.enums import TradeSide
+
+
+def entry_leverage(
+    *,
+    entry_price: Decimal,
+    stop_loss: Decimal,
+    max_leverage: int,
+    liq_buffer: Decimal,
+    maint_margin_rate: Decimal,
+) -> int:
+    """Плечо входа от стопа (решение 28.09): ликвидация должна быть дальше
+    стопа с запасом liq_buffer.
+
+    При изолированной марже ликвидация отстоит от входа примерно на
+    1/плечо − поддерживающая маржа. Условие 1/L − mmr ≥ буфер × стоп даёт
+    L ≤ 1 / (стоп × буфер + mmr). Результат — floor, не выше
+    plan.max_leverage (потолок, не фактическое значение), не ниже 1.
+    stop — доля от цены входа: |вход − стоп| / вход.
+
+    #110 XRP (стоп 13.84%) → 4x; LINK от цены «Да» (6.06%) → 10x (потолок)."""
+    if entry_price <= 0:
+        raise ValueError(f"Цена входа должна быть положительной: {entry_price}")
+    if max_leverage < 1:
+        raise ValueError(f"Потолок плеча плана должен быть ≥ 1: {max_leverage}")
+    stop_fraction = abs(entry_price - stop_loss) / entry_price
+    denominator = stop_fraction * liq_buffer + maint_margin_rate
+    if denominator <= 0:
+        return max_leverage
+    by_stop = int((Decimal(1) / denominator).to_integral_value(rounding=ROUND_FLOOR))
+    return max(1, min(max_leverage, by_stop))
 
 
 def leverage_needs_update(

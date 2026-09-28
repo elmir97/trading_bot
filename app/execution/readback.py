@@ -53,7 +53,7 @@ from app.exchanges.base import (
     ReadbackIncomplete,
 )
 from app.execution.models import OrderRequest
-from app.trading.enums import OrderRole, OrderSide, OrderStatus, OrderType
+from app.trading.enums import OrderRole, OrderSide, OrderStatus, OrderType, TradeSide
 
 logger = get_logger(__name__)
 
@@ -200,7 +200,63 @@ async def verify_entry(
         session, client, settings, entry_row, order, position_side, price_precision,
         fill, result, sleep,
     )
+    await _check_liquidation(client, order, result)
     return result
+
+
+async def _check_liquidation(
+    client: ExchangeClient, order: OrderRequest, result: ReadbackResult
+) -> None:
+    """28.09, блок D: ликвидация позиции должна быть за стопом, а не перед
+    ним (плечо считается от стопа, но формула приблизительная). Одно чтение
+    позиций, max_retries=1, без повторов. Ликвидация по ту сторону стопа —
+    тревога уровня «ПОЗИЦИЯ БЕЗ СТОПА» и ERROR; не удалось проверить (сбой
+    чтения, позиции нет, liquidationPrice нет или 0) — предупреждение и
+    WARNING, без тревоги."""
+    stop = order.stop_loss
+    try:
+        positions = await client.get_positions(max_retries=1)
+    except ExchangeError:
+        logger.warning(
+            "Ликвидация не проверена: позиции не прочитались",
+            extra={"symbol": order.symbol, "notification_id": order.notification_id},
+            exc_info=True,
+        )
+        result.warnings.append("⚠️ Цену ликвидации проверить не удалось — посмотри в BingX.")
+        return
+    position = next(
+        (p for p in positions if p.symbol == order.symbol and p.side is order.position_side),
+        None,
+    )
+    liquidation = position.liquidation_price if position is not None else None
+    if liquidation is None or liquidation <= 0:
+        logger.warning(
+            "Ликвидация не проверена: нет позиции или liquidationPrice",
+            extra={"symbol": order.symbol, "notification_id": order.notification_id},
+        )
+        result.warnings.append("⚠️ Цену ликвидации проверить не удалось — посмотри в BingX.")
+        return
+    before_stop = (
+        liquidation >= stop if order.position_side is TradeSide.LONG else liquidation <= stop
+    )
+    if not before_stop:
+        return
+    text = (
+        f"⚠️ ЛИКВИДАЦИЯ РАНЬШЕ СТОПА: {order.symbol} {order.position_side.value} — "
+        f"ликвидация {_num(liquidation)}, стоп {_num(stop)}, плечо {order.leverage}x. "
+        "Уменьши плечо или закрой позицию в BingX."
+    )
+    result.alarm = f"{result.alarm}\n{text}" if result.alarm else text
+    logger.error(
+        "Ликвидация по ту сторону стопа",
+        extra={
+            "symbol": order.symbol,
+            "notification_id": order.notification_id,
+            "liquidation_price": str(liquidation),
+            "stop_loss": str(stop),
+            "leverage": order.leverage,
+        },
+    )
 
 
 async def _read_fill(

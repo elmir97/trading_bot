@@ -341,7 +341,13 @@ def render_confirmation(
         f"Цена сейчас: {fmt_price(order.entry_price, price_precision)}{drift_note}",
         f"Объём: {fmt_qty(order.quantity, quantity_precision)} {base_asset} ≈ "
         f"{fmt_amount(order.notional)} {asset} нотионал",
-        f"Плечо: {order.leverage}x, маржа {fmt_amount(order.margin)} {asset}",
+        f"Плечо: {order.leverage}x"
+        + (
+            f" (план до {quote.max_leverage}x)"
+            if order.leverage < quote.max_leverage
+            else ""
+        )
+        + f", маржа {fmt_amount(order.margin)} {asset}",
         f"Стоп: {fmt_price(order.stop_loss, price_precision)}  (−{fmt_ratio(stop_pct)}%)  "
         f"риск {fmt_amount(order.risk_amount)} {asset} = {fmt_ratio(order.risk_percent)}% депозита",
         f"Тейк: {fmt_price(order.take_profit, price_precision)}  "
