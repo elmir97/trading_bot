@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Any, TypeVar
+from typing import Any
 from urllib.parse import quote, urlencode
 
 import httpx
@@ -150,10 +150,7 @@ def _to_decimal(value: Any, field: str) -> Decimal:
         ) from exc
 
 
-_Empty = TypeVar("_Empty", Decimal, None)
-
-
-def _decimal_or(value: Any, field: str, empty: _Empty) -> Decimal | _Empty:
+def _decimal_or[Empty: (Decimal, None)](value: Any, field: str, empty: Empty) -> Decimal | Empty:
     """Законная пустота: None/"" → empty, остальное — как _to_decimal.
 
     Только там, где пустое значение снято живьём и цифрой не становится:
