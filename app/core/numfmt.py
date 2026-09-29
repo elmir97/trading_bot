@@ -4,6 +4,9 @@
 не должны зависеть от слоя бота, а показывать цену без хвоста в 12 знаков
 хранимой точности им нужно так же, как экранам. app.bot.formatting
 реэкспортирует эти функции — существующие импорты не меняются.
+
+fmt_qty, fmt_money, fmt_amount перенесены сюда 29.09: уведомление reconciler
+о закрытии вне бота показывает объём и суммы теми же функциями, что экраны.
 """
 
 from __future__ import annotations
@@ -61,3 +64,39 @@ def fmt_price(value: Decimal | None, precision: int | None = None) -> str:
     step = Decimal(1).scaleb(-digits)
     rounded = value.quantize(step, rounding=ROUND_HALF_UP)
     return fmt_num(rounded)
+
+
+def fmt_qty(value: Decimal | None, precision: int = 8) -> str:
+    """Объём — точность по quantity_precision символа.
+
+    Дефолт 8 знаков сохраняет прежнее поведение там, где SymbolInfo не
+    под рукой (например, объём сделки из журнала): расчёт от риска даёт
+    периодические дроби (200 / 60 = 3.333…), и показывать все 12 знаков
+    хранимой точности бессмысленно — биржа всё равно округлит до шага
+    лота.
+    """
+    if value is None:
+        return "—"
+    step = Decimal(1).scaleb(-precision)
+    rounded = value.quantize(step, rounding=ROUND_HALF_UP)
+    return fmt_num(rounded)
+
+
+def fmt_money(value: Decimal | None) -> str:
+    if value is None:
+        return "—"
+    sign = "+" if value > 0 else ""
+    rounded = value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return f"{sign}{rounded:f}"
+
+
+def fmt_amount(value: Decimal | None) -> str:
+    """Денежная величина без знака: риск, маржа, размер позиции.
+
+    Отличается от fmt_money тем, что не ставит «+»: плюс уместен у PnL,
+    где знак несёт смысл, но «Сумма риска: +200» читается как прибыль.
+    """
+    if value is None:
+        return "—"
+    rounded = value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return f"{rounded:f}"

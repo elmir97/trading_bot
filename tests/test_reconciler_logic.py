@@ -11,7 +11,9 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from app.exchanges.base import OrderFill, Position
+import pytest
+
+from app.exchanges.base import OpenOrder, OrderFill, Position
 from app.exchanges.bingx import BingXClient, _parse_history_order
 from app.execution.reconciler import (
     BotTradeSnapshot,
@@ -26,9 +28,14 @@ from app.execution.reconciler import (
 )
 from app.trading.enums import ReconciliationKind, TradeSide
 from app.trading.exit_reasons import EXIT_OUTSIDE_BOT, EXIT_STOP_LOSS, EXIT_TAKE_PROFIT
-from tests.bingx_fixtures import live_items
+from tests.bingx_fixtures import LINK_MANUAL_STOP, live_items
 
 D = Decimal
+
+# Тексты app.trading.exit_reasons 29.09 — строками, не импортом: на коде до
+# правки файл обязан импортироваться, а новые тесты — падать на поведении.
+MANUAL_STOP_REASON = "Стоп, изменённый вручную — закрыто вне бота"
+MANUAL_TAKE_REASON = "Тейк, изменённый вручную — закрыто вне бота"
 
 SOL_ENTRY = "2104213344135159808"
 SOL_STOP = "2104213344721920001"
@@ -262,3 +269,176 @@ def test_not_found_but_position_exists_is_ambiguous() -> None:
     assert resolution.not_placed is False
     assert resolution.discrepancy is not None
     assert resolution.discrepancy.kind is ReconciliationKind.AMBIGUOUS
+
+
+# --- 29.09: LINK #3 закрыта ручным стопом владельца (живые ответы) ------------
+
+LINK_STOP = "2104122758140616705"
+LINK_TAKE = "2104122758140616704"
+LINK_ENTRY = "2104122757776154624"
+LINK_MANUAL_CHILD = "2104784078754553856"
+LINK_MANUAL_PARENT = "2104641198668472320"
+
+
+def _link_trade(**overrides: object) -> BotTradeSnapshot:
+    fields: dict[str, object] = {
+        "trade_id": 3, "symbol": "LINK-USDT", "side": TradeSide.LONG,
+        "open_quantity": D("2037.8"),
+        "opened_at": datetime(2026, 9, 27, 8, 15, 32, 828000, tzinfo=UTC),
+        "stop_order_id": LINK_STOP, "take_order_id": LINK_TAKE,
+        "recorded_order_ids": frozenset({LINK_ENTRY}),
+    }
+    fields.update(overrides)
+    return BotTradeSnapshot(**fields)  # type: ignore[arg-type]
+
+
+def _link_orders():  # type: ignore[no-untyped-def]
+    return [
+        _parse_history_order(item)
+        for item in live_items("allOrders LINK", LINK_MANUAL_STOP)
+    ]
+
+
+def _manual_child():  # type: ignore[no-untyped-def]
+    return next(o for o in _link_orders() if o.order_id == LINK_MANUAL_CHILD)
+
+
+def test_lock_link_manual_stop_fixture_shape() -> None:
+    """Живая форма 29.09: наши SL/TP отменены биржей в секунду закрытия,
+    дочерний ордер ручного стопа — STOP_MARKET reduceOnly с чужим
+    triggerOrderId; самого ручного условника в allOrders нет."""
+    by_id = {o.order_id: o for o in _link_orders()}
+    assert set(by_id) == {LINK_ENTRY, LINK_STOP, LINK_TAKE, LINK_MANUAL_CHILD}
+    assert by_id[LINK_STOP].status == by_id[LINK_TAKE].status == "CANCELLED"
+    child = by_id[LINK_MANUAL_CHILD]
+    assert (child.order_type, child.side, child.position_side, child.status) == (
+        "STOP_MARKET", "SELL", "LONG", "FILLED",
+    )
+    assert child.trigger_order_id == LINK_MANUAL_PARENT and child.reduce_only
+    assert child.updated_at == datetime(2026, 9, 29, 4, 3, 24, tzinfo=UTC)
+    assert by_id[LINK_STOP].updated_at == child.updated_at
+
+
+def test_lock_get_by_parent_id_returns_child_without_position_id() -> None:
+    """GET trade/order по orderId ручного условника отдаёт дочерний ордер,
+    positionID в этом ответе 0 → None (в allOrders у него настоящий)."""
+    [item] = live_items(f"order by parent {LINK_MANUAL_PARENT}", LINK_MANUAL_STOP)
+    order = _parse_history_order(item)
+    assert order.order_id == LINK_MANUAL_CHILD
+    assert order.trigger_order_id == LINK_MANUAL_PARENT
+    assert order.position_id is None
+    assert _manual_child().position_id is not None
+
+
+def test_link_manual_stop_is_closed_outside_bot() -> None:
+    decision = decide_trade(_link_trade(), None, _link_orders())
+
+    assert decision.discrepancy is None
+    assert decision.closes_fully
+    [exit_fill] = decision.exits
+    assert exit_fill.order_id == LINK_MANUAL_CHILD
+    assert exit_fill.reason == MANUAL_STOP_REASON
+    assert exit_fill.kind is ReconciliationKind.CLOSED_OUTSIDE_BOT
+    assert exit_fill.price == D("14.776")
+    assert exit_fill.quantity == D("2037.8")
+    assert exit_fill.fee == D("15.055386")
+    assert exit_fill.realized_pnl == D("765.8499")
+    assert exit_fill.executed_at == datetime(2026, 9, 29, 4, 3, 24, tzinfo=UTC)
+
+
+def test_manual_take_profit_is_closed_outside_bot() -> None:
+    child = replace(_manual_child(), order_type="TAKE_PROFIT_MARKET")
+    decision = decide_trade(_link_trade(), None, [child])
+    assert [(e.reason, e.kind) for e in decision.exits] == [
+        (MANUAL_TAKE_REASON, ReconciliationKind.CLOSED_OUTSIDE_BOT)
+    ]
+
+
+def test_manual_stop_limit_is_closed_outside_bot() -> None:
+    child = replace(_manual_child(), order_type="STOP")
+    decision = decide_trade(_link_trade(), None, [child])
+    assert [e.reason for e in decision.exits] == [MANUAL_STOP_REASON]
+
+
+def test_manual_stop_wrong_quantity_is_quantity_mismatch() -> None:
+    child = replace(_manual_child(), executed_qty=D("1000"))
+    decision = decide_trade(_link_trade(), None, [child])
+    assert decision.exits == []
+    assert decision.discrepancy is not None
+    assert decision.discrepancy.kind is ReconciliationKind.QUANTITY_MISMATCH
+
+
+@pytest.mark.parametrize("order_type", ["TRAILING_STOP_MARKET", "LIQUIDATION"])
+def test_lock_unknown_conditional_child_stays_ambiguous(order_type: str) -> None:
+    child = replace(_manual_child(), order_type=order_type)
+    decision = decide_trade(_link_trade(), None, [child])
+    assert decision.exits == []
+    assert decision.discrepancy is not None
+    assert decision.discrepancy.kind is ReconciliationKind.AMBIGUOUS
+    assert decision.discrepancy.dedup_key == f"ambiguous:3:{LINK_MANUAL_CHILD}"
+
+
+def test_lock_manual_stop_without_reduce_only_stays_ambiguous() -> None:
+    child = replace(_manual_child(), reduce_only=False)
+    decision = decide_trade(_link_trade(), None, [child])
+    assert decision.discrepancy is not None
+    assert decision.discrepancy.kind is ReconciliationKind.AMBIGUOUS
+
+
+@pytest.mark.parametrize(
+    "change", [{"position_side": "SHORT"}, {"side": "BUY"}, {"status": "CANCELLED"}]
+)
+def test_lock_manual_stop_other_side_or_status_is_not_candidate(
+    change: dict[str, str],
+) -> None:
+    child = replace(_manual_child(), **change)
+    decision = decide_trade(_link_trade(), None, [child])
+    assert decision.exits == []
+    assert decision.discrepancy is not None
+    assert decision.discrepancy.kind is ReconciliationKind.QUANTITY_MISMATCH
+
+
+def test_lock_bot_stop_trigger_still_stop_loss() -> None:
+    """Дочерний ордер нашего стопа (triggerOrderId = …705) — по-прежнему
+    «Стоп-лосс на бирже», не «изменённый вручную»."""
+    child = replace(_manual_child(), trigger_order_id=LINK_STOP)
+    decision = decide_trade(_link_trade(), None, [child])
+    assert [(e.reason, e.kind) for e in decision.exits] == [
+        (EXIT_STOP_LOSS, ReconciliationKind.CLOSED_STOP_LOSS)
+    ]
+
+
+# --- stop_missing: ручной стоп — защита, трейлинг — нет -----------------------
+
+
+def _open_stop(order_type: str) -> OpenOrder:
+    """Живой открытый стоп LINK 27.09, переделанный в ручной условник
+    владельца: чужой orderId, стоп 14.8, заданный тип."""
+    live_stop = next(
+        o for o in (BingXClient._parse_open_order(i) for i in live_items("openOrders LINK"))
+        if o.order_type == "STOP_MARKET"
+    )
+    return replace(
+        live_stop, order_id=LINK_MANUAL_PARENT, order_type=order_type, stop_price=D("14.8")
+    )
+
+
+def _link_position() -> Position:
+    position = exchange_position(_live_positions(), "LINK-USDT", TradeSide.LONG)
+    assert position is not None
+    return position
+
+
+def test_manual_stop_limit_counts_as_protection() -> None:
+    assert stop_missing(_link_trade(), _link_position(), [_open_stop("STOP")]) is None
+
+
+def test_lock_manual_stop_market_counts_as_protection() -> None:
+    assert stop_missing(_link_trade(), _link_position(), [_open_stop("STOP_MARKET")]) is None
+
+
+def test_lock_trailing_stop_is_not_protection() -> None:
+    found = stop_missing(
+        _link_trade(), _link_position(), [_open_stop("TRAILING_STOP_MARKET")]
+    )
+    assert found is not None and found.kind is ReconciliationKind.STOP_MISSING

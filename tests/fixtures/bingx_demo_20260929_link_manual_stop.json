@@ -1,0 +1,1083 @@
+{
+ "captured_at": "2026-09-29T08:30:00+00:00",
+ "host": "demo",
+ "_note": "Живые ответы демо BingX (open-api-vst), только GET, 29.09.2026, после ручного стопа владельца по LINK #3. Поля авторизации в ответах отсутствуют и не добавлялись. Вход 2104122757776154624 — поля по allowlist разведки (keys — полный список ответа), остальные три ордера и ответ GET — все поля. Ручной условник 2104641198668472320 в allOrders отсутствует; GET по его orderId отдаёт дочерний ордер 2104784078754553856 с positionID 0. rate_expire_ms не снимался.",
+ "calls": [
+  {
+   "path": "/openApi/swap/v2/trade/allOrders",
+   "params": {
+    "symbol": "LINK-USDT",
+    "startTime": "2026-09-27T00:00:00Z",
+    "endTime": "2026-09-29 ~08:30Z",
+    "limit": 500
+   },
+   "http_status": 200,
+   "rate_remain": "4",
+   "rate_expire_ms": null,
+   "code": 0,
+   "msg": "",
+   "top_keys": [
+    "code",
+    "data",
+    "msg"
+   ],
+   "data_type": "dict",
+   "data_keys": [
+    "orders"
+   ],
+   "inner_key": "orders",
+   "label": "allOrders LINK",
+   "items": [
+    {
+     "keys": [
+      "actPrice",
+      "advanceAttr",
+      "avgPrice",
+      "clientOrderId",
+      "closePosition",
+      "commission",
+      "cumQuote",
+      "executedQty",
+      "is_twap",
+      "leverage",
+      "mainOrderId",
+      "onlyOnePosition",
+      "orderId",
+      "orderType",
+      "origQty",
+      "positionID",
+      "positionSide",
+      "postOnly",
+      "price",
+      "priceRate",
+      "profit",
+      "reduceOnly",
+      "side",
+      "status",
+      "stopGuaranteed",
+      "stopLoss",
+      "stopLossEntrustPrice",
+      "stopPrice",
+      "symbol",
+      "takeProfit",
+      "takeProfitEntrustPrice",
+      "time",
+      "trailingStopDistance",
+      "trailingStopRate",
+      "triggerOrderId",
+      "type",
+      "updateTime",
+      "workingType"
+     ],
+     "fields": {
+      "orderId": {
+       "value": 2104122757776154624,
+       "type": "int"
+      },
+      "clientOrderId": {
+       "value": "tj209u1e",
+       "type": "str"
+      },
+      "type": {
+       "value": "MARKET",
+       "type": "str"
+      },
+      "side": {
+       "value": "BUY",
+       "type": "str"
+      },
+      "positionSide": {
+       "value": "LONG",
+       "type": "str"
+      },
+      "status": {
+       "value": "FILLED",
+       "type": "str"
+      },
+      "stopPrice": {
+       "value": "",
+       "type": "str"
+      },
+      "price": {
+       "value": "0",
+       "type": "str"
+      },
+      "avgPrice": {
+       "value": "14.400",
+       "type": "str"
+      },
+      "origQty": {
+       "value": "2037.8",
+       "type": "str"
+      },
+      "executedQty": {
+       "value": "2037.8",
+       "type": "str"
+      },
+      "cumQuote": {
+       "value": "29345",
+       "type": "str"
+      },
+      "commission": {
+       "value": "-14.672461",
+       "type": "str"
+      },
+      "profit": {
+       "value": "0.0000",
+       "type": "str"
+      },
+      "triggerOrderId": {
+       "value": 0,
+       "type": "int"
+      },
+      "stopGuaranteed": {
+       "value": "false",
+       "type": "str"
+      },
+      "workingType": {
+       "value": "MARK_PRICE",
+       "type": "str"
+      },
+      "reduceOnly": {
+       "value": false,
+       "type": "bool"
+      },
+      "closePosition": {
+       "value": "",
+       "type": "str"
+      },
+      "time": {
+       "value": 1790496932000,
+       "type": "int"
+      },
+      "updateTime": {
+       "value": 1790496933000,
+       "type": "int"
+      },
+      "positionID": {
+       "value": 2104122757805514754,
+       "type": "int"
+      },
+      "orderType": {
+       "value": "",
+       "type": "str"
+      },
+      "leverage": {
+       "value": "10X",
+       "type": "str"
+      },
+      "symbol": {
+       "value": "LINK-USDT",
+       "type": "str"
+      }
+     }
+    },
+    {
+     "keys": [
+      "actPrice",
+      "advanceAttr",
+      "avgPrice",
+      "clientOrderId",
+      "closePosition",
+      "commission",
+      "cumQuote",
+      "executedQty",
+      "is_twap",
+      "leverage",
+      "mainOrderId",
+      "onlyOnePosition",
+      "orderId",
+      "orderType",
+      "origQty",
+      "positionID",
+      "positionSide",
+      "postOnly",
+      "price",
+      "priceRate",
+      "profit",
+      "reduceOnly",
+      "side",
+      "status",
+      "stopGuaranteed",
+      "stopLoss",
+      "stopLossEntrustPrice",
+      "stopPrice",
+      "symbol",
+      "takeProfit",
+      "takeProfitEntrustPrice",
+      "time",
+      "trailingStopDistance",
+      "trailingStopRate",
+      "triggerOrderId",
+      "type",
+      "updateTime",
+      "workingType"
+     ],
+     "fields": {
+      "symbol": {
+       "value": "LINK-USDT",
+       "type": "str"
+      },
+      "orderId": {
+       "value": 2104122758140616704,
+       "type": "int"
+      },
+      "side": {
+       "value": "SELL",
+       "type": "str"
+      },
+      "positionSide": {
+       "value": "LONG",
+       "type": "str"
+      },
+      "type": {
+       "value": "TAKE_PROFIT_MARKET",
+       "type": "str"
+      },
+      "origQty": {
+       "value": "2037.8",
+       "type": "str"
+      },
+      "price": {
+       "value": "0",
+       "type": "str"
+      },
+      "executedQty": {
+       "value": "0.0",
+       "type": "str"
+      },
+      "avgPrice": {
+       "value": "0.000",
+       "type": "str"
+      },
+      "cumQuote": {
+       "value": "0",
+       "type": "str"
+      },
+      "stopPrice": {
+       "value": "16.263",
+       "type": "str"
+      },
+      "profit": {
+       "value": "0.0000",
+       "type": "str"
+      },
+      "commission": {
+       "value": "0.000000",
+       "type": "str"
+      },
+      "status": {
+       "value": "CANCELLED",
+       "type": "str"
+      },
+      "time": {
+       "value": 1790496933000,
+       "type": "int"
+      },
+      "updateTime": {
+       "value": 1790654604000,
+       "type": "int"
+      },
+      "clientOrderId": {
+       "value": "",
+       "type": "str"
+      },
+      "leverage": {
+       "value": "10X",
+       "type": "str"
+      },
+      "takeProfit": {
+       "value": {
+        "type": "",
+        "quantity": 0,
+        "stopPrice": 0,
+        "price": 0,
+        "workingType": "",
+        "stopGuaranteed": ""
+       },
+       "type": "dict"
+      },
+      "stopLoss": {
+       "value": {
+        "type": "",
+        "quantity": 0,
+        "stopPrice": 0,
+        "price": 0,
+        "workingType": "",
+        "stopGuaranteed": ""
+       },
+       "type": "dict"
+      },
+      "advanceAttr": {
+       "value": 0,
+       "type": "int"
+      },
+      "positionID": {
+       "value": 2104122757805514754,
+       "type": "int"
+      },
+      "takeProfitEntrustPrice": {
+       "value": 0,
+       "type": "int"
+      },
+      "stopLossEntrustPrice": {
+       "value": 0,
+       "type": "int"
+      },
+      "orderType": {
+       "value": "",
+       "type": "str"
+      },
+      "workingType": {
+       "value": "MARK_PRICE",
+       "type": "str"
+      },
+      "onlyOnePosition": {
+       "value": false,
+       "type": "bool"
+      },
+      "reduceOnly": {
+       "value": true,
+       "type": "bool"
+      },
+      "postOnly": {
+       "value": false,
+       "type": "bool"
+      },
+      "stopGuaranteed": {
+       "value": "false",
+       "type": "str"
+      },
+      "triggerOrderId": {
+       "value": 2104122758140616704,
+       "type": "int"
+      },
+      "trailingStopRate": {
+       "value": 0,
+       "type": "int"
+      },
+      "trailingStopDistance": {
+       "value": 0,
+       "type": "int"
+      },
+      "is_twap": {
+       "value": false,
+       "type": "bool"
+      },
+      "mainOrderId": {
+       "value": "",
+       "type": "str"
+      },
+      "priceRate": {
+       "value": "",
+       "type": "str"
+      },
+      "actPrice": {
+       "value": "",
+       "type": "str"
+      },
+      "closePosition": {
+       "value": "",
+       "type": "str"
+      }
+     }
+    },
+    {
+     "keys": [
+      "actPrice",
+      "advanceAttr",
+      "avgPrice",
+      "clientOrderId",
+      "closePosition",
+      "commission",
+      "cumQuote",
+      "executedQty",
+      "is_twap",
+      "leverage",
+      "mainOrderId",
+      "onlyOnePosition",
+      "orderId",
+      "orderType",
+      "origQty",
+      "positionID",
+      "positionSide",
+      "postOnly",
+      "price",
+      "priceRate",
+      "profit",
+      "reduceOnly",
+      "side",
+      "status",
+      "stopGuaranteed",
+      "stopLoss",
+      "stopLossEntrustPrice",
+      "stopPrice",
+      "symbol",
+      "takeProfit",
+      "takeProfitEntrustPrice",
+      "time",
+      "trailingStopDistance",
+      "trailingStopRate",
+      "triggerOrderId",
+      "type",
+      "updateTime",
+      "workingType"
+     ],
+     "fields": {
+      "symbol": {
+       "value": "LINK-USDT",
+       "type": "str"
+      },
+      "orderId": {
+       "value": 2104122758140616705,
+       "type": "int"
+      },
+      "side": {
+       "value": "SELL",
+       "type": "str"
+      },
+      "positionSide": {
+       "value": "LONG",
+       "type": "str"
+      },
+      "type": {
+       "value": "STOP_MARKET",
+       "type": "str"
+      },
+      "origQty": {
+       "value": "2037.8",
+       "type": "str"
+      },
+      "price": {
+       "value": "0",
+       "type": "str"
+      },
+      "executedQty": {
+       "value": "0.0",
+       "type": "str"
+      },
+      "avgPrice": {
+       "value": "0.000",
+       "type": "str"
+      },
+      "cumQuote": {
+       "value": "0",
+       "type": "str"
+      },
+      "stopPrice": {
+       "value": "13.526",
+       "type": "str"
+      },
+      "profit": {
+       "value": "0.0000",
+       "type": "str"
+      },
+      "commission": {
+       "value": "0.000000",
+       "type": "str"
+      },
+      "status": {
+       "value": "CANCELLED",
+       "type": "str"
+      },
+      "time": {
+       "value": 1790496933000,
+       "type": "int"
+      },
+      "updateTime": {
+       "value": 1790654604000,
+       "type": "int"
+      },
+      "clientOrderId": {
+       "value": "",
+       "type": "str"
+      },
+      "leverage": {
+       "value": "10X",
+       "type": "str"
+      },
+      "takeProfit": {
+       "value": {
+        "type": "",
+        "quantity": 0,
+        "stopPrice": 0,
+        "price": 0,
+        "workingType": "",
+        "stopGuaranteed": ""
+       },
+       "type": "dict"
+      },
+      "stopLoss": {
+       "value": {
+        "type": "",
+        "quantity": 0,
+        "stopPrice": 0,
+        "price": 0,
+        "workingType": "",
+        "stopGuaranteed": ""
+       },
+       "type": "dict"
+      },
+      "advanceAttr": {
+       "value": 0,
+       "type": "int"
+      },
+      "positionID": {
+       "value": 2104122757805514754,
+       "type": "int"
+      },
+      "takeProfitEntrustPrice": {
+       "value": 0,
+       "type": "int"
+      },
+      "stopLossEntrustPrice": {
+       "value": 0,
+       "type": "int"
+      },
+      "orderType": {
+       "value": "",
+       "type": "str"
+      },
+      "workingType": {
+       "value": "MARK_PRICE",
+       "type": "str"
+      },
+      "onlyOnePosition": {
+       "value": false,
+       "type": "bool"
+      },
+      "reduceOnly": {
+       "value": true,
+       "type": "bool"
+      },
+      "postOnly": {
+       "value": false,
+       "type": "bool"
+      },
+      "stopGuaranteed": {
+       "value": "false",
+       "type": "str"
+      },
+      "triggerOrderId": {
+       "value": 2104122758140616705,
+       "type": "int"
+      },
+      "trailingStopRate": {
+       "value": 0,
+       "type": "int"
+      },
+      "trailingStopDistance": {
+       "value": 0,
+       "type": "int"
+      },
+      "is_twap": {
+       "value": false,
+       "type": "bool"
+      },
+      "mainOrderId": {
+       "value": "",
+       "type": "str"
+      },
+      "priceRate": {
+       "value": "",
+       "type": "str"
+      },
+      "actPrice": {
+       "value": "",
+       "type": "str"
+      },
+      "closePosition": {
+       "value": "",
+       "type": "str"
+      }
+     }
+    },
+    {
+     "keys": [
+      "actPrice",
+      "advanceAttr",
+      "avgPrice",
+      "clientOrderId",
+      "closePosition",
+      "commission",
+      "cumQuote",
+      "executedQty",
+      "is_twap",
+      "leverage",
+      "mainOrderId",
+      "onlyOnePosition",
+      "orderId",
+      "orderType",
+      "origQty",
+      "positionID",
+      "positionSide",
+      "postOnly",
+      "price",
+      "priceRate",
+      "profit",
+      "reduceOnly",
+      "side",
+      "status",
+      "stopGuaranteed",
+      "stopLoss",
+      "stopLossEntrustPrice",
+      "stopPrice",
+      "symbol",
+      "takeProfit",
+      "takeProfitEntrustPrice",
+      "time",
+      "trailingStopDistance",
+      "trailingStopRate",
+      "triggerOrderId",
+      "type",
+      "updateTime",
+      "workingType"
+     ],
+     "fields": {
+      "symbol": {
+       "value": "LINK-USDT",
+       "type": "str"
+      },
+      "orderId": {
+       "value": 2104784078754553856,
+       "type": "int"
+      },
+      "side": {
+       "value": "SELL",
+       "type": "str"
+      },
+      "positionSide": {
+       "value": "LONG",
+       "type": "str"
+      },
+      "type": {
+       "value": "STOP_MARKET",
+       "type": "str"
+      },
+      "origQty": {
+       "value": "2037.8",
+       "type": "str"
+      },
+      "price": {
+       "value": "0",
+       "type": "str"
+      },
+      "executedQty": {
+       "value": "2037.8",
+       "type": "str"
+      },
+      "avgPrice": {
+       "value": "14.776",
+       "type": "str"
+      },
+      "cumQuote": {
+       "value": "30111",
+       "type": "str"
+      },
+      "stopPrice": {
+       "value": "14.800",
+       "type": "str"
+      },
+      "profit": {
+       "value": "765.8499",
+       "type": "str"
+      },
+      "commission": {
+       "value": "-15.055386",
+       "type": "str"
+      },
+      "status": {
+       "value": "FILLED",
+       "type": "str"
+      },
+      "time": {
+       "value": 1790654604000,
+       "type": "int"
+      },
+      "updateTime": {
+       "value": 1790654604000,
+       "type": "int"
+      },
+      "clientOrderId": {
+       "value": "",
+       "type": "str"
+      },
+      "leverage": {
+       "value": "10X",
+       "type": "str"
+      },
+      "takeProfit": {
+       "value": {
+        "type": "",
+        "quantity": 0,
+        "stopPrice": 0,
+        "price": 0,
+        "workingType": "",
+        "stopGuaranteed": ""
+       },
+       "type": "dict"
+      },
+      "stopLoss": {
+       "value": {
+        "type": "",
+        "quantity": 0,
+        "stopPrice": 0,
+        "price": 0,
+        "workingType": "",
+        "stopGuaranteed": ""
+       },
+       "type": "dict"
+      },
+      "advanceAttr": {
+       "value": 0,
+       "type": "int"
+      },
+      "positionID": {
+       "value": 2104122757805514754,
+       "type": "int"
+      },
+      "takeProfitEntrustPrice": {
+       "value": 0,
+       "type": "int"
+      },
+      "stopLossEntrustPrice": {
+       "value": 0,
+       "type": "int"
+      },
+      "orderType": {
+       "value": "",
+       "type": "str"
+      },
+      "workingType": {
+       "value": "CONTRACT_PRICE",
+       "type": "str"
+      },
+      "onlyOnePosition": {
+       "value": false,
+       "type": "bool"
+      },
+      "reduceOnly": {
+       "value": true,
+       "type": "bool"
+      },
+      "postOnly": {
+       "value": false,
+       "type": "bool"
+      },
+      "stopGuaranteed": {
+       "value": "false",
+       "type": "str"
+      },
+      "triggerOrderId": {
+       "value": 2104641198668472320,
+       "type": "int"
+      },
+      "trailingStopRate": {
+       "value": 0,
+       "type": "int"
+      },
+      "trailingStopDistance": {
+       "value": 0,
+       "type": "int"
+      },
+      "is_twap": {
+       "value": false,
+       "type": "bool"
+      },
+      "mainOrderId": {
+       "value": "",
+       "type": "str"
+      },
+      "priceRate": {
+       "value": "",
+       "type": "str"
+      },
+      "actPrice": {
+       "value": "",
+       "type": "str"
+      },
+      "closePosition": {
+       "value": "",
+       "type": "str"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "path": "/openApi/swap/v2/user/positions",
+   "params": {},
+   "http_status": 200,
+   "rate_remain": "9",
+   "rate_expire_ms": null,
+   "code": 0,
+   "msg": "",
+   "top_keys": [
+    "code",
+    "data",
+    "msg"
+   ],
+   "data_type": "list",
+   "label": "positions LINK (фильтр по символу на клиенте)",
+   "items": []
+  },
+  {
+   "path": "/openApi/swap/v2/trade/openOrders",
+   "params": {
+    "symbol": "LINK-USDT"
+   },
+   "http_status": 200,
+   "rate_remain": "4",
+   "rate_expire_ms": null,
+   "code": 0,
+   "msg": "",
+   "top_keys": [
+    "code",
+    "data",
+    "msg"
+   ],
+   "data_type": "dict",
+   "data_keys": [
+    "orders"
+   ],
+   "inner_key": "orders",
+   "label": "openOrders LINK",
+   "items": []
+  },
+  {
+   "path": "/openApi/swap/v2/trade/order",
+   "params": {
+    "symbol": "LINK-USDT",
+    "orderId": "2104641198668472320"
+   },
+   "http_status": 200,
+   "rate_remain": "29",
+   "rate_expire_ms": null,
+   "code": 0,
+   "msg": "",
+   "top_keys": [
+    "code",
+    "data",
+    "msg"
+   ],
+   "data_type": "dict",
+   "data_keys": [
+    "order"
+   ],
+   "inner_key": "order",
+   "label": "order by parent 2104641198668472320",
+   "items": [
+    {
+     "keys": [
+      "actPrice",
+      "advanceAttr",
+      "avgPrice",
+      "clientOrderId",
+      "closePosition",
+      "commission",
+      "cumQuote",
+      "executedQty",
+      "is_twap",
+      "leverage",
+      "mainOrderId",
+      "onlyOnePosition",
+      "orderId",
+      "orderType",
+      "origQty",
+      "positionID",
+      "positionSide",
+      "postOnly",
+      "price",
+      "priceRate",
+      "profit",
+      "reduceOnly",
+      "side",
+      "status",
+      "stopGuaranteed",
+      "stopLoss",
+      "stopLossEntrustPrice",
+      "stopPrice",
+      "symbol",
+      "takeProfit",
+      "takeProfitEntrustPrice",
+      "time",
+      "trailingStopDistance",
+      "trailingStopRate",
+      "triggerOrderId",
+      "type",
+      "updateTime",
+      "workingType"
+     ],
+     "fields": {
+      "symbol": {
+       "value": "LINK-USDT",
+       "type": "str"
+      },
+      "orderId": {
+       "value": 2104784078754553856,
+       "type": "int"
+      },
+      "side": {
+       "value": "SELL",
+       "type": "str"
+      },
+      "positionSide": {
+       "value": "LONG",
+       "type": "str"
+      },
+      "type": {
+       "value": "STOP_MARKET",
+       "type": "str"
+      },
+      "origQty": {
+       "value": "2037.8",
+       "type": "str"
+      },
+      "price": {
+       "value": "0",
+       "type": "str"
+      },
+      "executedQty": {
+       "value": "2037.8",
+       "type": "str"
+      },
+      "avgPrice": {
+       "value": "14.776",
+       "type": "str"
+      },
+      "cumQuote": {
+       "value": "30111",
+       "type": "str"
+      },
+      "stopPrice": {
+       "value": "14.800",
+       "type": "str"
+      },
+      "profit": {
+       "value": "765.8499",
+       "type": "str"
+      },
+      "commission": {
+       "value": "-15.055386",
+       "type": "str"
+      },
+      "status": {
+       "value": "FILLED",
+       "type": "str"
+      },
+      "time": {
+       "value": 1790654604000,
+       "type": "int"
+      },
+      "updateTime": {
+       "value": 1790654604000,
+       "type": "int"
+      },
+      "clientOrderId": {
+       "value": "",
+       "type": "str"
+      },
+      "leverage": {
+       "value": "10X",
+       "type": "str"
+      },
+      "takeProfit": {
+       "value": {
+        "type": "",
+        "quantity": 0,
+        "stopPrice": 0,
+        "price": 0,
+        "workingType": "",
+        "stopGuaranteed": ""
+       },
+       "type": "dict"
+      },
+      "stopLoss": {
+       "value": {
+        "type": "",
+        "quantity": 0,
+        "stopPrice": 0,
+        "price": 0,
+        "workingType": "",
+        "stopGuaranteed": ""
+       },
+       "type": "dict"
+      },
+      "advanceAttr": {
+       "value": 0,
+       "type": "int"
+      },
+      "positionID": {
+       "value": 0,
+       "type": "int"
+      },
+      "takeProfitEntrustPrice": {
+       "value": 0,
+       "type": "int"
+      },
+      "stopLossEntrustPrice": {
+       "value": 0,
+       "type": "int"
+      },
+      "orderType": {
+       "value": "",
+       "type": "str"
+      },
+      "workingType": {
+       "value": "CONTRACT_PRICE",
+       "type": "str"
+      },
+      "onlyOnePosition": {
+       "value": false,
+       "type": "bool"
+      },
+      "reduceOnly": {
+       "value": true,
+       "type": "bool"
+      },
+      "postOnly": {
+       "value": false,
+       "type": "bool"
+      },
+      "stopGuaranteed": {
+       "value": "false",
+       "type": "str"
+      },
+      "triggerOrderId": {
+       "value": 2104641198668472320,
+       "type": "int"
+      },
+      "trailingStopRate": {
+       "value": 0,
+       "type": "int"
+      },
+      "trailingStopDistance": {
+       "value": 0,
+       "type": "int"
+      },
+      "is_twap": {
+       "value": false,
+       "type": "bool"
+      },
+      "mainOrderId": {
+       "value": "",
+       "type": "str"
+      },
+      "priceRate": {
+       "value": "",
+       "type": "str"
+      },
+      "actPrice": {
+       "value": "",
+       "type": "str"
+      },
+      "closePosition": {
+       "value": "",
+       "type": "str"
+      }
+     }
+    }
+   ]
+  }
+ ]
+}

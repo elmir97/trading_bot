@@ -47,7 +47,7 @@ from app.trading.enums import (
 )
 from app.trading.exit_reasons import EXIT_STOP_LOSS
 from app.trading.journal import TradeJournal
-from tests.bingx_fixtures import live_items
+from tests.bingx_fixtures import LINK_MANUAL_STOP, live_items
 from tests.conftest import cleanup_user
 
 pytestmark = pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="Нужен PostgreSQL")
@@ -79,15 +79,21 @@ class LiveDemo:
         self.calls: list[str] = []
         self.link_open_orders: list[dict[str, Any]] = live_items("openOrders LINK")
         self.unknown_cids: set[str] = set()
+        # По умолчанию — состояние 27.09 (LINK открыта, SOL закрыта стопом);
+        # сценарий 29.09 подменяет позиции и историю LINK.
+        self.positions: list[dict[str, Any]] = live_items("positions all")
+        self.all_orders: dict[str, list[dict[str, Any]]] = {
+            "SOL-USDT": live_items("allOrders SOL"),
+        }
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         path, params = request.url.path, request.url.params
         self.calls.append(path)
         if path == "/openApi/swap/v2/user/positions":
-            return _ok(live_items("positions all"))
+            return _ok(self.positions)
         if path == "/openApi/swap/v2/trade/allOrders":
-            assert params["symbol"] == "SOL-USDT", "история нужна только закрытой SOL"
-            return _ok({"orders": live_items("allOrders SOL")})
+            assert params["symbol"] in self.all_orders, "история нужна только закрытым"
+            return _ok({"orders": self.all_orders[params["symbol"]]})
         if path == "/openApi/swap/v2/trade/openOrders":
             orders = self.link_open_orders if params["symbol"] == "LINK-USDT" else []
             return _ok({"orders": orders})
@@ -652,3 +658,106 @@ async def test_pulse_counts_lock_skip_and_exchange_error(ctx, monkeypatch, caplo
     )
     window = reconciler.pulse.window(datetime.now(UTC))
     assert (window.cycles, window.errors, window.since_start) == (1, 1, True)
+
+
+# --- 29.09: LINK #3 закрыта ручным стопом владельца --------------------------
+
+LINK_MANUAL_CHILD = "2104784078754553856"
+MANUAL_STOP_REASON = "Стоп, изменённый вручную — закрыто вне бота"
+
+
+async def _seed_link_manual_stop(session, demo, user_id: int) -> Trade:  # type: ignore[no-untyped-def]
+    """Состояние прода на 29.09 09:04 Екб: #3 открыта в журнале, позиции на
+    бирже нет, история LINK — живой ответ 29.09, AMBIGUOUS #2 доставлен и
+    не разрешён. 1R — риск карточки: (14.4 − 13.526) × 2037.8."""
+    demo.positions = live_items("positions LINK (фильтр по символу на клиенте)", LINK_MANUAL_STOP)
+    demo.all_orders = {"LINK-USDT": live_items("allOrders LINK", LINK_MANUAL_STOP)}
+    link = await _bot_trade(
+        session, user_id, "LINK-USDT", entry="14.4", qty="2037.8", entry_id=LINK_ENTRY,
+        stop_id=LINK_STOP, take_id=LINK_TAKE, fee="14.672461",
+        risk_amount=str((D("14.4") - D("13.526")) * D("2037.8")),
+        opened_at=datetime(2026, 9, 27, 8, 15, 32, 828000, tzinfo=UTC),
+    )
+    session.add(ReconciliationEvent(
+        user_id=user_id, trade_id=link.id, symbol="LINK-USDT",
+        kind=ReconciliationKind.AMBIGUOUS, dedup_key=f"ambiguous:{link.id}:{LINK_MANUAL_CHILD}",
+        detail="закрывающий ордер не узнан",
+        notified_at=datetime(2026, 9, 29, 4, 4, 11, tzinfo=UTC),
+    ))
+    await session.commit()
+    return link
+
+
+async def _trade_events(db, trade_id: int) -> list[ReconciliationEvent]:  # type: ignore[no-untyped-def]
+    async with db.session() as s:
+        rows = await s.scalars(
+            select(ReconciliationEvent)
+            .where(ReconciliationEvent.trade_id == trade_id)
+            .order_by(ReconciliationEvent.id)
+        )
+        return list(rows)
+
+
+async def test_link_manual_stop_closes_trade_from_fact(ctx) -> None:  # type: ignore[no-untyped-def]
+    settings, db, session, user, demo = ctx
+    link = await _seed_link_manual_stop(session, demo, user.id)
+    bot = FakeBot()
+
+    await _run_reconciler(settings, db, bot)
+
+    trade = await _trade(db, link.id)
+    assert trade.status is TradeStatus.CLOSED
+    assert trade.exit_price == D("14.776")
+    assert trade.fees == D("29.727847")  # 14.672461 вход + 15.055386 выход
+    # (14.776 − 14.4) × 2037.8 − 29.727847
+    assert trade.pnl == (D("14.776") - D("14.4")) * D("2037.8") - D("29.727847")
+    assert trade.exit_reason == MANUAL_STOP_REASON
+    assert trade.closed_at == datetime(2026, 9, 29, 4, 3, 24, tzinfo=UTC)
+    assert {f.external_fill_id for f in trade.fills} == {LINK_ENTRY, LINK_MANUAL_CHILD}
+    rows = await _rows(db, "LINK-USDT")
+    assert rows[OrderRole.STOP_LOSS].status is OrderStatus.CANCELED
+    assert rows[OrderRole.TAKE_PROFIT].status is OrderStatus.CANCELED
+
+    events = await _trade_events(db, link.id)
+    ambiguous = [e for e in events if e.kind is ReconciliationKind.AMBIGUOUS]
+    assert len(ambiguous) == 1 and ambiguous[0].resolved_at is not None
+    [closed] = [e for e in events if e.kind is ReconciliationKind.CLOSED_OUTSIDE_BOT]
+    assert closed.dedup_key == f"close:{link.id}:{LINK_MANUAL_CHILD}"
+    assert closed.notified_at is not None
+    assert not [e for e in events if e.kind is ReconciliationKind.PNL_MISMATCH]
+    assert len(bot.sent) == 1
+
+
+async def test_link_manual_stop_notification_text(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Время исполнения в поясе пользователя (Екб, +5), суммы — форматтерами;
+    валюта демо — VST."""
+    settings, db, session, user, demo = ctx
+    link = await _seed_link_manual_stop(session, demo, user.id)
+    bot = FakeBot()
+
+    await _run_reconciler(settings, db, bot)
+
+    [text] = bot.sent
+    assert text.splitlines() == [
+        "⚠️ LINK-USDT LONG закрыта на бирже вне бота",
+        MANUAL_STOP_REASON,
+        "Закрыта: 29.09 09:03",
+        "Выход: 14.776 · объём 2037.8",
+        "Комиссия выхода: 15.06 VST",
+        "PnL: +736.48 VST · комиссии вход+выход 29.73 VST",  # 736.484953
+        f"📒 Сделка #{link.id} закрыта в журнале",
+    ]
+
+
+async def test_lock_link_manual_stop_second_run_is_silent(ctx) -> None:  # type: ignore[no-untyped-def]
+    settings, db, session, user, demo = ctx
+    link = await _seed_link_manual_stop(session, demo, user.id)
+    bot = FakeBot()
+    await _run_reconciler(settings, db, bot)
+    sent = len(bot.sent)
+
+    await _run_reconciler(settings, db, bot)
+
+    assert len(bot.sent) == sent
+    trade = await _trade(db, link.id)
+    assert len(trade.fills) == len({f.external_fill_id for f in trade.fills})

@@ -29,7 +29,13 @@ from decimal import Decimal
 
 from app.exchanges.base import HistoryOrder, OpenOrder, OrderFill, Position
 from app.trading.enums import ReconciliationKind, TradeSide
-from app.trading.exit_reasons import EXIT_OUTSIDE_BOT, EXIT_STOP_LOSS, EXIT_TAKE_PROFIT
+from app.trading.exit_reasons import (
+    EXIT_MANUAL_STOP,
+    EXIT_MANUAL_TAKE,
+    EXIT_OUTSIDE_BOT,
+    EXIT_STOP_LOSS,
+    EXIT_TAKE_PROFIT,
+)
 
 ZERO = Decimal(0)
 
@@ -48,6 +54,13 @@ ORDER_NOT_EXIST_CODE = 109421
 _CLOSING_SIDE = {TradeSide.LONG: "SELL", TradeSide.SHORT: "BUY"}
 # Ручное закрытие позиции на бирже — обычный маркет или лимит без условника.
 _PLAIN_ORDER_TYPES = frozenset({"MARKET", "LIMIT"})
+# Условник, поставленный на бирже вручную (29.09, LINK #3): стоп или тейк по
+# типу. Трейлинг и прочее — не угадываем, AMBIGUOUS.
+_MANUAL_STOP_TYPES = frozenset({"STOP_MARKET", "STOP"})
+_MANUAL_TAKE_TYPES = frozenset({"TAKE_PROFIT_MARKET", "TAKE_PROFIT"})
+# Защита позиции для проверки STOP_MISSING: стоп бота или ручной, маркет или
+# лимитный. Трейлинг — не защита (стоп плавает, уровня нет).
+_PROTECTIVE_STOP_TYPES = _MANUAL_STOP_TYPES
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -119,6 +132,14 @@ def _classify_exit(
         return EXIT_STOP_LOSS, ReconciliationKind.CLOSED_STOP_LOSS
     if trade.take_order_id is not None and trade.take_order_id in linked:
         return EXIT_TAKE_PROFIT, ReconciliationKind.CLOSED_TAKE_PROFIT
+    # Сработал не наш условник (дочерний ордер: triggerOrderId — чужой
+    # родитель, reduceOnly). Символ, positionSide, сторона закрытия, FILLED и
+    # «после входа» уже отобраны в decide_trade; объём сверяется там же.
+    if order.trigger_order_id is not None and order.reduce_only:
+        if order.order_type in _MANUAL_STOP_TYPES:
+            return EXIT_MANUAL_STOP, ReconciliationKind.CLOSED_OUTSIDE_BOT
+        if order.order_type in _MANUAL_TAKE_TYPES:
+            return EXIT_MANUAL_TAKE, ReconciliationKind.CLOSED_OUTSIDE_BOT
     if order.trigger_order_id is None and order.order_type in _PLAIN_ORDER_TYPES:
         return EXIT_OUTSIDE_BOT, ReconciliationKind.CLOSED_OUTSIDE_BOT
     return None
@@ -169,7 +190,7 @@ def decide_trade(
                 trade.symbol,
                 f"закрывающий ордер {order.order_id} типа {order.order_type} "
                 f"(triggerOrderId {order.trigger_order_id or '—'}) не узнан — не стоп и не "
-                "тейк бота, не ручной маркет/лимит",
+                "тейк бота, не ручной стоп/тейк, не ручной маркет/лимит",
                 trade_id=trade.trade_id,
             )
             return decision
@@ -241,14 +262,17 @@ def _num(value: Decimal) -> str:
 def stop_missing(
     trade: BotTradeSnapshot, position: Position | None, open_orders: list[OpenOrder]
 ) -> Discrepancy | None:
-    """Позиция бота есть, а закрывающего STOP_MARKET по ней в openOrders нет —
-    тревога уровня «ПОЗИЦИЯ БЕЗ СТОПА» (15.5.3). Ордеров не ставим."""
+    """Позиция бота есть, а закрывающего стопа по ней в openOrders нет —
+    тревога уровня «ПОЗИЦИЯ БЕЗ СТОПА» (15.5.3). Ордеров не ставим.
+
+    Стоп — любой закрывающий STOP_MARKET или STOP на позиции, не только стоп
+    бота по id: ручной стоп владельца тоже защита (29.09). Трейлинг — нет."""
     if position is None:
         return None
     closing_side = _CLOSING_SIDE[trade.side]
     has_stop = any(
         o.symbol == trade.symbol
-        and o.order_type == "STOP_MARKET"
+        and o.order_type in _PROTECTIVE_STOP_TYPES
         and o.position_side == trade.side.value
         and o.side == closing_side
         and o.stop_price != ZERO

@@ -11,5 +11,11 @@ from __future__ import annotations
 EXIT_STOP_LOSS = "Стоп-лосс на бирже"
 EXIT_TAKE_PROFIT = "Тейк-профит на бирже"
 EXIT_OUTSIDE_BOT = "Закрыта на бирже вне бота"
+# 29.09: сработал закрывающий условник, поставленный на бирже вручную (LINK #3 —
+# стоп перенесён в безубыток). Стоп/тейк — по типу ордера, не по знаку PnL.
+EXIT_MANUAL_STOP = "Стоп, изменённый вручную — закрыто вне бота"
+EXIT_MANUAL_TAKE = "Тейк, изменённый вручную — закрыто вне бота"
 
-BOT_EXIT_REASONS = frozenset({EXIT_STOP_LOSS, EXIT_TAKE_PROFIT, EXIT_OUTSIDE_BOT})
+BOT_EXIT_REASONS = frozenset({
+    EXIT_STOP_LOSS, EXIT_TAKE_PROFIT, EXIT_OUTSIDE_BOT, EXIT_MANUAL_STOP, EXIT_MANUAL_TAKE,
+})

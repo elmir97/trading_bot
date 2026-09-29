@@ -11,11 +11,14 @@ from pathlib import Path
 from typing import Any
 
 FIXTURE = Path(__file__).parent / "fixtures" / "bingx_demo_20260927.json"
+# 29.09: LINK #3 закрыта ручным стопом владельца (allOrders, positions,
+# openOrders, GET ордера по orderId ручного условника).
+LINK_MANUAL_STOP = Path(__file__).parent / "fixtures" / "bingx_demo_20260929_link_manual_stop.json"
 
 
 @cache
-def _calls() -> dict[str, dict[str, Any]]:
-    data = json.loads(FIXTURE.read_text(encoding="utf-8"))
+def _calls(fixture: Path = FIXTURE) -> dict[str, dict[str, Any]]:
+    data = json.loads(fixture.read_text(encoding="utf-8"))
     return {call["label"]: call for call in data["calls"]}
 
 
@@ -29,11 +32,11 @@ def _raw(item: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def live_items(label: str) -> list[dict[str, Any]]:
+def live_items(label: str, fixture: Path = FIXTURE) -> list[dict[str, Any]]:
     """Сырые элементы ответа по метке вызова (см. "label" в фикстуре)."""
-    return [_raw(item) for item in _calls()[label]["items"]]
+    return [_raw(item) for item in _calls(fixture)[label]["items"]]
 
 
-def live_call(label: str) -> dict[str, Any]:
+def live_call(label: str, fixture: Path = FIXTURE) -> dict[str, Any]:
     """Метаданные вызова: code, msg, rate_remain, rate_expire_ms, keys."""
-    return _calls()[label]
+    return _calls(fixture)[label]

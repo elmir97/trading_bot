@@ -26,16 +26,19 @@ from decimal import Decimal
 from typing import Any
 
 from aiogram import Bot
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.logging import get_logger
+from app.core.numfmt import fmt_amount, fmt_money, fmt_price, fmt_qty
 from app.core.security import SecretCipher
+from app.core.timefmt import closed_at_line
 from app.database.models.execution_order import ExecutionOrder
 from app.database.models.reconciliation_event import ReconciliationEvent
 from app.database.models.trade import Trade
-from app.database.models.user import User
+from app.database.models.user import User, UserSettings
 from app.database.repositories.execution_order import ExecutionOrderRepository
 from app.database.repositories.reconciliation_event import ReconciliationEventRepository
 from app.database.repositories.trade import TradeRepository
@@ -74,6 +77,7 @@ from app.trading.enums import (
     TradeSource,
     TradeStatus,
 )
+from app.trading.exit_reasons import EXIT_OUTSIDE_BOT
 from app.trading.journal import JournalError, TradeJournal
 from app.trading.risk import tz_offset_for
 from app.workers.base import fmt_decimal
@@ -302,7 +306,14 @@ class Reconciler:
         client = await ExchangeFactory(self._settings, self._cipher).for_user(
             session, user_id, mode=mode
         )
-        ctx = _UserCtx(session, user.telegram_id, user_id, asset, now)
+        # Явным запросом: get_by_id не грузит settings, а ленивая загрузка в
+        # async-сессии падает (MissingGreenlet).
+        timezone = await session.scalar(
+            select(UserSettings.timezone).where(UserSettings.user_id == user_id)
+        )
+        ctx = _UserCtx(
+            session, user.telegram_id, user_id, asset, now, tz_offset_for(timezone)
+        )
         try:
             positions = await client.get_positions()
             trades_repo = TradeRepository(session)
@@ -435,7 +446,7 @@ class Reconciler:
                     kind=exit_fill.kind, dedup_key=f"close:{trade.id}:{exit_fill.order_id}",
                     detail=f"{exit_fill.reason}: {exit_fill.quantity} по {exit_fill.price}",
                 ),
-                self._close_text(trade, exit_fill, ctx.asset),
+                self._close_text(trade, exit_fill, ctx.asset, ctx.tz_offset_hours),
             )
         if closes_fully:
             # Условник, который сработал, — FILLED; второй биржа сняла сама
@@ -504,8 +515,12 @@ class Reconciler:
             await self._discrepancy(ctx, found, resolve_now=True)
 
     @staticmethod
-    def _close_text(trade: Trade, exit_fill: ExitFill, asset: str) -> str:
+    def _close_text(
+        trade: Trade, exit_fill: ExitFill, asset: str, tz_offset_hours: int = 5
+    ) -> str:
         head = _CLOSE_TEXT[exit_fill.kind].format(symbol=trade.symbol, side=trade.side.value)
+        if exit_fill.kind is ReconciliationKind.CLOSED_OUTSIDE_BOT:
+            return _outside_bot_close_text(head, trade, exit_fill, asset, tz_offset_hours)
         lines = [
             head,
             f"Выход: {fmt_decimal(exit_fill.price)} · объём {fmt_decimal(exit_fill.quantity)}",
@@ -719,6 +734,31 @@ class Reconciler:
             await self._resolve_missing(ctx, kind, set(), prefix=prefix)
 
 
+def _outside_bot_close_text(
+    head: str, trade: Trade, exit_fill: ExitFill, asset: str, tz_offset_hours: int
+) -> str:
+    """Закрытие вне бота (29.09): время исполнения ордера в поясе
+    пользователя, суммы — форматтерами app.core.numfmt. Остальные
+    уведомления о закрытии переводятся на тот же формат отдельно (хвост)."""
+    lines = [head]
+    if exit_fill.reason != EXIT_OUTSIDE_BOT:
+        lines.append(exit_fill.reason)
+    lines += [
+        closed_at_line(exit_fill.executed_at, tz_offset_hours),
+        f"Выход: {fmt_price(exit_fill.price)} · объём {fmt_qty(exit_fill.quantity)}",
+        f"Комиссия выхода: {fmt_amount(exit_fill.fee)} {asset}",
+    ]
+    if trade.status is TradeStatus.CLOSED and trade.pnl is not None:
+        lines.append(
+            f"PnL: {fmt_money(trade.pnl)} {asset} · комиссии вход+выход "
+            f"{fmt_amount(trade.fees)} {asset}"
+        )
+        lines.append(f"📒 Сделка #{trade.id} закрыта в журнале")
+    else:
+        lines.append(f"📒 Сделка #{trade.id} остаётся открытой")
+    return "\n".join(lines)
+
+
 def _redelivery_text(event: ReconciliationEvent, user: User, now: datetime) -> str:
     """Текст переотправки: сохранённый notify_text (у событий до 28.09 его
     нет — собираем из символа и detail) и, если событие старше 2 мин, первой
@@ -738,12 +778,20 @@ class _UserCtx:
     """Состояние одного прохода по пользователю."""
 
     def __init__(
-        self, session: AsyncSession, telegram_id: int, user_id: int, asset: str, now: datetime
+        self,
+        session: AsyncSession,
+        telegram_id: int,
+        user_id: int,
+        asset: str,
+        now: datetime,
+        tz_offset_hours: int = 5,
     ) -> None:
         self.session = session
         self.telegram_id = telegram_id
         self.user_id = user_id
         self.asset = asset
         self.now = now
+        # Пояс пользователя — время исполнения в уведомлениях (29.09).
+        self.tz_offset_hours = tz_offset_hours
         self.active_keys: set[str] = set()
 
