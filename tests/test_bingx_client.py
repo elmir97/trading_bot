@@ -375,11 +375,11 @@ class TestPrivateData:
         def handler(request: httpx.Request) -> httpx.Response:
             assert request.headers["X-BX-APIKEY"] == "test-key"
             assert "signature=" in str(request.url)
-            return ok({"balance": {
+            return ok([{
                 "asset": "USDT", "balance": "10000.5",
                 "equity": "10250.75", "unrealizedProfit": "250.25",
                 "usedMargin": "2010", "availableMargin": "7990.5",
-            }})
+            }])
 
         client = make_client(handler)
         balance = await client.get_balance()
@@ -387,6 +387,17 @@ class TestPrivateData:
         assert balance.equity == D("10250.75")
         assert balance.available == D("7990.5")
         assert balance.used_margin == D("2010")
+        await client.close()
+
+    async def test_balance_nested_object_form_is_error(self) -> None:
+        """Форма {"balance": {...}} живьём не встречалась (боевой ключ и демо —
+        список по активам): не разбираем, а asset не подставляем."""
+        client = make_client(lambda r: ok({"balance": {
+            "asset": "USDT", "balance": "10000.5", "equity": "10250.75",
+            "unrealizedProfit": "250.25", "usedMargin": "2010", "availableMargin": "7990.5",
+        }}))
+        with pytest.raises(ExchangeResponseError, match="не список"):
+            await client.get_balance()
         await client.close()
 
     async def test_balance_list_of_assets_shape(self) -> None:
@@ -1946,4 +1957,136 @@ class TestStrictOpenOrders:
         client = make_client(lambda r: ok({"orders": [stop, take]}))
         with pytest.raises(ExchangeResponseError, match="stopPrice"):
             await client.get_open_orders("LINK-USDT")
+        await client.close()
+
+
+def _live_balance_entry() -> dict[str, object]:
+    """Набор полей — живой дамп боевого ключа (test_balance_list_of_assets_shape),
+    суммы ненулевые (синтетика), чтобы подмена нулём была видна."""
+    return {
+        "userId": "1314404133518147588", "asset": "USDT",
+        "balance": "500.0000", "equity": "512.5000",
+        "unrealizedProfit": "12.5000", "realizedProfit": "0",
+        "availableMargin": "400.0000", "usedMargin": "100.0000",
+        "frozenMargin": "0.0000", "shortUid": "21792211",
+    }
+
+
+class TestStrictBalance:
+    @pytest.mark.parametrize("mode", _EMPTY_MODES)
+    @pytest.mark.parametrize("field", ["equity", "usedMargin", "unrealizedProfit"])
+    async def test_number_is_required(self, field: str, mode: str) -> None:
+        """equity — база риска, дневного лимита и % импорта; usedMargin —
+        проверка свободной маржи. Раньше нет поля → 0: вход отказывал
+        INVALID_LEVELS с неверной причиной, импорт писал баланс 0 в журнал."""
+        entry = _blank(_live_balance_entry(), field, mode)
+        client = make_client(lambda r: ok([entry]))
+        with pytest.raises(ExchangeResponseError, match=field):
+            await client.get_balance()
+        await client.close()
+
+
+class TestStrictPositions:
+    @pytest.mark.parametrize("mode", _EMPTY_MODES)
+    @pytest.mark.parametrize("field", ["avgPrice", "markPrice", "unrealizedProfit", "leverage"])
+    async def test_field_is_required(self, field: str, mode: str) -> None:
+        """Живая позиция LINK (positions all, 27.09). Раньше цена/PnL → 0,
+        плечо → 1 на экране «Позиции на бирже»."""
+        [item] = live_items("positions all")
+        _blank(item, field, mode)
+        client = make_client(lambda r: ok([item]))
+        with pytest.raises(ExchangeResponseError, match=field):
+            await client.get_positions()
+        await client.close()
+
+
+class TestStrictFills:
+    @pytest.mark.parametrize("mode", _EMPTY_MODES)
+    @pytest.mark.parametrize(
+        "field", ["price", "volume", "commission", "positionSide", "side", "symbol"]
+    )
+    async def test_field_is_required(self, field: str, mode: str) -> None:
+        """Живой allFillOrders SOL (27.09): цена, объём (живьём — volume),
+        комиссия, стороны и символ идут в импортированную сделку. Раньше
+        0 / LONG / BUY / "" — сделка в журнале с нулями или не той стороной."""
+        entry, exit_fill = live_items("allFillOrders SOL (get_fills)")
+        _blank(exit_fill, field, mode)
+        client = make_client(lambda r: ok({"fill_orders": [entry, exit_fill]}))
+        with pytest.raises(ExchangeResponseError, match=field):
+            await client.get_fills(*_SOL_WINDOW)
+        await client.close()
+
+    async def test_unknown_position_side_is_error(self) -> None:
+        """Раньше всё, что не LONG, считалось SHORT."""
+        entry, exit_fill = live_items("allFillOrders SOL (get_fills)")
+        exit_fill["positionSide"] = "BOTH"
+        client = make_client(lambda r: ok({"fill_orders": [entry, exit_fill]}))
+        with pytest.raises(ExchangeResponseError, match="positionSide"):
+            await client.get_fills(*_SOL_WINDOW)
+        await client.close()
+
+
+class TestStrictPublicData:
+    @pytest.mark.parametrize("mode", _EMPTY_MODES)
+    async def test_ticker_last_price_is_required(self, mode: str) -> None:
+        """Раньше цена 0: карточка отказывала дрейфом 100%, экран цен — 0."""
+        item = _blank(live_items("ticker BTC (live)", PUBLIC)[0], "lastPrice", mode)
+        client = make_client(lambda r: ok(item))
+        with pytest.raises(ExchangeResponseError, match="lastPrice"):
+            await client.get_ticker("BTC-USDT")
+        await client.close()
+
+    async def test_ticker_empty_list_is_error(self) -> None:
+        client = make_client(lambda r: ok([]))
+        with pytest.raises(ExchangeResponseError, match="ticker"):
+            await client.get_ticker("BTC-USDT")
+        await client.close()
+
+    @pytest.mark.parametrize("mode", _EMPTY_MODES)
+    @pytest.mark.parametrize("field", ["open", "high", "low", "close", "volume", "time"])
+    async def test_kline_field_is_required(self, field: str, mode: str) -> None:
+        """Живые klines v3. Раньше свеча с low=0 (ложные уровни, ATR, «стоп»
+        в отчёте исходов) или временем 1970."""
+        items = live_items("klines BTC 1h (live)", PUBLIC)
+        _blank(items[1], field, mode)
+        client = make_client(lambda r: ok(items))
+        with pytest.raises(ExchangeResponseError, match=field):
+            await client.get_klines("BTC-USDT", "1h")
+        await client.close()
+
+    @pytest.mark.parametrize("mode", _EMPTY_MODES)
+    @pytest.mark.parametrize(
+        "field",
+        ["pricePrecision", "quantityPrecision", "tradeMinQuantity", "tradeMinUSDT",
+         "status", "symbol"],
+    )
+    async def test_broken_contract_is_dropped_with_warning(
+        self, field: str, mode: str, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Живые контракты. Раньше точности по умолчанию 2/4, минимумы 0
+        (SIZE_TOO_SMALL выключен), status нет — «активен», symbol "".
+        Теперь битый контракт выпадает с WARNING, остальные живут."""
+        items = live_items("contracts (live)", PUBLIC)
+        [btc] = [i for i in items if i["symbol"] == "BTC-USDT"]
+        _blank(btc, field, mode)
+        client = make_client(lambda r: ok(items))
+        with caplog.at_level(logging.WARNING, logger="app.exchanges.bingx"):
+            symbols = await client.get_symbols()
+        assert {s.symbol for s in symbols} == {"ETH-USDT", "LINK-USDT", "SOL-USDT"}
+        assert any("Контракты без обязательных полей" in r.message for r in caplog.records)
+        await client.close()
+
+    async def test_lock_inactive_contract_skipped_silently(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Замок: status 25 (живьём есть в списке) — неактивный, пропуск без
+        WARNING."""
+        items = live_items("contracts (live)", PUBLIC)
+        [btc] = [i for i in items if i["symbol"] == "BTC-USDT"]
+        btc["status"] = 25
+        client = make_client(lambda r: ok(items))
+        with caplog.at_level(logging.WARNING, logger="app.exchanges.bingx"):
+            symbols = await client.get_symbols()
+        assert "BTC-USDT" not in {s.symbol for s in symbols}
+        assert not caplog.records
         await client.close()

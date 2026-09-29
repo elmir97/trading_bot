@@ -1451,3 +1451,54 @@ async def test_bingx_balance_without_available_margin_refuses_end_to_end(ctx) ->
     assert isinstance(result, ExecutionRefusal)
     assert result.code is Code.AVAILABLE_MARGIN_UNKNOWN
     assert paths == [QUOTE_TICKER, USER_BALANCE]
+
+
+@pytest.mark.parametrize("field", ["equity", "usedMargin"])
+async def test_bingx_balance_without_equity_or_used_margin_is_error_end_to_end(  # type: ignore[no-untyped-def]
+    ctx, field: str
+) -> None:
+    """Настоящий BingXClient на MockTransport, баланс — живой дамп
+    test_balance_list_of_assets_shape с суммами (синтетика), поле убрано.
+    Раньше equity → 0: day_loss_percent не считался (гвард дневного лимита
+    молча пропускался), а отказ приходил INVALID_LEVELS «Баланс должен быть
+    положительным»; usedMargin → 0 — отказ AVAILABLE_MARGIN_UNKNOWN с
+    «занято 0» вместо честного расчёта. Теперь — ошибка разбора ответа биржи."""
+    import httpx
+
+    from app.exchanges.base import ExchangeResponseError
+    from app.exchanges.bingx import QUOTE_TICKER, USER_BALANCE, BingXClient
+
+    session, user, _, market = ctx
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _snapshot(session, signal)
+
+    entry = {
+        "userId": "1314404133518147588", "asset": "USDT",
+        "balance": "1000.0000", "equity": "1000.0000",
+        "unrealizedProfit": "0.0000", "realizedProfit": "0",
+        "availableMargin": "0.0000", "usedMargin": "1000.0000",
+        "frozenMargin": "0.0000", "shortUid": "21792211",
+    }
+    del entry[field]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == QUOTE_TICKER:
+            data: object = {"symbol": "BTC-USDT", "lastPrice": "100"}
+        elif request.url.path == USER_BALANCE:
+            data = [entry]
+        else:
+            raise AssertionError(f"неожиданный запрос {request.url.path}")
+        return httpx.Response(200, json={"code": 0, "msg": "", "data": data})
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://open-api.bingx.com"
+    )
+    client = BingXClient(api_key="k", api_secret="s", client=http)
+    try:
+        service = _service(session, _live_settings(), client, market)
+        with pytest.raises(ExchangeResponseError, match=field):
+            await _evaluate(service, user, notification, signal)
+    finally:
+        await client.close()

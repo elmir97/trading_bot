@@ -168,15 +168,6 @@ def _decimal_or(value: Any, field: str, empty: _Empty) -> Decimal | _Empty:
     return _to_decimal(value, field)
 
 
-def _legacy_zero(value: Any, field: str) -> Decimal:
-    """ВРЕМЕННО, прежнее поведение _to_decimal (None/"" → 0) для мест,
-    которые переходят на строгий разбор следующим коммитом: баланс, позиции,
-    allFillOrders, тикер, свечи, контракты. Удаляется там же."""
-    if value is None or value == "":
-        return Decimal(0)
-    return _to_decimal(value, field)
-
-
 def _ms_to_dt(value: Any) -> datetime:
     return datetime.fromtimestamp(int(value) / 1000, tz=UTC)
 
@@ -215,7 +206,22 @@ def _required(item: dict[str, Any], *names: str) -> Any:
         value = item.get(name)
         if value is not None and value != "":
             return value
-    raise ExchangeResponseError(f"В ответе нет поля {names[0]}")
+    raise ExchangeResponseError(f"В ответе нет поля {'/'.join(names)}")
+
+
+def _required_int(item: dict[str, Any], name: str) -> int:
+    value = _required(item, name)
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ExchangeResponseError(f"Не удалось разобрать поле {name}: {value!r}") from exc
+
+
+def _one_of(item: dict[str, Any], name: str, allowed: tuple[str, ...]) -> str:
+    value = str(_required(item, name)).upper()
+    if value not in allowed:
+        raise ExchangeResponseError(f"Неизвестное значение {name}: {value!r}")
+    return value
 
 
 def _parse_history_order(item: Any) -> HistoryOrder:
@@ -642,13 +648,17 @@ class BingXClient(ExchangeClient):
     # --- Публичные данные --------------------------------------------------
 
     async def get_ticker(self, symbol: str, *, max_retries: int | None = None) -> Ticker:
+        """Живая форма (29.09, live и demo): data — объект, lastPrice —
+        строка. Пустой ответ или нет lastPrice — ошибка, не цена 0."""
         data = await self._request(QUOTE_TICKER, {"symbol": symbol}, max_retries=max_retries)
         if isinstance(data, list):
-            data = data[0] if data else {}
+            data = data[0] if len(data) == 1 else None
+        if not isinstance(data, dict):
+            raise ExchangeResponseError(f"ticker: нет записи {symbol}")
 
         return Ticker(
             symbol=data.get("symbol", symbol),
-            last_price=_legacy_zero(data.get("lastPrice"), "lastPrice"),
+            last_price=_to_decimal(data.get("lastPrice"), "lastPrice"),
             timestamp=datetime.now(UTC),
         )
 
@@ -688,25 +698,32 @@ class BingXClient(ExchangeClient):
         duration_ms = minutes[interval] * 60_000
 
         if isinstance(item, dict):
-            open_ms = int(item.get("time") or item.get("openTime") or 0)
+            # Живая форма v3 (29.09): объект без closeTime — закрытие
+            # вычисляется от открытия и таймфрейма, это не подстановка.
+            open_time = _exchange_time(_required(item, "time", "openTime"), "time")
             values = (
                 item.get("open"), item.get("high"),
                 item.get("low"), item.get("close"), item.get("volume"),
             )
-            close_ms = int(item.get("closeTime") or open_ms + duration_ms)
+            raw_close = item.get("closeTime")
+            close_time = (
+                _exchange_time(raw_close, "closeTime")
+                if raw_close is not None
+                else open_time + timedelta(milliseconds=duration_ms)
+            )
         else:  # массив [time, open, high, low, close, volume]
-            open_ms = int(item[0])
+            open_time = _exchange_time(item[0], "time")
             values = (item[1], item[2], item[3], item[4], item[5])
-            close_ms = open_ms + duration_ms
+            close_time = open_time + timedelta(milliseconds=duration_ms)
 
         return Kline(
-            open_time=_ms_to_dt(open_ms),
-            open=_legacy_zero(values[0], "open"),
-            high=_legacy_zero(values[1], "high"),
-            low=_legacy_zero(values[2], "low"),
-            close=_legacy_zero(values[3], "close"),
-            volume=_legacy_zero(values[4], "volume"),
-            close_time=_ms_to_dt(close_ms),
+            open_time=open_time,
+            open=_to_decimal(values[0], "open"),
+            high=_to_decimal(values[1], "high"),
+            low=_to_decimal(values[2], "low"),
+            close=_to_decimal(values[3], "close"),
+            volume=_to_decimal(values[4], "volume"),
+            close_time=close_time,
         )
 
     async def get_symbols(self, *, max_retries: int | None = None) -> list[SymbolInfo]:
@@ -714,24 +731,43 @@ class BingXClient(ExchangeClient):
         if not isinstance(data, list):
             raise ExchangeResponseError("Ожидался список контрактов")
 
+        # Битый контракт (нет точности, минимума, статуса) выпадает из списка
+        # с WARNING — список живёт: одна запись не лишает сканер и карточки
+        # всех символов, а для выпавшего вход откажет SYMBOL_DATA_UNAVAILABLE.
+        # Живьём (29.09, 1239/1185 записей) битых нет, status — 1 или 25.
         result = []
-        for item in data:
-            if item.get("status") not in (1, "1", None):
-                continue  # неактивный контракт
-            result.append(
-                SymbolInfo(
-                    symbol=item.get("symbol", ""),
-                    price_precision=int(item.get("pricePrecision", 2)),
-                    quantity_precision=int(item.get("quantityPrecision", 4)),
-                    min_quantity=_legacy_zero(
-                        item.get("tradeMinQuantity"), "tradeMinQuantity"
-                    ),
-                    min_notional=_legacy_zero(
-                        item.get("tradeMinUSDT"), "tradeMinUSDT"
-                    ),
-                )
+        skipped: dict[str, str] = {}
+        for index, item in enumerate(data):
+            try:
+                info = self._parse_contract(item)
+            except ExchangeResponseError as exc:
+                name = item.get("symbol") if isinstance(item, dict) else None
+                skipped[str(name or f"#{index}")] = str(exc)
+                continue
+            if info is not None:
+                result.append(info)
+        if skipped:
+            logger.warning(
+                "Контракты без обязательных полей пропущены",
+                extra={"count": len(skipped), "skipped": skipped},
             )
         return result
+
+    @staticmethod
+    def _parse_contract(item: Any) -> SymbolInfo | None:
+        """None — неактивный контракт (status не 1)."""
+        if not isinstance(item, dict):
+            raise ExchangeResponseError(f"Контракт — не объект: {type(item).__name__}")
+        symbol = str(_required(item, "symbol"))
+        if _required_int(item, "status") != 1:
+            return None
+        return SymbolInfo(
+            symbol=symbol,
+            price_precision=_required_int(item, "pricePrecision"),
+            quantity_precision=_required_int(item, "quantityPrecision"),
+            min_quantity=_to_decimal(item.get("tradeMinQuantity"), "tradeMinQuantity"),
+            min_notional=_to_decimal(item.get("tradeMinUSDT"), "tradeMinUSDT"),
+        )
 
     async def get_mark_price(self, symbol: str) -> Decimal:
         """premiumIndex, живая форма (27.09): data — объект, markPrice —
@@ -769,24 +805,22 @@ class BingXClient(ExchangeClient):
                     f"(режим {self._mode.value}). Получены активы: {found or 'пусто'}."
                 )
             data = match
-        if isinstance(data, dict) and isinstance(data.get("balance"), dict):
-            # Другая форма ответа: {"balance": {...вложенный объект...}}.
-            # Разворачиваем, только если "balance" действительно объект —
-            # в форме выше это просто строка, и разворачивать там нечего.
-            data = data["balance"]
+        else:
+            # Форма {"balance": {...}} живьём не встречалась — не разбираем.
+            raise ExchangeResponseError(
+                f"Ответ balance — не список активов: {type(data).__name__}"
+            )
 
-        equity = _legacy_zero(data.get("equity"), "equity")
-        # Свободная маржа — только availableMargin. Раньше при его отсутствии
-        # молча брали "balance" — другое поле с другим смыслом; нет поля —
-        # None, а не подмена и не 0.
+        # equity — база риска и дневного лимита, usedMargin — проверка
+        # свободной маржи: нет поля — ошибка, не 0 (разведка 29.09).
+        # Свободная маржа — только availableMargin; нет поля — None, решает
+        # вызывающий (вход — AVAILABLE_MARGIN_UNKNOWN, экран — «—»).
         return Balance(
-            asset=data.get("asset", expected_asset),
+            asset=expected_asset,
             available=_decimal_or(data.get("availableMargin"), "availableMargin", None),
-            used_margin=_legacy_zero(data.get("usedMargin"), "usedMargin"),
-            unrealized_pnl=_legacy_zero(
-                data.get("unrealizedProfit"), "unrealizedProfit"
-            ),
-            equity=equity,
+            used_margin=_to_decimal(data.get("usedMargin"), "usedMargin"),
+            unrealized_pnl=_to_decimal(data.get("unrealizedProfit"), "unrealizedProfit"),
+            equity=_to_decimal(data.get("equity"), "equity"),
         )
 
     async def get_positions(self, *, max_retries: int | None = None) -> list[Position]:
@@ -836,27 +870,18 @@ class BingXClient(ExchangeClient):
                     f"{symbol} {raw_side}: отрицательный positionAmt {raw_amount!r}"
                 )
 
-            # Тип и наличие leverage живьём не сняты; дефолт только для
-            # отображения, в торговый путь не идёт. int() бросает
-            # ValueError/TypeError — не ExchangeError, мимо всех
-            # потребителей; оборачиваем.
-            raw_leverage = item.get("leverage", 1) or 1
-            try:
-                leverage = int(raw_leverage)
-            except (TypeError, ValueError) as exc:
-                raise ExchangeResponseError(
-                    f"{symbol}: не удалось разобрать leverage {raw_leverage!r}"
-                ) from exc
+            # leverage живьём — int (27.09); нет — ошибка, не 1.
+            leverage = _required_int(item, "leverage")
 
             positions.append(
                 Position(
                     symbol=symbol,
                     side=TradeSide(raw_side),
                     quantity=quantity,
-                    entry_price=_legacy_zero(item.get("avgPrice"), "avgPrice"),
-                    mark_price=_legacy_zero(item.get("markPrice"), "markPrice"),
+                    entry_price=_to_decimal(item.get("avgPrice"), "avgPrice"),
+                    mark_price=_to_decimal(item.get("markPrice"), "markPrice"),
                     leverage=leverage,
-                    unrealized_pnl=_legacy_zero(
+                    unrealized_pnl=_to_decimal(
                         item.get("unrealizedProfit"), "unrealizedProfit"
                     ),
                     liquidation_price=_decimal_or(
@@ -914,13 +939,14 @@ class BingXClient(ExchangeClient):
 
     @staticmethod
     def _parse_fill(item: dict[str, Any]) -> Fill:
-        position_side = str(item.get("positionSide", "LONG")).upper()
-        side = TradeSide.LONG if position_side == "LONG" else TradeSide.SHORT
+        # Сторона позиции и ордера — без дефолтов LONG/BUY: по ним импорт
+        # решает направление сделки и вход это или выход.
+        side = TradeSide(_one_of(item, "positionSide", ("LONG", "SHORT")))
 
         # Направление ордера относительно позиции: BUY увеличивает лонг и
         # сокращает шорт. Именно это отличает вход от выхода, а не сам
         # по себе BUY/SELL.
-        order_side = str(item.get("side", "BUY")).upper()
+        order_side = _one_of(item, "side", ("BUY", "SELL"))
         is_entry = (side is TradeSide.LONG) == (order_side == "BUY")
 
         # Живая форма allFillOrders (демо, 27.09): filledTm (ISO, UTC) и
@@ -940,19 +966,16 @@ class BingXClient(ExchangeClient):
 
         return Fill(
             external_id=str(raw_id) if raw_id not in (None, "") else None,
-            symbol=item.get("symbol", ""),
+            symbol=str(_required(item, "symbol")),
             side=side,
             is_entry=is_entry,
-            price=_legacy_zero(
-                item.get("avgPrice") or item.get("price"), "price"
-            ),
+            # Живьём в allFillOrders только price (avgPrice — у прежних форм).
+            price=_to_decimal(_required(item, "avgPrice", "price"), "price"),
             # volume — живое имя объёма. Биржа его округляет (1362 при
             # executedQty ордера 1362.07, снято 27.09); amount/price тоже не
             # точен — точнее allFillOrders объём не отдаёт.
-            quantity=_legacy_zero(
-                item.get("executedQty") or item.get("qty") or item.get("volume"), "quantity"
-            ),
-            fee=abs(_legacy_zero(item.get("commission") or item.get("fee"), "fee")),
+            quantity=_to_decimal(_required(item, "executedQty", "qty", "volume"), "volume"),
+            fee=abs(_to_decimal(_required(item, "commission", "fee"), "commission")),
             executed_at=_exchange_time(item.get(time_field), time_field),
             position_id=str(item.get("positionId")) if item.get("positionId") else None,
             order_id=str(item.get("orderId")) if item.get("orderId") else None,

@@ -358,3 +358,38 @@ async def test_exit_recorded_on_bot_trade_is_skipped(ctx) -> None:  # type: igno
     result = await importer.import_period(BASE - timedelta(days=1), BASE + timedelta(days=1))
 
     assert result.fills_skipped_bot == 1
+
+
+@pytest.mark.parametrize("field", ["price", "volume", "commission"])
+async def test_live_fill_with_empty_number_is_window_error_not_trade(ctx, field: str) -> None:  # type: ignore[no-untyped-def]
+    """Настоящий BingXClient, живой allFillOrders SOL (вход и стоп-выход 27.09),
+    у выхода поле пустое. Раньше "" → 0: импорт создавал закрытую сделку с
+    ценой выхода, объёмом или комиссией 0. Теперь окно не загрузилось —
+    ошибка в итоге импорта, сделки нет."""
+    import httpx
+
+    from app.exchanges.bingx import BingXClient
+    from tests.bingx_fixtures import live_items
+
+    user, repo, _ = ctx
+    entry, exit_fill = live_items("allFillOrders SOL (get_fills)")
+    exit_fill[field] = ""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"code": 0, "msg": "", "data": {"fill_orders": [entry, exit_fill]}}
+        )
+
+    client = BingXClient(
+        api_key="k", api_secret="s",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://t"),
+    )
+    try:
+        result = await HistoryImporter(client, repo, user.id).import_period(
+            datetime(2026, 9, 27, tzinfo=UTC), datetime(2026, 9, 28, tzinfo=UTC)
+        )
+    finally:
+        await client.close()
+
+    assert result.trades_created == 0
+    assert len(result.errors) == 1 and field in result.errors[0]

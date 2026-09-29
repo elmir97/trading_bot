@@ -44,7 +44,7 @@ class FakeClient:
         return list(self._candles)
 
     async def get_symbols(self, *, max_retries: int | None = None) -> list[SymbolInfo]:
-        return [SymbolInfo("BTC-USDT", 2, 4, D("0.0001"))]
+        return [SymbolInfo("BTC-USDT", 2, 4, D("0.0001"), D("2"))]
 
     async def close(self) -> None: ...
 

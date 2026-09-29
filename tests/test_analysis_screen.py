@@ -456,7 +456,7 @@ class _Engine:
         return self._signal
 
     async def get_symbol_info(self, symbol: str) -> SymbolInfo:
-        return SymbolInfo(symbol, 2, 4, D("0.0001"))
+        return SymbolInfo(symbol, 2, 4, D("0.0001"), D("2"))
 
 
 def _message(photo: object = None) -> MagicMock:

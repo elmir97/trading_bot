@@ -238,10 +238,9 @@ class SymbolInfo:
     price_precision: int
     quantity_precision: int
     min_quantity: Decimal
-    # Минимальный нотионал (tradeMinUSDT у BingX). По умолчанию 0 — сохраняет
-    # обратную совместимость с позиционным конструктором, которым эту
-    # dataclass уже создают в тестах.
-    min_notional: Decimal = Decimal(0)
+    # Минимальный нотионал (tradeMinUSDT у BingX). Без дефолта: 0 молча
+    # выключал бы проверку SIZE_TOO_SMALL.
+    min_notional: Decimal
 
 
 # Шаг 15.5.3: тип триггера условных ордеров — один для вложенных в вход
