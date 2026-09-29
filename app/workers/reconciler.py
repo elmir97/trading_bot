@@ -44,7 +44,13 @@ from app.database.repositories.reconciliation_event import ReconciliationEventRe
 from app.database.repositories.trade import TradeRepository
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
-from app.exchanges.base import ExchangeClient, ExchangeError, OrderFill, Position
+from app.exchanges.base import (
+    ExchangeClient,
+    ExchangeError,
+    ExchangeResponseError,
+    OrderFill,
+    Position,
+)
 from app.exchanges.bingx import _QUOTE_ASSET_BY_MODE
 from app.execution.reconciler import (
     ORDER_NOT_EXIST_CODE,
@@ -88,6 +94,9 @@ logger = get_logger(__name__)
 ZERO = Decimal(0)
 LOCK_PATTERN = "exec:lock:*"
 HISTORY_LIMIT = timedelta(days=7) - timedelta(minutes=1)
+# История ордеров сделки не разбирается дольше — одно событие владельцу
+# (решение 29.09); до того — WARNING и ошибка в пульсе каждый цикл.
+HISTORY_UNPARSED_ALERT_AFTER = timedelta(minutes=30)
 
 _CLOSE_TEXT = {
     ReconciliationKind.CLOSED_STOP_LOSS: "🛑 {symbol} {side} закрыта по стопу на бирже",
@@ -200,6 +209,10 @@ class Reconciler:
         # 28.09: пульс — INFO раз в reconciler_pulse_every запусков и строка
         # «Сверка:» в сводке исполнения (DailyJobs читает pulse.window()).
         self.pulse = ReconcilerPulse(datetime.now(UTC))
+        # trade_id → (user_id, с какого момента история ордеров сделки не
+        # разбирается подряд). В памяти, как пульс: рестарт начинает отсчёт
+        # 30 минут заново.
+        self._history_unparsed_since: dict[int, tuple[int, datetime]] = {}
 
     async def run(self) -> None:
         self._cycle += 1
@@ -335,6 +348,11 @@ class Reconciler:
                 if trade.source is not TradeSource.SIGNAL_EXECUTION or not trade.fill_confirmed:
                     continue
                 await self._reconcile_trade(ctx, client, trade, positions, check_stops)
+            # Сделка закрыта или ушла из сверки — её отсчёт сбоя не нужен.
+            open_ids = {t.id for t in open_trades}
+            for trade_id, (owner, _since) in list(self._history_unparsed_since.items()):
+                if owner == user_id and trade_id not in open_ids:
+                    del self._history_unparsed_since[trade_id]
 
             in_flight = {
                 e.symbol for e in unresolved if now - e.created_at < UNRESOLVED_ENTRY_WINDOW
@@ -390,6 +408,7 @@ class Reconciler:
         position = exchange_position(positions, trade.symbol, trade.side)
 
         if not needs_history(snapshot, position):
+            self._history_unparsed_since.pop(trade.id, None)
             await self._resolve_trade_discrepancies(ctx, trade.id)
             if check_stops:
                 open_orders = await client.get_open_orders(trade.symbol)
@@ -404,7 +423,15 @@ class Reconciler:
             return
 
         start = max(trade.opened_at - timedelta(minutes=1), ctx.now - HISTORY_LIMIT)
-        orders = await client.get_all_orders(trade.symbol, start, ctx.now)
+        try:
+            orders = await client.get_all_orders(trade.symbol, start, ctx.now)
+        except ExchangeResponseError as exc:
+            await self._history_unparsed(ctx, trade, exc)
+            return
+        if self._history_unparsed_since.pop(trade.id, None) is not None:
+            await self._resolve_missing(
+                ctx, ReconciliationKind.AMBIGUOUS, set(), prefix=f"history:{trade.id}:"
+            )
         decision = decide_trade(snapshot, position, orders)
         if decision.discrepancy is not None:
             await self._discrepancy(ctx, decision.discrepancy)
@@ -413,6 +440,38 @@ class Reconciler:
             return
         await self._record_exits(
             ctx, trade.id, decision.exits, decision.closes_fully, stop_row, take_row
+        )
+
+    async def _history_unparsed(
+        self, ctx: _UserCtx, trade: Trade, exc: ExchangeResponseError
+    ) -> None:
+        """История ордеров сделки пришла, но не разбирается (29.09: пустая
+        цифра исполненного выхода — ошибка, не 0). Журнал не трогаем; каждый
+        цикл — WARNING и ошибка в пульсе, остальные сделки сверяются дальше.
+        Сбой подряд дольше HISTORY_UNPARSED_ALERT_AFTER — одно событие
+        владельцу (дедуп по ключу), разрешается, когда история разобралась."""
+        self._cycle_errors += 1
+        _owner, since = self._history_unparsed_since.setdefault(
+            trade.id, (ctx.user_id, ctx.now)
+        )
+        logger.warning(
+            "Сверка сделки: история ордеров не разобрана — журнал не изменён",
+            extra={
+                "trade_id": trade.id, "symbol": trade.symbol, "error": str(exc),
+                "since": since.isoformat(),
+            },
+        )
+        if ctx.now - since <= HISTORY_UNPARSED_ALERT_AFTER:
+            return
+        minutes = int((ctx.now - since).total_seconds() // 60)
+        await self._discrepancy(
+            ctx,
+            Discrepancy(
+                ReconciliationKind.AMBIGUOUS, f"history:{trade.id}:unparsed", trade.symbol,
+                f"история ордеров сделки #{trade.id} не разбирается {minutes} мин ({exc}) — "
+                "закрытие с биржи в журнал не записано",
+                trade_id=trade.id,
+            ),
         )
 
     async def _record_exits(
@@ -775,6 +834,7 @@ class Reconciler:
         for kind, prefix in (
             (ReconciliationKind.QUANTITY_MISMATCH, f"qty:{trade_id}:"),
             (ReconciliationKind.AMBIGUOUS, f"ambiguous:{trade_id}:"),
+            (ReconciliationKind.AMBIGUOUS, f"history:{trade_id}:"),
         ):
             await self._resolve_missing(ctx, kind, set(), prefix=prefix)
 

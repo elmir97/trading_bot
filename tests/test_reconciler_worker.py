@@ -1237,3 +1237,121 @@ async def test_not_placed_with_cancelled_trade_does_not_cancel_again(ctx) -> Non
     assert (await _trade(db, trade.id)).status is TradeStatus.CANCELLED
     [text] = [t for t in bot.sent if "не выставлен на бирже" in t]
     assert "Предварительная сделка" not in text
+
+
+# --- 29.09: история ордеров не разбирается дольше 30 минут -------------------
+
+
+class _Clock:
+    """Время воркера сверки: datetime.now модуля app.workers.reconciler."""
+
+    def __init__(self, now: datetime) -> None:
+        self.now = now
+
+
+def _freeze(monkeypatch, clock: _Clock) -> None:  # type: ignore[no-untyped-def]
+    class Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[no-untyped-def]
+            return clock.now if tz is None else clock.now.astimezone(tz)
+
+    monkeypatch.setattr("app.workers.reconciler.datetime", Frozen)
+
+
+def _unparsed_sol_history(demo: LiveDemo) -> None:
+    """СИНТЕТИКА ИЗ ЖИВОГО allOrders SOL: у исполненного стопа-выхода
+    commission "" — строгий разбор отказывает."""
+    orders = live_items("allOrders SOL")
+    [child] = [o for o in orders if str(o["orderId"]) == SOL_CHILD]
+    child["commission"] = ""
+    demo.all_orders["SOL-USDT"] = orders
+
+
+def _reconciler(settings, db, bot):  # type: ignore[no-untyped-def]
+    from app.workers.reconciler import Reconciler
+
+    return Reconciler(bot, db, settings, SecretCipher(settings.encryption_key.get_secret_value()))
+
+
+async def _open_events(db, user_id: int) -> list[ReconciliationEvent]:  # type: ignore[no-untyped-def]
+    async with db.session() as s:
+        rows = await s.scalars(
+            select(ReconciliationEvent).where(ReconciliationEvent.user_id == user_id)
+        )
+        return list(rows)
+
+
+async def test_history_unparsed_over_30_min_is_one_event(ctx, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """До 30 минут подряд — только WARNING и ошибка в пульсе каждый цикл;
+    дольше — одно событие AMBIGUOUS владельцу (history:{id}:unparsed), повтора
+    нет. Раньше сбой разбора обрывал сверку пользователя, события не было
+    никогда."""
+    settings, db, session, user, demo = ctx
+    sol_id, _link_id = await _seed_live(session, user.id)
+    _unparsed_sol_history(demo)
+    clock = _Clock(datetime.now(UTC))
+    _freeze(monkeypatch, clock)
+    bot = FakeBot()
+    reconciler = _reconciler(settings, db, bot)
+    start = clock.now
+
+    for minutes in (0, 29):
+        clock.now = start + timedelta(minutes=minutes)
+        await reconciler.run()
+    assert bot.sent == []
+
+    for minutes in (31, 40):
+        clock.now = start + timedelta(minutes=minutes)
+        await reconciler.run()
+
+    [text] = bot.sent
+    assert text.startswith("⚠️ Сверка с биржей, SOL-USDT: история ордеров сделки")
+    assert f"#{sol_id}" in text and "commission" in text
+    [event] = [e for e in await _open_events(db, user.id) if e.dedup_key.startswith("history:")]
+    assert (event.kind, event.dedup_key, event.resolved_at) == (
+        ReconciliationKind.AMBIGUOUS, f"history:{sol_id}:unparsed", None
+    )
+    assert (await _trade(db, sol_id)).status is TradeStatus.OPEN
+    assert reconciler.pulse.window(clock.now).errors == 4
+
+
+async def test_history_parsed_again_resolves_event_and_closes_trade(ctx, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """История снова разбирается — событие разрешено, выход записан фактом."""
+    settings, db, session, user, demo = ctx
+    sol_id, _link_id = await _seed_live(session, user.id)
+    _unparsed_sol_history(demo)
+    clock = _Clock(datetime.now(UTC))
+    _freeze(monkeypatch, clock)
+    bot = FakeBot()
+    reconciler = _reconciler(settings, db, bot)
+    start = clock.now
+    for minutes in (0, 31):
+        clock.now = start + timedelta(minutes=minutes)
+        await reconciler.run()
+    assert len(bot.sent) == 1
+
+    demo.all_orders["SOL-USDT"] = live_items("allOrders SOL")
+    clock.now = start + timedelta(minutes=32)
+    await reconciler.run()
+
+    [event] = [e for e in await _open_events(db, user.id) if e.dedup_key.startswith("history:")]
+    assert event.resolved_at is not None
+    assert (await _trade(db, sol_id)).status is TradeStatus.CLOSED
+    assert "закрыта по стопу" in bot.sent[-1]
+
+
+async def test_history_unparsed_does_not_stop_user_reconcile(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Сбой разбора истории одной сделки не обрывает сверку пользователя:
+    позиция без сделки в журнале всё равно найдена. Раньше исключение
+    выходило из цикла сделок, и дальше сверка не шла. СИНТЕТИКА ИЗ ЖИВОГО
+    positions all: копия позиции LINK с символом BTC-USDT."""
+    settings, db, session, user, demo = ctx
+    await _seed_live(session, user.id)
+    _unparsed_sol_history(demo)
+    [link] = live_items("positions all")
+    demo.positions = [link, {**link, "symbol": "BTC-USDT", "positionId": "1"}]
+    bot = FakeBot()
+
+    await _reconciler(settings, db, bot).run()
+
+    assert any("BTC-USDT" in text for text in bot.sent)
