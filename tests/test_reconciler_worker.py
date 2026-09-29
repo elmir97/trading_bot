@@ -789,3 +789,56 @@ async def test_lock_link_manual_stop_second_run_is_silent(ctx) -> None:  # type:
     assert len(bot.sent) == sent
     trade = await _trade(db, link.id)
     assert len(trade.fills) == len({f.external_fill_id for f in trade.fills})
+
+
+# ---------------------------------------------------------------------------
+# п.8, 29.09: префикс dedup_key — до двоеточия, entry:1 не закрывает entry:12
+# ---------------------------------------------------------------------------
+
+
+def _foreign_open_event(user_id: int, kind: ReconciliationKind, key: str) -> ReconciliationEvent:
+    """Открытое расхождение чужой записи с ключом, который начинается с ключа
+    нашей (entry:{id} → entry:{id}2). Уже доставлено — не переотправляется."""
+    return ReconciliationEvent(
+        user_id=user_id, symbol="XRP-USDT", kind=kind, dedup_key=key, detail="чужое",
+        notify_text="чужое", notified_at=datetime.now(UTC),
+    )
+
+
+async def test_entry_prefix_does_not_resolve_longer_entry_id(ctx) -> None:  # type: ignore[no-untyped-def]
+    settings, db, session, user, demo = ctx
+    await _seed_live(session, user.id)
+    n = await _notification(session, user.id, "ADA-USDT")
+    entry = _row(user.id, n.id, "ADA-USDT", OrderRole.ENTRY, OrderStatus.UNKNOWN, None,
+                 created_at=datetime.now(UTC) - timedelta(minutes=11))
+    session.add(entry)
+    await session.flush()
+    foreign_key = f"entry:{entry.id}2"
+    session.add(_foreign_open_event(user.id, ReconciliationKind.AMBIGUOUS, foreign_key))
+    await session.commit()
+    demo.unknown_cids.add(entry.client_order_id)
+
+    await _run_reconciler(settings, db, FakeBot())
+
+    assert (await _rows(db, "ADA-USDT"))[OrderRole.ENTRY].status is OrderStatus.NOT_PLACED
+    [foreign] = [e for e in await _events(db, user.id) if e.dedup_key == foreign_key]
+    assert foreign.resolved_at is None
+
+
+async def test_qty_and_stop_missing_prefix_do_not_resolve_longer_trade_id(ctx) -> None:  # type: ignore[no-untyped-def]
+    """LINK открыта и совпадает с биржей — сверка разрешает свои qty:{id} и
+    stop_missing:{id}, но не qty:{id}2 / stop_missing:{id}2."""
+    settings, db, session, user, _demo = ctx
+    settings.reconciler_stop_check_every = 1
+    _, link_id = await _seed_live(session, user.id)
+    keys = {
+        ReconciliationKind.QUANTITY_MISMATCH: f"qty:{link_id}2",
+        ReconciliationKind.STOP_MISSING: f"stop_missing:{link_id}2",
+    }
+    session.add_all(_foreign_open_event(user.id, kind, key) for kind, key in keys.items())
+    await session.commit()
+
+    await _run_reconciler(settings, db, FakeBot())
+
+    by_key = {e.dedup_key: e for e in await _events(db, user.id)}
+    assert all(by_key[key].resolved_at is None for key in keys.values())

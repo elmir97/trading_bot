@@ -389,7 +389,7 @@ class Reconciler:
                 else:
                     await self._resolve_missing(
                         ctx, ReconciliationKind.STOP_MISSING, set(),
-                        prefix=f"stop_missing:{trade.id}",
+                        prefix=f"stop_missing:{trade.id}:",
                     )
             return
 
@@ -467,7 +467,7 @@ class Reconciler:
             )
             await self._resolve_trade_discrepancies(ctx, trade.id)
             await self._resolve_missing(
-                ctx, ReconciliationKind.STOP_MISSING, set(), prefix=f"stop_missing:{trade.id}"
+                ctx, ReconciliationKind.STOP_MISSING, set(), prefix=f"stop_missing:{trade.id}:"
             )
             # closed_at, не status: mypy сузил status до OPEN проверкой выше,
             # а close_trade меняет его на месте.
@@ -580,7 +580,7 @@ class Reconciler:
             await self._discrepancy(ctx, resolution.discrepancy)
             return
         await self._resolve_missing(
-            ctx, ReconciliationKind.AMBIGUOUS, set(), prefix=f"entry:{entry.id}"
+            ctx, ReconciliationKind.AMBIGUOUS, set(), prefix=f"entry:{entry.id}:"
         )
         if resolution.confirmed is not None:
             await self._confirm_entry(ctx, entry, trade, resolution.confirmed)
@@ -717,18 +717,22 @@ class Reconciler:
         prefix: str | None = None,
     ) -> None:
         """Открытые расхождения вида kind, которых на этом цикле больше нет
-        (prefix — только ключи одной сделки/входа), — разрешены."""
+        (prefix — только ключи одной сделки/входа), — разрешены.
+
+        prefix кончается двоеточием ("entry:5:"): он покрывает сам ключ
+        "entry:5" и ключи "entry:5:…", но не "entry:52" (п.8, 29.09 — без
+        двоеточия вход 1 разрешал расхождения входа 12)."""
         for event in await ReconciliationEventRepository(ctx.session).list_open(
             ctx.user_id, [kind]
         ):
-            if prefix is not None and not event.dedup_key.startswith(prefix):
+            if prefix is not None and not _in_scope(event.dedup_key, prefix):
                 continue
             if event.dedup_key not in active:
                 event.resolved_at = ctx.now
 
     async def _resolve_trade_discrepancies(self, ctx: _UserCtx, trade_id: int) -> None:
         for kind, prefix in (
-            (ReconciliationKind.QUANTITY_MISMATCH, f"qty:{trade_id}"),
+            (ReconciliationKind.QUANTITY_MISMATCH, f"qty:{trade_id}:"),
             (ReconciliationKind.AMBIGUOUS, f"ambiguous:{trade_id}:"),
         ):
             await self._resolve_missing(ctx, kind, set(), prefix=prefix)
@@ -772,6 +776,14 @@ def _redelivery_text(event: ReconciliationEvent, user: User, now: datetime) -> s
         created_at=event.created_at, now=now, tz_offset_hours=tz_offset_for(timezone)
     )
     return f"{notice}\n{body}" if notice else body
+
+
+def _in_scope(dedup_key: str, prefix: str) -> bool:
+    """dedup_key принадлежит записи prefix ("kind:id:"): равен "kind:id" или
+    начинается с "kind:id:"."""
+    if not prefix.endswith(":"):
+        raise ValueError(f"Префикс dedup_key без двоеточия: {prefix!r}")
+    return dedup_key == prefix[:-1] or dedup_key.startswith(prefix)
 
 
 class _UserCtx:
