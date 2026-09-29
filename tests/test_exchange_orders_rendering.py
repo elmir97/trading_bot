@@ -77,3 +77,26 @@ def test_renders_without_symbol_precision_and_without_tp_sl() -> None:
     assert "по 100123.46" in text  # без SymbolInfo — fallback-точность fmt_price
     assert "Тейк" not in text
     assert "Стоп" not in text
+
+
+# --- Р1, 29.09: clientOrderId у биржи — строчными ------------------------------
+
+
+def test_own_order_live_lowercase_client_order_id() -> None:
+    """Живьём биржа отдаёт наш cid строчными (tj209u1e при tj209u1E в БД,
+    GET #37, демо 27.09) — ордер всё равно свой."""
+    from app.bot.handlers.exchange import _is_own_order
+    from tests.bingx_fixtures import live_items
+
+    [raw] = live_items("order #37 LINK-USDT ENTRY")
+    assert raw["clientOrderId"] == "tj209u1e"
+    assert _is_own_order(str(raw["clientOrderId"]))
+
+
+def test_own_order_is_case_insensitive() -> None:
+    """СИНТЕТИКА ИЗ ЖИВОГО #37, заменён регистр: сравнение cid — без учёта
+    регистра (casefold), как бы биржа его ни отдала."""
+    from app.bot.handlers.exchange import _is_own_order
+
+    assert _is_own_order("TJ209U1E")
+    assert not _is_own_order("rx1790495653136x84c65e48")

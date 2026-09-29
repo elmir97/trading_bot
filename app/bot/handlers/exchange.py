@@ -204,8 +204,9 @@ def _is_own_order(client_order_id: str) -> bool:
     client_order_id(): f"tj{notification_id}u{user_id}{E|S|T}" (до шага
     15.5.2а — tj{signal_id}…, префикс тот же). Конвенция бота,
     биржевой клиент про неё ничего не знает — поэтому проверка тут,
-    не в OpenOrder."""
-    return client_order_id.startswith("tj")
+    не в OpenOrder. Без учёта регистра: биржа отдаёт cid строчными
+    (tj209u1e при tj209u1E в БД, Р1 29.09)."""
+    return client_order_id.casefold().startswith("tj")
 
 
 def _render_open_order(order, precision) -> str:  # type: ignore[no-untyped-def]

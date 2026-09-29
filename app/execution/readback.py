@@ -168,7 +168,9 @@ def find_our_conditional(
     типа и стороны на той же цене с точностью до тика, поставленный в
     секунды после входа)."""
     target = _quantize(level, price_precision)
-    own_prefix = own_client_order_id[:-1]  # tj{nid}u{uid} без буквы роли
+    # tj{nid}u{uid} без буквы роли. Р1 (29.09): биржа отдаёт cid строчными
+    # (tj209u1e при tj209u1E в БД) — сравнение без учёта регистра.
+    own_prefix = own_client_order_id[:-1].casefold()
     candidates = []
     for o in open_orders:
         if o.symbol != symbol or o.order_type != order_type.value:
@@ -181,7 +183,8 @@ def find_our_conditional(
             continue
         if o.order_id in claimed_order_ids:
             continue
-        if o.client_order_id.startswith("tj") and not o.client_order_id.startswith(own_prefix):
+        cid = o.client_order_id.casefold()
+        if cid.startswith("tj") and not cid.startswith(own_prefix):
             continue
         candidates.append(o)
     if len(candidates) == 1:

@@ -627,6 +627,35 @@ def test_find_our_conditional_matches_rounded_level() -> None:
     assert match.order is stop
 
 
+def test_find_our_conditional_live_lowercase_own_client_order_id() -> None:
+    """Р1: условник с нашим cid в живом регистре биржи (строчными: tj…s при
+    tj…S в БД) — наш."""
+    stop = _conditional(
+        order_type="STOP_MARKET", stop_price="97.0", order_id="1", client_order_id="tj5u1s"
+    )
+    match = find_our_conditional(
+        [stop], symbol="BTC-USDT", order_type=OrderType.STOP_MARKET, position_side="LONG",
+        closing_side=OrderSide.SELL, level=D("97.0"), price_precision=1,
+        placed_after=NOW, claimed_order_ids=set(), own_client_order_id="tj5u1S",
+    )
+    assert match.order is stop
+
+
+def test_find_our_conditional_foreign_bot_cid_any_case_is_not_ours() -> None:
+    """Р1, СИНТЕТИКА ИЗ ЖИВОГО (заменён регистр): cid другого входа бота
+    заглавными — всё равно чужой, сравнение без учёта регистра."""
+    foreign = _conditional(
+        order_type="STOP_MARKET", stop_price="97.0", order_id="2",
+        client_order_id="TJ999999U1S",
+    )
+    match = find_our_conditional(
+        [foreign], symbol="BTC-USDT", order_type=OrderType.STOP_MARKET, position_side="LONG",
+        closing_side=OrderSide.SELL, level=D("97.0"), price_precision=1,
+        placed_after=NOW, claimed_order_ids=set(), own_client_order_id="tj5u1S",
+    )
+    assert match.order is None
+
+
 # --- ошибки и идемпотентность ------------------------------------------------
 
 
