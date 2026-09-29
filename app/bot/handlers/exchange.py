@@ -133,17 +133,24 @@ async def show_balance(
 ) -> None:
     async def action(client) -> str:  # type: ignore[no-untyped-def]
         balance = await client.get_balance()
-        free_ratio = (
-            balance.available / balance.equity * 100
-            if balance.equity > 0
-            else Decimal(0)
-        )
+        if balance.available is None:
+            # Биржа не отдала availableMargin — не подставляем другое поле.
+            free_line = "Свободно: —\n"
+        else:
+            free_ratio = (
+                balance.available / balance.equity * 100
+                if balance.equity > 0
+                else Decimal(0)
+            )
+            free_line = (
+                f"Свободно: {fmt_amount(balance.available)} "
+                f"({fmt_num(free_ratio.quantize(Decimal('0.1')))}%)\n"
+            )
         return (
             f"<b>Баланс BingX · {user.settings.active_exchange_mode.label}</b>\n\n"
             f"Эквити: {fmt_amount(balance.equity)} {balance.asset}\n"
-            f"Свободно: {fmt_amount(balance.available)} "
-            f"({fmt_num(free_ratio.quantize(Decimal('0.1')))}%)\n"
-            f"В позициях: {fmt_amount(balance.used_margin)}\n"
+            + free_line
+            + f"В позициях: {fmt_amount(balance.used_margin)}\n"
             f"Нереализованный PnL: {fmt_money(balance.unrealized_pnl)}"
         )
 

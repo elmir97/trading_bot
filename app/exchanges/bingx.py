@@ -778,10 +778,16 @@ class BingXClient(ExchangeClient):
             data = data["balance"]
 
         equity = _to_decimal(data.get("equity"), "equity")
+        # Свободная маржа — только availableMargin. Раньше при его отсутствии
+        # молча брали "balance" — другое поле с другим смыслом; нет поля —
+        # None, а не подмена и не 0 (_to_decimal отдал бы 0 на None/"").
+        raw_available = data.get("availableMargin")
         return Balance(
             asset=data.get("asset", expected_asset),
-            available=_to_decimal(
-                data.get("availableMargin") or data.get("balance"), "available"
+            available=(
+                None
+                if raw_available is None or raw_available == ""
+                else _to_decimal(raw_available, "availableMargin")
             ),
             used_margin=_to_decimal(data.get("usedMargin"), "usedMargin"),
             unrealized_pnl=_to_decimal(

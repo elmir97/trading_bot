@@ -69,6 +69,11 @@ class FakeExchangeClient(ExchangeClient):
     def __init__(self, *, price: Decimal, balance: Decimal, symbol_info: SymbolInfo) -> None:
         self.price = price
         self.balance = balance
+        # Свободная и занятая маржа — отдельно от equity (хвост 26.09):
+        # по умолчанию всё свободно, тесты INSUFFICIENT_MARGIN/
+        # AVAILABLE_MARGIN_UNKNOWN задают их явно.
+        self.available: Decimal | None = balance
+        self.used_margin = D("0")
         self.symbol_info = symbol_info
         self.closed = False
         # Раздел 8 ТЗ: чем evaluate() реально вызвало эти методы — по этому
@@ -102,7 +107,7 @@ class FakeExchangeClient(ExchangeClient):
     async def get_balance(self, *, max_retries: int | None = None) -> Balance:
         self.balance_retries_seen.append(max_retries)
         return Balance(
-            asset="USDT", available=self.balance, used_margin=D("0"),
+            asset="USDT", available=self.available, used_margin=self.used_margin,
             unrealized_pnl=D("0"), equity=self.balance,
         )
 
@@ -1053,7 +1058,8 @@ async def test_levels_rounded_toward_entry_and_sizing_uses_rounded_stop(  # type
     assert result.order.take_profit == D(expected_take)
     side = TradeSide.LONG if direction is SignalDirection.LONG else TradeSide.SHORT
     expected_size = calculate_size(
-        account_balance=D("1000"), risk_percent=user.trading_plan.risk_per_trade_percent,
+        account_balance=D("1000"), available_margin=D("1000"),
+        risk_percent=user.trading_plan.risk_per_trade_percent,
         entry_price=D("100"), stop_loss=D(expected_stop), side=side,
         leverage=user.trading_plan.max_leverage, symbol_info=_symbol_info(),
         fee_rate=_live_settings().exec_taker_fee_rate,
@@ -1281,3 +1287,173 @@ async def test_card_positions_read_failure_is_not_no_positions(ctx) -> None:  # 
     service = _service(session, _live_settings(), client, market)
     with pytest.raises(UnsupportedPositionMode):
         await _evaluate(service, user, notification, signal)
+
+
+# --- Свободная маржа (хвост 26.09): INSUFFICIENT_MARGIN против available ------
+
+
+async def _refused_rows(session, signal: SignalRecord) -> list[ExecutionOrder]:  # type: ignore[no-untyped-def]
+    return list(
+        await session.scalars(select(ExecutionOrder).where(ExecutionOrder.signal_id == signal.id))
+    )
+
+
+async def test_insufficient_margin_against_available_not_equity(ctx) -> None:  # type: ignore[no-untyped-def]
+    """equity 1000 покрывает маржу, свободной — копейки (остальное занято
+    позициями): отказ гварда, а не ордер, который отклонит биржа."""
+    session, user, client, market = ctx
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _snapshot(session, signal)
+    client.available = D("0.01")
+    client.used_margin = D("990")
+
+    service = _service(session, _live_settings(), client, market)
+    result = await _evaluate(service, user, notification, signal)
+
+    assert isinstance(result, ExecutionRefusal)
+    assert result.code is Code.INSUFFICIENT_MARGIN
+    assert "свободно 0.01" in result.message
+    rows = await _refused_rows(session, signal)
+    assert [r.error_code for r in rows] == [Code.INSUFFICIENT_MARGIN.value]
+
+
+async def test_insufficient_margin_counts_entry_fee(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Свободного ровно на маржу входа — комиссии входа не хватает."""
+    session, user, client, market = ctx
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _snapshot(session, signal)
+    settings = _live_settings()
+    assert settings.exec_taker_fee_rate > D("0")
+
+    service = _service(session, settings, client, market)
+    quote = await _evaluate(service, user, notification, signal)
+    assert isinstance(quote, ExecutionQuote)
+
+    client.available = quote.order.margin
+    client.used_margin = D("1")
+    result = await _evaluate(service, user, notification, signal)
+
+    assert isinstance(result, ExecutionRefusal)
+    assert result.code is Code.INSUFFICIENT_MARGIN
+
+
+async def test_zero_available_with_used_margin_is_insufficient_margin(ctx) -> None:  # type: ignore[no-untyped-def]
+    """0 при занятой марже — честное «всё занято», не «неизвестно»."""
+    session, user, client, market = ctx
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _snapshot(session, signal)
+    client.available = D("0")
+    client.used_margin = D("1000")
+
+    service = _service(session, _live_settings(), client, market)
+    result = await _evaluate(service, user, notification, signal)
+
+    assert isinstance(result, ExecutionRefusal)
+    assert result.code is Code.INSUFFICIENT_MARGIN
+
+
+@pytest.mark.parametrize(
+    ("available", "used_margin"),
+    [
+        pytest.param(None, D("0"), id="поля нет"),
+        pytest.param(D("-5"), D("0"), id="отрицательная"),
+        pytest.param(D("0"), D("0"), id="0 при нулевой занятой"),
+    ],
+)
+async def test_available_margin_unknown_refuses_without_equity_fallback(  # type: ignore[no-untyped-def]
+    ctx, available, used_margin
+) -> None:
+    """Свободная маржа не получена или противоречива — отдельный код, строка
+    наблюдения с ценой, позиции биржи не читаются. Старый код молча считал
+    от equity и отдавал карточку."""
+    session, user, client, market = ctx
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _snapshot(session, signal)
+    client.available = available
+    client.used_margin = used_margin
+
+    service = _service(session, _live_settings(), client, market)
+    result = await _evaluate(service, user, notification, signal)
+
+    assert isinstance(result, ExecutionRefusal)
+    assert result.code is Code.AVAILABLE_MARGIN_UNKNOWN
+    assert client.positions_retries_seen == []
+    rows = await _refused_rows(session, signal)
+    assert [r.error_code for r in rows] == [Code.AVAILABLE_MARGIN_UNKNOWN.value]
+    assert rows[0].price == D("100")
+
+
+async def test_quote_carries_available_margin_for_card(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Карточка пишет «маржа X из свободных Y» — Y едет в котировке, и это
+    свободная маржа, а не equity."""
+    session, user, client, market = ctx
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _snapshot(session, signal)
+    client.available = D("640.5")
+    client.used_margin = D("359.5")
+
+    service = _service(session, _live_settings(), client, market)
+    result = await _evaluate(service, user, notification, signal)
+
+    assert isinstance(result, ExecutionQuote)
+    assert result.available_margin == D("640.5")
+    assert result.account_balance == D("1000")
+
+
+async def test_bingx_balance_without_available_margin_refuses_end_to_end(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Настоящий BingXClient на MockTransport: ответ /user/balance без
+    availableMargin (синтетика из живого дампа test_balance_list_of_assets_shape,
+    поле убрано) → AVAILABLE_MARGIN_UNKNOWN. Старый код подставлял "balance"
+    и отдавал карточку; /user/positions не запрашивается."""
+    import httpx
+
+    from app.exchanges.bingx import QUOTE_TICKER, USER_BALANCE, BingXClient
+
+    session, user, _, market = ctx
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _snapshot(session, signal)
+
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == QUOTE_TICKER:
+            data: object = {"symbol": "BTC-USDT", "lastPrice": "100", "volume": "1",
+                            "priceChangePercent": "0"}
+        elif request.url.path == USER_BALANCE:
+            data = [{
+                "userId": "1314404133518147588", "asset": "USDT",
+                "balance": "1000.0000", "equity": "1000.0000",
+                "unrealizedProfit": "0.0000", "realizedProfit": "0",
+                "usedMargin": "0.0000", "frozenMargin": "0.0000",
+                "shortUid": "21792211",
+            }]
+        else:
+            raise AssertionError(f"неожиданный запрос {request.url.path}")
+        return httpx.Response(200, json={"code": 0, "msg": "", "data": data})
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://open-api.bingx.com"
+    )
+    client = BingXClient(api_key="k", api_secret="s", client=http)
+    try:
+        service = _service(session, _live_settings(), client, market)
+        result = await _evaluate(service, user, notification, signal)
+    finally:
+        await client.close()
+
+    assert isinstance(result, ExecutionRefusal)
+    assert result.code is Code.AVAILABLE_MARGIN_UNKNOWN
+    assert paths == [QUOTE_TICKER, USER_BALANCE]

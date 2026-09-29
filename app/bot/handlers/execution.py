@@ -362,7 +362,8 @@ def render_confirmation(
             if order.leverage < quote.max_leverage
             else ""
         )
-        + f", маржа {fmt_amount(order.margin)} {asset}",
+        + f", маржа {fmt_amount(order.margin)} из свободных "
+        f"{fmt_amount(quote.available_margin)} {asset}",
         f"Стоп: {fmt_price(order.stop_loss, price_precision)}  (−{fmt_ratio(stop_pct)}%)  "
         f"риск {fmt_amount(order.risk_amount)} {asset} = {fmt_ratio(order.risk_percent)}% депозита",
         f"Тейк: {fmt_price(order.take_profit, price_precision)}  "

@@ -79,7 +79,8 @@ class TestSizeWithFee:
             min_quantity=D("0.01"), min_notional=D("5"),
         )
         result = calculate_size(
-            account_balance=D("88330.4771"), risk_percent=D("2"),
+            account_balance=D("88330.4771"), available_margin=D("88330.4771"),
+            risk_percent=D("2"),
             entry_price=D("122.943"), stop_loss=D("121.646"), side=TradeSide.LONG,
             leverage=10, symbol_info=info, fee_rate=FEE,
         )

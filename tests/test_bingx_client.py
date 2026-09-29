@@ -389,7 +389,12 @@ class TestPrivateData:
         """DEMO торгует виртуальными VST, не USDT (см. _QUOTE_ASSET_BY_MODE
         в bingx.py) — список из нескольких активов, включая настоящий USDT
         вперемешку, должен выбрать именно VST, раз клиент создан в режиме
-        DEMO."""
+        DEMO.
+
+        СИНТЕТИКА: числа VST не помечены живыми ни в тесте, ни в коммите
+        13d3c7a (11.09), где фикстура появилась. Семантику полей
+        balance/availableMargin по ней не выводить — живой снимок с открытой
+        позицией снимается на ближайшем демо-входе (handoff)."""
         def handler(request: httpx.Request) -> httpx.Response:
             return ok([
                 {"asset": "USDT", "balance": "0.0", "equity": "0.0",
@@ -404,6 +409,41 @@ class TestPrivateData:
 
         assert balance.asset == "VST"
         assert balance.equity == D("88980.4276")
+        await client.close()
+
+    @pytest.mark.parametrize(
+        "available_margin",
+        [
+            pytest.param(None, id="поля нет"),
+            pytest.param("", id="пустая строка"),
+        ],
+    )
+    async def test_balance_without_available_margin_is_none_not_wallet(
+        self, available_margin: str | None
+    ) -> None:
+        """Хвост 26.09: нет availableMargin — available None, а не поле
+        "balance" (старый код брал его молча через `or`) и не 0 (так
+        _to_decimal читает None/""). Синтетика из живого: набор полей —
+        живой дамп из test_balance_list_of_assets_shape, availableMargin
+        убран или пуст, суммы ненулевые, чтобы подмена была видна."""
+        entry = {
+            "userId": "1314404133518147588", "asset": "USDT",
+            "balance": "500.0000", "equity": "512.5000",
+            "unrealizedProfit": "12.5000", "realizedProfit": "0",
+            "usedMargin": "0.0000", "frozenMargin": "0.0000",
+            "shortUid": "21792211",
+        }
+        if available_margin is not None:
+            entry["availableMargin"] = available_margin
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return ok([entry])
+
+        client = make_client(handler)
+        balance = await client.get_balance()
+
+        assert balance.available is None
+        assert balance.equity == D("512.5000")
         await client.close()
 
     async def test_balance_missing_expected_asset_raises_clear_error(self) -> None:

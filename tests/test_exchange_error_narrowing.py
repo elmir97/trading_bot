@@ -71,13 +71,14 @@ class FakeExchangeClient:
     def __init__(self, name: str) -> None:
         self.name = name
         self.get_balance_raises: Exception | None = None
+        self.available: D | None = D("900")
         self.get_symbols_raises: Exception | None = None
 
     async def get_balance(self, *, max_retries=None):  # type: ignore[no-untyped-def]
         if self.get_balance_raises is not None:
             raise self.get_balance_raises
         return SimpleNamespace(
-            asset="USDT", available=D("900"), equity=D("1000"),
+            asset="USDT", available=self.available, equity=D("1000"),
             used_margin=D("0"), unrealized_pnl=D("0"),
         )
 
@@ -230,6 +231,26 @@ async def test_show_balance_exchange_error_shows_friendly_text(ctx, bot, monkeyp
 
     text = bot.recorder.last_edited_text()
     assert text is not None and "биржа не отвечает" in text.lower()
+
+
+async def test_show_balance_without_available_margin_shows_dash(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Биржа не отдала availableMargin (Balance.available None) — экран
+    баланса пишет «Свободно: —», не падает и не подставляет другое поле."""
+    session, user, settings = ctx
+    client = FakeExchangeClient(name="fake-balance-no-available")
+    client.available = None
+    _patch_exchange_factory(monkeypatch, client)
+
+    router = _router_with((exchange.show_balance, F.data == ExchangeCB.BALANCE))
+    dp = _dispatcher(router, session, user, settings)
+    callback = _make_callback(ExchangeCB.BALANCE)
+
+    await _feed(dp, bot, callback)
+
+    text = bot.recorder.last_edited_text()
+    assert text is not None
+    assert "Свободно: —" in text
+    assert "Эквити: 1000" in text
 
 
 # ---------------------------------------------------------------------------

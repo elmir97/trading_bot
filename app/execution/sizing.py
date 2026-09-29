@@ -65,6 +65,7 @@ def round_levels_toward_entry(
 def calculate_size(
     *,
     account_balance: Decimal,
+    available_margin: Decimal,
     risk_percent: Decimal,
     entry_price: Decimal,
     stop_loss: Decimal,
@@ -77,7 +78,12 @@ def calculate_size(
     объём = риск / (|вход − стоп| + fee_rate × (вход + стоп)), чтобы убыток
     на стопе вместе с комиссией входа и выхода не превышал риск по плану
     (живьём #40 SOL: без комиссии убыток на стопе 1933 при риске 1767).
-    Обязательный параметр — молчаливый расчёт без комиссии был бы багом."""
+    Обязательный параметр — молчаливый расчёт без комиссии был бы багом.
+
+    account_balance — equity, база риска (риск% депозита). available_margin —
+    свободная маржа биржи (availableMargin): с ней, а не с equity, сравнивается
+    маржа входа плюс комиссия входа (fee_rate × нотионал). Хвост 26.09: при
+    занятой марже объём от equity проходил гвард, и отказывала уже биржа."""
     if leverage < 1:
         raise CalculationError("Плечо не может быть меньше 1")
 
@@ -124,10 +130,14 @@ def calculate_size(
         )
 
     margin = (notional / Decimal(leverage)).quantize(MONEY_PRECISION)
-    if margin > account_balance:
+    # Комиссия входа списывается из той же свободной маржи. Вверх — чтобы
+    # на границе отказал гвард, а не биржа.
+    entry_fee = (fee_rate * notional).quantize(MONEY_PRECISION, rounding=ROUND_CEILING)
+    if margin + entry_fee > available_margin:
         return ExecutionRefusal(
             ExecutionRefusalCode.INSUFFICIENT_MARGIN,
-            f"Нужна маржа {margin:g}, доступно {account_balance:g}.",
+            f"Нужна маржа {margin:g} + комиссия входа {entry_fee:g}, "
+            f"свободно {available_margin:g}.",
         )
 
     return SizingResult(

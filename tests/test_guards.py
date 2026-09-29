@@ -98,6 +98,7 @@ def _valid_inputs(**overrides: object) -> GuardInputs:
         "min_risk_reward": D("1.5"),
         "taker_fee_rate": D("0"),
         "account_balance": D("1000"),
+        "available_margin": D("1000"),
         "leverage": 5,
         "symbol_info": _symbol_info(),
         "symbol": "BTC-USDT",
@@ -689,6 +690,7 @@ class TestSize:
         sizing = calculate_size(
             fee_rate=D("0"),
             account_balance=D("10"),
+            available_margin=D("10"),
             risk_percent=D("1"),
             entry_price=D("100"),
             stop_loss=D("97"),

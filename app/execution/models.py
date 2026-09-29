@@ -74,6 +74,10 @@ class ExecutionRefusalCode(StrEnum):
     INVALID_LEVELS = "INVALID_LEVELS"
     SIZE_TOO_SMALL = "SIZE_TOO_SMALL"
     INSUFFICIENT_MARGIN = "INSUFFICIENT_MARGIN"
+    # Свободная маржа (availableMargin) не получена или противоречива: поля
+    # нет, значение отрицательное, или 0 при нулевой занятой марже и
+    # положительном equity. Не фолбэк на equity — см. ExecutionService.evaluate().
+    AVAILABLE_MARGIN_UNKNOWN = "AVAILABLE_MARGIN_UNKNOWN"
     SYMBOL_NOT_ALLOWED = "SYMBOL_NOT_ALLOWED"
     # Инструмент в вайтлисте, но биржа не отдала по нему SymbolInfo (список
     # инструментов пуст/не содержит символ) — не то же самое, что осознанный

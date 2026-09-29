@@ -35,6 +35,7 @@ class TestRoundsDown:
         result = calculate_size(
             fee_rate=D("0"),
             account_balance=D("1000"),
+            available_margin=D("1000"),
             risk_percent=D("1"),
             entry_price=D("100"),
             stop_loss=D("97"),
@@ -49,6 +50,7 @@ class TestRoundsDown:
         result = calculate_size(
             fee_rate=D("0"),
             account_balance=D("1000"),
+            available_margin=D("1000"),
             risk_percent=D("5"),
             entry_price=D("100"),
             stop_loss=D("90"),
@@ -64,6 +66,7 @@ class TestRoundsDown:
         result = calculate_size(
             fee_rate=D("0"),
             account_balance=D("1000"),
+            available_margin=D("1000"),
             risk_percent=D("1"),
             entry_price=D("97"),
             stop_loss=D("100"),
@@ -80,6 +83,7 @@ class TestMinimumLot:
         result = calculate_size(
             fee_rate=D("0"),
             account_balance=D("1000"),
+            available_margin=D("1000"),
             risk_percent=D("1"),
             entry_price=D("100"),
             stop_loss=D("97"),
@@ -96,6 +100,7 @@ class TestMinimumLot:
         result = calculate_size(
             fee_rate=D("0"),
             account_balance=D("10"),
+            available_margin=D("10"),
             risk_percent=D("1"),
             entry_price=D("200"),
             stop_loss=D("100"),
@@ -110,6 +115,7 @@ class TestMinimumLot:
         result = calculate_size(
             fee_rate=D("0"),
             account_balance=D("100"),
+            available_margin=D("100"),
             risk_percent=D("0.1"),
             entry_price=D("10"),
             stop_loss=D("9"),
@@ -128,6 +134,7 @@ class TestInsufficientMargin:
         result = calculate_size(
             fee_rate=D("0"),
             account_balance=D("100"),
+            available_margin=D("100"),
             risk_percent=D("50"),
             entry_price=D("100"),
             stop_loss=D("99"),
@@ -144,6 +151,7 @@ class TestInsufficientMargin:
         result = calculate_size(
             fee_rate=D("0"),
             account_balance=D("100"),
+            available_margin=D("100"),
             risk_percent=D("50"),
             entry_price=D("100"),
             stop_loss=D("99"),
@@ -155,11 +163,61 @@ class TestInsufficientMargin:
         assert result.margin == D("50.00000000")
 
 
+def _size_against_available(*, available: str, fee_rate: str = "0"):  # type: ignore[no-untyped-def]
+    """equity 1000, риск 1% = 10, дистанция 1, плечо 10, лот 1. Без комиссии:
+    объём 10, нотионал 1000, маржа 100. С комиссией 0.0005: объём
+    10 / (1 + 0.0005 × 199) → 9, нотионал 900, маржа 90, комиссия входа 0.45."""
+    return calculate_size(
+        fee_rate=D(fee_rate),
+        account_balance=D("1000"),
+        available_margin=D(available),
+        risk_percent=D("1"),
+        entry_price=D("100"),
+        stop_loss=D("99"),
+        side=TradeSide.LONG,
+        leverage=10,
+        symbol_info=_symbol_info(quantity_precision=0, min_quantity=D("1")),
+    )
+
+
+class TestAvailableMargin:
+    """Хвост 26.09: маржа входа — против свободной маржи, а не equity."""
+
+    def test_margin_above_available_refused_though_equity_covers_it(self) -> None:
+        result = _size_against_available(available="99.99")
+        assert isinstance(result, ExecutionRefusal)
+        assert result.code is ExecutionRefusalCode.INSUFFICIENT_MARGIN
+        assert "свободно 99.99" in result.message
+
+    def test_entry_fee_counts_against_available(self) -> None:
+        """Свободного ровно на маржу 90, на комиссию входа 0.45 не хватает."""
+        result = _size_against_available(available="90", fee_rate="0.0005")
+        assert isinstance(result, ExecutionRefusal)
+        assert result.code is ExecutionRefusalCode.INSUFFICIENT_MARGIN
+        assert "комиссия входа 0.45" in result.message
+
+    def test_lock_margin_plus_entry_fee_exactly_available_passes(self) -> None:
+        """ЗАМОК: граница включительно — маржа 90 + комиссия 0.45 = 90.45."""
+        result = _size_against_available(available="90.45", fee_rate="0.0005")
+        assert isinstance(result, SizingResult)
+        assert result.margin == D("90.00000000")
+
+    def test_lock_risk_base_is_equity_not_available(self) -> None:
+        """ЗАМОК: свободной маржи хватает, но она меньше equity — объём тот
+        же, что при свободной = equity: риск% считается от equity."""
+        narrow = _size_against_available(available="100")
+        wide = _size_against_available(available="1000")
+        assert isinstance(narrow, SizingResult) and isinstance(wide, SizingResult)
+        assert narrow.quantity == wide.quantity == D("10")
+        assert narrow.risk_amount == D("10")
+
+
 class TestZeroStopDistance:
     def test_entry_equals_stop_refused_not_raised(self) -> None:
         result = calculate_size(
             fee_rate=D("0"),
             account_balance=D("1000"),
+            available_margin=D("1000"),
             risk_percent=D("1"),
             entry_price=D("100"),
             stop_loss=D("100"),
@@ -177,6 +235,7 @@ class TestZeroStopDistance:
         result = calculate_size(
             fee_rate=D("0"),
             account_balance=D("1000"),
+            available_margin=D("1000"),
             risk_percent=D("1"),
             entry_price=D("100"),
             stop_loss=D("105"),

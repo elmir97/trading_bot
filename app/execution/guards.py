@@ -563,7 +563,10 @@ class GuardInputs:
     min_risk_reward: Decimal
     # Taker-комиссия на ногу — RR гварда и объём считаются с ней.
     taker_fee_rate: Decimal
+    # equity — база риска; available_margin — свободная маржа биржи, с ней
+    # сравнивается маржа входа плюс комиссия входа (INSUFFICIENT_MARGIN).
     account_balance: Decimal
+    available_margin: Decimal
     leverage: int
     symbol_info: SymbolInfo
     # 12
@@ -650,6 +653,7 @@ def run_guards(inputs: GuardInputs) -> ExecutionRefusal | None:
     if refusal := check_size(
         sizing=calculate_size(
             account_balance=inputs.account_balance,
+            available_margin=inputs.available_margin,
             risk_percent=inputs.new_risk_percent,
             entry_price=inputs.entry_price,
             stop_loss=inputs.stop_loss,

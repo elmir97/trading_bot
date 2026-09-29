@@ -175,7 +175,10 @@ class Kline:
 @dataclass(frozen=True, slots=True)
 class Balance:
     asset: str
-    available: Decimal       # свободно для новых позиций
+    # Свободно для новых позиций (availableMargin). None — биржа поле не
+    # отдала: не подменяем ни кошельком, ни equity, решает вызывающий
+    # (вход — отказ AVAILABLE_MARGIN_UNKNOWN, экран баланса — «—»).
+    available: Decimal | None
     used_margin: Decimal     # заблокировано открытыми позициями
     unrealized_pnl: Decimal
     equity: Decimal          # общая стоимость счёта

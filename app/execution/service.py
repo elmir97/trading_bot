@@ -140,6 +140,9 @@ class ExecutionQuote:
     # Шаг 15.5.4: equity счёта, от которого посчитан объём, — в журнал
     # (Trade.account_balance_at_entry, база для pnl_percent при закрытии).
     account_balance: Decimal
+    # Свободная маржа биржи на момент расчёта — на карточку («маржа X из
+    # свободных Y»), с ней сравнивалась маржа входа.
+    available_margin: Decimal
     # Валюта суммы на карточке и в итоге исполнения — актив того же баланса:
     # USDT на LIVE, VST на DEMO (BingXClient._QUOTE_ASSET_BY_MODE). Не
     # хардкод: на демо суммы в VST.
@@ -542,6 +545,31 @@ class ExecutionService:
 
         balance_row = await self._client.get_balance(max_retries=call_retries)
         balance = balance_row.equity
+        # Свободная маржа — для INSUFFICIENT_MARGIN (хвост 26.09), риск по-
+        # прежнему от equity. Нет поля, отрицательное, или 0 при нулевой
+        # занятой марже и положительном equity (все средства свободны, но
+        # свободного ноль — противоречие) — отказ, не фолбэк на equity.
+        # 0 при занятой марже — честное «всё занято», его отказывает sizing.
+        available_margin = balance_row.available
+        if (
+            available_margin is None
+            or available_margin < ZERO
+            or (
+                available_margin == ZERO
+                and balance_row.used_margin == ZERO
+                and balance > ZERO
+            )
+        ):
+            return await refuse(
+                ExecutionRefusal(
+                    ExecutionRefusalCode.AVAILABLE_MARGIN_UNKNOWN,
+                    "Биржа не отдала свободную маржу счёта "
+                    f"(availableMargin: {available_margin}, equity {balance:g}, "
+                    f"занято {balance_row.used_margin:g}) — вход не рассчитан.",
+                ),
+                price=current_price,
+                drift=drift,
+            )
 
         # Шаг 15.5.4а: позиции биржи — только на карточке. На «Да» их читает
         # _submit_real_order (handlers/execution.py) тем же клиентом, что
@@ -614,6 +642,7 @@ class ExecutionService:
             min_risk_reward=self._settings.exec_min_rr,
             taker_fee_rate=self._settings.exec_taker_fee_rate,
             account_balance=balance,
+            available_margin=available_margin,
             leverage=leverage,
             symbol_info=symbol_info,
             symbol=symbol,
@@ -625,6 +654,7 @@ class ExecutionService:
 
         sizing = calculate_size(
             account_balance=balance,
+            available_margin=available_margin,
             risk_percent=plan.risk_per_trade_percent,
             entry_price=current_price,
             stop_loss=stop_loss,
@@ -686,6 +716,7 @@ class ExecutionService:
             symbol_info=symbol_info,
             dual_side_position=dual_side_position,
             account_balance=balance,
+            available_margin=available_margin,
             quote_asset=balance_row.asset,
             max_leverage=plan.max_leverage,
             margin_type=margin_type,

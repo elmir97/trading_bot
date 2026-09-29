@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -130,6 +131,9 @@ class FakeExchangeClient(ExchangeClient):
         self.conditional_error: Exception | None = None
         self.price = price
         self.balance = balance
+        # Свободная маржа отдельно от equity — карточка пишет «из свободных».
+        self.available = balance
+        self.used_margin = D("0")
         # Актив баланса: USDT на LIVE, VST на DEMO (_QUOTE_ASSET_BY_MODE).
         self.asset = "USDT"
         self.symbol_info = symbol_info
@@ -186,7 +190,7 @@ class FakeExchangeClient(ExchangeClient):
     async def get_balance(self, *, max_retries: int | None = None) -> Balance:
         self.balance_retries_seen.append(max_retries)
         return Balance(
-            asset=self.asset, available=self.balance, used_margin=D("0"),
+            asset=self.asset, available=self.available, used_margin=self.used_margin,
             unrealized_pnl=D("0"), equity=self.balance,
         )
 
@@ -2536,6 +2540,27 @@ async def test_card_amounts_in_balance_asset_not_hardcoded_usdt(ctx, bot, monkey
     [card] = [t for t in bot.recorder.sent_texts() if "нотионал" in t]
     assert "VST нотионал" in card and "маржа" in card and "VST =" in card
     assert "USDT" not in card.replace("BTC-USDT", "")  # имя символа — не сумма
+
+
+async def test_card_shows_margin_out_of_available_not_equity(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Хвост 26.09: «маржа X из свободных Y VST» — Y это свободная маржа
+    (availableMargin), а не equity. Комиссии входа в строке нет."""
+    dp, session, user, client, _redis, _settings = ctx
+    client.asset = "VST"
+    client.available = D("640.5")
+    client.used_margin = D("359.5")
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _notify(session, signal)
+
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
+
+    [card] = [t for t in bot.recorder.sent_texts() if "нотионал" in t]
+    [margin_line] = [line for line in card.splitlines() if "маржа" in line]
+    assert re.search(r"маржа [\d.,\s]+ из свободных 640\.50 VST$", margin_line), margin_line
+    assert "комисси" not in margin_line
 
 
 async def test_card_shows_signal_zone_not_zone_middle(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
