@@ -81,8 +81,21 @@ mypy 69, ruff 3585 (F821 0, RUF100 4, I001 10, E501 55).**
 - Сырые ответы — в scratchpad сессии 29.09 (`link_manual_stop_*_raw.json`); при реализации —
   в `tests/fixtures/`
 - **#3 в журнале не трогать** до решения по плану (распознать не наш закрывающий условник)
-- `max_retries=0` у `BingXClient._request` — ноль попыток, запрос не уходит, `AssertionError`
-  (`bingx.py:503`). Никто так не зовёт; разведке — `max_retries=1`
+- **Решение — `e22d19c` (в git, не задеплоено):** закрывающий reduceOnly-ордер с чужим
+  `triggerOrderId` — `STOP_MARKET`/`STOP` → «Стоп, изменённый вручную — закрыто вне бота»,
+  `TAKE_PROFIT_MARKET`/`TAKE_PROFIT` → «Тейк, …», вид `CLOSED_OUTSIDE_BOT`; трейлинг и прочее
+  — AMBIGUOUS. `stop_missing`: защита — `STOP_MARKET` и `STOP`, трейлинг — нет. Фикстура —
+  `tests/fixtures/bingx_demo_20260929_link_manual_stop.json`. **После деплоя reconciler на
+  первом цикле закроет #3 сам**: 14.776 × 2037.8, комиссии 29.727847, PnL 736.484953 =
+  (14.776 − 14.4) × 2037.8 − 29.727847, closed_at 04:03:24 UTC; #38/#39 → CANCELED; AMBIGUOUS
+  #2 → resolved; одно уведомление
+- **Хвост: `max_retries=0` у `BingXClient._request`** — ноль попыток, запрос не уходит,
+  `AssertionError` (`bingx.py:503`). Никто так не зовёт; разведке — `max_retries=1`. Не чинить
+  без решения
+- **Хвост: формат уведомлений о закрытии.** С `e22d19c` только `CLOSED_OUTSIDE_BOT` пишет
+  «Закрыта: DD.MM HH:MM» (время исполнения в поясе пользователя, `app/core/timefmt.py`) и
+  суммы через `fmt_price`/`fmt_qty`/`fmt_amount`/`fmt_money`. Стоп/тейк бота и частичное
+  закрытие — по-старому (`fmt_decimal`, без времени) — перевести на тот же хелпер
 
 ## 28.09, ночь — признаки сигнала и отчёт исходов (задеплоено 29.09)
 
