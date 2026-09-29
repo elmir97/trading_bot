@@ -964,16 +964,11 @@ async def test_confirm_entry_zero_position_id_is_not_recorded(ctx) -> None:  # t
     assert t.external_position_id is None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="B4, 29.09: у сделки нет ENTRY-исполнения — recalculate по пустым fills "
-    "обнуляет entry_price и quantity, а сделка помечается подтверждённой. "
-    "Поведение — решение владельца",
-)
-async def test_confirm_entry_trade_without_entry_fill(ctx) -> None:  # type: ignore[no-untyped-def]
-    """B4: сделка OPEN без ENTRY-исполнения (record_entry_trade так не пишет,
-    но строка могла потерять fill) — после подтверждения цена и объём
-    сделки обязаны быть фактом биржи, а не пустыми."""
+async def test_confirm_entry_trade_without_entry_fill_is_ambiguous(ctx) -> None:  # type: ignore[no-untyped-def]
+    """B4 (решение 29.09): сделка OPEN без ENTRY-исполнения (record_entry_trade
+    так не пишет, но строка могла потерять fill) — не пересчитываем (пустые
+    fills обнулили бы цену и объём) и не подтверждаем: AMBIGUOUS
+    entry:{id}:no_entry_fill, ENTRY_CONFIRMED нет, сделка как была."""
     settings, db, session, user, demo = ctx
     entry, _ = await _unresolved_link(session, user.id, with_trade=False)
     orphan_trade = Trade(
@@ -986,11 +981,28 @@ async def test_confirm_entry_trade_without_entry_fill(ctx) -> None:  # type: ign
     entry.trade_id = orphan_trade.id
     await session.commit()
     demo.orders_by_cid[entry.client_order_id] = _live_entry()
+    bot = FakeBot()
 
-    await _run_reconciler(settings, db, FakeBot())
+    await _run_reconciler(settings, db, bot)
+    await _run_reconciler(settings, db, bot)
 
     t = await _trade(db, orphan_trade.id)
-    assert (t.entry_price, t.quantity) == (D("14.4"), D("2037.8"))
+    assert (t.entry_price, t.quantity, t.fill_confirmed) == (D("14.398"), D("2037.8"), False)
+    assert t.external_position_id is None and t.fills == []
+    row = (await _rows(db, "LINK-USDT"))[OrderRole.ENTRY]
+    assert (row.status, row.exchange_order_id) == (OrderStatus.FILLED, LINK_ENTRY)
+    events = _entry_events(await _events(db, user.id), entry.id)
+    assert set(events) == {f"entry:{entry.id}:no_entry_fill"}
+    event = events[f"entry:{entry.id}:no_entry_fill"]
+    assert event.kind is ReconciliationKind.AMBIGUOUS and event.resolved_at is None
+    assert event.trade_id == orphan_trade.id
+    detail = (
+        f"Сделка #{orphan_trade.id} без исполнения входа в журнале — подтверждение не "
+        "выполнено, проверь вручную"
+    )
+    assert event.detail == detail
+    assert sum(detail in text for text in bot.sent) == 1
+    assert not any("найден на бирже" in text for text in bot.sent)
 
 
 async def test_confirm_entry_without_trade_is_permanent_ambiguous(ctx) -> None:  # type: ignore[no-untyped-def]

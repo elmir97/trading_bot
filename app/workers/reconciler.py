@@ -612,6 +612,9 @@ class Reconciler:
         - OPEN и не подтверждена — исполнение входа и сделка приводятся к
           факту биржи (цена, объём, комиссия, время, positionID), событие
           ENTRY_CONFIRMED;
+        - OPEN и не подтверждена, но ENTRY-исполнения в журнале нет —
+          AMBIGUOUS entry:{id}:no_entry_fill, не пересчитываем (пустые fills
+          обнулили бы цену и объём) и не подтверждаем (решение 29.09, B4);
         - сделки нет — AMBIGUOUS entry:{id}:no_trade, сделку не создаём. Вход
           уже FILLED и в следующие циклы не попадает — расхождение остаётся
           открытым навсегда: так задумано (решение 29.09), разбирает владелец;
@@ -627,14 +630,25 @@ class Reconciler:
             entry_fill = next(
                 (f for f in trade.fills if f.fill_side is FillSide.ENTRY), None
             )
-            if entry_fill is not None:
-                entry_fill.price = fill.avg_price
-                entry_fill.quantity = fill.executed_qty
-                entry_fill.fee = fill.fee
-                entry_fill.external_fill_id = fill.order_id
-                if fill.filled_at is not None:
-                    entry_fill.executed_at = fill.filled_at
-                    trade.opened_at = fill.filled_at
+            if entry_fill is None:
+                await self._discrepancy(
+                    ctx,
+                    Discrepancy(
+                        ReconciliationKind.AMBIGUOUS, f"entry:{entry.id}:no_entry_fill",
+                        entry.symbol,
+                        f"Сделка #{trade.id} без исполнения входа в журнале — подтверждение "
+                        "не выполнено, проверь вручную",
+                        trade_id=trade.id, execution_order_id=entry.id,
+                    ),
+                )
+                return
+            entry_fill.price = fill.avg_price
+            entry_fill.quantity = fill.executed_qty
+            entry_fill.fee = fill.fee
+            entry_fill.external_fill_id = fill.order_id
+            if fill.filled_at is not None:
+                entry_fill.executed_at = fill.filled_at
+                trade.opened_at = fill.filled_at
             trade.fill_confirmed = True
             raw_position = fill.raw.get("positionID") or fill.raw.get("positionId")
             if raw_position not in (None, "", 0, "0"):
