@@ -328,6 +328,49 @@ async def test_readback_retries_until_filled(ctx) -> None:  # type: ignore[no-un
     assert entry.status is OrderStatus.FILLED
 
 
+def _live_new() -> dict[str, object]:
+    """Живой ответ GET по ордеру в статусе NEW (#38, демо 27.09): commission
+    и profit — пустые строки, avgPrice "0.000"."""
+    from tests.bingx_fixtures import live_items
+
+    [raw] = live_items("order #38 LINK-USDT STOP_LOSS")
+    return raw
+
+
+async def test_live_new_form_is_retried_until_filled(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Р2: вход ещё NEW в живой форме (пустая commission) — read-back ждёт
+    FILLED своим циклом повторов, а не обрывается на «нет поля commission»."""
+    session, user, slot, n, settings = ctx
+    order = _order(user.id, slot.id, n.id)
+    entry = await _entry(session, order)
+    client = FakeReadbackClient(
+        fills=[_live_new(), _fill()], open_orders=[[_our_stop(), _our_take()]]
+    )
+
+    result = await _verify(session, client, settings, entry, order)
+
+    assert client.count("get_order_fill") == 2
+    assert entry.status is OrderStatus.FILLED
+    assert result.fill is not None and result.fill.avg_price == D("100.3")
+    assert not any("commission" in w for w in result.warnings)
+
+
+async def test_live_new_form_never_filled_is_unconfirmed(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Р2: вход так и не стал FILLED — все попытки, вход SUBMITTED, исполнения
+    нет (не «исполнение 0»), предупреждение со статусом биржи."""
+    session, user, slot, n, settings = ctx
+    order = _order(user.id, slot.id, n.id)
+    entry = await _entry(session, order)
+    client = FakeReadbackClient(fills=[_live_new()], open_orders=[[_our_stop(), _our_take()]])
+
+    result = await _verify(session, client, settings, entry, order)
+
+    assert client.count("get_order_fill") == settings.exec_order_readback_attempts
+    assert entry.status is OrderStatus.SUBMITTED
+    assert result.fill is None
+    assert any("статус NEW" in w for w in result.warnings)
+
+
 async def test_missing_avg_price_is_incomplete_not_zero(ctx) -> None:  # type: ignore[no-untyped-def]
     """Нет avgPrice → ReadbackIncomplete, а не цена 0: вход остаётся
     SUBMITTED, пользователь видит, какого поля нет, стоп всё равно

@@ -79,6 +79,8 @@ class LiveDemo:
         self.calls: list[str] = []
         self.link_open_orders: list[dict[str, Any]] = live_items("openOrders LINK")
         self.unknown_cids: set[str] = set()
+        # GET /trade/order по clientOrderID: cid → живой ответ ордера.
+        self.orders_by_cid: dict[str, dict[str, Any]] = {}
         # По умолчанию — состояние 27.09 (LINK открыта, SOL закрыта стопом);
         # сценарий 29.09 подменяет позиции и историю LINK.
         self.positions: list[dict[str, Any]] = live_items("positions all")
@@ -100,6 +102,8 @@ class LiveDemo:
         cid = params.get("clientOrderID")
         if path == "/openApi/swap/v2/trade/order" and cid in self.unknown_cids:
             return httpx.Response(200, json={"code": 109421, "msg": "order not exist", "data": {}})
+        if path == "/openApi/swap/v2/trade/order" and cid in self.orders_by_cid:
+            return _ok({"order": self.orders_by_cid[cid]})
         raise AssertionError(f"неожиданный запрос {path} {dict(params)}")
 
     def client(self) -> BingXClient:
@@ -337,6 +341,30 @@ async def test_unknown_entry_not_found_after_window_is_not_placed(ctx) -> None: 
     assert rows[OrderRole.ENTRY].status is OrderStatus.NOT_PLACED
     assert (await _trade(db, trade.id)).status is TradeStatus.CANCELLED
     assert any("не выставлен на бирже" in t for t in bot.sent)
+
+
+async def test_unknown_entry_found_new_live_form_is_ambiguous(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Р2: поиск нашёл вход в статусе NEW (живая форма #38 — пустая
+    commission) — расхождение AMBIGUOUS «найден в статусе NEW», журнал не
+    правится. Раньше разбор падал ReadbackIncomplete, и reconciler молча
+    повторял поиск каждый цикл."""
+    settings, db, session, user, demo = ctx
+    await _seed_live(session, user.id)
+    n = await _notification(session, user.id, "ADA-USDT")
+    entry = _row(user.id, n.id, "ADA-USDT", OrderRole.ENTRY, OrderStatus.UNKNOWN, None,
+                 created_at=datetime.now(UTC) - timedelta(minutes=11))
+    session.add(entry)
+    await session.commit()
+    [demo.orders_by_cid[entry.client_order_id]] = live_items("order #38 LINK-USDT STOP_LOSS")
+    bot = FakeBot()
+
+    await _run_reconciler(settings, db, bot)
+
+    assert (await _rows(db, "ADA-USDT"))[OrderRole.ENTRY].status is OrderStatus.UNKNOWN
+    [event] = [e for e in await _events(db, user.id) if e.dedup_key == f"entry:{entry.id}"]
+    assert event.kind is ReconciliationKind.AMBIGUOUS and event.resolved_at is None
+    assert "найден в статусе NEW" in event.detail
+    assert sum("найден в статусе NEW" in t for t in bot.sent) == 1
 
 
 async def test_unknown_entry_inside_window_untouched(ctx) -> None:  # type: ignore[no-untyped-def]

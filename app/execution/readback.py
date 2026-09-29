@@ -360,7 +360,9 @@ async def _read_fill(
 
     _apply_fill(entry_row, fill, result)
     await session.commit()
-    return fill
+    # Р2: так и не FILLED — исполнения нет. Не отдаём его дальше: карточка
+    # показала бы «исполнение 0», тревога — объём 0 вместо заявленного.
+    return fill if fill.status == "FILLED" else None
 
 
 def _incomplete(result: ReadbackResult, exc: ReadbackIncomplete, entry_row: ExecutionOrder) -> None:

@@ -1492,6 +1492,42 @@ class TestGetOrderFill:
         await client.close()
 
 
+class TestOrderFillNotFilledLiveForm:
+    """Р2, 29.09: ордер в статусе NEW живьём — commission и profit пустые
+    строки, avgPrice "0.000" (GET #38, условник LINK до срабатывания, демо
+    27.09). Разбор сначала смотрит status: не FILLED — «не исполнен», пустая
+    комиссия не ошибка; FILLED с пустой комиссией — по-прежнему ошибка."""
+
+    def test_live_new_order_is_not_filled_not_incomplete(self) -> None:
+        from tests.bingx_fixtures import live_items
+
+        [raw] = live_items("order #38 LINK-USDT STOP_LOSS")
+        assert (raw["status"], raw["commission"]) == ("NEW", "")
+
+        fill = BingXClient._parse_order_fill(raw)
+
+        assert fill.status == "NEW"
+        assert fill.order_id == "2104122758140616705"
+        assert fill.executed_qty == D("0")
+        assert fill.orig_qty == D("2037.8")
+
+    def test_filled_with_empty_commission_is_still_incomplete(self) -> None:
+        from tests.bingx_fixtures import live_items
+
+        [raw] = live_items("order #37 LINK-USDT ENTRY")
+        with pytest.raises(ReadbackIncomplete) as info:
+            BingXClient._parse_order_fill({**raw, "commission": ""})
+        assert info.value.field == "commission"
+
+    def test_not_filled_without_status_is_incomplete(self) -> None:
+        from tests.bingx_fixtures import live_items
+
+        [raw] = live_items("order #38 LINK-USDT STOP_LOSS")
+        with pytest.raises(ReadbackIncomplete) as info:
+            BingXClient._parse_order_fill({k: v for k, v in raw.items() if k != "status"})
+        assert info.value.field == "status"
+
+
 class TestGetOpenOrdersMaxRetries:
     async def test_max_retries_one_does_not_retry(self) -> None:
         calls = {"n": 0}

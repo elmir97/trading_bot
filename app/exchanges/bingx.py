@@ -1146,7 +1146,13 @@ class BingXClient(ExchangeClient):
         пустое → ReadbackIncomplete с именем поля, а не Decimal(0) (в
         отличие от _parse_order/_to_decimal — там "" и None дают ноль).
         Написание orderId/orderID и clientOrderId/clientOrderID — оба
-        варианта, как в _parse_order: документация BingX расходится."""
+        варианта, как в _parse_order: документация BingX расходится.
+
+        Сначала status (Р2, 29.09): у не исполненного ордера живьём
+        commission — пустая строка, avgPrice "0.000" (GET #38, демо 27.09).
+        Не FILLED — «не исполнен»: avgPrice и commission мягко, "" → 0,
+        цифрами сделки они не становятся (read-back ждёт FILLED). FILLED с
+        пустой avgPrice или commission — по-прежнему ReadbackIncomplete."""
 
         def required(*names: str) -> Any:
             for name in names:
@@ -1158,16 +1164,23 @@ class BingXClient(ExchangeClient):
         def number(name: str) -> Decimal:
             return _to_decimal(required(name), name)
 
+        order_id = str(required("orderId", "orderID"))
+        status = str(required("status"))
+        if status == "FILLED":
+            avg_price, commission = number("avgPrice"), number("commission")
+        else:
+            avg_price = _to_decimal(item.get("avgPrice"), "avgPrice")
+            commission = _to_decimal(item.get("commission"), "commission")
         return OrderFill(
-            order_id=str(required("orderId", "orderID")),
+            order_id=order_id,
             client_order_id=str(
                 item.get("clientOrderId") or item.get("clientOrderID") or ""
             ),
-            status=str(required("status")),
-            avg_price=number("avgPrice"),
+            status=status,
+            avg_price=avg_price,
             orig_qty=number("origQty"),
             executed_qty=number("executedQty"),
-            fee=abs(number("commission")),
+            fee=abs(commission),
             raw=item,
             filled_at=_optional_ms_to_dt(item.get("updateTime") or item.get("time")),
         )
