@@ -96,7 +96,7 @@ def _fill(external_id: str | None) -> Fill:
     return Fill(
         external_id=external_id, symbol="SOL-USDT", side=TradeSide.LONG, is_entry=True,
         price=Decimal("123.021"), quantity=Decimal("1362"), fee=Decimal("83.78152"),
-        realized_pnl=Decimal(0), executed_at=BASE,
+        executed_at=BASE,
     )
 
 

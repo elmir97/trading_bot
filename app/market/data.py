@@ -19,7 +19,6 @@ from decimal import Decimal
 from app.core.logging import get_logger
 from app.exchanges.base import ExchangeClient, Kline, SymbolInfo, Ticker
 from app.market.cache import (
-    TTL_FUNDING,
     TTL_KLINES,
     TTL_SYMBOLS,
     TTL_TICKER,
@@ -108,13 +107,6 @@ class MarketDataService:
             if info.symbol == symbol:
                 return info
         return None
-
-    async def get_funding_rate(self, symbol: str) -> Decimal | None:
-        return await self._cache.get_or_fetch(
-            f"funding:{self._client.name}:{symbol}",
-            TTL_FUNDING,
-            lambda: self._client.get_funding_rate(symbol),
-        )
 
     async def get_prices(self, symbols: list[str]) -> dict[str, Decimal | None]:
         """Цены нескольких инструментов.

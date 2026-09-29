@@ -90,8 +90,8 @@ class FakeExchangeClient(ExchangeClient):
     async def get_ticker(self, symbol: str, *, max_retries: int | None = None) -> Ticker:
         self.ticker_retries_seen.append(max_retries)
         return Ticker(
-            symbol=symbol, last_price=self.price, volume_24h=D("0"),
-            price_change_percent=D("0"), timestamp=NOW,
+            symbol=symbol, last_price=self.price,
+            timestamp=NOW,
         )
 
     async def get_klines(self, symbol, interval, limit=500, end_time=None) -> list[Kline]:
@@ -100,9 +100,6 @@ class FakeExchangeClient(ExchangeClient):
     async def get_symbols(self, *, max_retries: int | None = None) -> list[SymbolInfo]:
         self.symbols_retries_seen.append(max_retries)
         return [self.symbol_info]
-
-    async def get_funding_rate(self, symbol: str) -> Decimal | None:
-        return None
 
     async def get_balance(self, *, max_retries: int | None = None) -> Balance:
         self.balance_retries_seen.append(max_retries)
@@ -133,9 +130,6 @@ class FakeExchangeClient(ExchangeClient):
         raise NotImplementedError
 
     async def place_market_order(self, **kwargs) -> object:  # type: ignore[override]
-        raise NotImplementedError
-
-    async def get_order(self, symbol, client_order_id) -> object:  # type: ignore[override]
         raise NotImplementedError
 
     async def get_order_fill(self, symbol, client_order_id, *, max_retries=None):  # type: ignore[no-untyped-def]
@@ -1213,7 +1207,7 @@ async def test_provisional_trade_counts_in_total_risk(ctx) -> None:  # type: ign
 def _exchange_position(symbol: str = "BTC-USDT", side: TradeSide = TradeSide.LONG) -> Position:
     return Position(
         symbol=symbol, side=side, quantity=D("0.8397"), entry_price=D("100"),
-        mark_price=D("100"), leverage=10, unrealized_pnl=D("0"), margin=D("10"),
+        mark_price=D("100"), leverage=10, unrealized_pnl=D("0"),
     )
 
 

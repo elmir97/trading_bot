@@ -53,12 +53,10 @@ def test_renders_price_take_profit_and_stop_loss_with_symbol_precision() -> None
     )
     order = _order(
         take_profit=AttachedTpSl(
-            trigger_price=D("103000.789"), price=D("103000.789"),
-            quantity=D("0.01"), working_type="MARK_PRICE",
+            trigger_price=D("103000.789"), working_type="MARK_PRICE",
         ),
         stop_loss=AttachedTpSl(
-            trigger_price=D("99000.123"), price=D("99000.123"),
-            quantity=D("0.01"), working_type="MARK_PRICE",
+            trigger_price=D("99000.123"), working_type="MARK_PRICE",
         ),
     )
 

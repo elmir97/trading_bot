@@ -97,9 +97,6 @@ class FakeSubmitClient(ExchangeClient):
     async def get_symbols(self, *, max_retries=None):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 
-    async def get_funding_rate(self, symbol):  # type: ignore[no-untyped-def]
-        return None
-
     async def get_balance(self, *, max_retries=None) -> Balance:
         raise NotImplementedError
 
@@ -139,9 +136,6 @@ class FakeSubmitClient(ExchangeClient):
             raise self.place_order_error
         assert self.place_order_result is not None, "тест не задал place_order_result"
         return self.place_order_result
-
-    async def get_order(self, symbol, client_order_id):  # type: ignore[no-untyped-def]
-        raise NotImplementedError
 
     async def get_order_fill(self, symbol, client_order_id, *, max_retries=None):  # type: ignore[no-untyped-def]
         raise NotImplementedError
@@ -257,7 +251,7 @@ class TestCheckExchangePosition:
     def _position(symbol: str, side: TradeSide) -> Position:
         return Position(
             symbol=symbol, side=side, quantity=D("1.2592"), entry_price=D("100"),
-            mark_price=D("100"), leverage=10, unrealized_pnl=D("0"), margin=D("10"),
+            mark_price=D("100"), leverage=10, unrealized_pnl=D("0"),
         )
 
     async def test_no_positions_passes(self, ctx) -> None:  # type: ignore[no-untyped-def]
@@ -451,11 +445,6 @@ def _order_result(**overrides: object) -> OrderResult:
         "position_side": "LONG",
         "order_type": "MARKET",
         "status": "FILLED",
-        "price": D("0"),
-        "avg_price": D("100.1"),
-        "quantity": D("0.01"),
-        "executed_qty": D("0.01"),
-        "fee": D("0.05"),
         "raw": {"orderId": "9001", "status": "FILLED"},
     }
     fields.update(overrides)

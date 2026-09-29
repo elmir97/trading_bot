@@ -114,8 +114,6 @@ class ReadbackIncomplete(ExchangeResponseError):  # noqa: N818 — имя из �
 class Ticker:
     symbol: str
     last_price: Decimal
-    volume_24h: Decimal
-    price_change_percent: Decimal
     timestamp: datetime
 
 
@@ -193,7 +191,6 @@ class Position:
     mark_price: Decimal
     leverage: int
     unrealized_pnl: Decimal
-    margin: Decimal
     liquidation_price: Decimal | None = None
     # positionId биржи — тот же, что positionID в ответе ордера входа и
     # positionId в positionHistory (снято живьём 27.09). None — не отдан.
@@ -216,7 +213,6 @@ class Fill:
     price: Decimal
     quantity: Decimal
     fee: Decimal
-    realized_pnl: Decimal
     executed_at: datetime
     position_id: str | None = None
     # Шаг 15.5.4: ордер, которым сделано исполнение, — импорт пропускает
@@ -275,18 +271,14 @@ class AttachedTpSl:
     """Условный ордер, вложенный в ОТКРЫТЫЙ ордер — GET .../trade/openOrders.
 
     Не путать с TpSlSpec: та описывает намерение при отправке входа, эта —
-    то, что реально вернула биржа по уже существующему ордеру. Форма другая
-    (есть quantity, нет опционального price) и признак "не задан" другой:
-    BingX всегда кладёт объект (даже когда TP/SL не выставлен), а не
-    опускает поле — пустой отличается от заполненного тем, что stopPrice
-    в нём 0. price и quantity нулевые и у реально прикреплённого условника
-    (проверено живым запросом на TAKE_PROFIT_MARKET/STOP_MARKET — там
-    исполнение по рынку, cена не нужна), поэтому решает только stopPrice.
+    то, что реально вернула биржа по уже существующему ордеру. Признак
+    "не задан": BingX всегда кладёт объект (даже когда TP/SL не выставлен),
+    а не опускает поле — пустой отличается от заполненного тем, что
+    stopPrice в нём 0. price и quantity заглушки не берём: потребителя нет,
+    а quantity в живой заглушке нет вовсе (27.09).
     """
 
     trigger_price: Decimal
-    price: Decimal
-    quantity: Decimal
     working_type: str
 
 
@@ -375,7 +367,10 @@ class OrderResult:
     status — оригинальная строка биржи (NEW/PENDING/FILLED/...), не наш
     внутренний OrderStatus из app.trading.enums: перевод одного в другой —
     ответственность execution/service.py, а не биржевого клиента.
-    """
+
+    Чисел ордера (цена, объём, комиссия) нет: форма ответа на POST живьём
+    не снята, а вызывающие берут только order_id и raw. Исполнение читает
+    get_order_fill строго."""
 
     order_id: str
     client_order_id: str
@@ -384,14 +379,6 @@ class OrderResult:
     position_side: str   # LONG | SHORT | BOTH
     order_type: str
     status: str
-    price: Decimal
-    avg_price: Decimal
-    quantity: Decimal
-    executed_qty: Decimal
-    # Комиссия. У BingX не приходит в ответе на размещение маркет-ордера
-    # (только avg_price) — появляется лишь при последующем запросе ордера
-    # (get_order) или в get_fills. Здесь 0, если источник её не вернул.
-    fee: Decimal
     raw: dict[str, object]
 
 
@@ -428,7 +415,7 @@ class OrderFill:
 
 @dataclass(frozen=True, slots=True)
 class HistoryOrder:
-    """Ордер из истории (allOrders / GET ордера по orderId) — сырьё reconciler.
+    """Ордер из истории (allOrders) — сырьё reconciler.
 
     Выход по стопу/тейку — дочерний ордер: свой order_id, trigger_order_id =
     orderId условника (снято живьём 27.09, SOL #4). reduce_only — закрывающий.
@@ -441,36 +428,13 @@ class HistoryOrder:
     order_type: str
     status: str
     avg_price: Decimal
-    orig_qty: Decimal
     executed_qty: Decimal
     fee: Decimal
     realized_pnl: Decimal
     reduce_only: bool
-    stop_price: Decimal
     trigger_order_id: str | None
     position_id: str | None
     created_at: datetime
-    updated_at: datetime
-
-
-@dataclass(frozen=True, slots=True)
-class PositionHistoryEntry:
-    """Итог позиции из positionHistory (v1): средняя цена закрытия, закрытый
-    объём, чистый результат с комиссиями входа и выхода (снято живьём 27.09)."""
-
-    position_id: str
-    symbol: str
-    position_side: str
-    avg_price: Decimal
-    avg_close_price: Decimal
-    position_amt: Decimal
-    close_position_amt: Decimal
-    realised_profit: Decimal
-    net_profit: Decimal
-    commission: Decimal
-    total_funding: Decimal
-    close_all: bool
-    opened_at: datetime
     updated_at: datetime
 
 
@@ -517,9 +481,6 @@ class ExchangeClient(ABC):
     async def get_symbols(self, *, max_retries: int | None = None) -> list[SymbolInfo]:
         """max_retries — см. get_ticker."""
         ...
-
-    @abstractmethod
-    async def get_funding_rate(self, symbol: str) -> Decimal | None: ...
 
     # --- Приватные данные (нужны ключи) -----------------------------------
 
@@ -571,8 +532,8 @@ class ExchangeClient(ABC):
         False — односторонний (BOTH). Раздел 16 ТЗ, шаг 15.5.1 — рабочий
         путь v1 (не v2, тот отвечает code 100404), значение живёт под
         data, не на верхнем уровне (проверено живым запросом на демо-
-        хосте). Возвращает bool напрямую, без обёртки-датакласса — как
-        get_funding_rate выше, для единственного скалярного значения."""
+        хосте). Возвращает bool напрямую, без обёртки-датакласса — для
+        единственного скалярного значения."""
         ...
 
     async def get_margin_type(
@@ -631,11 +592,6 @@ class ExchangeClient(ABC):
         ...
 
     @abstractmethod
-    async def get_order(
-        self, symbol: str, client_order_id: str, *, max_retries: int | None = None
-    ) -> OrderResult: ...
-
-    @abstractmethod
     async def get_order_fill(
         self, symbol: str, client_order_id: str, *, max_retries: int | None = None
     ) -> OrderFill:
@@ -655,19 +611,6 @@ class ExchangeClient(ABC):
         self, symbol: str, start: datetime, end: datetime, *, max_retries: int | None = None
     ) -> list[HistoryOrder]:
         """Ордера символа за окно не длиннее 7 дней (ограничение BingX)."""
-        raise NotImplementedError
-
-    async def get_order_by_id(
-        self, symbol: str, order_id: str, *, max_retries: int | None = None
-    ) -> HistoryOrder:
-        """Ордер по orderId биржи. Для условника, который сработал, биржа
-        отдаёт дочерний исполненный ордер (его trigger_order_id = order_id)."""
-        raise NotImplementedError
-
-    async def get_position_history(
-        self, symbol: str, start: datetime, end: datetime, *, max_retries: int | None = None
-    ) -> list[PositionHistoryEntry]:
-        """Закрытые (и частично закрытые) позиции символа за окно."""
         raise NotImplementedError
 
     @abstractmethod

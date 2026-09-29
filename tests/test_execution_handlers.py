@@ -173,8 +173,8 @@ class FakeExchangeClient(ExchangeClient):
     async def get_ticker(self, symbol: str, *, max_retries: int | None = None) -> Ticker:
         self.ticker_retries_seen.append(max_retries)
         return Ticker(
-            symbol=symbol, last_price=self.price, volume_24h=D("0"),
-            price_change_percent=D("0"), timestamp=NOW,
+            symbol=symbol, last_price=self.price,
+            timestamp=NOW,
         )
 
     async def get_klines(self, symbol, interval, limit=500, end_time=None):
@@ -183,9 +183,6 @@ class FakeExchangeClient(ExchangeClient):
     async def get_symbols(self, *, max_retries: int | None = None) -> list[SymbolInfo]:
         self.symbols_retries_seen.append(max_retries)
         return [self.symbol_info]
-
-    async def get_funding_rate(self, symbol: str) -> Decimal | None:
-        return None
 
     async def get_balance(self, *, max_retries: int | None = None) -> Balance:
         self.balance_retries_seen.append(max_retries)
@@ -251,9 +248,6 @@ class FakeExchangeClient(ExchangeClient):
             raise self.place_order_error
         assert self.place_order_result is not None, "тест не задал place_order_result"
         return self.place_order_result
-
-    async def get_order(self, symbol, client_order_id):
-        raise NotImplementedError
 
     def _last_entry(self) -> dict:
         entries = [c[1] for c in self.submit_calls if c[0] == "place_market_order"]
@@ -413,8 +407,7 @@ def _order_result(**overrides: object) -> OrderResult:
     fields: dict[str, object] = {
         "order_id": "9001", "client_order_id": "tj1u1E", "symbol": "BTC-USDT",
         "side": "BUY", "position_side": "LONG", "order_type": "MARKET",
-        "status": "FILLED", "price": D("0"), "avg_price": D("100.1"),
-        "quantity": D("0.01"), "executed_qty": D("0.01"), "fee": D("0.05"),
+        "status": "FILLED",
         "raw": {"orderId": "9001", "status": "FILLED"},
     }
     fields.update(overrides)
@@ -932,7 +925,7 @@ async def test_confirm_yes_submits_real_order(ctx, bot, monkeypatch) -> None:  #
 def _exchange_position(side: TradeSide = TradeSide.LONG) -> Position:
     return Position(
         symbol="BTC-USDT", side=side, quantity=D("0.8397"), entry_price=D("100"),
-        mark_price=D("100"), leverage=10, unrealized_pnl=D("0"), margin=D("10"),
+        mark_price=D("100"), leverage=10, unrealized_pnl=D("0"),
     )
 
 
@@ -2715,7 +2708,7 @@ def _own_position(liquidation: str | None) -> Position:
     # вне allowlist разведки 27.09) — снять на ближайшем реальном входе.
     return Position(
         symbol="BTC-USDT", side=TradeSide.LONG, quantity=D("1"), entry_price=D("100"),
-        mark_price=D("100"), leverage=10, unrealized_pnl=D("0"), margin=D("10"),
+        mark_price=D("100"), leverage=10, unrealized_pnl=D("0"),
         liquidation_price=D(liquidation) if liquidation is not None else None,
     )
 

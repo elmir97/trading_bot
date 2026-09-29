@@ -46,7 +46,6 @@ from app.exchanges.base import (
     OrderFill,
     OrderResult,
     Position,
-    PositionHistoryEntry,
     ReadbackIncomplete,
     SymbolInfo,
     Ticker,
@@ -77,12 +76,9 @@ TRADE_LEVERAGE = "/openApi/swap/v2/trade/leverage"
 # Один и тот же путь: POST размещает ордер, GET — запрашивает его статус.
 TRADE_ORDER = "/openApi/swap/v2/trade/order"
 TRADE_OPEN_ORDERS = "/openApi/swap/v2/trade/openOrders"
-# Шаг 15.6 (reconciler), обе сняты живьём на демо 27.09: история ордеров
-# символа (окно не длиннее 7 дней, data.orders) и итоги позиций — v1, НЕ v2
-# (data.positionHistory: avgClosePrice, closePositionAmt, netProfit,
-# positionCommission).
+# Шаг 15.6 (reconciler), снята живьём на демо 27.09: история ордеров символа
+# (окно не длиннее 7 дней, data.orders).
 TRADE_ALL_ORDERS = "/openApi/swap/v2/trade/allOrders"
-POSITION_HISTORY = "/openApi/swap/v1/trade/positionHistory"
 # BingX не отдаёт историю ордеров за окно длиннее 7 дней.
 MAX_HISTORY_WINDOW = timedelta(days=7)
 # Раздел 16 ТЗ, шаг 15.5.1: путь v1, НЕ v2 — /openApi/swap/v2/trade/
@@ -196,8 +192,8 @@ def _required(item: dict[str, Any], *names: str) -> Any:
 
 
 def _parse_history_order(item: Any) -> HistoryOrder:
-    """Строгий разбор ордера истории (allOrders, GET по orderId). Живая форма
-    снята 27.09: числа — строки, orderId/triggerOrderId/positionID — int."""
+    """Строгий разбор ордера истории (allOrders). Живая форма снята 27.09:
+    числа — строки, orderId/triggerOrderId/positionID — int."""
     if not isinstance(item, dict):
         raise ExchangeResponseError(f"Ордер — не объект: {type(item).__name__}")
     return HistoryOrder(
@@ -208,44 +204,14 @@ def _parse_history_order(item: Any) -> HistoryOrder:
         order_type=str(_required(item, "type")),
         status=str(_required(item, "status")),
         avg_price=_to_decimal(item.get("avgPrice"), "avgPrice"),
-        orig_qty=_to_decimal(item.get("origQty"), "origQty"),
         executed_qty=_to_decimal(item.get("executedQty"), "executedQty"),
         fee=abs(_to_decimal(item.get("commission"), "commission")),
         realized_pnl=_to_decimal(item.get("profit"), "profit"),
         reduce_only=_str_bool(item.get("reduceOnly")),
-        stop_price=_to_decimal(item.get("stopPrice"), "stopPrice"),
         trigger_order_id=_optional_id(item.get("triggerOrderId")),
         position_id=_optional_id(item.get("positionID") or item.get("positionId")),
         created_at=_exchange_time(_required(item, "time"), "time"),
         updated_at=_exchange_time(_required(item, "updateTime", "time"), "updateTime"),
-    )
-
-
-def _parse_position_history(item: Any) -> PositionHistoryEntry:
-    if not isinstance(item, dict):
-        raise ExchangeResponseError(
-            f"Запись positionHistory — не объект: {type(item).__name__}"
-        )
-    close_all = item.get("closeAllPositions")
-    if not isinstance(close_all, bool):
-        raise ExchangeResponseError(f"closeAllPositions не bool: {close_all!r}")
-    return PositionHistoryEntry(
-        position_id=str(_required(item, "positionId")),
-        symbol=str(_required(item, "symbol")),
-        position_side=str(_required(item, "positionSide")),
-        avg_price=_to_decimal(_required(item, "avgPrice"), "avgPrice"),
-        avg_close_price=_to_decimal(_required(item, "avgClosePrice"), "avgClosePrice"),
-        position_amt=_to_decimal(_required(item, "positionAmt"), "positionAmt"),
-        close_position_amt=_to_decimal(
-            _required(item, "closePositionAmt"), "closePositionAmt"
-        ),
-        realised_profit=_to_decimal(item.get("realisedProfit"), "realisedProfit"),
-        net_profit=_to_decimal(item.get("netProfit"), "netProfit"),
-        commission=abs(_to_decimal(item.get("positionCommission"), "positionCommission")),
-        total_funding=_to_decimal(item.get("totalFunding"), "totalFunding"),
-        close_all=close_all,
-        opened_at=_exchange_time(_required(item, "openTime"), "openTime"),
-        updated_at=_exchange_time(_required(item, "updateTime"), "updateTime"),
     )
 
 
@@ -640,10 +606,6 @@ class BingXClient(ExchangeClient):
         return Ticker(
             symbol=data.get("symbol", symbol),
             last_price=_to_decimal(data.get("lastPrice"), "lastPrice"),
-            volume_24h=_to_decimal(data.get("volume"), "volume"),
-            price_change_percent=_to_decimal(
-                data.get("priceChangePercent"), "priceChangePercent"
-            ),
             timestamp=datetime.now(UTC),
         )
 
@@ -738,13 +700,6 @@ class BingXClient(ExchangeClient):
         if not isinstance(data, dict) or data.get("symbol") != symbol:
             raise ExchangeResponseError(f"premiumIndex: нет записи {symbol}")
         return _to_decimal(_required(data, "markPrice"), "markPrice")
-
-    async def get_funding_rate(self, symbol: str) -> Decimal | None:
-        data = await self._request(QUOTE_PREMIUM_INDEX, {"symbol": symbol})
-        if isinstance(data, list):
-            data = data[0] if data else {}
-        rate = data.get("lastFundingRate")
-        return _to_decimal(rate, "lastFundingRate") if rate is not None else None
 
     # --- Приватные данные --------------------------------------------------
 
@@ -866,7 +821,6 @@ class BingXClient(ExchangeClient):
                     unrealized_pnl=_to_decimal(
                         item.get("unrealizedProfit"), "unrealizedProfit"
                     ),
-                    margin=_to_decimal(item.get("initialMargin"), "initialMargin"),
                     liquidation_price=(
                         _to_decimal(item.get("liquidationPrice"), "liquidationPrice")
                         if item.get("liquidationPrice")
@@ -963,7 +917,6 @@ class BingXClient(ExchangeClient):
                 item.get("executedQty") or item.get("qty") or item.get("volume"), "quantity"
             ),
             fee=abs(_to_decimal(item.get("commission") or item.get("fee"), "fee")),
-            realized_pnl=_to_decimal(item.get("profit"), "profit"),
             executed_at=_exchange_time(item.get(time_field), time_field),
             position_id=str(item.get("positionId")) if item.get("positionId") else None,
             order_id=str(item.get("orderId")) if item.get("orderId") else None,
@@ -1132,14 +1085,6 @@ class BingXClient(ExchangeClient):
         order = data.get("order", data) if isinstance(data, dict) else {}
         return self._parse_order(order)
 
-    async def get_order(
-        self, symbol: str, client_order_id: str, *, max_retries: int | None = None
-    ) -> OrderResult:
-        params = {"symbol": symbol, "clientOrderID": client_order_id}
-        data = await self._request(TRADE_ORDER, params, signed=True, max_retries=max_retries)
-        order = data.get("order", data) if isinstance(data, dict) else {}
-        return self._parse_order(order)
-
     async def get_order_fill(
         self, symbol: str, client_order_id: str, *, max_retries: int | None = None
     ) -> OrderFill:
@@ -1212,13 +1157,6 @@ class BingXClient(ExchangeClient):
             position_side=str(item.get("positionSide", "")),
             order_type=str(item.get("type", "")),
             status=str(item.get("status", "")),
-            price=_to_decimal(item.get("price"), "price"),
-            avg_price=_to_decimal(item.get("avgPrice"), "avgPrice"),
-            quantity=_to_decimal(
-                item.get("origQty") or item.get("quantity"), "quantity"
-            ),
-            executed_qty=_to_decimal(item.get("executedQty"), "executedQty"),
-            fee=abs(_to_decimal(item.get("commission"), "commission")),
             raw=item,
         )
 
@@ -1243,37 +1181,6 @@ class BingXClient(ExchangeClient):
             raise ExchangeResponseError("Ожидался список ордеров в data.orders")
         return [_parse_history_order(item) for item in orders]
 
-    async def get_order_by_id(
-        self, symbol: str, order_id: str, *, max_retries: int | None = None
-    ) -> HistoryOrder:
-        data = await self._request(
-            TRADE_ORDER, {"symbol": symbol, "orderId": order_id}, signed=True,
-            max_retries=max_retries,
-        )
-        order = data.get("order") if isinstance(data, dict) else None
-        if not isinstance(order, dict):
-            raise ExchangeResponseError("Ожидался объект ордера в data.order")
-        return _parse_history_order(order)
-
-    async def get_position_history(
-        self, symbol: str, start: datetime, end: datetime, *, max_retries: int | None = None
-    ) -> list[PositionHistoryEntry]:
-        _check_history_window(start, end)
-        params = {
-            "symbol": symbol,
-            "startTs": int(start.timestamp() * 1000),
-            "endTs": int(end.timestamp() * 1000),
-        }
-        data = await self._request(
-            POSITION_HISTORY, params, signed=True, max_retries=max_retries
-        )
-        if not isinstance(data, dict):
-            raise ExchangeResponseError("Ожидался объект в data positionHistory")
-        entries = data.get("positionHistory")
-        if not isinstance(entries, list):
-            raise ExchangeResponseError("Ожидался список в data.positionHistory")
-        return [_parse_position_history(item) for item in entries]
-
     async def get_open_orders(
         self, symbol: str | None = None, *, max_retries: int | None = None
     ) -> list[OpenOrder]:
@@ -1293,14 +1200,11 @@ class BingXClient(ExchangeClient):
         stop_price = _to_decimal(item.get("stopPrice"), "stopPrice")
         if stop_price == 0:
             # Не задан: BingX всегда кладёт объект-заглушку, а не опускает
-            # поле, — price/quantity нулевые и у реально прикреплённого
-            # условника (проверено живым запросом), поэтому решает только
-            # stopPrice.
+            # поле; у заглушки stopPrice — число 0 (проверено живым запросом),
+            # решает только он.
             return None
         return AttachedTpSl(
             trigger_price=stop_price,
-            price=_to_decimal(item.get("price"), "price"),
-            quantity=_to_decimal(item.get("quantity"), "quantity"),
             working_type=str(item.get("workingType", "")),
         )
 

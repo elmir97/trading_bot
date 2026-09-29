@@ -158,9 +158,6 @@ class FakeReadbackClient(ExchangeClient):
     async def get_symbols(self, *, max_retries=None):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 
-    async def get_funding_rate(self, symbol):  # type: ignore[no-untyped-def]
-        return None
-
     async def get_balance(self, *, max_retries=None):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 
@@ -182,9 +179,6 @@ class FakeReadbackClient(ExchangeClient):
         raise NotImplementedError
 
     async def set_leverage(self, symbol, leverage, *, position_side=None):  # type: ignore[no-untyped-def]
-        raise NotImplementedError
-
-    async def get_order(self, symbol, client_order_id, *, max_retries=None):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 
     async def close(self) -> None:

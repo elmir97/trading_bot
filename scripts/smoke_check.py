@@ -472,8 +472,8 @@ _FAKE_BALANCE = D("10000")
 
 async def _fake_get_ticker(self, symbol: str, *, max_retries=None) -> Ticker:  # type: ignore[no-untyped-def]
     return Ticker(
-        symbol=symbol, last_price=_FAKE_PRICE, volume_24h=D("0"),
-        price_change_percent=D("0"), timestamp=datetime.now(UTC),
+        symbol=symbol, last_price=_FAKE_PRICE,
+        timestamp=datetime.now(UTC),
     )
 
 

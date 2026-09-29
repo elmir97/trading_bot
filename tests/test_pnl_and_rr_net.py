@@ -97,7 +97,7 @@ class TestExitCarriesProfit:
         remaining = Position(
             symbol="SOL-USDT", side=TradeSide.LONG, quantity=D("1000"),
             entry_price=D("123.021"), mark_price=D("122"), leverage=10,
-            unrealized_pnl=D("0"), margin=D("0"),
+            unrealized_pnl=D("0"),
         )
         decision = decide_trade(_sol_trade(), remaining, [part])
         assert [(e.kind, e.realized_pnl) for e in decision.exits] == [

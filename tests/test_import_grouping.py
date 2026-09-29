@@ -39,7 +39,6 @@ def fill(
         price=D(price),
         quantity=D(qty),
         fee=D(fee),
-        realized_pnl=D(0),
         executed_at=BASE + timedelta(minutes=minutes),
     )
 

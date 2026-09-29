@@ -166,7 +166,7 @@ def test_partial_close_keeps_trade_open() -> None:
     )
     remaining = Position(
         symbol="SOL-USDT", side=TradeSide.LONG, quantity=D("1000"), entry_price=D("123.021"),
-        mark_price=D("122"), leverage=10, unrealized_pnl=D("0"), margin=D("0"),
+        mark_price=D("122"), leverage=10, unrealized_pnl=D("0"),
     )
     decision = decide_trade(_sol_trade(), remaining, [part])
     assert decision.closes_fully is False
@@ -186,7 +186,7 @@ def test_quantity_not_matching_is_discrepancy_not_write() -> None:
 def test_position_grown_outside_bot_is_discrepancy() -> None:
     bigger = Position(
         symbol="SOL-USDT", side=TradeSide.LONG, quantity=D("2000"), entry_price=D("123"),
-        mark_price=D("122"), leverage=10, unrealized_pnl=D("0"), margin=D("0"),
+        mark_price=D("122"), leverage=10, unrealized_pnl=D("0"),
     )
     decision = decide_trade(_sol_trade(), bigger, [])
     assert decision.discrepancy is not None
@@ -263,7 +263,7 @@ def test_not_found_without_position_is_not_placed() -> None:
 def test_not_found_but_position_exists_is_ambiguous() -> None:
     position = Position(
         symbol="SOL-USDT", side=TradeSide.LONG, quantity=D("1"), entry_price=D("1"),
-        mark_price=D("1"), leverage=10, unrealized_pnl=D("0"), margin=D("0"),
+        mark_price=D("1"), leverage=10, unrealized_pnl=D("0"),
     )
     resolution = resolve_entry(_unresolved(11), None, not_found=True, position=position)
     assert resolution.not_placed is False

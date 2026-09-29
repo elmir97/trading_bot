@@ -36,8 +36,6 @@ class FakeClient:
         return Ticker(
             symbol=symbol,
             last_price=D("100000") + self.ticker_calls,
-            volume_24h=D("1"),
-            price_change_percent=D("0"),
             timestamp=NOW,
         )
 
@@ -47,9 +45,6 @@ class FakeClient:
 
     async def get_symbols(self, *, max_retries: int | None = None) -> list[SymbolInfo]:
         return [SymbolInfo("BTC-USDT", 2, 4, D("0.0001"))]
-
-    async def get_funding_rate(self, symbol: str) -> Decimal | None:
-        return D("0.0001")
 
     async def close(self) -> None: ...
 
