@@ -399,8 +399,9 @@ class OrderFill:
     В отличие от OrderResult каждое числовое поле FILLED-ордера здесь пришло
     от биржи явно — отсутствие поля не превращается в ноль, а поднимает
     ReadbackIncomplete. У не исполненного (status не FILLED) avg_price и fee
-    мягкие: живьём commission там "" (Р2, 29.09). status — строка биржи (NEW/PARTIALLY_FILLED/FILLED/
-    CANCELED/...), перевод в OrderStatus — забота app/execution/readback.py.
+    мягкие: живьём commission там "" (Р2, 29.09). status — строка биржи
+    (NEW/PARTIALLY_FILLED/FILLED/CANCELED/...), перевод в OrderStatus — забота
+    app/execution/readback.py.
     fee — модуль комиссии (биржа отдаёт её отрицательной)."""
 
     order_id: str

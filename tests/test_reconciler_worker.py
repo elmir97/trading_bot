@@ -17,7 +17,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from fakeredis.aioredis import FakeRedis
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from app.core.config import Settings
@@ -842,3 +842,335 @@ async def test_qty_and_stop_missing_prefix_do_not_resolve_longer_trade_id(ctx) -
 
     by_key = {e.dedup_key: e for e in await _events(db, user.id)}
     assert all(by_key[key].resolved_at is None for key in keys.values())
+
+
+# ---------------------------------------------------------------------------
+# _confirm_entry и путь к нему (_resolve_unresolved_entry), 29.09.
+# Вход LINK #3 с неизвестным исходом старше окна (10 мин), GET по
+# clientOrderID отдаёт живой #37 (демо 27.09): 2037.8 по 14.400, комиссия
+# 14.672461, updateTime 08:15:32.828, positionID …754. Живая позиция LINK в
+# positions есть. Замены полей #37 помечены в тесте.
+# ---------------------------------------------------------------------------
+
+LINK_POSITION = "2104122757805514754"
+LINK_FILLED_AT = datetime(2026, 9, 27, 8, 15, 32, 828000, tzinfo=UTC)
+ORDER_GET = "/openApi/swap/v2/trade/order"
+
+
+def _live_entry(**overrides: Any) -> dict[str, Any]:
+    """Живой GET #37; overrides — синтетика из живого (None — поля нет)."""
+    [raw] = live_items("order #37 LINK-USDT ENTRY")
+    raw.update(overrides)
+    return {k: v for k, v in raw.items() if v is not None}
+
+
+async def _unresolved_link(  # type: ignore[no-untyped-def]
+    session, user_id: int, *, status: OrderStatus = OrderStatus.UNKNOWN,
+    with_trade: bool = True, fill_confirmed: bool = False,
+    exchange_id: str | None = None,
+) -> tuple[ExecutionOrder, Trade | None]:
+    """Вход LINK старше окна и (по умолчанию) предварительная сделка по плану:
+    14.398 × 2037.8, без комиссии — так её пишет record_entry_trade до факта."""
+    n = await _notification(session, user_id, "LINK-USDT")
+    placed = datetime.now(UTC) - timedelta(minutes=11)
+    trade = None
+    if with_trade:
+        trade = await TradeJournal(TradeRepository(session)).open_trade(
+            user_id=user_id, symbol="LINK-USDT", side=TradeSide.LONG, entry_price=D("14.398"),
+            quantity=D("2037.8"), leverage=10, stop_loss=D("13.526"), take_profit=D("16.263"),
+            opened_at=placed, source=TradeSource.SIGNAL_EXECUTION, notification_id=n.id,
+            fill_confirmed=fill_confirmed,
+        )
+    entry = _row(user_id, n.id, "LINK-USDT", OrderRole.ENTRY, status, exchange_id,
+                 trade_id=trade.id if trade else None, created_at=placed)
+    session.add(entry)
+    await session.commit()
+    return entry, trade
+
+
+def _entry_events(
+    events: list[ReconciliationEvent], entry_id: int
+) -> dict[str, ReconciliationEvent]:
+    return {e.dedup_key: e for e in events if e.dedup_key.startswith(f"entry:{entry_id}")}
+
+
+async def test_confirm_entry_brings_provisional_trade_to_live_fact(ctx) -> None:  # type: ignore[no-untyped-def]
+    """B1: сделка OPEN, не подтверждена, ENTRY-исполнение есть, время и
+    positionID в ответе — всё приводится к живому факту, одно уведомление;
+    второй цикл вход не ищет и ничего не шлёт."""
+    settings, db, session, user, demo = ctx
+    entry, trade = await _unresolved_link(session, user.id)
+    assert trade is not None
+    demo.orders_by_cid[entry.client_order_id] = _live_entry()
+    bot = FakeBot()
+
+    await _run_reconciler(settings, db, bot)
+
+    row = (await _rows(db, "LINK-USDT"))[OrderRole.ENTRY]
+    assert (row.status, row.exchange_order_id) == (OrderStatus.FILLED, LINK_ENTRY)
+    t = await _trade(db, trade.id)
+    assert t.fill_confirmed is True
+    assert (t.entry_price, t.quantity, t.fees) == (D("14.4"), D("2037.8"), D("14.672461"))
+    assert t.opened_at == LINK_FILLED_AT
+    assert t.external_position_id == LINK_POSITION
+    [fill] = t.fills
+    assert (fill.price, fill.quantity, fill.fee) == (D("14.4"), D("2037.8"), D("14.672461"))
+    assert (fill.external_fill_id, fill.executed_at) == (LINK_ENTRY, LINK_FILLED_AT)
+    events = _entry_events(await _events(db, user.id), entry.id)
+    confirmed = events[f"entry:{entry.id}:confirmed"]
+    assert confirmed.kind is ReconciliationKind.ENTRY_CONFIRMED
+    assert confirmed.resolved_at is not None
+    [text] = [t for t in bot.sent if "найден на бирже" in t]
+    assert "✅ Вход LINK-USDT LONG найден на бирже: 2037.8 по 14.4" in text
+    assert f"Сделка #{trade.id} подтверждена фактом биржи" in text
+
+    calls_before = demo.calls.count(ORDER_GET)
+    await _run_reconciler(settings, db, bot)
+    assert demo.calls.count(ORDER_GET) == calls_before
+    assert sum("найден на бирже" in t for t in bot.sent) == 1
+
+
+async def test_confirm_entry_without_fill_time_keeps_opened_at(ctx) -> None:  # type: ignore[no-untyped-def]
+    """B2: в ответе нет ни updateTime, ни time (СИНТЕТИКА ИЗ ЖИВОГО #37,
+    убраны оба) — цена, объём и комиссия подтверждаются, время — прежнее."""
+    settings, db, session, user, demo = ctx
+    entry, trade = await _unresolved_link(session, user.id)
+    assert trade is not None
+    opened_before = trade.opened_at
+    demo.orders_by_cid[entry.client_order_id] = _live_entry(updateTime=None, time=None)
+
+    await _run_reconciler(settings, db, FakeBot())
+
+    t = await _trade(db, trade.id)
+    assert t.fill_confirmed is True and t.entry_price == D("14.4")
+    assert t.opened_at == opened_before
+    [fill] = t.fills
+    assert fill.executed_at == opened_before
+
+
+async def test_confirm_entry_zero_position_id_is_not_recorded(ctx) -> None:  # type: ignore[no-untyped-def]
+    """B3: positionID 0 (так он приходит живьём в GET условника, #38) —
+    СИНТЕТИКА ИЗ ЖИВОГО #37, заменён positionID: позиция сделки не
+    записывается."""
+    settings, db, session, user, demo = ctx
+    entry, trade = await _unresolved_link(session, user.id)
+    assert trade is not None
+    demo.orders_by_cid[entry.client_order_id] = _live_entry(positionID=0)
+
+    await _run_reconciler(settings, db, FakeBot())
+
+    t = await _trade(db, trade.id)
+    assert t.fill_confirmed is True
+    assert t.external_position_id is None
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="B4, 29.09: у сделки нет ENTRY-исполнения — recalculate по пустым fills "
+    "обнуляет entry_price и quantity, а сделка помечается подтверждённой. "
+    "Поведение — решение владельца",
+)
+async def test_confirm_entry_trade_without_entry_fill(ctx) -> None:  # type: ignore[no-untyped-def]
+    """B4: сделка OPEN без ENTRY-исполнения (record_entry_trade так не пишет,
+    но строка могла потерять fill) — после подтверждения цена и объём
+    сделки обязаны быть фактом биржи, а не пустыми."""
+    settings, db, session, user, demo = ctx
+    entry, _ = await _unresolved_link(session, user.id, with_trade=False)
+    orphan_trade = Trade(
+        user_id=user.id, symbol="LINK-USDT", side=TradeSide.LONG, entry_price=D("14.398"),
+        quantity=D("2037.8"), leverage=10, opened_at=entry.created_at,
+        source=TradeSource.SIGNAL_EXECUTION, status=TradeStatus.OPEN, fill_confirmed=False,
+    )
+    session.add(orphan_trade)
+    await session.flush()
+    entry.trade_id = orphan_trade.id
+    await session.commit()
+    demo.orders_by_cid[entry.client_order_id] = _live_entry()
+
+    await _run_reconciler(settings, db, FakeBot())
+
+    t = await _trade(db, orphan_trade.id)
+    assert (t.entry_price, t.quantity) == (D("14.4"), D("2037.8"))
+
+
+async def test_confirm_entry_without_trade_is_permanent_ambiguous(ctx) -> None:  # type: ignore[no-untyped-def]
+    """B5: вход исполнен, сделки в журнале нет — AMBIGUOUS no_trade, сделку
+    не создаём, ENTRY_CONFIRMED нет. Вход FILLED и больше не ищется —
+    расхождение остаётся открытым (задумано, 29.09)."""
+    settings, db, session, user, demo = ctx
+    entry, _ = await _unresolved_link(session, user.id, with_trade=False)
+    demo.orders_by_cid[entry.client_order_id] = _live_entry()
+    bot = FakeBot()
+
+    await _run_reconciler(settings, db, bot)
+    await _run_reconciler(settings, db, bot)
+
+    row = (await _rows(db, "LINK-USDT"))[OrderRole.ENTRY]
+    assert (row.status, row.exchange_order_id, row.trade_id) == (
+        OrderStatus.FILLED, LINK_ENTRY, None
+    )
+    events = _entry_events(await _events(db, user.id), entry.id)
+    assert set(events) == {f"entry:{entry.id}:no_trade"}
+    no_trade = events[f"entry:{entry.id}:no_trade"]
+    assert no_trade.kind is ReconciliationKind.AMBIGUOUS and no_trade.resolved_at is None
+    assert demo.calls.count(ORDER_GET) == 1
+    assert sum(f"вход {entry.client_order_id} исполнен на бирже" in t for t in bot.sent) == 1
+    # Живая позиция LINK без сделки в журнале — ещё и ORPHAN, тоже один раз.
+    assert sum("позиция LONG 2037.8 по 14.400 на бирже" in t for t in bot.sent) == 1
+    async with db.session() as s:
+        count = await s.scalar(
+            select(func.count()).select_from(Trade).where(
+                Trade.user_id == user.id, Trade.symbol == "LINK-USDT"
+            )
+        )
+    assert count == 0
+
+
+@pytest.mark.parametrize("status", [TradeStatus.CANCELLED, TradeStatus.CLOSED])
+async def test_confirm_entry_for_closed_or_cancelled_trade_is_fact_only(  # type: ignore[no-untyped-def]
+    ctx, status
+) -> None:
+    """B6: сделку уже отменили или закрыли руками — журнал не трогаем, только
+    событие-факт (задумано, 29.09)."""
+    settings, db, session, user, demo = ctx
+    entry, trade = await _unresolved_link(session, user.id)
+    assert trade is not None
+    trade.status = status
+    if status is TradeStatus.CLOSED:
+        trade.closed_at = datetime.now(UTC)
+    await session.commit()
+    demo.orders_by_cid[entry.client_order_id] = _live_entry()
+    bot = FakeBot()
+
+    await _run_reconciler(settings, db, bot)
+
+    t = await _trade(db, trade.id)
+    assert (t.status, t.fill_confirmed, t.entry_price) == (status, False, D("14.398"))
+    assert t.external_position_id is None
+    row = (await _rows(db, "LINK-USDT"))[OrderRole.ENTRY]
+    assert row.status is OrderStatus.FILLED
+    events = _entry_events(await _events(db, user.id), entry.id)
+    assert events[f"entry:{entry.id}:confirmed"].kind is ReconciliationKind.ENTRY_CONFIRMED
+    [text] = [t for t in bot.sent if "найден на бирже" in t]
+    assert "подтверждена" not in text
+
+
+async def test_confirm_entry_already_confirmed_trade_is_fact_only(ctx) -> None:  # type: ignore[no-untyped-def]
+    """B7: вход UNKNOWN, а сделка уже подтверждена (ранний выход на 552 —
+    только для SUBMITTED) — журнал не трогаем, только факт."""
+    settings, db, session, user, demo = ctx
+    entry, trade = await _unresolved_link(session, user.id, fill_confirmed=True)
+    assert trade is not None
+    demo.orders_by_cid[entry.client_order_id] = _live_entry()
+    bot = FakeBot()
+
+    await _run_reconciler(settings, db, bot)
+
+    t = await _trade(db, trade.id)
+    assert (t.entry_price, t.fees) == (D("14.398"), D("0"))
+    assert (await _rows(db, "LINK-USDT"))[OrderRole.ENTRY].status is OrderStatus.FILLED
+    [text] = [t for t in bot.sent if "найден на бирже" in t]
+    assert "подтверждена" not in text
+
+
+async def test_confirm_entry_keeps_existing_exchange_order_id(ctx) -> None:  # type: ignore[no-untyped-def]
+    """B8: у строки входа уже есть exchange_order_id (из ответа POST) — не
+    перезаписывается ответом поиска. Значение в строке — синтетика, отличное
+    от живого, чтобы перезапись была видна."""
+    settings, db, session, user, demo = ctx
+    entry, trade = await _unresolved_link(
+        session, user.id, status=OrderStatus.SUBMITTED, exchange_id="2104122757776150000"
+    )
+    assert trade is not None
+    demo.orders_by_cid[entry.client_order_id] = _live_entry()
+
+    await _run_reconciler(settings, db, FakeBot())
+
+    row = (await _rows(db, "LINK-USDT"))[OrderRole.ENTRY]
+    assert (row.status, row.exchange_order_id) == (OrderStatus.FILLED, "2104122757776150000")
+    t = await _trade(db, trade.id)
+    assert t.fill_confirmed is True
+    assert [f.external_fill_id for f in t.fills] == [LINK_ENTRY]
+
+
+async def test_submitted_entry_with_confirmed_trade_is_not_searched(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Строка 552: SUBMITTED, а сделка уже подтверждена — исполнение в
+    журнале, поиска нет, ничего не пишется."""
+    settings, db, session, user, demo = ctx
+    entry, _ = await _unresolved_link(
+        session, user.id, status=OrderStatus.SUBMITTED, fill_confirmed=True
+    )
+    bot = FakeBot()
+
+    await _run_reconciler(settings, db, bot)
+
+    assert ORDER_GET not in demo.calls
+    assert (await _rows(db, "LINK-USDT"))[OrderRole.ENTRY].status is OrderStatus.SUBMITTED
+    assert _entry_events(await _events(db, user.id), entry.id) == {}
+
+
+async def test_entry_lookup_incomplete_retries_next_cycle_silently(ctx, caplog) -> None:  # type: ignore[no-untyped-def]
+    """Строки 570-574: ответ поиска не разобран (FILLED с пустой commission —
+    СИНТЕТИКА ИЗ ЖИВОГО #37) — WARNING, ничего не пишется, на следующем
+    цикле поиск повторяется."""
+    settings, db, session, user, demo = ctx
+    entry, trade = await _unresolved_link(session, user.id)
+    assert trade is not None
+    demo.orders_by_cid[entry.client_order_id] = _live_entry(commission="")
+    bot = FakeBot()
+
+    with caplog.at_level("WARNING", logger="app.workers.reconciler"):
+        await _run_reconciler(settings, db, bot)
+        await _run_reconciler(settings, db, bot)
+
+    assert demo.calls.count(ORDER_GET) == 2
+    assert "Поиск входа по client_order_id не удался" in caplog.text
+    assert (await _rows(db, "LINK-USDT"))[OrderRole.ENTRY].status is OrderStatus.UNKNOWN
+    assert (await _trade(db, trade.id)).fill_confirmed is False
+    assert _entry_events(await _events(db, user.id), entry.id) == {}
+    assert not any("найден на бирже" in t for t in bot.sent)
+
+
+async def test_entry_not_found_but_position_exists_is_ambiguous(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Строки 580-581: биржа ответила 109421 (живой код), а живая позиция LINK
+    есть — вывода нет, AMBIGUOUS, вход не NOT_PLACED."""
+    settings, db, session, user, demo = ctx
+    entry, trade = await _unresolved_link(session, user.id)
+    assert trade is not None
+    demo.unknown_cids.add(entry.client_order_id)
+
+    await _run_reconciler(settings, db, FakeBot())
+
+    assert (await _rows(db, "LINK-USDT"))[OrderRole.ENTRY].status is OrderStatus.UNKNOWN
+    event = _entry_events(await _events(db, user.id), entry.id)[f"entry:{entry.id}"]
+    assert event.kind is ReconciliationKind.AMBIGUOUS and event.resolved_at is None
+    assert "не найден, а позиция LONG по символу есть" in event.detail
+    assert (await _trade(db, trade.id)).status is TradeStatus.OPEN
+
+
+async def test_not_placed_with_cancelled_trade_does_not_cancel_again(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Ветка 590→593: вход не выставлен, позиции нет, а предварительная сделка
+    уже отменена — NOT_PLACED, сделку не трогаем, в тексте нет строки об
+    отмене."""
+    settings, db, session, user, demo = ctx
+    await _seed_live(session, user.id)
+    n = await _notification(session, user.id, "ADA-USDT")
+    trade = await TradeJournal(TradeRepository(session)).open_trade(
+        user_id=user.id, symbol="ADA-USDT", side=TradeSide.LONG, entry_price=D("1"),
+        quantity=D("10"), source=TradeSource.SIGNAL_EXECUTION, notification_id=n.id,
+        fill_confirmed=False,
+    )
+    trade.status = TradeStatus.CANCELLED
+    entry = _row(user.id, n.id, "ADA-USDT", OrderRole.ENTRY, OrderStatus.UNKNOWN, None,
+                 trade_id=trade.id, created_at=datetime.now(UTC) - timedelta(minutes=11))
+    session.add(entry)
+    await session.commit()
+    demo.unknown_cids.add(entry.client_order_id)
+    bot = FakeBot()
+
+    await _run_reconciler(settings, db, bot)
+
+    assert (await _rows(db, "ADA-USDT"))[OrderRole.ENTRY].status is OrderStatus.NOT_PLACED
+    assert (await _trade(db, trade.id)).status is TradeStatus.CANCELLED
+    [text] = [t for t in bot.sent if "не выставлен на бирже" in t]
+    assert "Предварительная сделка" not in text

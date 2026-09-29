@@ -606,6 +606,17 @@ class Reconciler:
     async def _confirm_entry(
         self, ctx: _UserCtx, entry: ExecutionOrder, trade: Trade | None, fill: OrderFill
     ) -> None:
+        """Поиск по client_order_id нашёл вход FILLED: строка входа — FILLED
+        (exchange_order_id не перезаписывается), дальше по сделке:
+
+        - OPEN и не подтверждена — исполнение входа и сделка приводятся к
+          факту биржи (цена, объём, комиссия, время, positionID), событие
+          ENTRY_CONFIRMED;
+        - сделки нет — AMBIGUOUS entry:{id}:no_trade, сделку не создаём. Вход
+          уже FILLED и в следующие циклы не попадает — расхождение остаётся
+          открытым навсегда: так задумано (решение 29.09), разбирает владелец;
+        - сделка CANCELLED/CLOSED или уже подтверждена — журнал не трогаем,
+          только событие-факт ENTRY_CONFIRMED: так задумано (решение 29.09)."""
         entry.status = OrderStatus.FILLED
         entry.exchange_order_id = entry.exchange_order_id or fill.order_id
         text = (
