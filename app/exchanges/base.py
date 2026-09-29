@@ -97,9 +97,8 @@ class ReadbackIncomplete(ExchangeResponseError):  # noqa: N818 — имя из �
 
     Для read-back «поля нет» и «поле = 0» — разные вещи: нестрогий разбор
     (_to_decimal) превратил бы отсутствие в Decimal(0), и пустой avgPrice
-    молча стал бы ценой входа. Рабочие имена полей живьём не сняты (раздел
-    16, 15.5.5) — строгость и есть способ увидеть расхождение на первом
-    демо-ордере."""
+    молча стал бы ценой входа. Имена полей сняты живьём (GET #37, демо
+    27.09): avgPrice, origQty, executedQty, commission — строки."""
 
     def __init__(self, field: str, payload: dict[str, object] | None = None) -> None:
         super().__init__(f"В ответе чтения ордера нет поля {field}", payload=payload)
@@ -219,7 +218,7 @@ class Fill:
     position_id: str | None = None
     # Шаг 15.5.4: ордер, которым сделано исполнение, — импорт пропускает
     # исполнения ордеров бота (сделка бота уже в журнале). None — биржа не
-    # отдала orderId (имя поля в allFillOrders — синтетика до 15.5.5).
+    # отдала orderId (живьём в allFillOrders orderId — строка, 27.09).
     order_id: str | None = None
     # Условный ордер, срабатывание которого породило это исполнение (выход по
     # стопу/тейку — отдельный дочерний ордер с triggerOrderId = orderId
@@ -413,8 +412,8 @@ class OrderFill:
     fee: Decimal
     raw: dict[str, object]
     # Шаг 15.5.4: время исполнения — НЕ обязательное поле (не цифра сделки):
-    # нет в ответе → None, журнал берёт момент чтения. Имя поля в ответе
-    # (updateTime/time) — синтетика до 15.5.5.
+    # нет в ответе → None, журнал берёт момент чтения. Живьём (GET #37,
+    # 27.09) updateTime — мс исполнения, time — целые секунды постановки.
     filled_at: datetime | None = None
 
 

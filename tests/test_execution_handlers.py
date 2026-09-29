@@ -79,6 +79,7 @@ from app.trading.enums import (
     TradeSide,
     TradeStatus,
 )
+from tests.bingx_fixtures import live_items
 from tests.conftest import cleanup_user
 
 pytestmark = pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="Нужен PostgreSQL")
@@ -118,7 +119,9 @@ class FakeExchangeClient(ExchangeClient):
     ) -> None:
         # Шаг 15.5.3: read-back. По умолчанию фейк ведёт себя как биржа:
         # исполнение — по последнему place_market_order, в openOrders —
-        # условники из его stopLoss/takeProfit (СИНТЕТИКА ДО 15.5.5).
+        # условники из его stopLoss/takeProfit. Форма — живая (GET #37 и
+        # openOrders LINK, демо 27.09), значения — сценария теста: СИНТЕТИКА
+        # ИЗ ЖИВОГО, заменены поля, зависящие от входа.
         self.fill_overrides: dict[str, object] = {}
         self.fill_error: Exception | None = None
         self.attach_conditionals = True
@@ -261,11 +264,21 @@ class FakeExchangeClient(ExchangeClient):
             raise self.fill_error
         entry = self._last_entry()
         placed_id = getattr(self.place_order_result, "order_id", "") or "9001"
-        raw: dict[str, object] = {
-            "orderId": placed_id, "clientOrderId": client_order_id, "status": "FILLED",
+        [raw] = live_items("order #37 LINK-USDT ENTRY")
+        now_ms = int(datetime.now(UTC).timestamp() * 1000)
+        raw.update({
+            "orderId": int(placed_id), "clientOrderId": client_order_id.casefold(),
+            "symbol": entry["symbol"], "side": entry["side"].value,
+            "positionSide": entry["position_side"], "price": str(self.price),
             "origQty": str(entry["quantity"]), "executedQty": str(entry["quantity"]),
             "avgPrice": str(self.price), "commission": "-0.05",
-        }
+            "time": now_ms, "updateTime": now_ms,
+            # Своя позиция на каждый вход (uq_trade_external_position): живой
+            # positionID плюс номер входа в тесте.
+            "positionID": int(str(raw["positionID"])) + sum(
+                1 for c in self.submit_calls if c[0] == "place_market_order"
+            ),
+        })
         raw.update(self.fill_overrides)
         return BingXClient._parse_order_fill({k: v for k, v in raw.items() if v is not None})
 
@@ -280,27 +293,31 @@ class FakeExchangeClient(ExchangeClient):
         entry = self._last_entry()
         closing = "SELL" if entry["side"].value == "BUY" else "BUY"
         now_ms = int((datetime.now(UTC) + timedelta(seconds=1)).timestamp() * 1000)
+        # Живой openOrders LINK: [стоп, тейк]. Живьём у условника origQty —
+        # объём позиции, reduceOnly true, closePosition "false", avgPrice —
+        # цена входа, clientOrderId пустой.
+        live_stop, live_take = live_items("openOrders LINK")
         orders = []
-        for key, order_type, order_id in (
-            ("stop_loss", "STOP_MARKET", "8001"), ("take_profit", "TAKE_PROFIT_MARKET", "8002"),
+        for key, raw, order_id in (
+            ("stop_loss", live_stop, 8001), ("take_profit", live_take, 8002),
         ):
             spec = entry.get(key)
             if spec is None:
                 continue
-            orders.append(BingXClient._parse_open_order({
+            raw.update({
                 "symbol": entry["symbol"], "orderId": order_id, "side": closing,
-                "positionSide": entry["position_side"], "type": order_type,
-                "origQty": "0", "price": "0", "executedQty": "0", "avgPrice": "0",
-                "status": "NEW", "stopPrice": str(spec.trigger_price), "clientOrderId": "",
-                "time": now_ms, "updateTime": now_ms, "leverage": "10X",
-                "reduceOnly": False, "closePosition": "true", "workingType": "MARK_PRICE",
-            }))
+                "positionSide": entry["position_side"], "origQty": str(entry["quantity"]),
+                "avgPrice": str(self.price), "stopPrice": str(spec.trigger_price),
+                "time": now_ms, "updateTime": now_ms,
+            })
+            orders.append(BingXClient._parse_open_order(raw))
         return orders
 
     async def place_conditional_order(self, **kwargs):  # type: ignore[no-untyped-def]
         self.submit_calls.append(("place_conditional_order", kwargs))
         if self.conditional_error is not None:
             raise self.conditional_error
+        # СИНТЕТИКА: ответ POST условного ордера живьём не снят.
         return self.conditional_result or BingXClient._parse_order(
             {"orderId": "8101", "status": "NEW"}
         )
@@ -1096,7 +1113,7 @@ async def test_confirm_yes_real_order_timeout_shows_unknown_text(  # type: ignor
     client.current_leverage = _leverage_info(long_leverage=10)
     client.place_order_error = ExchangeUnavailableError("BingX не ответил вовремя")
     # Шаг 15.5.3: поиск по clientOrderID тоже не находит ордер.
-    client.fill_error = ExchangeResponseError("order not exist", code=109414, payload=None)
+    client.fill_error = ExchangeResponseError("order not exist", code=109421, payload=None)
     _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
     settings.exec_dry_run = False
 
@@ -2164,7 +2181,7 @@ async def test_unknown_entry_still_burns_setup_for_next_notification(  # type: i
     dp, session, user, client, _redis, settings = ctx
     client.current_leverage = _leverage_info(long_leverage=10)
     client.place_order_error = ExchangeUnavailableError("BingX не ответил вовремя")
-    client.fill_error = ExchangeResponseError("order not exist", code=109414, payload=None)
+    client.fill_error = ExchangeResponseError("order not exist", code=109421, payload=None)
     _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
     settings.exec_dry_run = False
 
@@ -2591,7 +2608,7 @@ async def test_unknown_not_found_writes_provisional_trade_with_cancel_hint(  # t
     session, user, _n, edits = await _real_confirm(
         ctx, bot, monkeypatch,
         place_order_error=ExchangeUnavailableError("timeout"),
-        fill_error=ExchangeResponseError("order not exist", code=109414, payload=None),
+        fill_error=ExchangeResponseError("order not exist", code=109421, payload=None),
     )
 
     [trade] = await _user_trades(session, user.id)
@@ -2669,6 +2686,8 @@ async def test_card_shows_rr_with_fee(ctx, bot, monkeypatch) -> None:  # type: i
 
 
 def _own_position(liquidation: str | None) -> Position:
+    # СИНТЕТИКА: liquidationPrice/initialMargin/margin живьём не сняты (значения
+    # вне allowlist разведки 27.09) — снять на ближайшем реальном входе.
     return Position(
         symbol="BTC-USDT", side=TradeSide.LONG, quantity=D("1"), entry_price=D("100"),
         mark_price=D("100"), leverage=10, unrealized_pnl=D("0"), margin=D("10"),

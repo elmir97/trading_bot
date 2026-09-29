@@ -1407,36 +1407,41 @@ async def _noop() -> None:
 
 # --- Шаг 15.5.3: строгий read-back и условный ордер -------------------------
 #
-# СИНТЕТИКА ДО 15.5.5, заменить живым снимком: форма ответа GET
-# /trade/order по исполненному маркет-ордеру и POST условного ордера
-# живьём не сняты (раздел 16). Имена полей — те же, что уже разбирает
-# _parse_order (orderId, status, avgPrice, origQty, executedQty,
-# commission).
-SYNTHETIC_FILLED_ORDER = {
-    "symbol": "BTC-USDT", "orderId": 2100000000000000001,
-    "clientOrderId": "tj105u1E", "side": "BUY", "positionSide": "LONG",
-    "type": "MARKET", "status": "FILLED", "origQty": "0.0100",
-    "executedQty": "0.0100", "avgPrice": "86012.4", "commission": "-0.4301",
-}
+# Живой ответ GET /trade/order по исполненному маркет-входу LINK #3 (демо
+# 27.09, execution_orders #37): orderId и positionID — int, числа — строки,
+# commission отрицательная, clientOrderId биржа отдаёт строчными (tj209u1e
+# при tj209u1E в БД). Ответ POST условного ордера живьём не снят — ниже
+# синтетика с пометкой.
+LINK_ENTRY_CID = "tj209u1E"
+
+
+def _live_entry() -> dict[str, object]:
+    from tests.bingx_fixtures import live_items
+
+    [raw] = live_items("order #37 LINK-USDT ENTRY")
+    return raw
 
 
 class TestGetOrderFill:
-    async def test_parses_required_fields(self) -> None:
+    async def test_parses_live_filled_entry(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             url = str(request.url)
             assert request.method == "GET"
-            assert "clientOrderID=tj105u1E" in url
-            return ok({"order": SYNTHETIC_FILLED_ORDER})
+            assert f"clientOrderID={LINK_ENTRY_CID}" in url
+            return ok({"order": _live_entry()})
 
         client = make_client(handler)
-        fill = await client.get_order_fill("BTC-USDT", "tj105u1E", max_retries=1)
+        fill = await client.get_order_fill("LINK-USDT", LINK_ENTRY_CID, max_retries=1)
 
-        assert fill.order_id == "2100000000000000001"
+        assert fill.order_id == "2104122757776154624"
+        assert fill.client_order_id == "tj209u1e"  # Р1: эхо биржи строчными
         assert fill.status == "FILLED"
-        assert fill.avg_price == D("86012.4")
-        assert fill.orig_qty == D("0.0100")
-        assert fill.executed_qty == D("0.0100")
-        assert fill.fee == D("0.4301")
+        assert fill.avg_price == D("14.400")
+        assert fill.orig_qty == D("2037.8")
+        assert fill.executed_qty == D("2037.8")
+        assert fill.fee == D("14.672461")
+        assert fill.filled_at == datetime(2026, 9, 27, 8, 15, 32, 828000, tzinfo=UTC)
+        assert fill.raw["positionID"] == 2104122757805514754
         await client.close()
 
     @pytest.mark.parametrize(
@@ -1444,36 +1449,41 @@ class TestGetOrderFill:
     )
     async def test_missing_field_raises_not_zero(self, field: str) -> None:
         """«Поля нет» ≠ «поле = 0»: отсутствие обязательного поля — явная
-        ошибка с его именем, а не молчаливый Decimal(0) (как в _parse_order)."""
-        order = {k: v for k, v in SYNTHETIC_FILLED_ORDER.items() if k != field}
+        ошибка с его именем, а не молчаливый Decimal(0) (как в _parse_order).
+        СИНТЕТИКА ИЗ ЖИВОГО #37, убрано поле."""
+        order = {k: v for k, v in _live_entry().items() if k != field}
         client = make_client(lambda r: ok({"order": order}))
 
         with pytest.raises(ReadbackIncomplete) as info:
-            await client.get_order_fill("BTC-USDT", "tj105u1E")
+            await client.get_order_fill("LINK-USDT", LINK_ENTRY_CID)
         assert info.value.field == field
         await client.close()
 
     async def test_empty_avg_price_raises(self) -> None:
-        order = {**SYNTHETIC_FILLED_ORDER, "avgPrice": ""}
+        """СИНТЕТИКА ИЗ ЖИВОГО #37, заменено: avgPrice."""
+        order = {**_live_entry(), "avgPrice": ""}
         client = make_client(lambda r: ok({"order": order}))
         with pytest.raises(ReadbackIncomplete, match="avgPrice"):
-            await client.get_order_fill("BTC-USDT", "tj105u1E")
+            await client.get_order_fill("LINK-USDT", LINK_ENTRY_CID)
         await client.close()
 
     async def test_explicit_zero_is_a_value(self) -> None:
-        """Поле есть и равно 0 — это значение, не ошибка."""
-        order = {**SYNTHETIC_FILLED_ORDER, "commission": "0", "executedQty": "0"}
+        """Поле есть и равно 0 — это значение, не ошибка. СИНТЕТИКА ИЗ
+        ЖИВОГО #37, заменены: commission, executedQty."""
+        order = {**_live_entry(), "commission": "0", "executedQty": "0"}
         client = make_client(lambda r: ok({"order": order}))
-        fill = await client.get_order_fill("BTC-USDT", "tj105u1E")
+        fill = await client.get_order_fill("LINK-USDT", LINK_ENTRY_CID)
         assert fill.fee == D("0")
         assert fill.executed_qty == D("0")
         await client.close()
 
     async def test_order_id_alternative_spelling(self) -> None:
-        order = {k: v for k, v in SYNTHETIC_FILLED_ORDER.items() if k != "orderId"}
+        """В GET живьём только orderId; orderID — в ответе POST (разведка
+        27.09). СИНТЕТИКА ИЗ ЖИВОГО #37, orderId → orderID."""
+        order = {k: v for k, v in _live_entry().items() if k != "orderId"}
         order["orderID"] = "777"
         client = make_client(lambda r: ok({"order": order}))
-        fill = await client.get_order_fill("BTC-USDT", "tj105u1E")
+        fill = await client.get_order_fill("LINK-USDT", LINK_ENTRY_CID)
         assert fill.order_id == "777"
         await client.close()
 
@@ -1487,7 +1497,7 @@ class TestGetOrderFill:
         client = make_client(handler, max_retries=3)
         client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
         with pytest.raises(ExchangeUnavailableError):
-            await client.get_order_fill("BTC-USDT", "tj105u1E", max_retries=1)
+            await client.get_order_fill("LINK-USDT", LINK_ENTRY_CID, max_retries=1)
         assert calls["n"] == 1
         await client.close()
 
@@ -1544,7 +1554,41 @@ class TestGetOpenOrdersMaxRetries:
         await client.close()
 
 
+class TestOpenOrdersLiveConditionals:
+    """Живой openOrders LINK (демо 27.09): TP/SL, вложенные во вход, на бирже —
+    отдельные условники. origQty — объём позиции, reduceOnly true,
+    closePosition "false", avgPrice — цена входа позиции, positionID — id
+    позиции, clientOrderId пустой, свои вложенные takeProfit/stopLoss —
+    заглушки (type "", stopPrice 0). Тот же ордер в GET по orderId —
+    reduceOnly false, closePosition "", positionID 0 (#38/#39)."""
+
+    async def test_parses_live_stop_and_take(self) -> None:
+        from tests.bingx_fixtures import live_items
+
+        client = make_client(lambda r: ok({"orders": live_items("openOrders LINK")}))
+        stop, take = await client.get_open_orders("LINK-USDT")
+
+        assert (stop.order_id, stop.order_type, stop.stop_price) == (
+            "2104122758140616705", "STOP_MARKET", D("13.526")
+        )
+        assert (take.order_id, take.order_type, take.stop_price) == (
+            "2104122758140616704", "TAKE_PROFIT_MARKET", D("16.263")
+        )
+        for order in (stop, take):
+            assert (order.side, order.position_side, order.status) == ("SELL", "LONG", "NEW")
+            assert order.client_order_id == ""
+            assert order.quantity == D("2037.8")
+            assert (order.reduce_only, order.close_position) == (True, False)
+            assert order.working_type == "MARK_PRICE"
+            assert (order.take_profit, order.stop_loss) == (None, None)
+            assert order.created_at == datetime(2026, 9, 27, 8, 15, 32, 908000, tzinfo=UTC)
+        await client.close()
+
+
 class TestPlaceConditionalOrder:
+    """СИНТЕТИКА: ответ POST условного ордера (спасение стопа) живьём не снят —
+    ни одного спасения на демо не было."""
+
     async def test_stop_market_close_position_params(self) -> None:
         """Спасение стопа LONG: закрывающая сторона SELL, positionSide LONG,
         closePosition=true, без quantity, тот же workingType, что у входа."""
@@ -1609,33 +1653,41 @@ def test_entry_and_rescue_share_working_type() -> None:
 
 class TestOrderFillFilledAt:
     """Шаг 15.5.4: время исполнения — мягко (не цифра сделки): есть →
-    datetime, нет или мусор → None, без ReadbackIncomplete. СИНТЕТИКА ДО
-    15.5.5 — имя поля (updateTime/time)."""
+    datetime, нет или мусор → None, без ReadbackIncomplete. Живьём (GET #37)
+    updateTime — мс исполнения, time — целые секунды постановки."""
 
-    def test_update_time_parsed(self) -> None:
-        fill = BingXClient._parse_order_fill(
-            {**SYNTHETIC_FILLED_ORDER, "updateTime": 1789372424814}
+    def test_live_update_time_parsed(self) -> None:
+        fill = BingXClient._parse_order_fill(_live_entry())
+        assert fill.filled_at == datetime(2026, 9, 27, 8, 15, 32, 828000, tzinfo=UTC)
+
+    def test_falls_back_to_time(self) -> None:
+        """СИНТЕТИКА ИЗ ЖИВОГО #37, убран updateTime."""
+        order = {k: v for k, v in _live_entry().items() if k != "updateTime"}
+        assert BingXClient._parse_order_fill(order).filled_at == datetime(
+            2026, 9, 27, 8, 15, 32, tzinfo=UTC
         )
-        assert fill.filled_at == datetime(2026, 9, 14, 7, 53, 44, 814000, tzinfo=UTC)
 
     @pytest.mark.parametrize("value", [None, "", 0, "not-a-number"])
     def test_missing_or_garbage_is_none_not_error(self, value: object) -> None:
-        order = {**SYNTHETIC_FILLED_ORDER}
+        """СИНТЕТИКА ИЗ ЖИВОГО #37: убран time, updateTime нет или мусор."""
+        order = {k: v for k, v in _live_entry().items() if k not in ("time", "updateTime")}
         if value is not None:
             order["updateTime"] = value
         assert BingXClient._parse_order_fill(order).filled_at is None
 
 
-
 def test_fill_carries_order_id_for_import_dedupe() -> None:
-    """Шаг 15.5.4: orderId исполнения — по нему импорт узнаёт ордера бота
-    (СИНТЕТИКА ДО 15.5.5 — имя поля в allFillOrders)."""
-    base = {
-        "symbol": "BTC-USDT", "tradeId": "t1", "side": "BUY", "positionSide": "LONG",
-        "price": "100", "qty": "0.1", "commission": "-0.01", "time": 1789372424000,
-    }
-    assert BingXClient._parse_fill({**base, "orderId": "555"}).order_id == "555"
-    assert BingXClient._parse_fill(base).order_id is None
+    """Шаг 15.5.4: orderId исполнения — по нему импорт узнаёт ордера бота.
+    Живой allFillOrders SOL (демо 27.09): orderId — строка; у выхода по стопу
+    это дочерний ордер, связь с условником — triggerOrderId. Исполнение без
+    orderId — TestLiveFillsForm.test_fill_without_any_id_is_none_with_warning."""
+    from tests.bingx_fixtures import live_items
+
+    entry, stop_exit = (
+        BingXClient._parse_fill(item) for item in live_items("allFillOrders SOL (get_fills)")
+    )
+    assert entry.order_id == "2104213344135159808"
+    assert stop_exit.order_id == "2104219661398712320"
 
 
 class TestLiveFillsForm:

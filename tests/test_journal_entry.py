@@ -1,8 +1,9 @@
 """Тесты app/execution/journal_entry.py (шаг 15.5.4) — против настоящей БД.
 
 ReadbackResult собирается напрямую: read-back проверен в test_readback.py,
-здесь — только то, какую сделку журнал пишет из его итога. Ответ get_order
-разбирается настоящим BingXClient._parse_order_fill (СИНТЕТИКА ДО 15.5.5).
+здесь — только то, какую сделку журнал пишет из его итога. Ответ get_order —
+живой GET входа LINK #3 (#37, демо 27.09), разбирается настоящим
+BingXClient._parse_order_fill; замены полей помечены в тесте.
 """
 
 from __future__ import annotations
@@ -49,7 +50,10 @@ pytestmark = pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="Нуже�
 
 D = Decimal
 NOW = datetime.now(UTC)
-FILLED_AT = datetime(2026, 9, 24, 10, 0, 0, tzinfo=UTC)
+# updateTime живого #37 — мс исполнения (time — целые секунды постановки).
+FILLED_AT = datetime(2026, 9, 27, 8, 15, 32, 828000, tzinfo=UTC)
+LINK_ENTRY = "2104122757776154624"
+LINK_POSITION = "2104122757805514754"
 
 
 @pytest_asyncio.fixture
@@ -62,9 +66,10 @@ async def ctx(unique_telegram_id):  # type: ignore[no-untyped-def]
             MistakeTypeRepository(session), settings,
         ).get_or_create(telegram_id=unique_telegram_id())
         slot = SignalRecord(
-            user_id=user.id, symbol="BTC-USDT", timeframe="1h", level=SignalLevel.READY,
+            user_id=user.id, symbol="LINK-USDT", timeframe="1h", level=SignalLevel.READY,
             setup="Пробой с ретестом", direction=SignalDirection.LONG, fingerprint="fp",
-            entry_low=D("100"), entry_high=D("101"), stop_loss=D("97"), take_profit=D("110"),
+            entry_low=D("14.35"), entry_high=D("14.43"), stop_loss=D("13.526"),
+            take_profit=D("16.263"),
             detail="d", expires_at=NOW + timedelta(hours=4),
         )
         session.add(slot)
@@ -81,11 +86,11 @@ async def ctx(unique_telegram_id):  # type: ignore[no-untyped-def]
 
 def _order(user_id: int, slot_id: int, nid: int) -> OrderRequest:
     return OrderRequest(
-        user_id=user_id, signal_id=slot_id, notification_id=nid, symbol="BTC-USDT",
-        side=OrderSide.BUY, position_side=TradeSide.LONG, quantity=D("0.010"),
-        entry_price=D("100.1"), leverage=10, stop_loss=D("97.0"), take_profit=D("110.0"),
-        notional=D("1"), margin=D("0.1"), risk_amount=D("0.031"),
-        risk_percent=D("1.00"), risk_reward=D("3.19"),
+        user_id=user_id, signal_id=slot_id, notification_id=nid, symbol="LINK-USDT",
+        side=OrderSide.BUY, position_side=TradeSide.LONG, quantity=D("2037.8"),
+        entry_price=D("14.398"), leverage=10, stop_loss=D("13.526"), take_profit=D("16.263"),
+        notional=D("29340.24"), margin=D("2934.02"), risk_amount=D("1776.96"),
+        risk_percent=D("1.00"), risk_reward=D("2.14"),
     )
 
 
@@ -98,11 +103,10 @@ async def _entry(session, order: OrderRequest, status: OrderStatus) -> Execution
 
 
 def _fill(**overrides: object):  # type: ignore[no-untyped-def]
-    raw: dict[str, object] = {
-        "orderId": "9001", "status": "FILLED", "origQty": "0.010",
-        "executedQty": "0.010", "avgPrice": "100.3", "commission": "-0.0005",
-        "updateTime": int(FILLED_AT.timestamp() * 1000),
-    }
+    """Живой GET #37; overrides — синтетика из живого."""
+    from tests.bingx_fixtures import live_items
+
+    [raw] = live_items("order #37 LINK-USDT ENTRY")
     raw.update(overrides)
     return BingXClient._parse_order_fill(raw)
 
@@ -115,8 +119,8 @@ def _readback(status: OrderStatus, **kw: object) -> ReadbackResult:
     fields: dict[str, object] = {
         "entry_status": status,
         "fill": _fill(),
-        "stop": _found("97.0", "501"),
-        "take": _found("110.0", "502"),
+        "stop": _found("13.526", "2104122758140616705"),
+        "take": _found("16.263", "2104122758140616704"),
     }
     fields.update(kw)
     return ReadbackResult(**fields)  # type: ignore[arg-type]
@@ -142,19 +146,20 @@ async def test_filled_writes_trade_from_fact(ctx) -> None:  # type: ignore[no-un
 
     assert outcome is not None and outcome.provisional is False and outcome.alarm is None
     t = outcome.trade
-    assert (t.entry_price, t.quantity, t.fees) == (D("100.3"), D("0.010"), D("0.0005"))
+    assert (t.entry_price, t.quantity, t.fees) == (D("14.400"), D("2037.8"), D("14.672461"))
     assert (t.notification_id, t.signal_id) == (n.id, slot.id)
     assert t.source is TradeSource.SIGNAL_EXECUTION
     assert t.status is TradeStatus.OPEN
     assert t.fill_confirmed is True
-    assert (t.stop_loss, t.take_profit, t.leverage) == (D("97.0"), D("110.0"), 10)
-    assert (t.risk_percent, t.risk_reward) == (D("1.00"), D("3.19"))
+    assert (t.stop_loss, t.take_profit, t.leverage) == (D("13.526"), D("16.263"), 10)
+    assert (t.risk_percent, t.risk_reward) == (D("1.00"), D("2.14"))
     assert t.account_balance_at_entry == D("1000")
     assert t.timeframe == "1h"
     assert t.opened_at == FILLED_AT
     assert t.strategy_id is not None and t.is_annotated is True  # «Пробой с ретестом»
     assert t.notes is None
     assert entry.trade_id == t.id
+    assert t.external_position_id == LINK_POSITION
 
 
 async def test_readback_incomplete_writes_provisional_trade(ctx) -> None:  # type: ignore[no-untyped-def]
@@ -170,7 +175,7 @@ async def test_readback_incomplete_writes_provisional_trade(ctx) -> None:  # typ
 
     assert outcome is not None and outcome.provisional is True
     t = outcome.trade
-    assert (t.entry_price, t.quantity, t.fees) == (D("100.1"), D("0.010"), D("0"))
+    assert (t.entry_price, t.quantity, t.fees) == (D("14.398"), D("2037.8"), D("0"))
     assert t.fill_confirmed is False
     assert NOTE_FILL_UNCONFIRMED in (t.notes or "")
     assert t.opened_at == NOW
@@ -190,7 +195,7 @@ async def test_unknown_writes_provisional_trade(ctx) -> None:  # type: ignore[no
     assert outcome is not None and outcome.provisional is True
     assert outcome.entry_not_found is True
     assert outcome.trade.fill_confirmed is False
-    assert outcome.trade.stop_loss == D("97.0")
+    assert outcome.trade.stop_loss == D("13.526")
     assert NOTE_STOP_UNCONFIRMED in (outcome.trade.notes or "")
 
 
@@ -226,8 +231,8 @@ async def test_parallel_writer_race_resolved_by_unique_index(ctx) -> None:  # ty
     order = _order(user.id, slot.id, n.id)
     entry = await _entry(session, order, OrderStatus.FILLED)
     competitor = Trade(
-        user_id=user.id, symbol="BTC-USDT", side=TradeSide.LONG, quantity=D("0.010"),
-        entry_price=D("100.3"), opened_at=NOW, source=TradeSource.SIGNAL_EXECUTION,
+        user_id=user.id, symbol="LINK-USDT", side=TradeSide.LONG, quantity=D("2037.8"),
+        entry_price=D("14.400"), opened_at=NOW, source=TradeSource.SIGNAL_EXECUTION,
         notification_id=n.id,
     )
     session.add(competitor)
@@ -247,9 +252,9 @@ async def test_parallel_writer_race_resolved_by_unique_index(ctx) -> None:  # ty
 @pytest.mark.parametrize(
     "state",
     [
-        ConditionalState(ConditionalOutcome.RESCUE_FAILED, None, D("97.0")),
-        ConditionalState(ConditionalOutcome.UNVERIFIED, None, D("97.0")),
-        ConditionalState(ConditionalOutcome.AMBIGUOUS, None, D("97.0")),
+        ConditionalState(ConditionalOutcome.RESCUE_FAILED, None, D("13.526")),
+        ConditionalState(ConditionalOutcome.UNVERIFIED, None, D("13.526")),
+        ConditionalState(ConditionalOutcome.AMBIGUOUS, None, D("13.526")),
     ],
     ids=["rescue_failed", "unverified", "ambiguous"],
 )
@@ -261,7 +266,7 @@ async def test_unconfirmed_stop_keeps_planned_level_with_note(ctx, state) -> Non
     outcome = await _record(session, entry, order, n, _readback(OrderStatus.FILLED, stop=state))
 
     assert outcome is not None
-    assert outcome.trade.stop_loss == D("97.0")
+    assert outcome.trade.stop_loss == D("13.526")
     assert NOTE_STOP_UNCONFIRMED in (outcome.trade.notes or "")
     assert NOTE_TAKE_UNCONFIRMED not in (outcome.trade.notes or "")
 
@@ -270,7 +275,7 @@ async def test_rescued_stop_level_is_used(ctx) -> None:  # type: ignore[no-untyp
     session, user, slot, n = ctx
     order = _order(user.id, slot.id, n.id)
     entry = await _entry(session, order, OrderStatus.FILLED)
-    rescued = ConditionalState(ConditionalOutcome.RESCUED, "7001", D("97.0"))
+    rescued = ConditionalState(ConditionalOutcome.RESCUED, "7001", D("13.526"))
 
     outcome = await _record(session, entry, order, n, _readback(OrderStatus.FILLED, stop=rescued))
 
@@ -279,21 +284,22 @@ async def test_rescued_stop_level_is_used(ctx) -> None:  # type: ignore[no-untyp
 
 async def test_entry_past_stop_alarm_and_trade_without_stop(ctx, caplog) -> None:  # type: ignore[no-untyped-def]
     """Проскальзывание дальше стопа: сделка пишется без стопа, пометка,
-    logger.error и тревога пользователю."""
+    logger.error и тревога пользователю. СИНТЕТИКА ИЗ ЖИВОГО #37, заменён
+    avgPrice (13.5 — ниже стопа 13.526)."""
     session, user, slot, n = ctx
     order = _order(user.id, slot.id, n.id)
     entry = await _entry(session, order, OrderStatus.FILLED)
 
     with caplog.at_level("ERROR", logger="app.execution.journal_entry"):
         outcome = await _record(
-            session, entry, order, n, _readback(OrderStatus.FILLED, fill=_fill(avgPrice="96.5"))
+            session, entry, order, n, _readback(OrderStatus.FILLED, fill=_fill(avgPrice="13.5"))
         )
 
     assert outcome is not None
     assert outcome.trade.stop_loss is None
     assert "за уровнем стопа" in (outcome.trade.notes or "")
     assert outcome.alarm == (
-        "⚠️ Вход исполнен за уровнем стопа: BTC-USDT LONG, цена 96.5, стоп 97. "
+        "⚠️ Вход исполнен за уровнем стопа: LINK-USDT LONG, цена 13.5, стоп 13.526. "
         "Убыток больше заявленного — проверь позицию в BingX"
     )
     assert "Вход исполнен за уровнем стопа" in caplog.text
@@ -329,19 +335,20 @@ def test_bot_trade_card_warns_to_close_on_exchange_first() -> None:
 async def test_filled_entry_keeps_position_id_and_entry_order_id(ctx) -> None:  # type: ignore[no-untyped-def]
     """Шаг 15.6: reconciler узнаёт позицию сделки по positionId (живьём —
     positionID в ответе ордера входа, int), а исполнение входа — по orderId
-    биржи: импорт и повторная сверка не заводят его второй раз."""
+    биржи: импорт и повторная сверка не заводят его второй раз. Живой #37
+    без замен."""
     session, user, slot, n = ctx
     order = _order(user.id, slot.id, n.id)
     entry = await _entry(session, order, OrderStatus.FILLED)
-    readback = _readback(OrderStatus.FILLED, fill=_fill(positionID=2104213344168714242))
+    readback = _readback(OrderStatus.FILLED)
 
     outcome = await _record(session, entry, order, n, readback)
 
     assert outcome is not None
     trade = outcome.trade
-    assert trade.external_position_id == "2104213344168714242"
+    assert trade.external_position_id == LINK_POSITION
     await session.refresh(trade, ["fills"])
-    assert [f.external_fill_id for f in trade.fills] == ["9001"]
+    assert [f.external_fill_id for f in trade.fills] == [LINK_ENTRY]
 
 
 async def test_unconfirmed_entry_has_no_position_id(ctx) -> None:  # type: ignore[no-untyped-def]

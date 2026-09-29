@@ -3,12 +3,12 @@
 Биржа — фейк, но ответы разбираются настоящими BingXClient._parse_order_fill
 и _parse_open_order: проверяется и строгость разбора, и форма.
 
-СИНТЕТИКА ДО 15.5.5, заменить живым снимком: ответ get_order по
-исполненному маркет-входу и условные ордера верхнего уровня в openOrders
-(во что превращаются вложенные TP/SL после исполнения входа) живьём не
-сняты. Форма элемента openOrders — от живого снимка 14.09
-(tests/test_bingx_client.py::TestGetOpenOrders, docs/architecture.md), только
-тип/stopPrice/сторона — условного ордера.
+Сценарий — живой LINK #3 (демо 27.09, tests/fixtures/bingx_demo_20260927.json):
+вход 2037.8 по 14.400 (#37), стоп 13.526 (…705) и тейк 16.263 (…704) — отдельные
+условники в openOrders, clientOrderId у них пустой. Ответы по умолчанию — живые
+без изменений. Сценарии, которых живьём нет (частичное исполнение, ручной стоп в
+openOrders, SHORT, отказ спасения), — синтетика ИЗ живого ответа заменой полей,
+помечена в тесте: «СИНТЕТИКА ИЗ ЖИВОГО <что>, заменены: <поля>».
 """
 
 from __future__ import annotations
@@ -49,61 +49,58 @@ from app.trading.enums import (
     SignalLevel,
     TradeSide,
 )
+from tests.bingx_fixtures import live_items
 from tests.conftest import cleanup_user
 
 pytestmark = pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="Нужен PostgreSQL")
 
 D = Decimal
 NOW = datetime.now(UTC)
-PRICE_PRECISION = 1
+PRICE_PRECISION = 3  # LINK-USDT: 14.400, 13.526
 
 
 def _ms(moment: datetime) -> int:
     return int(moment.timestamp() * 1000)
 
 
+# Живой LINK #3: вход ушёл в 08:15:32 (time входа — целые секунды), условники
+# созданы через 908 мс. Строка входа в БД получает это время явно — иначе
+# живые условники «созданы до входа» и отсекаются.
+LIVE_ENTRY_PLACED = datetime(2026, 9, 27, 8, 15, 32, tzinfo=UTC)
+LINK_ENTRY, LINK_STOP, LINK_TAKE = (
+    "2104122757776154624", "2104122758140616705", "2104122758140616704",
+)
+
+
 def _fill(**overrides: object) -> dict[str, object]:
-    """Сырой ответ get_order по исполненному маркет-входу — СИНТЕТИКА ДО
-    15.5.5. Разбирается фейком в момент вызова настоящим
-    BingXClient._parse_order_fill (None в overrides — поля нет вовсе)."""
-    raw: dict[str, object] = {
-        "symbol": "BTC-USDT", "orderId": "9001", "clientOrderId": "",
-        "side": "BUY", "positionSide": "LONG", "type": "MARKET",
-        "status": "FILLED", "origQty": "0.010", "executedQty": "0.010",
-        "avgPrice": "100.3", "commission": "-0.0005",
-    }
+    """Живой ответ get_order по исполненному входу LINK (#37); overrides —
+    синтетика из живого (None — поля нет вовсе). Разбирается фейком в момент
+    вызова настоящим BingXClient._parse_order_fill."""
+    [raw] = live_items("order #37 LINK-USDT ENTRY")
     raw.update(overrides)
     return {k: v for k, v in raw.items() if v is not None}
 
 
+def _live_open_orders() -> list[OpenOrder]:
+    """Живой openOrders LINK: [стоп …705, тейк …704]."""
+    return [BingXClient._parse_open_order(item) for item in live_items("openOrders LINK")]
+
+
 def _conditional(
     *, order_type: str, stop_price: str, order_id: str, side: str = "SELL",
-    position_side: str = "LONG", client_order_id: str = "", created: datetime | None = None,
-    symbol: str = "BTC-USDT",
+    position_side: str = "LONG", client_order_id: str = "",
+    created: datetime | None = None, symbol: str = "LINK-USDT",
 ) -> OpenOrder:
-    """Элемент openOrders в живой форме 14.09, тип и stopPrice — условного
-    ордера (СИНТЕТИКА ДО 15.5.5)."""
-    # Время — в момент вызова, не при импорте модуля: вход получает
-    # created_at от сервера БД в момент теста, и условник «из прошлого»
-    # отсекается проверкой «создан не раньше входа».
-    created = created or datetime.now(UTC) + timedelta(seconds=1)
-    return BingXClient._parse_open_order({
-        "symbol": symbol, "orderId": order_id,
-        "side": side, "positionSide": position_side, "type": order_type,
-        "origQty": "0.0000", "price": "0.0", "executedQty": "0.0000",
-        "avgPrice": "0.0", "status": "NEW", "stopPrice": stop_price,
-        "workingType": "MARK_PRICE", "clientOrderId": client_order_id,
-        "time": _ms(created), "updateTime": _ms(created),
-        "leverage": "10X", "reduceOnly": False, "closePosition": "true",
-        "takeProfit": {
-            "type": "TAKE_PROFIT", "quantity": 0, "stopPrice": 0,
-            "price": 0, "workingType": "", "stopGuaranteed": "false",
-        },
-        "stopLoss": {
-            "type": "STOP", "quantity": 0, "stopPrice": 0,
-            "price": 0, "workingType": "", "stopGuaranteed": "false",
-        },
+    """СИНТЕТИКА ИЗ ЖИВОГО стопа …705 (openOrders LINK), заменены: тип,
+    stopPrice, orderId, стороны, clientOrderId, time, символ."""
+    [raw, _take] = live_items("openOrders LINK")
+    moment = int((created or LIVE_ENTRY_PLACED + timedelta(milliseconds=908)).timestamp() * 1000)
+    raw.update({
+        "type": order_type, "stopPrice": stop_price, "orderId": int(order_id), "side": side,
+        "positionSide": position_side, "clientOrderId": client_order_id,
+        "time": moment, "updateTime": moment, "symbol": symbol,
     })
+    return BingXClient._parse_open_order(raw)
 
 
 class FakeReadbackClient(ExchangeClient):
@@ -168,6 +165,8 @@ class FakeReadbackClient(ExchangeClient):
         raise NotImplementedError
 
     async def get_positions(self, *, max_retries=None):  # type: ignore[no-untyped-def]
+        # Проверка ликвидации: liquidationPrice живьём не снят (значение вне
+        # allowlist разведки 27.09) — позиций нет, только предупреждение.
         return []
 
     async def get_api_restrictions(self):  # type: ignore[no-untyped-def]
@@ -193,6 +192,7 @@ class FakeReadbackClient(ExchangeClient):
 
 
 def _placed(order_id: str = "7001") -> OrderResult:
+    """СИНТЕТИКА: ответ POST условного ордера живьём не снят."""
     return BingXClient._parse_order({"orderId": order_id, "status": "NEW"})
 
 
@@ -206,9 +206,10 @@ async def ctx(unique_telegram_id):  # type: ignore[no-untyped-def]
             MistakeTypeRepository(session), settings,
         ).get_or_create(telegram_id=unique_telegram_id())
         slot = SignalRecord(
-            user_id=user.id, symbol="BTC-USDT", timeframe="1h", level=SignalLevel.READY,
+            user_id=user.id, symbol="LINK-USDT", timeframe="1h", level=SignalLevel.READY,
             setup="Пробой с ретестом", direction=SignalDirection.LONG, fingerprint="fp",
-            entry_low=D("100"), entry_high=D("101"), stop_loss=D("97"), take_profit=D("110"),
+            entry_low=D("14.35"), entry_high=D("14.43"), stop_loss=D("13.526"),
+            take_profit=D("16.263"),
             detail="d", expires_at=NOW + timedelta(hours=4),
         )
         session.add(slot)
@@ -228,13 +229,14 @@ def _order(
 ) -> OrderRequest:
     long = side is TradeSide.LONG
     return OrderRequest(
-        user_id=user_id, signal_id=slot_id, notification_id=nid, symbol="BTC-USDT",
+        user_id=user_id, signal_id=slot_id, notification_id=nid, symbol="LINK-USDT",
         side=OrderSide.BUY if long else OrderSide.SELL, position_side=side,
-        quantity=D("0.010"), entry_price=D("100.1"), leverage=10,
-        stop_loss=D("97.0") if long else D("103.0"),
-        take_profit=D("110.0") if long else D("90.0"),
-        notional=D("1"), margin=D("0.1"), risk_amount=D("0.03"),
-        risk_percent=D("1"), risk_reward=D("3"),
+        quantity=D("2037.8"), entry_price=D("14.398"), leverage=10,
+        # SHORT — зеркало живого LONG (синтетика): стоп выше, тейк ниже.
+        stop_loss=D("13.526") if long else D("15.270"),
+        take_profit=D("16.263") if long else D("12.533"),
+        notional=D("29340.24"), margin=D("2934.02"), risk_amount=D("1776.96"),
+        risk_percent=D("1"), risk_reward=D("2.19"),
     )
 
 
@@ -243,10 +245,10 @@ async def _entry(  # type: ignore[no-untyped-def]
 ) -> ExecutionOrder:
     row = build_entry_order_pending(order)
     row.status = status
-    row.raw_response = {"orderId": "9001"}
+    row.raw_response = {"orderId": LINK_ENTRY}
+    row.created_at = LIVE_ENTRY_PLACED
     session.add(row)
     await session.flush()
-    await session.refresh(row)  # created_at с сервера
     return row
 
 
@@ -272,14 +274,14 @@ async def _verify(session, client, settings, entry, order, sleep=None, side="LON
     )
 
 
-def _our_stop(order_id: str = "501", **kw: object) -> OpenOrder:
-    return _conditional(order_type="STOP_MARKET", stop_price="97.0", order_id=order_id, **kw)  # type: ignore[arg-type]
+def _our_stop() -> OpenOrder:
+    """Живой стоп …705 из openOrders LINK, без изменений."""
+    return _live_open_orders()[0]
 
 
-def _our_take(order_id: str = "502", **kw: object) -> OpenOrder:
-    return _conditional(  # type: ignore[arg-type]
-        order_type="TAKE_PROFIT_MARKET", stop_price="110.0", order_id=order_id, **kw
-    )
+def _our_take() -> OpenOrder:
+    """Живой тейк …704 из openOrders LINK, без изменений."""
+    return _live_open_orders()[1]
 
 
 # --- исполнение входа -------------------------------------------------------
@@ -287,52 +289,37 @@ def _our_take(order_id: str = "502", **kw: object) -> OpenOrder:
 
 async def test_submitted_with_stop_and_take_in_place(ctx) -> None:  # type: ignore[no-untyped-def]
     """SUBMITTED + стоп и тейк на месте → строки S/T со своими orderId,
-    вход FILLED, ни одной попытки что-либо выставить."""
+    вход FILLED, ни одной попытки что-либо выставить. Всё живое: GET #37 и
+    openOrders LINK без изменений."""
     session, user, slot, n, settings = ctx
     order = _order(user.id, slot.id, n.id)
     entry = await _entry(session, order)
-    client = FakeReadbackClient(fills=[_fill()], open_orders=[[_our_stop(), _our_take()]])
+    client = FakeReadbackClient(fills=[_fill()], open_orders=[_live_open_orders()])
 
     result = await _verify(session, client, settings, entry, order)
 
     assert entry.status is OrderStatus.FILLED
-    assert result.fill is not None and result.fill.avg_price == D("100.3")
-    assert result.stop.outcome is ConditionalOutcome.FOUND and result.stop.order_id == "501"
-    assert result.take.outcome is ConditionalOutcome.FOUND and result.take.order_id == "502"
+    assert result.fill is not None
+    assert (result.fill.avg_price, result.fill.executed_qty) == (D("14.400"), D("2037.8"))
+    assert result.stop.outcome is ConditionalOutcome.FOUND and result.stop.order_id == LINK_STOP
+    assert result.take.outcome is ConditionalOutcome.FOUND and result.take.order_id == LINK_TAKE
     assert result.alarm is None
+    assert entry.exchange_order_id == LINK_ENTRY
     [s] = await _rows(session, n.id, OrderRole.STOP_LOSS)
     [t] = await _rows(session, n.id, OrderRole.TAKE_PROFIT)
     assert (s.exchange_order_id, s.client_order_id, s.status) == (
-        "501", f"tj{n.id}u{user.id}S", OrderStatus.SUBMITTED
+        LINK_STOP, f"tj{n.id}u{user.id}S", OrderStatus.SUBMITTED
     )
-    assert (t.exchange_order_id, t.client_order_id) == ("502", f"tj{n.id}u{user.id}T")
+    assert (t.exchange_order_id, t.client_order_id) == (LINK_TAKE, f"tj{n.id}u{user.id}T")
     assert client.count("place_conditional_order") == 0
     assert client.count("get_open_orders") == 1
     assert all(c[1]["max_retries"] == 1 for c in client.calls if "max_retries" in c[1])
 
 
-async def test_readback_retries_until_filled(ctx) -> None:  # type: ignore[no-untyped-def]
-    session, user, slot, n, settings = ctx
-    order = _order(user.id, slot.id, n.id)
-    entry = await _entry(session, order)
-    client = FakeReadbackClient(
-        fills=[_fill(status="NEW", executedQty="0"), _fill()],
-        open_orders=[[_our_stop(), _our_take()]],
-    )
-    sleeps = _Sleeps()
-
-    await _verify(session, client, settings, entry, order, sleeps)
-
-    assert client.count("get_order_fill") == 2
-    assert sleeps.calls[0] == settings.exec_order_readback_delay_ms / 1000
-    assert entry.status is OrderStatus.FILLED
-
-
 def _live_new() -> dict[str, object]:
     """Живой ответ GET по ордеру в статусе NEW (#38, демо 27.09): commission
-    и profit — пустые строки, avgPrice "0.000"."""
-    from tests.bingx_fixtures import live_items
-
+    и profit — пустые строки, avgPrice "0.000". Живого NEW маркет-входа нет —
+    это ближайшая живая форма."""
     [raw] = live_items("order #38 LINK-USDT STOP_LOSS")
     return raw
 
@@ -346,12 +333,14 @@ async def test_live_new_form_is_retried_until_filled(ctx) -> None:  # type: igno
     client = FakeReadbackClient(
         fills=[_live_new(), _fill()], open_orders=[[_our_stop(), _our_take()]]
     )
+    sleeps = _Sleeps()
 
-    result = await _verify(session, client, settings, entry, order)
+    result = await _verify(session, client, settings, entry, order, sleeps)
 
     assert client.count("get_order_fill") == 2
+    assert sleeps.calls[0] == settings.exec_order_readback_delay_ms / 1000
     assert entry.status is OrderStatus.FILLED
-    assert result.fill is not None and result.fill.avg_price == D("100.3")
+    assert result.fill is not None and result.fill.avg_price == D("14.400")
     assert not any("commission" in w for w in result.warnings)
 
 
@@ -374,7 +363,7 @@ async def test_live_new_form_never_filled_is_unconfirmed(ctx) -> None:  # type: 
 async def test_missing_avg_price_is_incomplete_not_zero(ctx) -> None:  # type: ignore[no-untyped-def]
     """Нет avgPrice → ReadbackIncomplete, а не цена 0: вход остаётся
     SUBMITTED, пользователь видит, какого поля нет, стоп всё равно
-    проверяется."""
+    проверяется. СИНТЕТИКА ИЗ ЖИВОГО #37, убран avgPrice."""
     session, user, slot, n, settings = ctx
     order = _order(user.id, slot.id, n.id)
     entry = await _entry(session, order)
@@ -391,16 +380,18 @@ async def test_missing_avg_price_is_incomplete_not_zero(ctx) -> None:  # type: i
 
 
 async def test_partial_fill_warns_and_still_checks_stop(ctx) -> None:  # type: ignore[no-untyped-def]
+    """СИНТЕТИКА ИЗ ЖИВОГО #37, заменён executedQty. Статус частичного
+    исполнения живьём не снят — status FILLED, как у живого."""
     session, user, slot, n, settings = ctx
     order = _order(user.id, slot.id, n.id)
     entry = await _entry(session, order)
     client = FakeReadbackClient(
-        fills=[_fill(executedQty="0.004")], open_orders=[[_our_stop(), _our_take()]]
+        fills=[_fill(executedQty="1000.0")], open_orders=[[_our_stop(), _our_take()]]
     )
 
     result = await _verify(session, client, settings, entry, order)
 
-    assert any("0.004 из 0.01" in w for w in result.warnings)
+    assert any("1000 из 2037.8" in w for w in result.warnings)
     assert result.stop.outcome is ConditionalOutcome.FOUND
 
 
@@ -415,12 +406,14 @@ async def test_missing_stop_is_rescued_with_close_position(  # type: ignore[no-u
     ctx, side, closing, position_side
 ) -> None:
     """Стопа нет и после повторного чтения → ровно один отдельный
-    STOP_MARKET на закрывающей стороне, по уровню, ушедшему во вход."""
+    STOP_MARKET на закрывающей стороне, по уровню, ушедшему во вход.
+    LONG: живой тейк …704 без стопа рядом (живой список минус стоп); SHORT —
+    СИНТЕТИКА ИЗ ЖИВОГО тейка, заменены стороны и уровень."""
     session, user, slot, n, settings = ctx
     order = _order(user.id, slot.id, n.id, side=side)
     entry = await _entry(session, order)
-    take = _conditional(
-        order_type="TAKE_PROFIT_MARKET", stop_price=str(order.take_profit), order_id="502",
+    take = _our_take() if side is TradeSide.LONG else _conditional(
+        order_type="TAKE_PROFIT_MARKET", stop_price=str(order.take_profit), order_id=LINK_TAKE,
         side=closing, position_side=position_side,
     )
     client = FakeReadbackClient(
@@ -474,7 +467,7 @@ async def test_failed_stop_rescue_raises_alarm_once(  # type: ignore[no-untyped-
 
     assert client.count("place_conditional_order") == 1
     assert result.stop.outcome is ConditionalOutcome.RESCUE_FAILED
-    assert result.alarm == "⚠️ ПОЗИЦИЯ БЕЗ СТОПА: BTC-USDT LONG 0.01 — поставь стоп руками."
+    assert result.alarm == "⚠️ ПОЗИЦИЯ БЕЗ СТОПА: LINK-USDT LONG 2037.8 — поставь стоп руками."
     assert "Позиция без стопа" in caplog.text
     [s] = await _rows(session, n.id, OrderRole.STOP_LOSS)
     assert s.status is expected_status
@@ -482,6 +475,32 @@ async def test_failed_stop_rescue_raises_alarm_once(  # type: ignore[no-untyped-
     # Повторный вызов (reconciler) — повторной попытки нет.
     await _verify(session, client, settings, entry, order)
     assert client.count("place_conditional_order") == 1
+
+
+async def test_both_missing_live_empty_open_orders_rescues_both(ctx) -> None:  # type: ignore[no-untyped-def]
+    """openOrders LINK — живой пустой ответ (демо 29.09): спасаются оба,
+    стоп и тейк, по одной попытке."""
+    from tests.bingx_fixtures import LINK_MANUAL_STOP
+
+    session, user, slot, n, settings = ctx
+    order = _order(user.id, slot.id, n.id)
+    entry = await _entry(session, order)
+    empty = [
+        BingXClient._parse_open_order(item)
+        for item in live_items("openOrders LINK", LINK_MANUAL_STOP)
+    ]
+    assert empty == []
+    client = FakeReadbackClient(
+        fills=[_fill()], open_orders=[empty], place_results=[_placed("7001"), _placed("7002")]
+    )
+
+    result = await _verify(session, client, settings, entry, order)
+
+    types = [c[1]["order_type"] for c in client.calls if c[0] == "place_conditional_order"]
+    assert types == ["STOP_MARKET", "TAKE_PROFIT_MARKET"]
+    assert result.stop.outcome is ConditionalOutcome.RESCUED
+    assert result.take.outcome is ConditionalOutcome.RESCUED
+    assert result.alarm is None
 
 
 async def test_missing_take_one_attempt_no_alarm(ctx) -> None:  # type: ignore[no-untyped-def]
@@ -510,15 +529,16 @@ async def test_unknown_found_continues_as_submitted(ctx) -> None:  # type: ignor
     order = _order(user.id, slot.id, n.id)
     entry = await _entry(session, order, OrderStatus.UNKNOWN)
     entry.raw_response = None
+    entry.exchange_order_id = None
     client = FakeReadbackClient(
-        fills=[_fill(orderId="9555")], open_orders=[[_our_stop(), _our_take()]]
+        fills=[_fill()], open_orders=[[_our_stop(), _our_take()]]
     )
     sleeps = _Sleeps()
 
     result = await _verify(session, client, settings, entry, order, sleeps)
 
     assert sleeps.calls[0] == settings.exec_unknown_search_delay_ms / 1000
-    assert entry.exchange_order_id == "9555"
+    assert entry.exchange_order_id == LINK_ENTRY
     assert entry.status is OrderStatus.FILLED
     assert result.stop.outcome is ConditionalOutcome.FOUND
 
@@ -528,7 +548,8 @@ async def test_unknown_not_found_is_not_resent(ctx) -> None:  # type: ignore[no-
     order = _order(user.id, slot.id, n.id)
     entry = await _entry(session, order, OrderStatus.UNKNOWN)
     client = FakeReadbackClient(
-        fills=[ExchangeResponseError("order not exist", code=109414, payload=None)]
+        # Код и msg — живые (GET по несуществующему clientOrderID, демо 29.09).
+        fills=[ExchangeResponseError("order not exist", code=109421, payload=None)]
     )
 
     result = await _verify(session, client, settings, entry, order)
@@ -547,8 +568,8 @@ async def test_unknown_not_found_is_not_resent(ctx) -> None:  # type: ignore[no-
 @pytest.mark.parametrize(
     "manual",
     [
-        pytest.param({"created": NOW - timedelta(hours=1)}, id="создан до входа"),
-        pytest.param({"stop_price": "96.5"}, id="другая цена"),
+        pytest.param({"created": LIVE_ENTRY_PLACED - timedelta(hours=1)}, id="создан до входа"),
+        pytest.param({"stop_price": "13.4"}, id="другая цена"),
         pytest.param({"client_order_id": "tj999999u1S"}, id="чужой вход бота"),
         pytest.param({"position_side": "SHORT", "side": "BUY"}, id="другая сторона"),
         pytest.param({"symbol": "ETH-USDT"}, id="другой символ"),
@@ -556,11 +577,12 @@ async def test_unknown_not_found_is_not_resent(ctx) -> None:  # type: ignore[no-
 )
 async def test_manual_stop_is_not_taken_for_ours(ctx, manual) -> None:  # type: ignore[no-untyped-def]
     """Ручной стоп по тому же символу не принимается за наш — стоп
-    спасается отдельно."""
+    спасается отдельно. Ручной условник в openOrders живьём не снят (29.09 он
+    уже сработал) — СИНТЕТИКА ИЗ ЖИВОГО стопа …705."""
     session, user, slot, n, settings = ctx
     order = _order(user.id, slot.id, n.id)
     entry = await _entry(session, order)
-    fields = {"order_type": "STOP_MARKET", "stop_price": "97.0", "order_id": "666", **manual}
+    fields = {"order_type": "STOP_MARKET", "stop_price": "13.526", "order_id": "666", **manual}
     foreign = _conditional(**fields)  # type: ignore[arg-type]
     client = FakeReadbackClient(
         fills=[_fill()], open_orders=[[foreign, _our_take()]], place_results=[_placed()]
@@ -582,9 +604,9 @@ async def test_stop_claimed_by_other_entry_is_not_ours(ctx) -> None:  # type: ig
     other_order = _order(user.id, slot.id, other.id)
     other_stop = ExecutionOrder(
         user_id=user.id, signal_id=slot.id, notification_id=other.id,
-        client_order_id=other_order.stop_loss_client_order_id, symbol="BTC-USDT",
+        client_order_id=other_order.stop_loss_client_order_id, symbol="LINK-USDT",
         side=OrderSide.SELL, position_side=TradeSide.LONG, order_type=OrderType.STOP_MARKET,
-        role=OrderRole.STOP_LOSS, status=OrderStatus.SUBMITTED, exchange_order_id="501",
+        role=OrderRole.STOP_LOSS, status=OrderStatus.SUBMITTED, exchange_order_id=LINK_STOP,
     )
     session.add(other_stop)
     await session.flush()
@@ -592,7 +614,7 @@ async def test_stop_claimed_by_other_entry_is_not_ours(ctx) -> None:  # type: ig
     order = _order(user.id, slot.id, n.id)
     entry = await _entry(session, order)
     client = FakeReadbackClient(
-        fills=[_fill()], open_orders=[[_our_stop("501"), _our_take()]], place_results=[_placed()]
+        fills=[_fill()], open_orders=[_live_open_orders()], place_results=[_placed()]
     )
 
     result = await _verify(session, client, settings, entry, order)
@@ -601,11 +623,16 @@ async def test_stop_claimed_by_other_entry_is_not_ours(ctx) -> None:  # type: ig
 
 
 async def test_two_matching_stops_are_ambiguous_no_rescue(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Живой стоп …705 и его копия с другим orderId (синтетика из живого)."""
     session, user, slot, n, settings = ctx
     order = _order(user.id, slot.id, n.id)
     entry = await _entry(session, order)
     client = FakeReadbackClient(
-        fills=[_fill()], open_orders=[[_our_stop("501"), _our_stop("503"), _our_take()]]
+        fills=[_fill()], open_orders=[[
+            _our_stop(),
+            _conditional(order_type="STOP_MARKET", stop_price="13.526", order_id="503"),
+            _our_take(),
+        ]]
     )
 
     result = await _verify(session, client, settings, entry, order)
@@ -617,12 +644,13 @@ async def test_two_matching_stops_are_ambiguous_no_rescue(ctx) -> None:  # type:
 
 
 def test_find_our_conditional_matches_rounded_level() -> None:
-    """Уровень сравнивается до шага цены: 97.04 ≈ 97.0 при precision 1."""
-    stop = _conditional(order_type="STOP_MARKET", stop_price="97.04", order_id="1")
+    """Уровень сравнивается до шага цены: 13.5264 ≈ 13.526 при precision 3
+    (СИНТЕТИКА ИЗ ЖИВОГО стопа, заменён stopPrice)."""
+    stop = _conditional(order_type="STOP_MARKET", stop_price="13.5264", order_id="1")
     match = find_our_conditional(
-        [stop], symbol="BTC-USDT", order_type=OrderType.STOP_MARKET, position_side="LONG",
-        closing_side=OrderSide.SELL, level=D("97.0"), price_precision=1,
-        placed_after=NOW, claimed_order_ids=set(), own_client_order_id="tj5u1S",
+        [stop], symbol="LINK-USDT", order_type=OrderType.STOP_MARKET, position_side="LONG",
+        closing_side=OrderSide.SELL, level=D("13.526"), price_precision=PRICE_PRECISION,
+        placed_after=LIVE_ENTRY_PLACED, claimed_order_ids=set(), own_client_order_id="tj5u1S",
     )
     assert match.order is stop
 
@@ -631,12 +659,12 @@ def test_find_our_conditional_live_lowercase_own_client_order_id() -> None:
     """Р1: условник с нашим cid в живом регистре биржи (строчными: tj…s при
     tj…S в БД) — наш."""
     stop = _conditional(
-        order_type="STOP_MARKET", stop_price="97.0", order_id="1", client_order_id="tj5u1s"
+        order_type="STOP_MARKET", stop_price="13.526", order_id="1", client_order_id="tj5u1s"
     )
     match = find_our_conditional(
-        [stop], symbol="BTC-USDT", order_type=OrderType.STOP_MARKET, position_side="LONG",
-        closing_side=OrderSide.SELL, level=D("97.0"), price_precision=1,
-        placed_after=NOW, claimed_order_ids=set(), own_client_order_id="tj5u1S",
+        [stop], symbol="LINK-USDT", order_type=OrderType.STOP_MARKET, position_side="LONG",
+        closing_side=OrderSide.SELL, level=D("13.526"), price_precision=PRICE_PRECISION,
+        placed_after=LIVE_ENTRY_PLACED, claimed_order_ids=set(), own_client_order_id="tj5u1S",
     )
     assert match.order is stop
 
@@ -645,13 +673,13 @@ def test_find_our_conditional_foreign_bot_cid_any_case_is_not_ours() -> None:
     """Р1, СИНТЕТИКА ИЗ ЖИВОГО (заменён регистр): cid другого входа бота
     заглавными — всё равно чужой, сравнение без учёта регистра."""
     foreign = _conditional(
-        order_type="STOP_MARKET", stop_price="97.0", order_id="2",
+        order_type="STOP_MARKET", stop_price="13.526", order_id="2",
         client_order_id="TJ999999U1S",
     )
     match = find_our_conditional(
-        [foreign], symbol="BTC-USDT", order_type=OrderType.STOP_MARKET, position_side="LONG",
-        closing_side=OrderSide.SELL, level=D("97.0"), price_precision=1,
-        placed_after=NOW, claimed_order_ids=set(), own_client_order_id="tj5u1S",
+        [foreign], symbol="LINK-USDT", order_type=OrderType.STOP_MARKET, position_side="LONG",
+        closing_side=OrderSide.SELL, level=D("13.526"), price_precision=PRICE_PRECISION,
+        placed_after=LIVE_ENTRY_PLACED, claimed_order_ids=set(), own_client_order_id="tj5u1S",
     )
     assert match.order is None
 
@@ -669,7 +697,9 @@ async def test_open_orders_failure_is_unverified_alarm_without_rescue(ctx) -> No
 
     assert client.count("place_conditional_order") == 0
     assert result.stop.outcome is ConditionalOutcome.UNVERIFIED
-    assert result.alarm == "⚠️ СТОП НЕ ПОДТВЕРЖДЁН: BTC-USDT LONG 0.01 — проверь позицию в BingX."
+    assert result.alarm == (
+        "⚠️ СТОП НЕ ПОДТВЕРЖДЁН: LINK-USDT LONG 2037.8 — проверь позицию в BingX."
+    )
     [s] = await _rows(session, n.id, OrderRole.STOP_LOSS)
     assert (s.status, s.error_code, s.client_order_id) == (
         OrderStatus.ERROR, "STOP_UNVERIFIED", None
@@ -708,7 +738,7 @@ async def test_pending_rescue_row_is_not_resent(ctx) -> None:  # type: ignore[no
     ):
         session.add(ExecutionOrder(
             user_id=user.id, signal_id=slot.id, notification_id=n.id, client_order_id=cid,
-            symbol="BTC-USDT", side=OrderSide.SELL, position_side=TradeSide.LONG,
+            symbol="LINK-USDT", side=OrderSide.SELL, position_side=TradeSide.LONG,
             order_type=OrderType.STOP_MARKET, role=role, status=OrderStatus.PENDING,
         ))
     await session.flush()
@@ -749,7 +779,7 @@ async def test_failed_rescue_alarm_has_event_kind(ctx) -> None:  # type: ignore[
 
     [alarm] = result.alarms
     assert alarm.kind.value == "STOP_RESCUE_FAILED"
-    assert alarm.text == "⚠️ ПОЗИЦИЯ БЕЗ СТОПА: BTC-USDT LONG 0.01 — поставь стоп руками."
+    assert alarm.text == "⚠️ ПОЗИЦИЯ БЕЗ СТОПА: LINK-USDT LONG 2037.8 — поставь стоп руками."
 
 
 async def test_unverified_stop_alarm_has_event_kind(ctx) -> None:  # type: ignore[no-untyped-def]
@@ -762,4 +792,4 @@ async def test_unverified_stop_alarm_has_event_kind(ctx) -> None:  # type: ignor
 
     [alarm] = result.alarms
     assert alarm.kind.value == "STOP_UNVERIFIED"
-    assert alarm.text.startswith("⚠️ СТОП НЕ ПОДТВЕРЖДЁН: BTC-USDT LONG 0.01")
+    assert alarm.text.startswith("⚠️ СТОП НЕ ПОДТВЕРЖДЁН: LINK-USDT LONG 2037.8")

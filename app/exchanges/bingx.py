@@ -1138,7 +1138,8 @@ class BingXClient(ExchangeClient):
         self, symbol: str, client_order_id: str, *, max_retries: int | None = None
     ) -> OrderFill:
         """Шаг 15.5.3: тот же GET, что у get_order, но строгий разбор
-        (_parse_order_fill). Фикстуры тестов — синтетика до 15.5.5."""
+        (_parse_order_fill). Форма ответа снята живьём (GET #37, демо 27.09):
+        поиск по clientOrderID от регистра не зависит, в ответе cid строчными."""
         params = {"symbol": symbol, "clientOrderID": client_order_id}
         data = await self._request(TRADE_ORDER, params, signed=True, max_retries=max_retries)
         order = data.get("order", data) if isinstance(data, dict) else None

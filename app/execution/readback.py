@@ -25,8 +25,10 @@
 он может быть пустым. Сверять с биржей такие строки — по exchange_order_id
 (orderId); спасённые — по clientOrderID, он у них наш.
 
-Форма ответов get_order/openOrders для исполненного маркет-входа живьём не
-снята (раздел 16, 15.5.5): фикстуры тестов — синтетика.
+Форма ответов get_order/openOrders для исполненного маркет-входа снята живьём
+(LINK #3, демо 27.09, tests/fixtures/bingx_demo_20260927.json): вложенные TP/SL
+входа на бирже — отдельные условники с пустым clientOrderId, reduceOnly true.
+Ответ POST спасения (place_conditional_order) живьём не снят.
 """
 
 from __future__ import annotations
