@@ -1,0 +1,1771 @@
+{
+ "captured_at": "2026-09-29T15:17:13+00:00",
+ "host": "live+demo",
+ "_note": "Живые ответы публичных ручек BingX, только GET без ключей и подписи, 29.09.2026, по одному запросу на (хост, ручку): live — open-api.bingx.com (публичный клиент сканера), demo — open-api-vst.bingx.com (карточка на демо-ключе). keys — полный список ключей элемента, fields — значения как пришли. klines v3: элемент — объект без closeTime. contracts: count — число записей, keys_union — ключи по всем записям, numeric_stats — пропуски/пустоты по числовым полям во всём списке (0), status_values — все значения status; items — только BTC/ETH/LINK/SOL.",
+ "calls": [
+  {
+   "label": "ticker BTC (live)",
+   "host": "live",
+   "path": "/openApi/swap/v2/quote/ticker",
+   "params": {
+    "symbol": "BTC-USDT"
+   },
+   "http_status": 200,
+   "rate_remain": "499",
+   "rate_expire_ms": "10000",
+   "code": 0,
+   "msg": "",
+   "top_keys": [
+    "code",
+    "data",
+    "msg"
+   ],
+   "data_type": "dict",
+   "items": [
+    {
+     "keys": [
+      "askPrice",
+      "askQty",
+      "bidPrice",
+      "bidQty",
+      "closeTime",
+      "highPrice",
+      "lastPrice",
+      "lastQty",
+      "lowPrice",
+      "openPrice",
+      "openTime",
+      "priceChange",
+      "priceChangePercent",
+      "quoteVolume",
+      "symbol",
+      "volume"
+     ],
+     "fields": {
+      "symbol": {
+       "value": "BTC-USDT",
+       "type": "str"
+      },
+      "priceChange": {
+       "value": "501.5",
+       "type": "str"
+      },
+      "priceChangePercent": {
+       "value": "0.60",
+       "type": "str"
+      },
+      "lastPrice": {
+       "value": "83429.5",
+       "type": "str"
+      },
+      "lastQty": {
+       "value": "0.0009",
+       "type": "str"
+      },
+      "highPrice": {
+       "value": "84538.0",
+       "type": "str"
+      },
+      "lowPrice": {
+       "value": "82729.2",
+       "type": "str"
+      },
+      "volume": {
+       "value": "9079.6600",
+       "type": "str"
+      },
+      "quoteVolume": {
+       "value": "760400702.52",
+       "type": "str"
+      },
+      "openPrice": {
+       "value": "82928.0",
+       "type": "str"
+      },
+      "openTime": {
+       "value": 1790608633000,
+       "type": "int"
+      },
+      "closeTime": {
+       "value": 1790695033000,
+       "type": "int"
+      },
+      "askPrice": {
+       "value": "83425.2",
+       "type": "str"
+      },
+      "askQty": {
+       "value": "26.8192",
+       "type": "str"
+      },
+      "bidPrice": {
+       "value": "83425.0",
+       "type": "str"
+      },
+      "bidQty": {
+       "value": "0.9062",
+       "type": "str"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "label": "klines BTC 1h (live)",
+   "host": "live",
+   "path": "/openApi/swap/v3/quote/klines",
+   "params": {
+    "symbol": "BTC-USDT",
+    "interval": "1h",
+    "limit": 3
+   },
+   "http_status": 200,
+   "rate_remain": "499",
+   "rate_expire_ms": "10000",
+   "code": 0,
+   "msg": "",
+   "top_keys": [
+    "code",
+    "data",
+    "msg"
+   ],
+   "data_type": "list",
+   "count": 3,
+   "items": [
+    {
+     "keys": [
+      "close",
+      "high",
+      "low",
+      "open",
+      "time",
+      "volume"
+     ],
+     "fields": {
+      "open": {
+       "value": "83713.7",
+       "type": "str"
+      },
+      "close": {
+       "value": "83429.5",
+       "type": "str"
+      },
+      "high": {
+       "value": "83719.4",
+       "type": "str"
+      },
+      "low": {
+       "value": "83328.0",
+       "type": "str"
+      },
+      "volume": {
+       "value": "388.4410",
+       "type": "str"
+      },
+      "time": {
+       "value": 1790694000000,
+       "type": "int"
+      }
+     }
+    },
+    {
+     "keys": [
+      "close",
+      "high",
+      "low",
+      "open",
+      "time",
+      "volume"
+     ],
+     "fields": {
+      "open": {
+       "value": "84162.2",
+       "type": "str"
+      },
+      "close": {
+       "value": "83713.7",
+       "type": "str"
+      },
+      "high": {
+       "value": "84248.7",
+       "type": "str"
+      },
+      "low": {
+       "value": "83646.9",
+       "type": "str"
+      },
+      "volume": {
+       "value": "741.8445",
+       "type": "str"
+      },
+      "time": {
+       "value": 1790690400000,
+       "type": "int"
+      }
+     }
+    },
+    {
+     "keys": [
+      "close",
+      "high",
+      "low",
+      "open",
+      "time",
+      "volume"
+     ],
+     "fields": {
+      "open": {
+       "value": "84283.4",
+       "type": "str"
+      },
+      "close": {
+       "value": "84162.2",
+       "type": "str"
+      },
+      "high": {
+       "value": "84538.0",
+       "type": "str"
+      },
+      "low": {
+       "value": "83973.9",
+       "type": "str"
+      },
+      "volume": {
+       "value": "566.6202",
+       "type": "str"
+      },
+      "time": {
+       "value": 1790686800000,
+       "type": "int"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "label": "premiumIndex BTC (live)",
+   "host": "live",
+   "path": "/openApi/swap/v2/quote/premiumIndex",
+   "params": {
+    "symbol": "BTC-USDT"
+   },
+   "http_status": 200,
+   "rate_remain": "499",
+   "rate_expire_ms": "10000",
+   "code": 0,
+   "msg": "",
+   "top_keys": [
+    "code",
+    "data",
+    "msg"
+   ],
+   "data_type": "dict",
+   "items": [
+    {
+     "keys": [
+      "fundingIntervalHours",
+      "indexPrice",
+      "lastFundingRate",
+      "markPrice",
+      "maxFundingRate",
+      "minFundingRate",
+      "nextFundingTime",
+      "symbol",
+      "updateTime"
+     ],
+     "fields": {
+      "symbol": {
+       "value": "BTC-USDT",
+       "type": "str"
+      },
+      "markPrice": {
+       "value": "83428.9",
+       "type": "str"
+      },
+      "indexPrice": {
+       "value": "83462.7",
+       "type": "str"
+      },
+      "lastFundingRate": {
+       "value": "0.00002400",
+       "type": "str"
+      },
+      "nextFundingTime": {
+       "value": 1790697600000,
+       "type": "int"
+      },
+      "fundingIntervalHours": {
+       "value": 8,
+       "type": "int"
+      },
+      "minFundingRate": {
+       "value": "-0.003000",
+       "type": "str"
+      },
+      "maxFundingRate": {
+       "value": "0.003000",
+       "type": "str"
+      },
+      "updateTime": {
+       "value": 1790668800000,
+       "type": "int"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "label": "contracts (live)",
+   "host": "live",
+   "path": "/openApi/swap/v2/quote/contracts",
+   "params": {},
+   "http_status": 200,
+   "rate_remain": "499",
+   "rate_expire_ms": "10000",
+   "code": 0,
+   "msg": "",
+   "top_keys": [
+    "code",
+    "data",
+    "msg"
+   ],
+   "data_type": "list",
+   "count": 1239,
+   "keys_union": [
+    "apiStateClose",
+    "apiStateOpen",
+    "asset",
+    "brokerState",
+    "contractId",
+    "currency",
+    "displayName",
+    "ensureTrigger",
+    "feeRate",
+    "launchTime",
+    "maintainTime",
+    "makerFeeRate",
+    "offTime",
+    "pricePrecision",
+    "quantityPrecision",
+    "size",
+    "status",
+    "symbol",
+    "takerFeeRate",
+    "tradeMinLimit",
+    "tradeMinQuantity",
+    "tradeMinUSDT",
+    "triggerFeeRate"
+   ],
+   "status_values": [
+    "1",
+    "25"
+   ],
+   "numeric_stats": {
+    "pricePrecision": {
+     "missing": [],
+     "empty": [],
+     "types": [
+      "int"
+     ]
+    },
+    "quantityPrecision": {
+     "missing": [],
+     "empty": [],
+     "types": [
+      "int"
+     ]
+    },
+    "tradeMinQuantity": {
+     "missing": [],
+     "empty": [],
+     "types": [
+      "float",
+      "int"
+     ]
+    },
+    "tradeMinUSDT": {
+     "missing": [],
+     "empty": [],
+     "types": [
+      "int"
+     ]
+    },
+    "status": {
+     "missing": [],
+     "empty": [],
+     "types": [
+      "int"
+     ]
+    }
+   },
+   "items": [
+    {
+     "keys": [
+      "apiStateClose",
+      "apiStateOpen",
+      "asset",
+      "brokerState",
+      "contractId",
+      "currency",
+      "displayName",
+      "ensureTrigger",
+      "feeRate",
+      "launchTime",
+      "maintainTime",
+      "makerFeeRate",
+      "offTime",
+      "pricePrecision",
+      "quantityPrecision",
+      "size",
+      "status",
+      "symbol",
+      "takerFeeRate",
+      "tradeMinLimit",
+      "tradeMinQuantity",
+      "tradeMinUSDT",
+      "triggerFeeRate"
+     ],
+     "fields": {
+      "contractId": {
+       "value": "100",
+       "type": "str"
+      },
+      "symbol": {
+       "value": "BTC-USDT",
+       "type": "str"
+      },
+      "size": {
+       "value": "0.0001",
+       "type": "str"
+      },
+      "quantityPrecision": {
+       "value": 4,
+       "type": "int"
+      },
+      "pricePrecision": {
+       "value": 1,
+       "type": "int"
+      },
+      "feeRate": {
+       "value": 0.0005,
+       "type": "float"
+      },
+      "makerFeeRate": {
+       "value": 0.0002,
+       "type": "float"
+      },
+      "takerFeeRate": {
+       "value": 0.0005,
+       "type": "float"
+      },
+      "tradeMinLimit": {
+       "value": 0,
+       "type": "int"
+      },
+      "tradeMinQuantity": {
+       "value": 0.0001,
+       "type": "float"
+      },
+      "tradeMinUSDT": {
+       "value": 2,
+       "type": "int"
+      },
+      "currency": {
+       "value": "USDT",
+       "type": "str"
+      },
+      "asset": {
+       "value": "BTC",
+       "type": "str"
+      },
+      "status": {
+       "value": 1,
+       "type": "int"
+      },
+      "apiStateOpen": {
+       "value": "true",
+       "type": "str"
+      },
+      "apiStateClose": {
+       "value": "true",
+       "type": "str"
+      },
+      "ensureTrigger": {
+       "value": true,
+       "type": "bool"
+      },
+      "triggerFeeRate": {
+       "value": "0.00050000",
+       "type": "str"
+      },
+      "brokerState": {
+       "value": false,
+       "type": "bool"
+      },
+      "launchTime": {
+       "value": 1586275200000,
+       "type": "int"
+      },
+      "maintainTime": {
+       "value": 0,
+       "type": "int"
+      },
+      "offTime": {
+       "value": 0,
+       "type": "int"
+      },
+      "displayName": {
+       "value": "BTC-USDT",
+       "type": "str"
+      }
+     }
+    },
+    {
+     "keys": [
+      "apiStateClose",
+      "apiStateOpen",
+      "asset",
+      "brokerState",
+      "contractId",
+      "currency",
+      "displayName",
+      "ensureTrigger",
+      "feeRate",
+      "launchTime",
+      "maintainTime",
+      "makerFeeRate",
+      "offTime",
+      "pricePrecision",
+      "quantityPrecision",
+      "size",
+      "status",
+      "symbol",
+      "takerFeeRate",
+      "tradeMinLimit",
+      "tradeMinQuantity",
+      "tradeMinUSDT",
+      "triggerFeeRate"
+     ],
+     "fields": {
+      "contractId": {
+       "value": "101",
+       "type": "str"
+      },
+      "symbol": {
+       "value": "ETH-USDT",
+       "type": "str"
+      },
+      "size": {
+       "value": "0.01",
+       "type": "str"
+      },
+      "quantityPrecision": {
+       "value": 2,
+       "type": "int"
+      },
+      "pricePrecision": {
+       "value": 2,
+       "type": "int"
+      },
+      "feeRate": {
+       "value": 0.0005,
+       "type": "float"
+      },
+      "makerFeeRate": {
+       "value": 0.0002,
+       "type": "float"
+      },
+      "takerFeeRate": {
+       "value": 0.0005,
+       "type": "float"
+      },
+      "tradeMinLimit": {
+       "value": 0,
+       "type": "int"
+      },
+      "tradeMinQuantity": {
+       "value": 0.01,
+       "type": "float"
+      },
+      "tradeMinUSDT": {
+       "value": 2,
+       "type": "int"
+      },
+      "currency": {
+       "value": "USDT",
+       "type": "str"
+      },
+      "asset": {
+       "value": "ETH",
+       "type": "str"
+      },
+      "status": {
+       "value": 1,
+       "type": "int"
+      },
+      "apiStateOpen": {
+       "value": "true",
+       "type": "str"
+      },
+      "apiStateClose": {
+       "value": "true",
+       "type": "str"
+      },
+      "ensureTrigger": {
+       "value": true,
+       "type": "bool"
+      },
+      "triggerFeeRate": {
+       "value": "0.00050000",
+       "type": "str"
+      },
+      "brokerState": {
+       "value": false,
+       "type": "bool"
+      },
+      "launchTime": {
+       "value": 1586275200000,
+       "type": "int"
+      },
+      "maintainTime": {
+       "value": 0,
+       "type": "int"
+      },
+      "offTime": {
+       "value": 0,
+       "type": "int"
+      },
+      "displayName": {
+       "value": "ETH-USDT",
+       "type": "str"
+      }
+     }
+    },
+    {
+     "keys": [
+      "apiStateClose",
+      "apiStateOpen",
+      "asset",
+      "brokerState",
+      "contractId",
+      "currency",
+      "displayName",
+      "ensureTrigger",
+      "feeRate",
+      "launchTime",
+      "maintainTime",
+      "makerFeeRate",
+      "offTime",
+      "pricePrecision",
+      "quantityPrecision",
+      "size",
+      "status",
+      "symbol",
+      "takerFeeRate",
+      "tradeMinLimit",
+      "tradeMinQuantity",
+      "tradeMinUSDT",
+      "triggerFeeRate"
+     ],
+     "fields": {
+      "contractId": {
+       "value": "103",
+       "type": "str"
+      },
+      "symbol": {
+       "value": "LINK-USDT",
+       "type": "str"
+      },
+      "size": {
+       "value": "0.1",
+       "type": "str"
+      },
+      "quantityPrecision": {
+       "value": 1,
+       "type": "int"
+      },
+      "pricePrecision": {
+       "value": 3,
+       "type": "int"
+      },
+      "feeRate": {
+       "value": 0.0005,
+       "type": "float"
+      },
+      "makerFeeRate": {
+       "value": 0.0002,
+       "type": "float"
+      },
+      "takerFeeRate": {
+       "value": 0.0005,
+       "type": "float"
+      },
+      "tradeMinLimit": {
+       "value": 0,
+       "type": "int"
+      },
+      "tradeMinQuantity": {
+       "value": 0.2,
+       "type": "float"
+      },
+      "tradeMinUSDT": {
+       "value": 2,
+       "type": "int"
+      },
+      "currency": {
+       "value": "USDT",
+       "type": "str"
+      },
+      "asset": {
+       "value": "LINK",
+       "type": "str"
+      },
+      "status": {
+       "value": 1,
+       "type": "int"
+      },
+      "apiStateOpen": {
+       "value": "true",
+       "type": "str"
+      },
+      "apiStateClose": {
+       "value": "true",
+       "type": "str"
+      },
+      "ensureTrigger": {
+       "value": true,
+       "type": "bool"
+      },
+      "triggerFeeRate": {
+       "value": "0.00240000",
+       "type": "str"
+      },
+      "brokerState": {
+       "value": false,
+       "type": "bool"
+      },
+      "launchTime": {
+       "value": 1604851200000,
+       "type": "int"
+      },
+      "maintainTime": {
+       "value": 0,
+       "type": "int"
+      },
+      "offTime": {
+       "value": 0,
+       "type": "int"
+      },
+      "displayName": {
+       "value": "LINK-USDT",
+       "type": "str"
+      }
+     }
+    },
+    {
+     "keys": [
+      "apiStateClose",
+      "apiStateOpen",
+      "asset",
+      "brokerState",
+      "contractId",
+      "currency",
+      "displayName",
+      "ensureTrigger",
+      "feeRate",
+      "launchTime",
+      "maintainTime",
+      "makerFeeRate",
+      "offTime",
+      "pricePrecision",
+      "quantityPrecision",
+      "size",
+      "status",
+      "symbol",
+      "takerFeeRate",
+      "tradeMinLimit",
+      "tradeMinQuantity",
+      "tradeMinUSDT",
+      "triggerFeeRate"
+     ],
+     "fields": {
+      "contractId": {
+       "value": "100028",
+       "type": "str"
+      },
+      "symbol": {
+       "value": "SOL-USDT",
+       "type": "str"
+      },
+      "size": {
+       "value": "1",
+       "type": "str"
+      },
+      "quantityPrecision": {
+       "value": 2,
+       "type": "int"
+      },
+      "pricePrecision": {
+       "value": 3,
+       "type": "int"
+      },
+      "feeRate": {
+       "value": 0.0005,
+       "type": "float"
+      },
+      "makerFeeRate": {
+       "value": 0.0002,
+       "type": "float"
+      },
+      "takerFeeRate": {
+       "value": 0.0005,
+       "type": "float"
+      },
+      "tradeMinLimit": {
+       "value": 0,
+       "type": "int"
+      },
+      "tradeMinQuantity": {
+       "value": 0.02,
+       "type": "float"
+      },
+      "tradeMinUSDT": {
+       "value": 2,
+       "type": "int"
+      },
+      "currency": {
+       "value": "USDT",
+       "type": "str"
+      },
+      "asset": {
+       "value": "SOL",
+       "type": "str"
+      },
+      "status": {
+       "value": 1,
+       "type": "int"
+      },
+      "apiStateOpen": {
+       "value": "true",
+       "type": "str"
+      },
+      "apiStateClose": {
+       "value": "true",
+       "type": "str"
+      },
+      "ensureTrigger": {
+       "value": true,
+       "type": "bool"
+      },
+      "triggerFeeRate": {
+       "value": "0.00070000",
+       "type": "str"
+      },
+      "brokerState": {
+       "value": false,
+       "type": "bool"
+      },
+      "launchTime": {
+       "value": 1635955200000,
+       "type": "int"
+      },
+      "maintainTime": {
+       "value": 0,
+       "type": "int"
+      },
+      "offTime": {
+       "value": 0,
+       "type": "int"
+      },
+      "displayName": {
+       "value": "SOL-USDT",
+       "type": "str"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "label": "ticker BTC (demo)",
+   "host": "demo",
+   "path": "/openApi/swap/v2/quote/ticker",
+   "params": {
+    "symbol": "BTC-USDT"
+   },
+   "http_status": 200,
+   "rate_remain": "498",
+   "rate_expire_ms": "8544",
+   "code": 0,
+   "msg": "",
+   "top_keys": [
+    "code",
+    "data",
+    "msg"
+   ],
+   "data_type": "dict",
+   "items": [
+    {
+     "keys": [
+      "askPrice",
+      "askQty",
+      "bidPrice",
+      "bidQty",
+      "closeTime",
+      "highPrice",
+      "lastPrice",
+      "lastQty",
+      "lowPrice",
+      "openPrice",
+      "openTime",
+      "priceChange",
+      "priceChangePercent",
+      "quoteVolume",
+      "symbol",
+      "volume"
+     ],
+     "fields": {
+      "symbol": {
+       "value": "BTC-USDT",
+       "type": "str"
+      },
+      "priceChange": {
+       "value": "-19.9",
+       "type": "str"
+      },
+      "priceChangePercent": {
+       "value": "-0.02",
+       "type": "str"
+      },
+      "lastPrice": {
+       "value": "83423.1",
+       "type": "str"
+      },
+      "lastQty": {
+       "value": "0.0004",
+       "type": "str"
+      },
+      "highPrice": {
+       "value": "84503.3",
+       "type": "str"
+      },
+      "lowPrice": {
+       "value": "82728.1",
+       "type": "str"
+      },
+      "volume": {
+       "value": "35012.4400",
+       "type": "str"
+      },
+      "quoteVolume": {
+       "value": "2929513877.42",
+       "type": "str"
+      },
+      "openPrice": {
+       "value": "83443.0",
+       "type": "str"
+      },
+      "openTime": {
+       "value": 1790694863749,
+       "type": "int"
+      },
+      "closeTime": {
+       "value": 1790695035549,
+       "type": "int"
+      },
+      "askPrice": {
+       "value": "83424.8",
+       "type": "str"
+      },
+      "askQty": {
+       "value": "0.0044",
+       "type": "str"
+      },
+      "bidPrice": {
+       "value": "83421.9",
+       "type": "str"
+      },
+      "bidQty": {
+       "value": "0.0044",
+       "type": "str"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "label": "klines BTC 1h (demo)",
+   "host": "demo",
+   "path": "/openApi/swap/v3/quote/klines",
+   "params": {
+    "symbol": "BTC-USDT",
+    "interval": "1h",
+    "limit": 3
+   },
+   "http_status": 200,
+   "rate_remain": "498",
+   "rate_expire_ms": "8534",
+   "code": 0,
+   "msg": "",
+   "top_keys": [
+    "code",
+    "data",
+    "msg"
+   ],
+   "data_type": "list",
+   "count": 3,
+   "items": [
+    {
+     "keys": [
+      "close",
+      "high",
+      "low",
+      "open",
+      "time",
+      "volume"
+     ],
+     "fields": {
+      "open": {
+       "value": "83713.3",
+       "type": "str"
+      },
+      "close": {
+       "value": "83430.2",
+       "type": "str"
+      },
+      "high": {
+       "value": "83718.5",
+       "type": "str"
+      },
+      "low": {
+       "value": "83319.3",
+       "type": "str"
+      },
+      "volume": {
+       "value": "902.6016",
+       "type": "str"
+      },
+      "time": {
+       "value": 1790694000000,
+       "type": "int"
+      }
+     }
+    },
+    {
+     "keys": [
+      "close",
+      "high",
+      "low",
+      "open",
+      "time",
+      "volume"
+     ],
+     "fields": {
+      "open": {
+       "value": "84165.7",
+       "type": "str"
+      },
+      "close": {
+       "value": "83713.3",
+       "type": "str"
+      },
+      "high": {
+       "value": "84249.7",
+       "type": "str"
+      },
+      "low": {
+       "value": "83650.0",
+       "type": "str"
+      },
+      "volume": {
+       "value": "1284.7459",
+       "type": "str"
+      },
+      "time": {
+       "value": 1790690400000,
+       "type": "int"
+      }
+     }
+    },
+    {
+     "keys": [
+      "close",
+      "high",
+      "low",
+      "open",
+      "time",
+      "volume"
+     ],
+     "fields": {
+      "open": {
+       "value": "84283.2",
+       "type": "str"
+      },
+      "close": {
+       "value": "84165.7",
+       "type": "str"
+      },
+      "high": {
+       "value": "84503.3",
+       "type": "str"
+      },
+      "low": {
+       "value": "83972.8",
+       "type": "str"
+      },
+      "volume": {
+       "value": "1114.1625",
+       "type": "str"
+      },
+      "time": {
+       "value": 1790686800000,
+       "type": "int"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "label": "premiumIndex BTC (demo)",
+   "host": "demo",
+   "path": "/openApi/swap/v2/quote/premiumIndex",
+   "params": {
+    "symbol": "BTC-USDT"
+   },
+   "http_status": 200,
+   "rate_remain": "498",
+   "rate_expire_ms": "8548",
+   "code": 0,
+   "msg": "",
+   "top_keys": [
+    "code",
+    "data",
+    "msg"
+   ],
+   "data_type": "dict",
+   "items": [
+    {
+     "keys": [
+      "fundingIntervalHours",
+      "indexPrice",
+      "lastFundingRate",
+      "markPrice",
+      "maxFundingRate",
+      "minFundingRate",
+      "nextFundingTime",
+      "symbol",
+      "updateTime"
+     ],
+     "fields": {
+      "symbol": {
+       "value": "BTC-USDT",
+       "type": "str"
+      },
+      "markPrice": {
+       "value": "83426.0",
+       "type": "str"
+      },
+      "indexPrice": {
+       "value": "83462.7",
+       "type": "str"
+      },
+      "lastFundingRate": {
+       "value": "0.00001980",
+       "type": "str"
+      },
+      "nextFundingTime": {
+       "value": 1790697600000,
+       "type": "int"
+      },
+      "fundingIntervalHours": {
+       "value": 8,
+       "type": "int"
+      },
+      "minFundingRate": {
+       "value": "-0.02",
+       "type": "str"
+      },
+      "maxFundingRate": {
+       "value": "0.02",
+       "type": "str"
+      },
+      "updateTime": {
+       "value": 1790668800000,
+       "type": "int"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "label": "contracts (demo)",
+   "host": "demo",
+   "path": "/openApi/swap/v2/quote/contracts",
+   "params": {},
+   "http_status": 200,
+   "rate_remain": "498",
+   "rate_expire_ms": "8560",
+   "code": 0,
+   "msg": "",
+   "top_keys": [
+    "code",
+    "data",
+    "msg"
+   ],
+   "data_type": "list",
+   "count": 1185,
+   "keys_union": [
+    "apiStateClose",
+    "apiStateOpen",
+    "asset",
+    "brokerState",
+    "contractId",
+    "currency",
+    "displayName",
+    "ensureTrigger",
+    "feeRate",
+    "launchTime",
+    "maintainTime",
+    "makerFeeRate",
+    "offTime",
+    "pricePrecision",
+    "quantityPrecision",
+    "size",
+    "status",
+    "symbol",
+    "takerFeeRate",
+    "tradeMinLimit",
+    "tradeMinQuantity",
+    "tradeMinUSDT",
+    "triggerFeeRate"
+   ],
+   "status_values": [
+    "1",
+    "25"
+   ],
+   "numeric_stats": {
+    "pricePrecision": {
+     "missing": [],
+     "empty": [],
+     "types": [
+      "int"
+     ]
+    },
+    "quantityPrecision": {
+     "missing": [],
+     "empty": [],
+     "types": [
+      "int"
+     ]
+    },
+    "tradeMinQuantity": {
+     "missing": [],
+     "empty": [],
+     "types": [
+      "float",
+      "int"
+     ]
+    },
+    "tradeMinUSDT": {
+     "missing": [],
+     "empty": [],
+     "types": [
+      "int"
+     ]
+    },
+    "status": {
+     "missing": [],
+     "empty": [],
+     "types": [
+      "int"
+     ]
+    }
+   },
+   "items": [
+    {
+     "keys": [
+      "apiStateClose",
+      "apiStateOpen",
+      "asset",
+      "brokerState",
+      "contractId",
+      "currency",
+      "displayName",
+      "ensureTrigger",
+      "feeRate",
+      "launchTime",
+      "maintainTime",
+      "makerFeeRate",
+      "offTime",
+      "pricePrecision",
+      "quantityPrecision",
+      "size",
+      "status",
+      "symbol",
+      "takerFeeRate",
+      "tradeMinLimit",
+      "tradeMinQuantity",
+      "tradeMinUSDT",
+      "triggerFeeRate"
+     ],
+     "fields": {
+      "contractId": {
+       "value": "100",
+       "type": "str"
+      },
+      "symbol": {
+       "value": "BTC-USDT",
+       "type": "str"
+      },
+      "size": {
+       "value": "0.0001",
+       "type": "str"
+      },
+      "quantityPrecision": {
+       "value": 4,
+       "type": "int"
+      },
+      "pricePrecision": {
+       "value": 1,
+       "type": "int"
+      },
+      "feeRate": {
+       "value": 0.0005,
+       "type": "float"
+      },
+      "makerFeeRate": {
+       "value": 0.0002,
+       "type": "float"
+      },
+      "takerFeeRate": {
+       "value": 0.0005,
+       "type": "float"
+      },
+      "tradeMinLimit": {
+       "value": 0,
+       "type": "int"
+      },
+      "tradeMinQuantity": {
+       "value": 0.0001,
+       "type": "float"
+      },
+      "tradeMinUSDT": {
+       "value": 2,
+       "type": "int"
+      },
+      "currency": {
+       "value": "USDT",
+       "type": "str"
+      },
+      "asset": {
+       "value": "BTC",
+       "type": "str"
+      },
+      "status": {
+       "value": 1,
+       "type": "int"
+      },
+      "apiStateOpen": {
+       "value": "true",
+       "type": "str"
+      },
+      "apiStateClose": {
+       "value": "true",
+       "type": "str"
+      },
+      "ensureTrigger": {
+       "value": true,
+       "type": "bool"
+      },
+      "triggerFeeRate": {
+       "value": "0.00020000",
+       "type": "str"
+      },
+      "brokerState": {
+       "value": false,
+       "type": "bool"
+      },
+      "launchTime": {
+       "value": 1586275200000,
+       "type": "int"
+      },
+      "maintainTime": {
+       "value": 0,
+       "type": "int"
+      },
+      "offTime": {
+       "value": 0,
+       "type": "int"
+      },
+      "displayName": {
+       "value": "BTC-USDT",
+       "type": "str"
+      }
+     }
+    },
+    {
+     "keys": [
+      "apiStateClose",
+      "apiStateOpen",
+      "asset",
+      "brokerState",
+      "contractId",
+      "currency",
+      "displayName",
+      "ensureTrigger",
+      "feeRate",
+      "launchTime",
+      "maintainTime",
+      "makerFeeRate",
+      "offTime",
+      "pricePrecision",
+      "quantityPrecision",
+      "size",
+      "status",
+      "symbol",
+      "takerFeeRate",
+      "tradeMinLimit",
+      "tradeMinQuantity",
+      "tradeMinUSDT",
+      "triggerFeeRate"
+     ],
+     "fields": {
+      "contractId": {
+       "value": "101",
+       "type": "str"
+      },
+      "symbol": {
+       "value": "ETH-USDT",
+       "type": "str"
+      },
+      "size": {
+       "value": "0.01",
+       "type": "str"
+      },
+      "quantityPrecision": {
+       "value": 3,
+       "type": "int"
+      },
+      "pricePrecision": {
+       "value": 2,
+       "type": "int"
+      },
+      "feeRate": {
+       "value": 0.0005,
+       "type": "float"
+      },
+      "makerFeeRate": {
+       "value": 0.0002,
+       "type": "float"
+      },
+      "takerFeeRate": {
+       "value": 0.0005,
+       "type": "float"
+      },
+      "tradeMinLimit": {
+       "value": 0,
+       "type": "int"
+      },
+      "tradeMinQuantity": {
+       "value": 0.001,
+       "type": "float"
+      },
+      "tradeMinUSDT": {
+       "value": 2,
+       "type": "int"
+      },
+      "currency": {
+       "value": "USDT",
+       "type": "str"
+      },
+      "asset": {
+       "value": "ETH",
+       "type": "str"
+      },
+      "status": {
+       "value": 1,
+       "type": "int"
+      },
+      "apiStateOpen": {
+       "value": "true",
+       "type": "str"
+      },
+      "apiStateClose": {
+       "value": "true",
+       "type": "str"
+      },
+      "ensureTrigger": {
+       "value": true,
+       "type": "bool"
+      },
+      "triggerFeeRate": {
+       "value": "0.00030000",
+       "type": "str"
+      },
+      "brokerState": {
+       "value": false,
+       "type": "bool"
+      },
+      "launchTime": {
+       "value": 1586275200000,
+       "type": "int"
+      },
+      "maintainTime": {
+       "value": 0,
+       "type": "int"
+      },
+      "offTime": {
+       "value": 0,
+       "type": "int"
+      },
+      "displayName": {
+       "value": "ETH-USDT",
+       "type": "str"
+      }
+     }
+    },
+    {
+     "keys": [
+      "apiStateClose",
+      "apiStateOpen",
+      "asset",
+      "brokerState",
+      "contractId",
+      "currency",
+      "displayName",
+      "ensureTrigger",
+      "feeRate",
+      "launchTime",
+      "maintainTime",
+      "makerFeeRate",
+      "offTime",
+      "pricePrecision",
+      "quantityPrecision",
+      "size",
+      "status",
+      "symbol",
+      "takerFeeRate",
+      "tradeMinLimit",
+      "tradeMinQuantity",
+      "tradeMinUSDT",
+      "triggerFeeRate"
+     ],
+     "fields": {
+      "contractId": {
+       "value": "103",
+       "type": "str"
+      },
+      "symbol": {
+       "value": "LINK-USDT",
+       "type": "str"
+      },
+      "size": {
+       "value": "0.1",
+       "type": "str"
+      },
+      "quantityPrecision": {
+       "value": 1,
+       "type": "int"
+      },
+      "pricePrecision": {
+       "value": 3,
+       "type": "int"
+      },
+      "feeRate": {
+       "value": 0.0005,
+       "type": "float"
+      },
+      "makerFeeRate": {
+       "value": 0.0002,
+       "type": "float"
+      },
+      "takerFeeRate": {
+       "value": 0.0005,
+       "type": "float"
+      },
+      "tradeMinLimit": {
+       "value": 0,
+       "type": "int"
+      },
+      "tradeMinQuantity": {
+       "value": 0.2,
+       "type": "float"
+      },
+      "tradeMinUSDT": {
+       "value": 2,
+       "type": "int"
+      },
+      "currency": {
+       "value": "USDT",
+       "type": "str"
+      },
+      "asset": {
+       "value": "LINK",
+       "type": "str"
+      },
+      "status": {
+       "value": 1,
+       "type": "int"
+      },
+      "apiStateOpen": {
+       "value": "true",
+       "type": "str"
+      },
+      "apiStateClose": {
+       "value": "true",
+       "type": "str"
+      },
+      "ensureTrigger": {
+       "value": true,
+       "type": "bool"
+      },
+      "triggerFeeRate": {
+       "value": "0.00020000",
+       "type": "str"
+      },
+      "brokerState": {
+       "value": false,
+       "type": "bool"
+      },
+      "launchTime": {
+       "value": 1604851200000,
+       "type": "int"
+      },
+      "maintainTime": {
+       "value": 0,
+       "type": "int"
+      },
+      "offTime": {
+       "value": 0,
+       "type": "int"
+      },
+      "displayName": {
+       "value": "LINK-USDT",
+       "type": "str"
+      }
+     }
+    },
+    {
+     "keys": [
+      "apiStateClose",
+      "apiStateOpen",
+      "asset",
+      "brokerState",
+      "contractId",
+      "currency",
+      "displayName",
+      "ensureTrigger",
+      "feeRate",
+      "launchTime",
+      "maintainTime",
+      "makerFeeRate",
+      "offTime",
+      "pricePrecision",
+      "quantityPrecision",
+      "size",
+      "status",
+      "symbol",
+      "takerFeeRate",
+      "tradeMinLimit",
+      "tradeMinQuantity",
+      "tradeMinUSDT",
+      "triggerFeeRate"
+     ],
+     "fields": {
+      "contractId": {
+       "value": "100028",
+       "type": "str"
+      },
+      "symbol": {
+       "value": "SOL-USDT",
+       "type": "str"
+      },
+      "size": {
+       "value": "1",
+       "type": "str"
+      },
+      "quantityPrecision": {
+       "value": 2,
+       "type": "int"
+      },
+      "pricePrecision": {
+       "value": 3,
+       "type": "int"
+      },
+      "feeRate": {
+       "value": 0.0005,
+       "type": "float"
+      },
+      "makerFeeRate": {
+       "value": 0.0002,
+       "type": "float"
+      },
+      "takerFeeRate": {
+       "value": 0.0005,
+       "type": "float"
+      },
+      "tradeMinLimit": {
+       "value": 0,
+       "type": "int"
+      },
+      "tradeMinQuantity": {
+       "value": 0.02,
+       "type": "float"
+      },
+      "tradeMinUSDT": {
+       "value": 2,
+       "type": "int"
+      },
+      "currency": {
+       "value": "USDT",
+       "type": "str"
+      },
+      "asset": {
+       "value": "SOL",
+       "type": "str"
+      },
+      "status": {
+       "value": 1,
+       "type": "int"
+      },
+      "apiStateOpen": {
+       "value": "true",
+       "type": "str"
+      },
+      "apiStateClose": {
+       "value": "true",
+       "type": "str"
+      },
+      "ensureTrigger": {
+       "value": true,
+       "type": "bool"
+      },
+      "triggerFeeRate": {
+       "value": "0.00050000",
+       "type": "str"
+      },
+      "brokerState": {
+       "value": false,
+       "type": "bool"
+      },
+      "launchTime": {
+       "value": 1635955200000,
+       "type": "int"
+      },
+      "maintainTime": {
+       "value": 0,
+       "type": "int"
+      },
+      "offTime": {
+       "value": 0,
+       "type": "int"
+      },
+      "displayName": {
+       "value": "SOL-USDT",
+       "type": "str"
+      }
+     }
+    }
+   ]
+  }
+ ]
+}

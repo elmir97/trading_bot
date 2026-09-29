@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from urllib.parse import unquote
 
@@ -29,6 +29,7 @@ from app.exchanges.base import (
 )
 from app.exchanges.bingx import QUOTE_TICKER, BingXClient
 from app.trading.enums import ExchangeKeyMode, OrderSide, TradeSide
+from tests.bingx_fixtures import PUBLIC, live_call, live_items
 
 D = Decimal
 
@@ -311,6 +312,62 @@ class TestPublicData:
         symbols = await client.get_symbols()
 
         assert symbols[0].min_notional == D("2")
+        await client.close()
+
+
+_HOSTS = ["live", "demo"]
+
+
+class TestPublicLiveForms:
+    """Замки на живых формах публичных ручек (фикстура PUBLIC, 29.09): разбор
+    живого ответа не меняется. На старом коде зелёные — это не регрессии."""
+
+    @pytest.mark.parametrize("host", _HOSTS)
+    async def test_lock_live_ticker(self, host: str) -> None:
+        item = live_items(f"ticker BTC ({host})", PUBLIC)[0]
+        client = make_client(lambda r: ok(item))
+        ticker = await client.get_ticker("BTC-USDT")
+        assert ticker.symbol == "BTC-USDT"
+        assert ticker.last_price == D(item["lastPrice"])
+        await client.close()
+
+    @pytest.mark.parametrize("host", _HOSTS)
+    async def test_lock_live_klines_have_no_close_time(self, host: str) -> None:
+        """klines v3 живьём — объект без closeTime: закрытие считается как
+        открытие + длительность таймфрейма, а не берётся из ответа."""
+        items = live_items(f"klines BTC 1h ({host})", PUBLIC)
+        assert all("closeTime" not in item for item in items)
+        client = make_client(lambda r: ok(items))
+        candles = await client.get_klines("BTC-USDT", "1h")
+        assert [c.open_time for c in candles] == sorted(c.open_time for c in candles)
+        newest = max(items, key=lambda i: i["time"])
+        assert candles[-1].low == D(newest["low"])
+        assert candles[-1].close_time - candles[-1].open_time == timedelta(hours=1)
+        await client.close()
+
+    @pytest.mark.parametrize("host", _HOSTS)
+    async def test_lock_live_mark_price(self, host: str) -> None:
+        item = live_items(f"premiumIndex BTC ({host})", PUBLIC)[0]
+        client = make_client(lambda r: ok(item))
+        assert await client.get_mark_price("BTC-USDT") == D(item["markPrice"])
+        await client.close()
+
+    @pytest.mark.parametrize("host", _HOSTS)
+    async def test_lock_live_contracts(self, host: str) -> None:
+        """Во всём живом списке (1185-1239 записей) точности и минимумы есть
+        у каждой записи, status — только 1/25; tradeMinQuantity — JSON-float."""
+        call = live_call(f"contracts ({host})", PUBLIC)
+        assert all(
+            not stats["missing"] and not stats["empty"]
+            for stats in call["numeric_stats"].values()
+        )
+        assert call["status_values"] == ["1", "25"]
+        items = live_items(f"contracts ({host})", PUBLIC)
+        client = make_client(lambda r: ok(items))
+        btc = {s.symbol: s for s in await client.get_symbols()}["BTC-USDT"]
+        assert (btc.price_precision, btc.quantity_precision) == (1, 4)
+        assert btc.min_quantity == D("0.0001")
+        assert btc.min_notional == D("2")
         await client.close()
 
 
