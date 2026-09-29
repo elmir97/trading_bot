@@ -275,7 +275,7 @@ def stop_missing(
         and o.order_type in _PROTECTIVE_STOP_TYPES
         and o.position_side == trade.side.value
         and o.side == closing_side
-        and o.stop_price != ZERO
+        and o.stop_price is not None
         for o in open_orders
     )
     if has_stop:

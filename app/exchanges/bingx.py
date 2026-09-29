@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, TypeVar
 from urllib.parse import quote, urlencode
 
 import httpx
@@ -137,17 +137,44 @@ class _RateLimitState:
 def _to_decimal(value: Any, field: str) -> Decimal:
     """Числа биржи приходят строками — так и разбираем, минуя float.
 
-    "" — тоже "нет значения": проверено живым запросом на openOrders,
-    так приходит stopPrice у ордера без стопа (не null, не 0, а пустая
-    строка)."""
+    Строго: нет поля или "" — ExchangeResponseError, а не 0. Молчаливый ноль
+    становился ценой выхода, комиссией или базой риска (разведка 29.09).
+    Там, где пустота законна, — _decimal_or с явным значением пустоты."""
     if value is None or value == "":
-        return Decimal(0)
+        raise ExchangeResponseError(f"В ответе нет поля {field}")
     try:
         return Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:
         raise ExchangeResponseError(
             f"Не удалось разобрать поле {field}: {value!r}"
         ) from exc
+
+
+_Empty = TypeVar("_Empty", Decimal, None)
+
+
+def _decimal_or(value: Any, field: str, empty: _Empty) -> Decimal | _Empty:
+    """Законная пустота: None/"" → empty, остальное — как _to_decimal.
+
+    Только там, где пустое значение снято живьём и цифрой не становится:
+    - get_order_fill и allOrders, статус не FILLED: avgPrice/commission/profit
+      (у NEW commission и profit — "", Р2 и openOrders 27.09) → 0; дальше
+      не идут — read-back и сверка берут только FILLED;
+    - openOrders stopPrice: "" у ордера без триггера (живьём) → None;
+    - positions liquidationPrice, balance availableMargin → None: вызывающий
+      решает сам (read-back предупреждает, вход отказывает)."""
+    if value is None or value == "":
+        return empty
+    return _to_decimal(value, field)
+
+
+def _legacy_zero(value: Any, field: str) -> Decimal:
+    """ВРЕМЕННО, прежнее поведение _to_decimal (None/"" → 0) для мест,
+    которые переходят на строгий разбор следующим коммитом: баланс, позиции,
+    allFillOrders, тикер, свечи, контракты. Удаляется там же."""
+    if value is None or value == "":
+        return Decimal(0)
+    return _to_decimal(value, field)
 
 
 def _ms_to_dt(value: Any) -> datetime:
@@ -193,20 +220,33 @@ def _required(item: dict[str, Any], *names: str) -> Any:
 
 def _parse_history_order(item: Any) -> HistoryOrder:
     """Строгий разбор ордера истории (allOrders). Живая форма снята 27.09:
-    числа — строки, orderId/triggerOrderId/positionID — int."""
+    числа — строки, orderId/triggerOrderId/positionID — int.
+
+    FILLED — цифры выхода для журнала: avgPrice, commission, profit
+    обязательны. Не FILLED — цифрами не становятся (сверка берёт только
+    FILLED), а у NEW commission и profit живьём "": законная пустота → 0."""
     if not isinstance(item, dict):
         raise ExchangeResponseError(f"Ордер — не объект: {type(item).__name__}")
+    status = str(_required(item, "status"))
+    if status == "FILLED":
+        avg_price = _to_decimal(item.get("avgPrice"), "avgPrice")
+        commission = _to_decimal(item.get("commission"), "commission")
+        profit = _to_decimal(item.get("profit"), "profit")
+    else:
+        avg_price = _decimal_or(item.get("avgPrice"), "avgPrice", Decimal(0))
+        commission = _decimal_or(item.get("commission"), "commission", Decimal(0))
+        profit = _decimal_or(item.get("profit"), "profit", Decimal(0))
     return HistoryOrder(
         order_id=str(_required(item, "orderId", "orderID")),
         symbol=str(_required(item, "symbol")),
         side=str(_required(item, "side")),
         position_side=str(_required(item, "positionSide")),
         order_type=str(_required(item, "type")),
-        status=str(_required(item, "status")),
-        avg_price=_to_decimal(item.get("avgPrice"), "avgPrice"),
+        status=status,
+        avg_price=avg_price,
         executed_qty=_to_decimal(item.get("executedQty"), "executedQty"),
-        fee=abs(_to_decimal(item.get("commission"), "commission")),
-        realized_pnl=_to_decimal(item.get("profit"), "profit"),
+        fee=abs(commission),
+        realized_pnl=profit,
         reduce_only=_str_bool(item.get("reduceOnly")),
         trigger_order_id=_optional_id(item.get("triggerOrderId")),
         position_id=_optional_id(item.get("positionID") or item.get("positionId")),
@@ -237,9 +277,12 @@ def _decimal_literal(value: Decimal) -> str:
 
 
 def _parse_order_leverage(value: Any) -> int:
-    """leverage в openOrders — строка вида "20X" (не int, как в get_positions())."""
-    text = str(value or "").rstrip("Xx")
-    return int(text) if text.isdigit() else 0
+    """leverage в openOrders — строка вида "20X" (не int, как в get_positions()).
+    Нет или не разбирается — ошибка, не 0."""
+    text = str(value if value is not None else "").rstrip("Xx")
+    if not text.isdigit():
+        raise ExchangeResponseError(f"Не удалось разобрать leverage ордера: {value!r}")
+    return int(text)
 
 
 def _str_bool(value: Any) -> bool:
@@ -605,7 +648,7 @@ class BingXClient(ExchangeClient):
 
         return Ticker(
             symbol=data.get("symbol", symbol),
-            last_price=_to_decimal(data.get("lastPrice"), "lastPrice"),
+            last_price=_legacy_zero(data.get("lastPrice"), "lastPrice"),
             timestamp=datetime.now(UTC),
         )
 
@@ -658,11 +701,11 @@ class BingXClient(ExchangeClient):
 
         return Kline(
             open_time=_ms_to_dt(open_ms),
-            open=_to_decimal(values[0], "open"),
-            high=_to_decimal(values[1], "high"),
-            low=_to_decimal(values[2], "low"),
-            close=_to_decimal(values[3], "close"),
-            volume=_to_decimal(values[4], "volume"),
+            open=_legacy_zero(values[0], "open"),
+            high=_legacy_zero(values[1], "high"),
+            low=_legacy_zero(values[2], "low"),
+            close=_legacy_zero(values[3], "close"),
+            volume=_legacy_zero(values[4], "volume"),
             close_time=_ms_to_dt(close_ms),
         )
 
@@ -680,10 +723,10 @@ class BingXClient(ExchangeClient):
                     symbol=item.get("symbol", ""),
                     price_precision=int(item.get("pricePrecision", 2)),
                     quantity_precision=int(item.get("quantityPrecision", 4)),
-                    min_quantity=_to_decimal(
+                    min_quantity=_legacy_zero(
                         item.get("tradeMinQuantity"), "tradeMinQuantity"
                     ),
-                    min_notional=_to_decimal(
+                    min_notional=_legacy_zero(
                         item.get("tradeMinUSDT"), "tradeMinUSDT"
                     ),
                 )
@@ -732,20 +775,15 @@ class BingXClient(ExchangeClient):
             # в форме выше это просто строка, и разворачивать там нечего.
             data = data["balance"]
 
-        equity = _to_decimal(data.get("equity"), "equity")
+        equity = _legacy_zero(data.get("equity"), "equity")
         # Свободная маржа — только availableMargin. Раньше при его отсутствии
         # молча брали "balance" — другое поле с другим смыслом; нет поля —
-        # None, а не подмена и не 0 (_to_decimal отдал бы 0 на None/"").
-        raw_available = data.get("availableMargin")
+        # None, а не подмена и не 0.
         return Balance(
             asset=data.get("asset", expected_asset),
-            available=(
-                None
-                if raw_available is None or raw_available == ""
-                else _to_decimal(raw_available, "availableMargin")
-            ),
-            used_margin=_to_decimal(data.get("usedMargin"), "usedMargin"),
-            unrealized_pnl=_to_decimal(
+            available=_decimal_or(data.get("availableMargin"), "availableMargin", None),
+            used_margin=_legacy_zero(data.get("usedMargin"), "usedMargin"),
+            unrealized_pnl=_legacy_zero(
                 data.get("unrealizedProfit"), "unrealizedProfit"
             ),
             equity=equity,
@@ -815,16 +853,14 @@ class BingXClient(ExchangeClient):
                     symbol=symbol,
                     side=TradeSide(raw_side),
                     quantity=quantity,
-                    entry_price=_to_decimal(item.get("avgPrice"), "avgPrice"),
-                    mark_price=_to_decimal(item.get("markPrice"), "markPrice"),
+                    entry_price=_legacy_zero(item.get("avgPrice"), "avgPrice"),
+                    mark_price=_legacy_zero(item.get("markPrice"), "markPrice"),
                     leverage=leverage,
-                    unrealized_pnl=_to_decimal(
+                    unrealized_pnl=_legacy_zero(
                         item.get("unrealizedProfit"), "unrealizedProfit"
                     ),
-                    liquidation_price=(
-                        _to_decimal(item.get("liquidationPrice"), "liquidationPrice")
-                        if item.get("liquidationPrice")
-                        else None
+                    liquidation_price=_decimal_or(
+                        item.get("liquidationPrice"), "liquidationPrice", None
                     ),
                     position_id=_optional_id(item.get("positionId")),
                 )
@@ -907,16 +943,16 @@ class BingXClient(ExchangeClient):
             symbol=item.get("symbol", ""),
             side=side,
             is_entry=is_entry,
-            price=_to_decimal(
+            price=_legacy_zero(
                 item.get("avgPrice") or item.get("price"), "price"
             ),
             # volume — живое имя объёма. Биржа его округляет (1362 при
             # executedQty ордера 1362.07, снято 27.09); amount/price тоже не
             # точен — точнее allFillOrders объём не отдаёт.
-            quantity=_to_decimal(
+            quantity=_legacy_zero(
                 item.get("executedQty") or item.get("qty") or item.get("volume"), "quantity"
             ),
-            fee=abs(_to_decimal(item.get("commission") or item.get("fee"), "fee")),
+            fee=abs(_legacy_zero(item.get("commission") or item.get("fee"), "fee")),
             executed_at=_exchange_time(item.get(time_field), time_field),
             position_id=str(item.get("positionId")) if item.get("positionId") else None,
             order_id=str(item.get("orderId")) if item.get("orderId") else None,
@@ -1101,15 +1137,16 @@ class BingXClient(ExchangeClient):
     @staticmethod
     def _parse_order_fill(item: dict[str, Any]) -> OrderFill:
         """Строгий разбор для read-back: обязательное поле отсутствует или
-        пустое → ReadbackIncomplete с именем поля, а не Decimal(0) (в
-        отличие от _parse_order/_to_decimal — там "" и None дают ноль).
-        Написание orderId/orderID и clientOrderId/clientOrderID — оба
+        пустое → ReadbackIncomplete с именем поля (не общий
+        ExchangeResponseError _to_decimal: read-back отличает «ордер нашёлся,
+        но неполный» от сбоя чтения). Написание orderId/orderID и clientOrderId/clientOrderID — оба
         варианта, как в _parse_order: документация BingX расходится.
 
         Сначала status (Р2, 29.09): у не исполненного ордера живьём
         commission — пустая строка, avgPrice "0.000" (GET #38, демо 27.09).
-        Не FILLED — «не исполнен»: avgPrice и commission мягко, "" → 0,
-        цифрами сделки они не становятся (read-back ждёт FILLED). FILLED с
+        Не FILLED — «не исполнен»: avgPrice и commission — законная пустота
+        (_decimal_or, "" → 0), цифрами сделки они не становятся (read-back
+        ждёт FILLED). FILLED с
         пустой avgPrice или commission — по-прежнему ReadbackIncomplete."""
 
         def required(*names: str) -> Any:
@@ -1127,8 +1164,8 @@ class BingXClient(ExchangeClient):
         if status == "FILLED":
             avg_price, commission = number("avgPrice"), number("commission")
         else:
-            avg_price = _to_decimal(item.get("avgPrice"), "avgPrice")
-            commission = _to_decimal(item.get("commission"), "commission")
+            avg_price = _decimal_or(item.get("avgPrice"), "avgPrice", Decimal(0))
+            commission = _decimal_or(item.get("commission"), "commission", Decimal(0))
         return OrderFill(
             order_id=order_id,
             client_order_id=str(
@@ -1210,26 +1247,31 @@ class BingXClient(ExchangeClient):
 
     @staticmethod
     def _parse_open_order(item: dict[str, Any]) -> OpenOrder:
+        """По этому чтению read-back ищет свой стоп, а сверка — защиту позиции:
+        поле, по которому идёт сопоставление, пустым быть не может. Прежний
+        time → 0 (1970) отсеивал свой стоп как «поставлен до входа», и
+        read-back выставлял второй. clientOrderId пуст у ручных ордеров
+        (живьём) — это законно; stopPrice "" у ордера без триггера → None."""
         return OpenOrder(
-            order_id=str(item.get("orderId") or item.get("orderID") or ""),
+            order_id=str(_required(item, "orderId", "orderID")),
             client_order_id=str(
                 item.get("clientOrderId") or item.get("clientOrderID") or ""
             ),
-            symbol=item.get("symbol", ""),
-            side=str(item.get("side", "")),
-            position_side=str(item.get("positionSide", "")),
-            order_type=str(item.get("type", "")),
+            symbol=str(_required(item, "symbol")),
+            side=str(_required(item, "side")),
+            position_side=str(_required(item, "positionSide")),
+            order_type=str(_required(item, "type")),
             quantity=_to_decimal(item.get("origQty"), "origQty"),
             executed_qty=_to_decimal(item.get("executedQty"), "executedQty"),
             price=_to_decimal(item.get("price"), "price"),
-            stop_price=_to_decimal(item.get("stopPrice"), "stopPrice"),
-            status=str(item.get("status", "")),
+            stop_price=_decimal_or(item.get("stopPrice"), "stopPrice", None),
+            status=str(_required(item, "status")),
             leverage=_parse_order_leverage(item.get("leverage")),
             reduce_only=_str_bool(item.get("reduceOnly")),
             close_position=_str_bool(item.get("closePosition")),
             working_type=str(item.get("workingType", "")),
-            created_at=_ms_to_dt(item.get("time") or 0),
-            updated_at=_ms_to_dt(item.get("updateTime") or 0),
+            created_at=_exchange_time(_required(item, "time"), "time"),
+            updated_at=_exchange_time(_required(item, "updateTime"), "updateTime"),
             take_profit=BingXClient._parse_attached_tp_sl(item.get("takeProfit")),
             stop_loss=BingXClient._parse_attached_tp_sl(item.get("stopLoss")),
         )

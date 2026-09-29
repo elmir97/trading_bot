@@ -95,10 +95,11 @@ class UnsupportedPositionMode(ExchangeResponseError):  # noqa: N818 — не с�
 class ReadbackIncomplete(ExchangeResponseError):  # noqa: N818 — имя из ТЗ шага 15.5.3
     """Шаг 15.5.3: в ответе чтения ордера нет обязательного поля.
 
-    Для read-back «поля нет» и «поле = 0» — разные вещи: нестрогий разбор
-    (_to_decimal) превратил бы отсутствие в Decimal(0), и пустой avgPrice
-    молча стал бы ценой входа. Имена полей сняты живьём (GET #37, демо
-    27.09): avgPrice, origQty, executedQty, commission — строки."""
+    Для read-back «поля нет» и «поле = 0» — разные вещи: пустой avgPrice
+    не должен молча стать ценой входа. Отдельный класс, а не общий
+    ExchangeResponseError: ордер нашёлся, но неполный — позиция могла
+    открыться. Имена полей сняты живьём (GET #37, демо 27.09): avgPrice,
+    origQty, executedQty, commission — строки."""
 
     def __init__(self, field: str, payload: dict[str, object] | None = None) -> None:
         super().__init__(f"В ответе чтения ордера нет поля {field}", payload=payload)
@@ -300,7 +301,8 @@ class OpenOrder:
     quantity: Decimal
     executed_qty: Decimal
     price: Decimal
-    stop_price: Decimal
+    # None — у ордера нет триггера (живьём stopPrice "" у лимитного/маркет).
+    stop_price: Decimal | None
     status: str
     leverage: int
     reduce_only: bool

@@ -787,3 +787,36 @@ async def test_unverified_stop_alarm_has_event_kind(ctx) -> None:  # type: ignor
     [alarm] = result.alarms
     assert alarm.kind.value == "STOP_UNVERIFIED"
     assert alarm.text.startswith("⚠️ СТОП НЕ ПОДТВЕРЖДЁН: LINK-USDT LONG 2037.8")
+
+
+def _as_client_returns(raws: list[dict[str, object]]) -> list[OpenOrder] | ExchangeResponseError:
+    """openOrders так, как его отдал бы настоящий клиент: разбор в момент
+    чтения, ошибка разбора — исключение из get_open_orders."""
+    try:
+        return [BingXClient._parse_open_order(item) for item in raws]
+    except ExchangeResponseError as exc:
+        return exc
+
+
+@pytest.mark.parametrize("field", ["time", "type", "symbol"])
+async def test_open_order_without_matching_field_is_unverified_not_rescued(  # type: ignore[no-untyped-def]
+    ctx, field: str
+) -> None:
+    """Разведка 29.09: у стопа в openOrders нет поля, по которому read-back
+    ищет свой условник. Раньше time → 1970 («поставлен до входа»), type и
+    symbol → "" — свой стоп не находился, и read-back выставлял второй. Теперь
+    чтение openOrders — ошибка разбора: стоп не подтверждён, ничего не
+    выставлено. СИНТЕТИКА ИЗ ЖИВОГО openOrders LINK, у стопа …705 убрано поле."""
+    session, user, slot, n, settings = ctx
+    order = _order(user.id, slot.id, n.id)
+    entry = await _entry(session, order)
+    raws = live_items("openOrders LINK")
+    del raws[0][field]
+    client = FakeReadbackClient(
+        fills=[_fill()], open_orders=[_as_client_returns(raws)], place_results=[_placed()]
+    )
+
+    result = await _verify(session, client, settings, entry, order)
+
+    assert client.count("place_conditional_order") == 0
+    assert result.stop.outcome is ConditionalOutcome.UNVERIFIED

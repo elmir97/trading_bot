@@ -277,6 +277,35 @@ async def test_sol_closed_by_stop_on_exchange_is_closed_in_journal(ctx) -> None:
     assert "#" + str(sol_id) in bot.sent[0]
 
 
+@pytest.mark.parametrize("field", ["avgPrice", "commission", "profit"])
+async def test_filled_exit_with_empty_number_is_not_written(ctx, field: str) -> None:  # type: ignore[no-untyped-def]
+    """Разведка 29.09: у исполненного выхода пустая цифра. Раньше "" → 0:
+    commission — выход записан с комиссией 0 (PnL завышен, сверка PnL не
+    видит — комиссии нет с обеих сторон); profit — 0 в trade_fills и ложный
+    PNL_MISMATCH; avgPrice — цена 0, JournalError и молчаливый WARNING каждый
+    цикл. Теперь чтение allOrders — ошибка разбора: журнал не тронут, ошибка
+    в пульсе. СИНТЕТИКА ИЗ ЖИВОГО allOrders SOL, у стопа-выхода поле ""."""
+    settings, db, session, user, demo = ctx
+    sol_id, _link_id = await _seed_live(session, user.id)
+    orders = live_items("allOrders SOL")
+    [child] = [o for o in orders if str(o["orderId"]) == SOL_CHILD]
+    child[field] = ""
+    demo.all_orders["SOL-USDT"] = orders
+    bot = FakeBot()
+    from app.workers.reconciler import Reconciler
+
+    reconciler = Reconciler(
+        bot, db, settings, SecretCipher(settings.encryption_key.get_secret_value())
+    )
+    await reconciler.run()
+
+    sol = await _trade(db, sol_id)
+    assert sol.status is TradeStatus.OPEN
+    assert {f.external_fill_id for f in sol.fills} == {SOL_ENTRY}
+    assert reconciler.pulse.window(datetime.now(UTC)).errors == 1
+    assert bot.sent == []
+
+
 async def test_sol_stop_notification_text(ctx) -> None:  # type: ignore[no-untyped-def]
     """Живой стоп SOL #4 (27.09 14:40:36 UTC): тот же формат, что у закрытия
     вне бота — «Закрыта: DD.MM HH:MM» в поясе пользователя, суммы

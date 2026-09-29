@@ -159,7 +159,7 @@ def find_our_conditional(
 
     1. тот же символ; 2. тип STOP_MARKET/TAKE_PROFIT_MARKET; 3. наша сторона
     позиции (positionSide); 4. закрывающая сторона (LONG → SELL); 5. stopPrice
-    верхнего уровня не 0 и совпадает с уровнем, ушедшим в запрос, до шага
+    верхнего уровня есть и совпадает с уровнем, ушедшим в запрос, до шага
     цены символа; 6. создан не раньше входа (минус PLACED_AFTER_SKEW) —
     ручной стоп, поставленный до «Да», отсекается; 7. orderId не записан за
     другим входом; 8. clientOrderId с префиксом tj — только наш
@@ -179,7 +179,7 @@ def find_our_conditional(
             continue
         if o.position_side != position_side or o.side != closing_side.value:
             continue
-        if o.stop_price == 0 or _quantize(o.stop_price, price_precision) != target:
+        if o.stop_price is None or _quantize(o.stop_price, price_precision) != target:
             continue
         if o.created_at < placed_after - PLACED_AFTER_SKEW:
             continue
@@ -548,6 +548,7 @@ async def _resolve(
 
     if found.order is not None:
         o = found.order
+        assert o.stop_price is not None, "find_our_conditional не берёт ордер без stopPrice"
         row = _conditional_row(order, role, status=OrderStatus.SUBMITTED, level=o.stop_price)
         row.exchange_order_id = o.order_id or None
         row.raw_response = {

@@ -1040,7 +1040,8 @@ class TestGetOpenOrders:
         assert order.quantity == D("0.2517")
         assert order.executed_qty == D("0.0000")
         assert order.price == D("70000.0")
-        assert order.stop_price == D(0)  # "" в ответе, не 0 и не null
+        # "" в ответе (не 0 и не null) — у ордера нет триггера: None, не 0.
+        assert order.stop_price is None
         assert order.status == "PENDING"
         assert order.leverage == 20
         assert order.reduce_only is False
@@ -1870,4 +1871,79 @@ class TestReconcilerHistoryEndpoints:
             await client.get_all_orders(
                 "SOL-USDT", datetime(2026, 9, 1, tzinfo=UTC), datetime(2026, 9, 9, tzinfo=UTC)
             )
+        await client.close()
+
+
+# Разведка 29.09: None/"" в числе ответа — ошибка разбора, не 0. Синтетика из
+# живого: живой элемент, одно поле убрано ("поля нет") или пусто ("").
+_EMPTY_MODES = [pytest.param("del", id="поля нет"), pytest.param("", id="пустая строка")]
+_SOL_WINDOW = (datetime(2026, 9, 26, tzinfo=UTC), datetime(2026, 9, 27, 18, tzinfo=UTC))
+
+
+def _blank(item: dict[str, object], field: str, mode: str) -> dict[str, object]:
+    if mode == "del":
+        del item[field]
+    else:
+        item[field] = ""
+    return item
+
+
+class TestStrictHistoryOrders:
+    @pytest.mark.parametrize("mode", _EMPTY_MODES)
+    @pytest.mark.parametrize("field", ["avgPrice", "executedQty", "commission", "profit"])
+    async def test_filled_exit_without_number_is_error(self, field: str, mode: str) -> None:
+        """Исполненный стоп-выход SOL #4: цифры выхода идут в журнал — пустая
+        цифра не становится 0 (цена/комиссия/profit выхода)."""
+        orders = live_items("allOrders SOL")
+        [child] = [o for o in orders if str(o["orderId"]) == "2104219661398712320"]
+        assert child["status"] == "FILLED"
+        _blank(child, field, mode)
+        client = make_client(lambda r: ok({"orders": orders}))
+        with pytest.raises(ExchangeResponseError, match=field):
+            await client.get_all_orders("SOL-USDT", *_SOL_WINDOW)
+        await client.close()
+
+    async def test_lock_not_filled_empty_commission_and_profit_is_lawful(self) -> None:
+        """Замок: у NEW commission и profit живьём "" (openOrders LINK 27.09 —
+        та же форма ордера, что в allOrders). Законная пустота: цифрами
+        выхода не становятся, сверка берёт только FILLED."""
+        [stop, _take] = live_items("openOrders LINK")
+        assert (stop["status"], stop["commission"], stop["profit"]) == ("NEW", "", "")
+        client = make_client(lambda r: ok({"orders": [stop]}))
+        [order] = await client.get_all_orders("LINK-USDT", *_SOL_WINDOW)
+        assert (order.status, order.fee, order.realized_pnl) == ("NEW", D(0), D(0))
+        await client.close()
+
+
+class TestStrictOpenOrders:
+    @pytest.mark.parametrize("mode", _EMPTY_MODES)
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "orderId", "symbol", "side", "positionSide", "type", "status",
+            "origQty", "executedQty", "price", "leverage", "time", "updateTime",
+        ],
+    )
+    async def test_field_is_required(self, field: str, mode: str) -> None:
+        """По этим полям read-back ищет свой стоп, сверка — защиту позиции,
+        экран ордеров показывает объём/цену/плечо. Раньше time → 1970,
+        строки → "", числа → 0: свой стоп не находился, read-back ставил
+        второй. Живой стоп …705 openOrders LINK."""
+        stop, take = live_items("openOrders LINK")
+        _blank(stop, field, mode)
+        client = make_client(lambda r: ok({"orders": [stop, take]}))
+        with pytest.raises(ExchangeResponseError, match=field):
+            await client.get_open_orders("LINK-USDT")
+        await client.close()
+
+    async def test_attached_stub_without_stop_price_is_error(self) -> None:
+        """Заглушка takeProfit живьём всегда со stopPrice (число 0). Нет поля —
+        ошибка, а не «условник не задан»."""
+        stop, take = live_items("openOrders LINK")
+        stub = stop["takeProfit"]
+        assert isinstance(stub, dict) and stub["stopPrice"] == 0
+        del stub["stopPrice"]
+        client = make_client(lambda r: ok({"orders": [stop, take]}))
+        with pytest.raises(ExchangeResponseError, match="stopPrice"):
+            await client.get_open_orders("LINK-USDT")
         await client.close()
