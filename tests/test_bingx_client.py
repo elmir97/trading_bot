@@ -1670,6 +1670,26 @@ class TestLiveFillsForm:
         assert entry.trigger_order_id is None  # 0 у биржи — «не условный»
         assert stop_exit.trigger_order_id == "2104213344721920001"
 
+    def test_live_external_id_is_order_id(self) -> None:
+        """tradeId в живом allFillOrders нет — ключ дедупа импорта orderId."""
+        entry, stop_exit = self._fills()
+        assert entry.external_id == "2104213344135159808"
+        assert stop_exit.external_id == "2104219661398712320"
+
+    def test_fill_without_any_id_is_none_with_warning(self, caplog) -> None:  # type: ignore[no-untyped-def]
+        """п.7, 29.09, СИНТЕТИКА ИЗ ЖИВОГО (allFillOrders SOL, убран orderId):
+        нет ни tradeId, ни orderId — external_id None и WARNING, а не "":
+        пустая строка — не ключ дедупа."""
+        from tests.bingx_fixtures import live_items
+
+        raw = live_items("allFillOrders SOL (get_fills)")[0]
+        raw = {k: v for k, v in raw.items() if k != "orderId"}
+        with caplog.at_level(logging.WARNING, logger="app.exchanges.bingx"):
+            fill = BingXClient._parse_fill(raw)
+        assert fill.external_id is None
+        assert fill.order_id is None
+        assert "без идентификатора" in caplog.text
+
     def test_missing_time_is_error_not_now(self) -> None:
         from app.exchanges.base import ExchangeResponseError
 

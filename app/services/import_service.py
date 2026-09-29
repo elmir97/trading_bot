@@ -155,7 +155,9 @@ class HistoryImporter:
             try:
                 batch = await self._client.get_fills(window_start, window_end)
                 for fill in batch:
-                    if fill.external_id:
+                    # Дедуп только по непустому ключу: без него исполнение
+                    # не отличить от уже импортированного (WARNING — в разборе).
+                    if fill.external_id is not None:
                         collected[fill.external_id] = fill
             except Exception as exc:
                 # ронять весь импорт: остальные окна могут пройти успешно.
@@ -191,7 +193,8 @@ class HistoryImporter:
         # Отсекаем уже импортированное одним запросом: за год исполнений
         # могут быть тысячи, и проверять их по одному недопустимо.
         known = await self._trades.existing_fill_ids(
-            self._user_id, self._client.name, [f.external_id for f in fills]
+            self._user_id, self._client.name,
+            [f.external_id for f in fills if f.external_id is not None],
         )
         fresh = [f for f in fills if f.external_id not in known]
         fresh = await self._drop_bot_fills(fresh, result)

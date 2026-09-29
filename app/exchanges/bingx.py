@@ -933,11 +933,17 @@ class BingXClient(ExchangeClient):
             (name for name in ("filledTm", "filledTime", "time") if item.get(name)), "filledTm"
         )
         trigger = item.get("triggerOrderId")
+        # tradeId в живом allFillOrders нет (27.09) — ключ дедупа orderId.
+        # Нет ни одного — None и WARNING: пустая строка не ключ дедупа (п.7, 29.09).
+        raw_id = item.get("tradeId") or item.get("orderId") or item.get("id")
+        if raw_id in (None, ""):
+            logger.warning(
+                "Исполнение без идентификатора (tradeId/orderId) — в импорт не попадёт",
+                extra={"symbol": item.get("symbol"), "side": item.get("side")},
+            )
 
         return Fill(
-            external_id=str(
-                item.get("tradeId") or item.get("orderId") or item.get("id") or ""
-            ),
+            external_id=str(raw_id) if raw_id not in (None, "") else None,
             symbol=item.get("symbol", ""),
             side=side,
             is_entry=is_entry,
