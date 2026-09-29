@@ -77,7 +77,7 @@ from app.trading.enums import (
     TradeSource,
     TradeStatus,
 )
-from app.trading.exit_reasons import EXIT_OUTSIDE_BOT
+from app.trading.exit_reasons import EXIT_MANUAL_STOP, EXIT_MANUAL_TAKE
 from app.trading.journal import JournalError, TradeJournal
 from app.trading.risk import tz_offset_for
 from app.workers.base import fmt_decimal
@@ -92,8 +92,18 @@ HISTORY_LIMIT = timedelta(days=7) - timedelta(minutes=1)
 _CLOSE_TEXT = {
     ReconciliationKind.CLOSED_STOP_LOSS: "🛑 {symbol} {side} закрыта по стопу на бирже",
     ReconciliationKind.CLOSED_TAKE_PROFIT: "🎯 {symbol} {side} закрыта по тейку на бирже",
-    ReconciliationKind.CLOSED_OUTSIDE_BOT: "⚠️ {symbol} {side} закрыта на бирже вне бота",
+    # 29.09: ℹ️, а не ⚠️ — закрытие вне бота владельцем штатно, тревоги нет.
+    ReconciliationKind.CLOSED_OUTSIDE_BOT: "ℹ️ {symbol} {side} закрыта на бирже вне бота",
     ReconciliationKind.PARTIAL_CLOSE: "⚠️ {symbol} {side} частично закрыта на бирже",
+}
+
+# Причина закрытия вне бота в уведомлении — коротко: «вне бота» уже в
+# заголовке. Trade.exit_reason в журнале — полный текст (app.trading.
+# exit_reasons), по нему отчёт считает закрытия. Ручной маркет/лимит
+# (EXIT_OUTSIDE_BOT) — без строки причины.
+_NOTIFY_REASON = {
+    EXIT_MANUAL_STOP: "Стоп, изменённый вручную",
+    EXIT_MANUAL_TAKE: "Тейк, изменённый вручную",
 }
 
 
@@ -518,18 +528,24 @@ class Reconciler:
     def _close_text(
         trade: Trade, exit_fill: ExitFill, asset: str, tz_offset_hours: int = 5
     ) -> str:
-        head = _CLOSE_TEXT[exit_fill.kind].format(symbol=trade.symbol, side=trade.side.value)
+        """Уведомление о закрытии — одно для всех видов (стоп/тейк бота,
+        вне бота, частичное): время исполнения ордера в поясе пользователя
+        (app.core.timefmt), суммы — форматтерами app.core.numfmt; комиссии —
+        fmt_amount (без «+»), PnL — fmt_money (знак несёт смысл)."""
+        lines = [_CLOSE_TEXT[exit_fill.kind].format(symbol=trade.symbol, side=trade.side.value)]
         if exit_fill.kind is ReconciliationKind.CLOSED_OUTSIDE_BOT:
-            return _outside_bot_close_text(head, trade, exit_fill, asset, tz_offset_hours)
-        lines = [
-            head,
-            f"Выход: {fmt_decimal(exit_fill.price)} · объём {fmt_decimal(exit_fill.quantity)}",
-            f"Комиссия выхода: {fmt_decimal(exit_fill.fee)} {asset}",
+            reason = _NOTIFY_REASON.get(exit_fill.reason)
+            if reason is not None:
+                lines.append(reason)
+        lines += [
+            closed_at_line(exit_fill.executed_at, tz_offset_hours),
+            f"Выход: {fmt_price(exit_fill.price)} · объём {fmt_qty(exit_fill.quantity)}",
+            f"Комиссия выхода: {fmt_amount(exit_fill.fee)} {asset}",
         ]
         if trade.status is TradeStatus.CLOSED and trade.pnl is not None:
             lines.append(
-                f"PnL: {fmt_decimal(trade.pnl)} {asset} · комиссии вход+выход "
-                f"{fmt_decimal(trade.fees)} {asset}"
+                f"PnL: {fmt_money(trade.pnl)} {asset} · комиссии вход+выход "
+                f"{fmt_amount(trade.fees)} {asset}"
             )
             lines.append(f"📒 Сделка #{trade.id} закрыта в журнале")
         else:
@@ -761,31 +777,6 @@ class Reconciler:
             (ReconciliationKind.AMBIGUOUS, f"ambiguous:{trade_id}:"),
         ):
             await self._resolve_missing(ctx, kind, set(), prefix=prefix)
-
-
-def _outside_bot_close_text(
-    head: str, trade: Trade, exit_fill: ExitFill, asset: str, tz_offset_hours: int
-) -> str:
-    """Закрытие вне бота (29.09): время исполнения ордера в поясе
-    пользователя, суммы — форматтерами app.core.numfmt. Остальные
-    уведомления о закрытии переводятся на тот же формат отдельно (хвост)."""
-    lines = [head]
-    if exit_fill.reason != EXIT_OUTSIDE_BOT:
-        lines.append(exit_fill.reason)
-    lines += [
-        closed_at_line(exit_fill.executed_at, tz_offset_hours),
-        f"Выход: {fmt_price(exit_fill.price)} · объём {fmt_qty(exit_fill.quantity)}",
-        f"Комиссия выхода: {fmt_amount(exit_fill.fee)} {asset}",
-    ]
-    if trade.status is TradeStatus.CLOSED and trade.pnl is not None:
-        lines.append(
-            f"PnL: {fmt_money(trade.pnl)} {asset} · комиссии вход+выход "
-            f"{fmt_amount(trade.fees)} {asset}"
-        )
-        lines.append(f"📒 Сделка #{trade.id} закрыта в журнале")
-    else:
-        lines.append(f"📒 Сделка #{trade.id} остаётся открытой")
-    return "\n".join(lines)
 
 
 def _redelivery_text(event: ReconciliationEvent, user: User, now: datetime) -> str:

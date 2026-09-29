@@ -277,6 +277,27 @@ async def test_sol_closed_by_stop_on_exchange_is_closed_in_journal(ctx) -> None:
     assert "#" + str(sol_id) in bot.sent[0]
 
 
+async def test_sol_stop_notification_text(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Живой стоп SOL #4 (27.09 14:40:36 UTC): тот же формат, что у закрытия
+    вне бота — «Закрыта: DD.MM HH:MM» в поясе пользователя, суммы
+    форматтерами. Раньше — fmt_decimal («82.821383») и без времени."""
+    settings, db, session, user, _demo = ctx
+    sol_id, _link_id = await _seed_live(session, user.id)
+    bot = FakeBot()
+
+    await _run_reconciler(settings, db, bot)
+
+    [text] = bot.sent
+    assert text.splitlines() == [
+        "🛑 SOL-USDT LONG закрыта по стопу на бирже",
+        "Закрыта: 27.09 19:40",
+        "Выход: 121.611 · объём 1362.07",
+        "Комиссия выхода: 82.82 VST",
+        "PnL: -2087.12 VST · комиссии вход+выход 166.60 VST",  # -2087.121603
+        f"📒 Сделка #{sol_id} закрыта в журнале",
+    ]
+
+
 async def test_second_run_writes_and_notifies_nothing(ctx) -> None:  # type: ignore[no-untyped-def]
     settings, db, session, user, _demo = ctx
     sol_id, _link_id = await _seed_live(session, user.id)
@@ -758,7 +779,8 @@ async def test_link_manual_stop_closes_trade_from_fact(ctx) -> None:  # type: ig
 
 async def test_link_manual_stop_notification_text(ctx) -> None:  # type: ignore[no-untyped-def]
     """Время исполнения в поясе пользователя (Екб, +5), суммы — форматтерами;
-    валюта демо — VST."""
+    валюта демо — VST. Вне бота — ℹ️ и короткая причина; полный exit_reason
+    — в журнале (test_link_manual_stop_closes_trade_from_fact)."""
     settings, db, session, user, demo = ctx
     link = await _seed_link_manual_stop(session, demo, user.id)
     bot = FakeBot()
@@ -767,8 +789,8 @@ async def test_link_manual_stop_notification_text(ctx) -> None:  # type: ignore[
 
     [text] = bot.sent
     assert text.splitlines() == [
-        "⚠️ LINK-USDT LONG закрыта на бирже вне бота",
-        MANUAL_STOP_REASON,
+        "ℹ️ LINK-USDT LONG закрыта на бирже вне бота",
+        "Стоп, изменённый вручную",
         "Закрыта: 29.09 09:03",
         "Выход: 14.776 · объём 2037.8",
         "Комиссия выхода: 15.06 VST",
