@@ -26,7 +26,7 @@ DATABASE_URL=postgresql+asyncpg://test:test@localhost:5432/trading_bot_test
 **Прогон зелёный только при нуле skipped.** Без `DATABASE_URL` молча
 пропускается ~115 интеграционных тестов, и счёт врёт.
 
-Ориентир на 02.10.2026 (финальный тест A/B): 1663 passed, 0 skipped, 0 failed.
+Ориентир на 02.10.2026 (этап 1 — сигналы удалены): 966 passed, 0 skipped, 0 failed.
 
 Число тестов в этом файле — ориентир на момент записи, а не факт. Перед
 тем как называть его в плане или отчёте, прогонять пакет и брать свежую
@@ -78,25 +78,8 @@ ruff check .
   smoke в том же коммите** и добавляет заглушку метода; pytest этого не ловит
   (28.09: `a5c1ad4` запушен с падающим smoke — нет заглушки `get_margin_type`)
 
-`scripts/signal_outcomes.py` — отчёт исходов READY-сигналов, запускать на проде
-**только с разрешения владельца**:
-
-```
-docker compose exec -T bot python -m scripts.signal_outcomes [--horizon 50] [--json out.json] [--include-backfill]
-```
-
-- только чтение: SELECT в транзакции `READ ONLY` + публичные свечи BingX (GET klines),
-  ключи не нужны; остаток лимита klines ≤ 2 — стоп без отчёта (exit 2)
-- исход стоп/тейк/открыт по закрытым свечам после `notified_at`, горизонт 50; оба уровня
-  в одной свече — стоп; R от RR снимка, нетто — минус taker-комиссия в R
-  (`exec_taker_fee_rate`); открытые вне среднего R
-- признаки — из снимка (миграция `ea93de72860d`), до неё — прогоном детектора
-  (`replay` совпал со снимком / `replay≠`); срезы по ТФ, сетапу, направлению,
-  порогам признаков и «один сигнал на пробой» (`breakout_at`)
-- `--json` пишет файл внутри контейнера — забрать и удалить
-- строки до миграции `b0943282b974` (23.09, `notified_at` < 23.09 10:00 UTC) — бэкфилл по
-  строке на слот: эталон неполный, уровни не от `notified_at`. По умолчанию исключены
-  (число в шапке), `--include-backfill` — включить отдельным срезом «Эталон»
+Скрипты исследований сигналов (`replay_history`, `trend_research`, `signal_outcomes`)
+удалены вместе с сигналами 02.10.2026 — в истории git (до `1892b70`).
 
 `scripts/rehearse_migration.sh` — репетиция миграции на копии прода, запуск и отчёт —
 «Деплой» → «Репетиция миграции».
@@ -189,7 +172,8 @@ Remote `origin` — приватный резервный репозиторий
 Откат кода: `docker tag trading_bot-bot:rollback_<ts> trading_bot-bot:latest
 && docker compose up -d --no-deps bot`. Удалять rollback-тег
 (`docker rmi trading_bot-bot:rollback_<ts>`) — только после первого
-чистого «Цикл сканера завершён» на новом образе и с «да» владельца.
+«Пульс reconciler» без ошибок на новом образе (раз в час; сканера с 02.10.2026
+нет) и с «да» владельца.
 
 **Миграции на проде — только после явного «да» владельца.** Порядок:
 свежий дамп → показать SQL офлайн-режимом alembic (без подключения
@@ -375,10 +359,8 @@ PY
 
 8. Из `get_settings()` печатать только: `trading_execution_enabled`,
    `exec_dry_run`, `exec_allow_live_mode_orders`, `bingx_trading_mode`,
-   `bingx_base_url`, `bingx_demo_base_url`, `exec_symbol_whitelist`,
-   `exec_max_open_positions`, `exec_max_total_risk_percent`,
+   `bingx_base_url`, `bingx_demo_base_url`,
    `confirm_lock_ttl_seconds`, `exec_position_mode_ttl_seconds`,
-   `exec_margin_type_ttl_seconds` (с блоков 28.09),
    `exec_daily_digest_hour`, `log_json`, `environment`,
    `reconciler_notify_max_age_hours`, `reconciler_pulse_every` (с `c8306f9`/`90fae6e`).
    `bingx_base_url` — только публичный клиент; ключевой клиент в режиме
@@ -398,16 +380,17 @@ PY
 10. `grep -c Traceback`
 11. `grep -ci -e Conflict -e 'terminated by other getUpdates'` — второй
     экземпляр бота
-12. Последние `Фоновый цикл завершён: setup_scanner|position_monitor|
-    daily_jobs` и `Цикл сканера завершён` (символы, запросы,
-    длительность). Строки «Скан рынка» в логах нет. С `27ac9db` рассылки
+12. Последние `Фоновый цикл завершён: position_monitor|daily_jobs`
+    (сканер удалён 02.10.2026 — строк `setup_scanner` и «Цикл сканера
+    завершён» на новом коде нет). С `27ac9db` рассылки
     daily_jobs пишут INFO `Рассылка отправлена: daily_report|daily_limit_reached|
     execution_digest`, сбой — WARNING `Рассылка не доставлена…` / `…выброшена`;
     на коде до него — только `user_settings.execution_digest_last_sent_date`
     (пункт 14). С `90fae6e` reconciler пишет `Пульс reconciler: …` раз в
     `reconciler_pulse_every` запусков (60 — раз в час): последний не старше часа,
-    `ошибок` и `пропущено по локу` — флаг, если не 0. Плюс `Лимит BingX после POST`
-    (остаток и окно лимитов пути входа, с `e194bb7`) — копить в handoff
+    `ошибок` и `пропущено по локу` — флаг, если не 0. `Лимит BingX после POST`
+    (с `e194bb7`) писал путь входа — до этапа 4 (действия с позициями) этих
+    строк не будет
 
 ### E. База
 
@@ -418,23 +401,23 @@ PY
 
 13. `pg_size_pretty(pg_database_size(current_database()))`; соединения
     из `pg_stat_activity` по `state`
-14. `execution_orders` с окна деплоя: `status × stage`. Любая строка
-    `PENDING`/`SUBMITTED`/`UNKNOWN` при `exec_dry_run=true` — флаг.
+14. `execution_orders` с окна деплоя: `status × stage`. С 02.10.2026 входа
+    по сигналу нет — до этапа 4 новых строк быть не должно, любая — флаг.
     Там же `user_settings.execution_digest_last_sent_date` — вчерашняя
     дата, если час `EXEC_DAILY_DIGEST_HOUR` по локальному времени прошёл.
     С миграции `7b4e2c9a1f35`: `reconciliation_events` с `notified_at IS NULL`
     — недоставленные уведомления (`gave_up_at` NULL — ещё в переотправке, не
     NULL — отказ); по `kind`, с `attempts` и возрастом
-15. `signal_notifications` с `level='READY'` по `notified_at` за 24 ч и с
-    окна деплоя (события, не слоты); сколько из них дошло до карточки —
-    distinct `notification_id` в `execution_orders`, кроме `REFUSED` на
-    `card`. Плюс уведомления с `trade_opened_at IS NOT NULL`.
-    `signals.trade_opened_at` с 15.5.2а не используется
+15. `signals` и `signal_notifications` — с 02.10.2026 не пишутся (сканер
+    удалён, таблицы ждут отдельной миграции после дампа): новые строки после
+    окна деплоя — флаг
 16. `trades` со `status='OPEN'` по `source`; всего
     `source='SIGNAL_EXECUTION'`; из них `fill_confirmed = false`
     (предварительные, 15.5.4) — при сухом прогоне их быть не должно
 16а. С миграции `0bf103d4a84d`: `execution_callbacks` с окна деплоя по
-    `action`; `notification_id IS NULL` (битые кнопки) — флаг. Каждому
+    `action`. С 02.10.2026 старые кнопки `exn:*` отвечают «Сигналы отключены»
+    и ничего не пишут — до этапа 4 новых строк быть не должно.
+    Историческое (для строк до 02.10): `notification_id IS NULL` (битые кнопки) — флаг. Каждому
     `yes` — строка исхода в `execution_orders` по тому же
     `notification_id`; `yes` без исхода — только двойной тап под локом
     (пара `yes` по одному уведомлению за секунды). В логе — WARNING/ERROR
