@@ -235,7 +235,8 @@ class FakeFundingClient:
 
     async def _request(self, path: str, params: dict[str, Any]) -> list[dict[str, Any]]:
         self.params.append(params)
-        older = [e for e in self.events if e["fundingTime"] <= params["endTime"]]
+        end = params.get("endTime")
+        older = [e for e in self.events if end is None or e["fundingTime"] <= end]
         return older[-params["limit"]:]
 
 
@@ -256,7 +257,9 @@ async def test_fetch_funding_pages_by_end_time(monkeypatch) -> None:  # type: ig
 
     assert len(events) == 10
     assert events[0].time == T0
-    assert [p["endTime"] for p in client.params][0] == int((T0 + 8 * H * 9).timestamp() * 1000)
+    # первая страница — без endTime (ручка отвечает null на endTime в текущем периоде)
+    assert "endTime" not in client.params[0]
+    assert all("endTime" in p for p in client.params[1:])
 
 
 async def test_fetch_funding_stops_when_end_time_ignored(monkeypatch) -> None:  # type: ignore[no-untyped-def]

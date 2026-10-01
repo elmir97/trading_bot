@@ -211,16 +211,19 @@ class FundingFetcher:
         self.requests = 0
         self.null_retries = 0
 
-    async def get(self, symbol: str, end: datetime) -> list[FundingEvent]:
+    async def get(self, symbol: str, end: datetime | None) -> list[FundingEvent]:
+        """end None — последние FUNDING_LIMIT записей. 01.10: endTime в текущем
+        периоде funding (сразу после начисления) ручка стабильно отвечает
+        data: null; без endTime и с endTime в прошлом — список."""
+        params: dict[str, Any] = {"symbol": symbol, "limit": FUNDING_LIMIT}
+        if end is not None:
+            params["endTime"] = _ms(end)
         # 01.10: ручка изредка отвечает code 0 и data: null на тот же запрос,
         # что через секунду отдаёт список. Пустота — не «ставок нет»: повтор
         # до NULL_RETRIES раз, потом parse_funding падает, как на любом
         # не-списке.
         for attempt in range(NULL_RETRIES + 1):
-            data = await self._client._request(
-                FUNDING_PATH,
-                {"symbol": symbol, "endTime": _ms(end), "limit": FUNDING_LIMIT},
-            )
+            data = await self._client._request(FUNDING_PATH, params)
             self.requests += 1
             if data is not None or attempt == NULL_RETRIES:
                 break
@@ -243,7 +246,7 @@ async def fetch_funding(
     сдвигает выдачу или история кончилась) — останавливаемся: покрытие
     начинается с самого раннего полученного события, раньше — «н/д»."""
     collected: dict[datetime, FundingEvent] = {}
-    cursor = end
+    cursor: datetime | None = None  # первая страница — без endTime, см. FundingFetcher.get
     while True:
         batch = await fetcher.get(symbol, cursor)
         fresh = [e for e in batch if e.time not in collected]
@@ -255,7 +258,7 @@ async def fetch_funding(
         if earliest <= start:
             break
         cursor = earliest - timedelta(milliseconds=1)
-    return sorted(collected.values(), key=lambda e: e.time)
+    return sorted((e for e in collected.values() if e.time <= end), key=lambda e: e.time)
 
 
 # --- replay: слоты сканера ----------------------------------------------------
