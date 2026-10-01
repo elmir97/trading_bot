@@ -873,3 +873,10 @@ def test_trend_scored_open_has_no_r() -> None:
 
 def test_parse_start_for_final_window() -> None:
     assert rh.parse_end("2022-10-13T00:00Z") == datetime(2022, 10, 13, tzinfo=UTC)
+
+
+def test_used_binance_counts_only_stitched_part() -> None:
+    raw = [rh.BinanceFunding(T0 + 8 * H * i, D("0.0001"), None) for i in range(6)]
+    bingx = [rh.FundingEvent(T0 + 8 * H * 4, D("0.0003"), D(1))]
+    assert len(rh.used_binance(raw, bingx)) == 4
+    assert len(rh.used_binance(raw, [])) == 6

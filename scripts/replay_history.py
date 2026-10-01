@@ -400,6 +400,17 @@ def resolve_marks(
     return out, substituted
 
 
+def used_binance(
+    raw: Sequence[BinanceFunding], bingx: Sequence[FundingEvent]
+) -> list[BinanceFunding]:
+    """Записи Binance, которые реально войдут в склейку (до первого BingX) —
+    для честного счёта подстановок markPrice в отчёте (01.10: считались все
+    загруженные, у Binance markPrice пуст до 31.10.2023)."""
+    if not bingx:
+        return list(raw)
+    return [e for e in raw if e.time < bingx[0].time]
+
+
 def stitch_funding(
     bingx: Sequence[FundingEvent], binance: Sequence[FundingEvent]
 ) -> tuple[list[FundingEvent], datetime | None]:
@@ -1716,10 +1727,12 @@ async def run_final(
                         bfetcher, symbol, start - timedelta(days=2), now
                     )
                     save_binance(path, raw)
-                events, substituted = resolve_marks(raw, h4)
+                events, _ = resolve_marks(raw, h4)
                 funding, until = stitch_funding(bingx, events)
+                used = used_binance(raw, bingx)
                 note = (f"Binance до {until:%d.%m.%Y}" if until else "Binance") + (
-                    f", markPrice по закрытию H4: {substituted}"
+                    f": начислений {len(used)}, markPrice по закрытию H4 — у "
+                    f"{sum(1 for e in used if e.mark_price is None)}"
                 )
             gap = funding_gap(symbol, funding, start)
             if gap is not None:
