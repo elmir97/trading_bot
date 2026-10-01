@@ -12,3 +12,5 @@ logs/
 .venv
 # Документы проекта (ТЗ, handoff, архитектура) — в git, не в образе.
 docs/
+# Shell-скрипты запускаются с Windows через ssh и stdin, в контейнере не нужны.
+scripts/*.sh

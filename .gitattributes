@@ -1,0 +1,3 @@
+# Shell-скрипты уходят на сервер через stdin (scripts/rehearse_migration.sh):
+# с CRLF bash падает на первой строке, а core.autocrlf=true на этой машине.
+*.sh text eol=lf
