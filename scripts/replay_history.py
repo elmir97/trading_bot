@@ -485,6 +485,169 @@ def sections(items: Sequence[Scored]) -> dict[str, list[Line]]:
     }
 
 
+# --- критерий половин ------------------------------------------------------------
+#
+# Кандидаты фиксированы до прогона (решение владельца 01.10): фильтр
+# «оставить только …» подбирается на одной половине и принимается, только
+# если держится на другой. R нетто без funding — у funding есть «н/д».
+
+MIN_KEPT = 50
+MIN_KEPT_SHARE = Decimal("0.3")
+MIN_UPLIFT = Decimal("0.15")
+
+
+def _trend_aligned(s: Scored) -> bool:
+    d = s.result.row.direction
+    return (d is SignalDirection.LONG and s.regime == "выше EMA200 D1") or (
+        d is SignalDirection.SHORT and s.regime == "ниже EMA200 D1"
+    )
+
+
+def filter_candidates(
+    symbols: Sequence[str], first_ids: set[int]
+) -> dict[str, Callable[[Scored], bool]]:
+    """first_ids — id() записей, первых на свой пробой (first_per_breakout)."""
+    row = lambda s: s.result.row  # noqa: E731
+
+    def first_only(s: Scored) -> bool:
+        return id(s) in first_ids
+
+    cands: dict[str, Callable[[Scored], bool]] = {
+        "сетап: только пробой": lambda s: row(s).setup == BreakoutRetest.name,
+        "сетап: только откат": lambda s: row(s).setup != BreakoutRetest.name,
+        "стоп ≥1%": lambda s: (row(s).features.stop_pct or Decimal(0)) >= 1,
+        "стоп <1%": lambda s: row(s).features.stop_pct is not None
+        and row(s).features.stop_pct < 1,
+        "стоп <1 ATR": lambda s: (v := stop_atr(row(s))) is not None and v < 1,
+        "стоп 1–2 ATR": lambda s: (v := stop_atr(row(s))) is not None and 1 <= v < 2,
+        "стоп ≥2 ATR": lambda s: (v := stop_atr(row(s))) is not None and v >= 2,
+        "стоп ≥1 ATR": lambda s: (v := stop_atr(row(s))) is not None and v >= 1,
+        "объём пробоя ≥1.3 (откаты остаются)": lambda s: row(s).setup != BreakoutRetest.name
+        or (row(s).features.breakout_volume_ratio or Decimal(0)) >= Decimal("1.3"),
+        "объём пробоя <1.3 (откаты остаются)": lambda s: row(s).setup != BreakoutRetest.name
+        or (
+            row(s).features.breakout_volume_ratio is not None
+            and row(s).features.breakout_volume_ratio < Decimal("1.3")
+        ),
+        "один на пробой (откаты остаются)": lambda s: row(s).setup != BreakoutRetest.name
+        or first_only(s),
+        "только LONG": lambda s: row(s).direction is SignalDirection.LONG,
+        "только SHORT": lambda s: row(s).direction is SignalDirection.SHORT,
+        "режим: выше EMA200 D1": lambda s: s.regime == "выше EMA200 D1",
+        "режим: ниже EMA200 D1": lambda s: s.regime == "ниже EMA200 D1",
+        "по тренду D1 (LONG выше, SHORT ниже)": _trend_aligned,
+    }
+    for symbol in symbols:
+        cands[f"без {symbol}"] = lambda s, sym=symbol: row(s).symbol != sym
+    return cands
+
+
+@dataclass(slots=True)
+class FilterCheck:
+    name: str
+    fit_n: int
+    fit_base: Decimal | None
+    fit_r: Decimal | None
+    test_n: int
+    test_base: Decimal | None
+    test_r: Decimal | None
+    eligible: bool
+    chosen: bool = False
+
+    @property
+    def uplift(self) -> Decimal | None:
+        if self.test_r is None or self.test_base is None:
+            return None
+        return self.test_r - self.test_base
+
+    @property
+    def holds(self) -> bool:
+        return (
+            self.uplift is not None and self.uplift >= MIN_UPLIFT
+            and self.test_r is not None and self.test_r > 0
+        )
+
+
+def _closed_net(items: Sequence[Scored]) -> tuple[int, Decimal | None]:
+    nets = [s.result.r_net for s in items if s.result.r_net is not None]
+    return len(nets), _avg(nets)
+
+
+def evaluate_filters(
+    fit: Sequence[Scored], test: Sequence[Scored], symbols: Sequence[str]
+) -> list[FilterCheck]:
+    """Каждый кандидат: n и R нетто закрытых на половине подбора и на
+    проверочной, против базы. Допустим к выбору — оставил ≥ MIN_KEPT и
+    ≥ MIN_KEPT_SHARE закрытых на половине подбора. Выбран — лучший R нетто
+    среди допустимых. Держится — на проверочной R нетто выше базы на
+    MIN_UPLIFT и выше нуля."""
+    first_ids: set[int] = set()
+    for half in (fit, test):
+        first, _ = first_per_breakout(half)
+        first_ids.update(id(s) for s in first)
+    cands = filter_candidates(symbols, first_ids)
+    fit_total, fit_base = _closed_net(fit)
+    _, test_base = _closed_net(test)
+    checks: list[FilterCheck] = []
+    for name, keep in cands.items():
+        fit_n, fit_r = _closed_net([s for s in fit if keep(s)])
+        test_n, test_r = _closed_net([s for s in test if keep(s)])
+        eligible = fit_n >= MIN_KEPT and fit_total > 0 and (
+            Decimal(fit_n) / Decimal(fit_total) >= MIN_KEPT_SHARE
+        )
+        checks.append(FilterCheck(
+            name, fit_n, fit_base, fit_r, test_n, test_base, test_r, eligible
+        ))
+    best = max(
+        (c for c in checks if c.eligible and c.fit_r is not None),
+        key=lambda c: c.fit_r or Decimal(0), default=None,
+    )
+    if best is not None:
+        best.chosen = True
+    return checks
+
+
+def render_filters(title: str, checks: Sequence[FilterCheck]) -> str:
+    out = [
+        f"\n**{title}**\n",
+        "| фильтр | n подбор | R нетто подбор (база) | n проверка | R нетто проверка (база) "
+        "| прирост | допуск | выбран | держится |",
+        "|---|---|---|---|---|---|---|---|---|",
+    ]
+    for c in sorted(checks, key=lambda c: (not c.chosen, -(c.fit_r or Decimal(-99)))):
+        out.append(
+            f"| {c.name} | {c.fit_n} | {_fmt(c.fit_r)} ({_fmt(c.fit_base)}) | {c.test_n} "
+            f"| {_fmt(c.test_r)} ({_fmt(c.test_base)}) | {_fmt(c.uplift)} "
+            f"| {'да' if c.eligible else 'нет'} | {'★' if c.chosen else ''} "
+            f"| {'да' if c.holds else 'нет'} |"
+        )
+    return "\n".join(out)
+
+
+def notification_counts(
+    items: Sequence[Scored], halves: tuple[datetime, datetime, datetime]
+) -> str:
+    """Уведомления по символу и половине, в сутки — правдоподобность против
+    живого темпа."""
+    start, middle, end = halves
+    days = [(middle - start).total_seconds() / 86400, (end - middle).total_seconds() / 86400]
+    symbols = sorted({s.result.row.symbol for s in items})
+    out = ["| символ | половина 1 | в сутки | половина 2 | в сутки |", "|---|---|---|---|---|"]
+    for sym in [*symbols, "все"]:
+        sel = [s for s in items if sym == "все" or s.result.row.symbol == sym]
+        a = sum(1 for s in sel if s.result.row.notified_at < middle)
+        b = len(sel) - a
+        out.append(f"| {sym} | {a} | {a / days[0]:.2f} | {b} | {b / days[1]:.2f} |")
+    return "\n".join(out)
+
+
+def funding_coverage(items: Sequence[Scored]) -> str:
+    closed = [s for s in items if s.result.r_net is not None]
+    missing = sum(1 for s in closed if s.r_net_funding is None)
+    share = Decimal(missing) / Decimal(len(closed)) * 100 if closed else Decimal(0)
+    return f"закрытых {len(closed)}, без funding {missing} ({share:.0f}%)"
+
+
 def split_halves(
     items: Sequence[Scored], start: datetime, end: datetime
 ) -> tuple[list[Scored], list[Scored]]:
@@ -704,10 +867,23 @@ async def run(months: int, symbols: Sequence[str], cache: Path, json_path: Path 
     for tf in REPLAY_TIMEFRAMES:
         items = [s for s in scored if s.result.row.timeframe == tf]
         halves = split_halves(items, start, now)
+        middle = start + (now - start) / 2
+        print(f"\n# {tf}: уведомления по символу и половине "
+              f"(половины {start:%d.%m.%Y}–{middle:%d.%m.%Y}–{now:%d.%m.%Y})\n")
+        print(notification_counts(items, (start, middle, now)))
         for name, half in zip(("первая половина", "вторая половина"), halves, strict=True):
-            print(f"\n## {tf} — {name} (n={len(half)})")
+            print(f"\n## {tf} — {name} (n={len(half)}); funding: {funding_coverage(half)}")
             for title, lines in sections(half).items():
                 print(render_lines(title, lines))
+        used = [s for s in symbols if s not in {e.split(" ")[0] for e in excluded}]
+        print(render_filters(
+            f"{tf}: фильтры — подбор на первой половине, проверка на второй",
+            evaluate_filters(halves[0], halves[1], used),
+        ))
+        print(render_filters(
+            f"{tf}: фильтры — подбор на второй половине, проверка на первой (устойчивость)",
+            evaluate_filters(halves[1], halves[0], used),
+        ))
     if json_path is not None:
         json_path.write_text(json.dumps([
             {

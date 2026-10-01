@@ -438,3 +438,63 @@ def test_history_gap_detects_short_history() -> None:
     short = {"1h": [kline(i) for i in range(200, 500)]}
     assert "история с" in str(rh.history_gap("GRAMTON-USDT", short, start))
     assert "нет свечей" in str(rh.history_gap("X", {"1h": []}, start))
+
+
+# --- критерий половин -------------------------------------------------------------------
+
+
+def _half(long_net: str, short_net: str, n: int = 60) -> list[rh.Scored]:
+    return [
+        *(_scored("тейк", long_net, long_net, at=T0 + i * H) for i in range(n)),
+        *(
+            _scored("стоп", short_net, short_net, at=T0 + i * H,
+                    direction=SignalDirection.SHORT, stop_loss=D(102))
+            for i in range(n)
+        ),
+    ]
+
+
+def _check(checks: list[rh.FilterCheck], name: str) -> rh.FilterCheck:
+    return next(c for c in checks if c.name == name)
+
+
+def test_filter_chosen_on_fit_and_holds_on_test() -> None:
+    checks = rh.evaluate_filters(_half("0.5", "-1"), _half("0.3", "-1"), ["BTC-USDT"])
+    long_only = _check(checks, "только LONG")
+    assert long_only.chosen and long_only.eligible
+    assert long_only.test_r == D("0.3")
+    assert long_only.uplift == D("0.65")
+    assert long_only.holds
+    assert sum(c.chosen for c in checks) == 1
+    # все кандидаты в отчёте, не только выбранный
+    assert {"только SHORT", "без BTC-USDT", "по тренду D1 (LONG выше, SHORT ниже)"} <= {
+        c.name for c in checks
+    }
+
+
+def test_filter_that_breaks_on_test_does_not_hold() -> None:
+    checks = rh.evaluate_filters(_half("0.5", "-1"), _half("-0.9", "-1"), ["BTC-USDT"])
+    long_only = _check(checks, "только LONG")
+    assert long_only.chosen
+    assert not long_only.holds
+
+
+def test_filter_below_min_kept_not_eligible() -> None:
+    checks = rh.evaluate_filters(_half("0.5", "-1", n=40), _half("0.3", "-1", n=40), [])
+    assert not _check(checks, "только LONG").eligible
+    assert not any(c.chosen and c.name == "только LONG" for c in checks)
+
+
+def test_notification_counts_per_symbol_and_half() -> None:
+    items = [_scored("стоп", "-1", "-1", at=T0 + i * H) for i in range(10)]
+    text = rh.notification_counts(items, (T0, T0 + 5 * H, T0 + 10 * H))
+    assert "| BTC-USDT | 5 |" in text and "| все | 5 |" in text
+
+
+def test_funding_coverage_share() -> None:
+    items = [
+        _scored("тейк", "2", "1.9", r_nf="1.8"),
+        _scored("стоп", "-1", "-1.1"),
+        _scored("открыт", None, None),
+    ]
+    assert rh.funding_coverage(items) == "закрытых 2, без funding 1 (50%)"
