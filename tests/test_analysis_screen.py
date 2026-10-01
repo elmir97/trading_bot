@@ -19,7 +19,6 @@ import pytest
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Message
 
-from app.analysis import classify
 from app.analysis.engine import AnalysisEngine
 from app.analysis.setups import EMAPullback
 from app.analysis.signals import MarketContext, Signal, SignalCondition
@@ -42,7 +41,6 @@ from app.exchanges.base import ExchangeUnavailableError, Kline, SymbolInfo
 from app.market.cache import TTLCache
 from app.market.data import MarketDataService
 from app.trading.enums import MarketStructure, SignalDirection
-from app.workers import scanner
 from tests.test_market_data import FakeClient
 
 D = Decimal
@@ -393,13 +391,6 @@ class TestKeyboard:
         for row in markup.inline_keyboard:
             for button in row:
                 assert len((button.callback_data or "").encode()) <= 64
-
-
-class TestSharedWithScanner:
-    def test_same_classifier_object(self) -> None:
-        # Одно определение FORMING на экран и сканер: копия разошлась бы.
-        assert scanner.classify_signal is classify.classify_signal
-        assert scanner.SCAN_TIMEFRAMES is classify.SCAN_TIMEFRAMES
 
 
 # --- запросы к бирже -------------------------------------------------------

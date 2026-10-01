@@ -76,7 +76,7 @@ class SignalNotification(IntPKMixin, Base):
     ema50_distance_atr: Mapped[Decimal | None] = mapped_column(RatioNumeric)
 
     notified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    # notified_at + TTL сигнала (Settings.setup_scanner_ttl_hours), фиксируется
+    # notified_at + TTL сигнала (было 4 ч; сканер удалён 02.10.2026), фиксируется
     # при вставке. В отличие от SignalRecord.expires_at пересканы его НЕ
     # продлевают — это срок жизни кнопки из конкретного сообщения.
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

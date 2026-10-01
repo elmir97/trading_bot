@@ -26,17 +26,7 @@ render_execution_digest() — чистые функции без I/O, поэто
 полночью, и календарные сутки резали бы события между часом отправки и
 полночью — они не попадали бы ни в сегодняшнюю сводку, ни в завтрашнюю.
 Само окно считает DailyJobs (window_start = now - 24h), этому модулю
-известны только уже готовые rows/ready_signals.
-
-"Сигналов READY" в шапке сводки — исключение: это count() из
-signal_notifications (SignalNotificationRepository.count_ready_between()),
-не из execution_orders, потому что отказ гварда происходит до появления
-карточки, а карточка (и, значит, execution_orders-строка) при этом ещё не
-существует — без отдельного источника READY-сигналы, упёршиеся в гвард,
-были бы не видны. Шаг 15.5.2а: считаются отправленные уведомления
-(события), а не слоты — слот, уведомивший дважды за сутки, даёт два.
-build_stats() принимает готовое число ready_signals параметром, I/O
-остаётся в DailyJobs.
+известны только уже готовые строки.
 """
 
 from __future__ import annotations
@@ -56,7 +46,6 @@ from app.trading.enums import (
     TradeSide,
 )
 from app.workers.base import fmt_decimal
-from app.workers.scanner import ScanCycleStats
 
 if TYPE_CHECKING:
     # Только тип: сводке не нужен весь reconciler (биржа, журнал) при импорте.
@@ -103,12 +92,6 @@ class ExecutionDigestStats:
 
     Окно — скользящие 24 часа до отправки (см. докстринг модуля), не
     календарные сутки."""
-
-    # Из signal_notifications (SignalNotificationRepository.count_ready_between),
-    # не из execution_orders — сколько раз READY-сетап реально дошёл до
-    # пользователя уведомлением, независимо от того, нажималась ли кнопка
-    # и прошла ли попытка гвардов (раздел 12а).
-    ready_signals: int = 0
 
     confirmed: int = 0
     declined: int = 0
@@ -224,7 +207,6 @@ def build_stats(
     rows: list[ExecutionOrder],
     *,
     target_risk_percent: Decimal | None,
-    ready_signals: int = 0,
     unprotected: list[ExecutionOrder] | None = None,
     reconciler_events: list[ReconciliationEvent] | None = None,
 ) -> ExecutionDigestStats:
@@ -232,12 +214,8 @@ def build_stats(
     пользователя (скользящие 24 часа, не календарные сутки — см. докстринг
     модуля), см. ExecutionOrderRepository.list_entries_between().
     target_risk_percent — текущий risk_per_trade_percent торгового плана,
-    точка отсчёта для "риск отклонился от заданного" (раздел 12а).
-    ready_signals — SignalNotificationRepository.count_ready_between() за то
-    же окно: считается отдельно от rows, источник другой
-    (signal_notifications, не execution_orders), поэтому передаётся готовым
-    числом, а не строками."""
-    stats = ExecutionDigestStats(ready_signals=ready_signals)
+    точка отсчёта для "риск отклонился от заданного" (раздел 12а)."""
+    stats = ExecutionDigestStats()
     stats.unprotected = [
         (row.symbol, row.position_side.value) for row in (unprotected or [])
     ]
@@ -497,23 +475,16 @@ def render_execution_digest(
     stats: ExecutionDigestStats,
     *,
     max_price_drift_ratio: Decimal,
-    scan_cycle: ScanCycleStats | None = None,
     reconciler: ReconcilerWindow | None = None,
     tz_offset_hours: int = 0,
 ) -> str:
     """Раздел 12а ТЗ, макет сводки. Корректна и при stats.total_attempts == 0
-    (нули вместо деления на ноль, средние строки просто не печатаются).
-
-    scan_cycle — последний замер SetupScanner.run() (раздел "троттлинг
-    сканера"), чтобы расширение списка символов было измеримым, а не на
-    глаз. None, если сканер ни разу не отработал после старта процесса —
-    это не то же самое, что "0 запросов", строка просто не печатается."""
+    (нули вместо деления на ноль, средние строки просто не печатаются)."""
     anomalies = detect_anomalies(stats, max_price_drift_ratio=max_price_drift_ratio)
 
     lines = [
         "📊 <b>Исполнение за последние 24 часа</b>",
         "",
-        f"Сигналов READY: {stats.ready_signals}",
         f"  показана карточка: {stats.total_cards}",
         f"    подтверждено: {stats.confirmed}",
         f"    исполнено (read-back): {stats.filled}",
@@ -579,16 +550,8 @@ def render_execution_digest(
     else:
         lines.append("Аномалии: нет")
 
-    if scan_cycle is not None:
-        lines.append("")
-        lines.append(
-            f"Скан рынка: {scan_cycle.symbols_scanned} символов, "
-            f"{scan_cycle.requests_made} запросов, "
-            f"{fmt_decimal(Decimal(str(round(scan_cycle.duration_seconds, 1))))} с"
-        )
     if reconciler is not None:
-        if scan_cycle is None:
-            lines.append("")
+        lines.append("")
         lines.append(render_reconciler_line(reconciler, tz_offset_hours))
 
     return "\n".join(lines)

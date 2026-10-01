@@ -1,6 +1,6 @@
 """Собирает фоновые задачи в один APScheduler внутри процесса бота.
 
-Один AsyncIOScheduler на все три задачи, а не три отдельных цикла: они и
+Один AsyncIOScheduler на все задачи, а не отдельные циклы: они и
 так работают в общем event loop процесса (требование 1 — без отдельного
 контейнера), а планировщик уже даёт нужную изоляцию между job'ами —
 падение одной не трогает расписание остальных.
@@ -21,7 +21,6 @@ from app.workers.base import job_wrapper
 from app.workers.daily import DailyJobs
 from app.workers.positions import PositionMonitor
 from app.workers.reconciler import Reconciler
-from app.workers.scanner import SetupScanner
 
 logger = get_logger(__name__)
 
@@ -37,14 +36,11 @@ class BackgroundJobs:
     ) -> None:
         self._settings = settings
         self._scheduler = AsyncIOScheduler(timezone="UTC")
-        self._scanner = SetupScanner(bot, db, settings)
         self._positions = PositionMonitor(bot, db, settings)
         # Шаг 15.6: сверка журнала с биржей. Redis — чтобы пропускать цикл,
         # пока жив лок «Да» (вход в полёте).
         self._reconciler = Reconciler(bot, db, settings, cipher, redis)
-        self._daily = DailyJobs(
-            bot, db, settings, cipher, scanner=self._scanner, reconciler=self._reconciler
-        )
+        self._daily = DailyJobs(bot, db, settings, cipher, reconciler=self._reconciler)
 
     def start(self) -> None:
         """Требование 8: пока BACKGROUND_JOBS_ENABLED=false — не регистрирует
@@ -53,14 +49,6 @@ class BackgroundJobs:
             logger.info("Фоновые задачи выключены (BACKGROUND_JOBS_ENABLED=false)")
             return
 
-        self._scheduler.add_job(
-            job_wrapper("setup_scanner", self._scanner.run),
-            "interval",
-            minutes=self._settings.setup_scanner_interval_minutes,
-            id="setup_scanner",
-            coalesce=True,
-            max_instances=1,
-        )
         self._scheduler.add_job(
             job_wrapper("position_monitor", self._positions.run),
             "interval",
@@ -89,7 +77,6 @@ class BackgroundJobs:
         logger.info(
             "Фоновые задачи запущены",
             extra={
-                "setup_scanner_minutes": self._settings.setup_scanner_interval_minutes,
                 "position_monitor_minutes": self._settings.position_monitor_interval_minutes,
                 "daily_jobs_minutes": self._settings.daily_jobs_interval_minutes,
                 "reconciler_seconds": self._settings.reconciler_interval_seconds,

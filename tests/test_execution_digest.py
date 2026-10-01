@@ -5,10 +5,6 @@ detect_anomalies() читают уже готовые ExecutionOrder (role=ENTRY
 отдаёт ExecutionOrderRepository.list_entries_between()), собранные тут
 вручную, без сессии. Как test_workers.py — те же принципы (Decimal,
 никакого мока сети/БД).
-
-ready_signals (счётчик из таблицы signals) сюда же передаётся готовым
-числом — build_stats() ничего не знает о SignalRepository, поэтому
-никакого мока БД для него не нужно, как и для execution_orders.
 """
 
 from __future__ import annotations
@@ -23,7 +19,6 @@ from app.workers.execution_digest import (
     detect_anomalies,
     render_execution_digest,
 )
-from app.workers.scanner import ScanCycleStats
 
 D = Decimal
 
@@ -220,9 +215,8 @@ class TestAnomalies:
 
 class TestRenderExecutionDigest:
     def test_zero_signals_day_renders_without_errors(self) -> None:
-        stats = build_stats([], target_risk_percent=D("2.0"), ready_signals=0)
+        stats = build_stats([], target_risk_percent=D("2.0"))
         text = render_execution_digest(stats, max_price_drift_ratio=D("0.3"))
-        assert "Сигналов READY: 0" in text
         assert "показана карточка: 0" in text
         assert "подтверждено: 0" in text
         assert "отказ пользователя: 0" in text
@@ -251,13 +245,9 @@ class TestRenderExecutionDigest:
         ]
         # target_risk_percent=None — эта проверка про форматирование счётчиков
         # и средних, не про раздел "Аномалии" (у него свой TestAnomalies).
-        # ready_signals=9 — намеренно не равно total_cards(6) и не равно
-        # total_attempts(8): источник другой (signals), сумма карточек и
-        # отказов не обязана с ним совпадать.
-        stats = build_stats(rows, target_risk_percent=None, ready_signals=9)
+        stats = build_stats(rows, target_risk_percent=None)
         text = render_execution_digest(stats, max_price_drift_ratio=D("0.3"))
 
-        assert "Сигналов READY: 9" in text
         assert "показана карточка: 6" in text
         assert "подтверждено: 2" in text
         assert "отказ пользователя: 3" in text
@@ -271,38 +261,18 @@ class TestRenderExecutionDigest:
         assert "Аномалии: нет" in text
 
     def test_guard_refusal_before_card_reflected_in_funnel_not_lost(self) -> None:
-        # Вчерашний баг-репорт: 1 READY-сигнал, отказ гварда ещё до карточки
-        # (SYMBOL_NOT_ALLOWED), карточка не показана. Раньше "Сигналов READY"
-        # считался по total_cards и печатал 0 при реальном сигнале — теперь
-        # READY берётся из отдельного счётчика и не занижается отказами.
+        # Отказ гварда ещё до карточки (SYMBOL_NOT_ALLOWED): карточка не
+        # показана, но попытка видна в воронке.
         rows = [_row(OrderStatus.REFUSED, error_code="SYMBOL_NOT_ALLOWED")]
-        stats = build_stats(rows, target_risk_percent=None, ready_signals=1)
+        stats = build_stats(rows, target_risk_percent=None)
         text = render_execution_digest(stats, max_price_drift_ratio=D("0.3"))
 
-        assert "Сигналов READY: 1" in text
         assert "показана карточка: 0" in text
         assert "отказ кода до карточки: 1" in text
         assert "SYMBOL_NOT_ALLOWED — 1" in text
         # Один отказ на одну попытку — доля 100%, но ниже минимума выборки:
         # не должно превращаться в "подозрительно часто".
         assert "Аномалии: нет" in text
-
-    def test_scan_cycle_line_printed_when_given(self) -> None:
-        stats = build_stats([], target_risk_percent=None, ready_signals=0)
-        scan_cycle = ScanCycleStats(
-            symbols_scanned=12, requests_made=34, duration_seconds=5.67
-        )
-        text = render_execution_digest(
-            stats, max_price_drift_ratio=D("0.3"), scan_cycle=scan_cycle
-        )
-        assert "Скан рынка: 12 символов, 34 запросов, 5.7 с" in text
-
-    def test_scan_cycle_line_absent_when_not_given(self) -> None:
-        """Сканер мог не отработать ни разу после рестарта — это не "0",
-        строка просто не печатается (не выдумываем данных, которых нет)."""
-        stats = build_stats([], target_risk_percent=None, ready_signals=0)
-        text = render_execution_digest(stats, max_price_drift_ratio=D("0.3"))
-        assert "Скан рынка" not in text
 
 
 # ---------------------------------------------------------------------------
@@ -419,14 +389,13 @@ class TestErrorAnomalies:
 
 
 class TestFunnelRender:
-    def _text(self, rows: list[ExecutionOrder], ready: int = 0) -> str:
-        stats = build_stats(rows, target_risk_percent=None, ready_signals=ready)
+    def _text(self, rows: list[ExecutionOrder]) -> str:
+        stats = build_stats(rows, target_risk_percent=None)
         return render_execution_digest(stats, max_price_drift_ratio=D("0.3"))
 
     def test_funnel_lines_printed_even_when_zero(self) -> None:
         text = self._text([])
         for line in (
-            "Сигналов READY: 0",
             "  показана карточка: 0",
             "    подтверждено: 0",
             "    отказ пользователя: 0",
@@ -444,7 +413,7 @@ class TestFunnelRender:
             _stage_row(OrderStatus.REFUSED, "card", "MAX_POSITIONS"),
             _stage_row(OrderStatus.REFUSED, "card", "MAX_POSITIONS"),
         ]
-        lines = self._text(rows, ready=3).splitlines()
+        lines = self._text(rows).splitlines()
         i = lines.index("    отказ кода при подтверждении: 1")
         assert lines[i + 1] == "      PRICE_DRIFT — 1"
         j = lines.index("  отказ кода до карточки: 2")
@@ -453,9 +422,8 @@ class TestFunnelRender:
 
     def test_layout_order_matches_spec(self) -> None:
         rows = [_row(OrderStatus.DRY_RUN)]
-        lines = self._text(rows, ready=1).splitlines()
+        lines = self._text(rows).splitlines()
         order = [
-            "Сигналов READY: 1",
             "  показана карточка: 1",
             "    подтверждено: 1",
             "    отказ пользователя: 0",

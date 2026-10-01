@@ -21,8 +21,6 @@ import pytest_asyncio
 from app.core.config import Settings
 from app.core.security import SecretCipher
 from app.database.models.execution_order import ExecutionOrder
-from app.database.models.signal import SignalRecord
-from app.database.models.signal_notification import SignalNotification
 from app.database.models.trade import Trade
 from app.database.repositories.strategy import MistakeTypeRepository, StrategyRepository
 from app.database.repositories.user import UserRepository
@@ -33,7 +31,6 @@ from app.trading.enums import (
     OrderSide,
     OrderStatus,
     OrderType,
-    SignalLevel,
     TradeSide,
     TradeSource,
 )
@@ -66,42 +63,6 @@ def _row(user_id: int, status: OrderStatus, **overrides: object) -> ExecutionOrd
     }
     fields.update(overrides)
     return ExecutionOrder(**fields)  # type: ignore[arg-type]
-
-
-def _signal(
-    user_id: int, level: SignalLevel, *, symbol: str, notified_at: datetime, **overrides: object
-) -> SignalRecord:
-    fields: dict[str, object] = {
-        "user_id": user_id,
-        "symbol": symbol,
-        "timeframe": "1h",
-        "level": level,
-        "setup": "test",
-        "fingerprint": f"fp-{symbol}-{level}",
-        "detail": "test detail",
-        "expires_at": notified_at + timedelta(hours=1),
-        "notified_at": notified_at,
-    }
-    fields.update(overrides)
-    return SignalRecord(**fields)  # type: ignore[arg-type]
-
-
-async def _add_notified(  # type: ignore[no-untyped-def]
-    session, user_id: int, level: SignalLevel, *, symbol: str, notified_at: datetime
-) -> SignalRecord:
-    """Шаг 15.5.2а: «Сигналов READY» считается по отправленным уведомлениям
-    (signal_notifications), а не по слотам — слот + его снимок, как пишет
-    сканер при отправке."""
-    slot = _signal(user_id, level, symbol=symbol, notified_at=notified_at)
-    session.add(slot)
-    await session.flush()
-    session.add(
-        SignalNotification.snapshot_of(
-            slot, notified_at=notified_at, expires_at=notified_at + timedelta(hours=4)
-        )
-    )
-    await session.flush()
-    return slot
 
 
 @pytest_asyncio.fixture
@@ -145,12 +106,6 @@ async def test_sends_digest_reflecting_todays_rows(ctx) -> None:  # type: ignore
     )
     session.add(_row(user.id, OrderStatus.DECLINED, created_at=moment))
     session.add(_row(user.id, OrderStatus.REFUSED, error_code="MAX_POSITIONS", created_at=moment))
-    # READY-сигнал сегодня — должен попасть в счётчик. FORMING сегодня же —
-    # проверяет, что фильтр по level реально отсекает не-READY.
-    await _add_notified(session, user.id, SignalLevel.READY, symbol="BTC-USDT", notified_at=moment)
-    await _add_notified(
-        session, user.id, SignalLevel.FORMING, symbol="ETH-USDT", notified_at=moment
-    )
     await session.flush()
 
     _now, _tz_offset, today_local, local_hour = _call_args(
@@ -162,7 +117,6 @@ async def test_sends_digest_reflecting_todays_rows(ctx) -> None:  # type: ignore
 
     assert len(bot.sent_messages) == 1
     _chat_id, text = bot.sent_messages[0]
-    assert "Сигналов READY: 1" in text
     assert "показана карточка: 2" in text
     assert "подтверждено: 1" in text
     assert "отказ пользователя: 1" in text
@@ -191,14 +145,6 @@ async def test_window_is_rolling_24h_not_calendar_day(ctx) -> None:  # type: ign
             user.id, OrderStatus.EXPIRED, created_at=now - timedelta(hours=25)
         )
     )
-    await _add_notified(
-        session, user.id, SignalLevel.READY, symbol="BTC-USDT",
-        notified_at=now - timedelta(hours=23),
-    )
-    await _add_notified(
-        session, user.id, SignalLevel.READY, symbol="ETH-USDT",
-        notified_at=now - timedelta(hours=25),
-    )
     await session.flush()
 
     _now, _tz_offset, today_local, local_hour = _call_args(
@@ -210,9 +156,8 @@ async def test_window_is_rolling_24h_not_calendar_day(ctx) -> None:  # type: ign
 
     assert len(bot.sent_messages) == 1
     text = bot.sent_messages[0][1]
-    # 23ч назад — внутри окна: 1 READY-сигнал, 1 показанная карточка (отказ
-    # пользователя). 25ч назад — вне окна, не должно попасть ни в одно число.
-    assert "Сигналов READY: 1" in text
+    # 23ч назад — внутри окна: 1 показанная карточка (отказ пользователя).
+    # 25ч назад — вне окна, не должно попасть ни в одно число.
     assert "показана карточка: 1" in text
     assert "отказ пользователя: 1" in text
     assert "истекло по TTL: 0" in text
@@ -232,7 +177,6 @@ async def test_zero_signals_day_still_sends_digest(ctx) -> None:  # type: ignore
 
     assert len(bot.sent_messages) == 1
     text = bot.sent_messages[0][1]
-    assert "Сигналов READY: 0" in text
     assert "Аномалии: нет" in text
 
 
@@ -319,36 +263,6 @@ async def test_stage_and_error_rows_reach_the_digest_through_the_db(ctx) -> None
     assert "  отказ кода до карточки: 1" in lines
     assert "  сбой биржи до карточки: 1" in lines
     assert "сбои биржи при попытках входа: 1 из 3 (ExchangeAuthError — 1)" in text
-
-
-async def test_ready_counts_notifications_not_slots(ctx) -> None:  # type: ignore[no-untyped-def]
-    """Шаг 15.5.2а: один слот уведомил дважды за окно (новый сетап) — это
-    два READY-события. До 15.5.2а COUNT по слотам давал 1: повторное
-    уведомление перезаписывало notified_at той же строки."""
-    daily, session, user, bot, settings = ctx
-    now = datetime.now(UTC)
-    slot = await _add_notified(
-        session, user.id, SignalLevel.READY, symbol="BTC-USDT",
-        notified_at=now - timedelta(hours=3),
-    )
-    slot.fingerprint = "fp-second-setup"
-    slot.notified_at = now - timedelta(hours=1)
-    await session.flush()
-    session.add(
-        SignalNotification.snapshot_of(
-            slot, notified_at=now - timedelta(hours=1), expires_at=now + timedelta(hours=3)
-        )
-    )
-    await session.flush()
-
-    _now, _tz_offset, today_local, local_hour = _call_args(
-        user, settings, local_hour=settings.exec_daily_digest_hour
-    )
-    await daily._maybe_send_execution_digest(
-        session, user, user.settings, now, today_local, local_hour
-    )
-
-    assert "Сигналов READY: 2" in bot.sent_messages[0][1]
 
 
 async def test_real_submission_statuses_reach_the_digest(ctx) -> None:  # type: ignore[no-untyped-def]

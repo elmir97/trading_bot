@@ -23,7 +23,7 @@ PlanValidator при сохранении сделки, взять его нео
 есть в PlanValidator.check().
 
 Сводка исполнения на биржу не ходит: она считает уже накопленные строки
-execution_orders и signals (см. app/workers/execution_digest.py), поэтому
+execution_orders и reconciliation_events (см. app/workers/execution_digest.py), поэтому
 доступна даже пользователям без подключённых ключей.
 """
 
@@ -40,7 +40,6 @@ from app.core.security import SecretCipher
 from app.database.models.user import User, UserSettings
 from app.database.repositories.execution_order import ExecutionOrderRepository
 from app.database.repositories.reconciliation_event import ReconciliationEventRepository
-from app.database.repositories.signal_notification import SignalNotificationRepository
 from app.database.repositories.trade import TradeRepository
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
@@ -53,7 +52,6 @@ from app.workers.base import fmt_decimal
 from app.workers.execution_digest import build_stats, render_execution_digest
 from app.workers.notifier import Delivery, notification_enabled, send_notification
 from app.workers.reconciler import Reconciler
-from app.workers.scanner import SetupScanner
 
 logger = get_logger(__name__)
 
@@ -85,17 +83,12 @@ class DailyJobs:
         settings: Settings,
         cipher: SecretCipher,
         *,
-        scanner: SetupScanner | None = None,
         reconciler: Reconciler | None = None,
     ) -> None:
         self._bot = bot
         self._db = db
         self._settings = settings
         self._exchange_factory = ExchangeFactory(settings, cipher)
-        # Раздел "троттлинг сканера": последний замер run() для строки в
-        # сводке исполнения. None в тестах/там, где сводка исполнения не
-        # нужна — не обязателен для работы остальных двух уведомлений.
-        self._scanner = scanner
         # 28.09: пульс reconciler для строки «Сверка:» сводки исполнения.
         self._reconciler = reconciler
         # 28.09: рассылки, не доставленные из-за сбоя Telegram, — (user_id,
@@ -280,12 +273,6 @@ class DailyJobs:
         rows = await ExecutionOrderRepository(session).list_entries_between(
             user.id, window_start, now
         )
-        # Отдельный источник (signals, не execution_orders) для "Сигналов
-        # READY" — то же окно window_start..now, что и у rows выше (раздел
-        # 12а, execution_digest.py).
-        ready_signals = await SignalNotificationRepository(session).count_ready_between(
-            user.id, window_start, now
-        )
         unprotected = await ExecutionOrderRepository(session).list_unprotected_between(
             user.id, window_start, now
         )
@@ -297,16 +284,13 @@ class DailyJobs:
         stats = build_stats(
             rows,
             target_risk_percent=target_risk_percent,
-            ready_signals=ready_signals,
             unprotected=unprotected,
             reconciler_events=reconciler_events,
         )
 
-        scan_cycle = self._scanner.last_cycle if self._scanner else None
         text = render_execution_digest(
             stats,
             max_price_drift_ratio=self._settings.exec_max_price_drift_ratio,
-            scan_cycle=scan_cycle,
             reconciler=self._reconciler.pulse.window(now) if self._reconciler else None,
             tz_offset_hours=tz_offset_for(settings_row.timezone),
         )

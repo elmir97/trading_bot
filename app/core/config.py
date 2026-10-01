@@ -256,10 +256,6 @@ class Settings(BaseSettings):
         default=False,
         description="Глобальный выключатель. Держать false на время доработок этапа.",
     )
-    setup_scanner_interval_minutes: int = 30
-    # Он же порог "прошло N часов" для повторного уведомления по тому же
-    # сетапу — то же самое TTL, а не два независимых числа (см. app/workers/scanner.py).
-    setup_scanner_ttl_hours: int = 4
     position_monitor_interval_minutes: int = 5
     # Доля оставшегося пути от входа до TP/SL, при которой считаем, что цена
     # "приблизилась" — 10 означает последние 10% дистанции.
