@@ -76,6 +76,7 @@ REPLAY_TIMEFRAMES = ("1h", "4h")
 KLINE_LIMIT = 1000
 FUNDING_PATH = "/openApi/swap/v2/quote/fundingRate"
 FUNDING_LIMIT = 1000
+NULL_RETRIES = 3
 CACHE_DIR = Path("data/replay")
 # EXEC_SYMBOL_WHITELIST прода (docker-compose.override.yml, 01.10).
 DEFAULT_SYMBOLS = (
@@ -184,7 +185,9 @@ def parse_funding(data: Any) -> list[FundingEvent]:
     """Живая форма 01.10: список {symbol, fundingRate, fundingTime, markPrice}.
     Нет поля — ошибка, не ноль."""
     if not isinstance(data, list):
-        raise ValueError("fundingRate: ожидался список")
+        raise ValueError(
+            f"fundingRate: ожидался список, пришёл {type(data).__name__}: {data!r:.200}"
+        )
     events: list[FundingEvent] = []
     for item in data:
         try:
@@ -201,17 +204,29 @@ def parse_funding(data: Any) -> list[FundingEvent]:
 class FundingFetcher:
     """Публичная история funding с паузой и стопом по остатку лимита."""
 
-    def __init__(self, client: Any, pause: float = 0.3) -> None:
+    def __init__(self, client: Any, pause: float = 0.3, null_pause: float = 2.0) -> None:
         self._client = client
         self._pause = pause
+        self._null_pause = null_pause
         self.requests = 0
+        self.null_retries = 0
 
     async def get(self, symbol: str, end: datetime) -> list[FundingEvent]:
-        data = await self._client._request(
-            FUNDING_PATH,
-            {"symbol": symbol, "endTime": _ms(end), "limit": FUNDING_LIMIT},
-        )
-        self.requests += 1
+        # 01.10: ручка изредка отвечает code 0 и data: null на тот же запрос,
+        # что через секунду отдаёт список. Пустота — не «ставок нет»: повтор
+        # до NULL_RETRIES раз, потом parse_funding падает, как на любом
+        # не-списке.
+        for attempt in range(NULL_RETRIES + 1):
+            data = await self._client._request(
+                FUNDING_PATH,
+                {"symbol": symbol, "endTime": _ms(end), "limit": FUNDING_LIMIT},
+            )
+            self.requests += 1
+            if data is not None or attempt == NULL_RETRIES:
+                break
+            self.null_retries += 1
+            print(f"fundingRate {symbol}: data null, повтор {attempt + 1}", file=sys.stderr)
+            await asyncio.sleep(self._null_pause)
         state = getattr(self._client, "_rate_limits", {}).get(("GET", FUNDING_PATH))
         if state is not None and state.remaining <= 2:
             raise RateLimitStopError(
@@ -858,7 +873,7 @@ async def run(months: int, symbols: Sequence[str], cache: Path, json_path: Path 
 
     print(f"Replay {start:%d.%m.%Y}–{now:%d.%m.%Y %H:%M} UTC, горизонт {HORIZON}, "
           f"taker {FEE_RATE}, TTL слота {TTL}; запросов klines {fetcher.requests}, "
-          f"funding {ffetcher.requests}")
+          f"funding {ffetcher.requests} (повторов на data: null — {ffetcher.null_retries})")
     if excluded:
         print("Исключены (нет полной истории): " + ", ".join(excluded))
     print("Funding с: " + ", ".join(

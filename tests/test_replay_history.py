@@ -498,3 +498,35 @@ def test_funding_coverage_share() -> None:
         _scored("открыт", None, None),
     ]
     assert rh.funding_coverage(items) == "закрытых 2, без funding 1 (50%)"
+
+
+async def test_funding_null_data_is_retried_then_list() -> None:
+    """Ручка изредка отдаёт data: null — повтор, а не «ставок нет»."""
+
+    class Flaky(FakeFundingClient):
+        def __init__(self, events: list[dict[str, Any]], nulls: int) -> None:
+            super().__init__(events)
+            self.nulls = nulls
+
+        async def _request(self, path: str, params: dict[str, Any]) -> Any:
+            if self.nulls:
+                self.nulls -= 1
+                return None
+            return await super()._request(path, params)
+
+    fetcher = rh.FundingFetcher(Flaky(_funding_items(3), nulls=2), pause=0, null_pause=0)
+    events = await fetcher.get("BTC-USDT", T0 + 100 * H)
+    assert len(events) == 3
+    assert fetcher.null_retries == 2
+
+
+async def test_funding_null_data_every_time_is_error() -> None:
+    class AlwaysNull(FakeFundingClient):
+        async def _request(self, path: str, params: dict[str, Any]) -> Any:
+            self.params.append(params)
+            return None
+
+    client = AlwaysNull([])
+    with pytest.raises(ValueError, match="NoneType"):
+        await rh.FundingFetcher(client, pause=0, null_pause=0).get("BTC-USDT", T0)
+    assert len(client.params) == rh.NULL_RETRIES + 1
