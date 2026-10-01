@@ -78,6 +78,12 @@ class ExecutionRefusalCode(StrEnum):
     # нет, значение отрицательное, или 0 при нулевой занятой марже и
     # положительном equity. Не фолбэк на equity — см. ExecutionService.evaluate().
     AVAILABLE_MARGIN_UNKNOWN = "AVAILABLE_MARGIN_UNKNOWN"
+    # Equity счёта ≤ 0 (пустой счёт — законный ноль, хвост 29.09): объём
+    # входа не из чего считать. Раньше отказ приходил из sizing как
+    # INVALID_LEVELS «Баланс должен быть положительным» — причина неверная.
+    # Проверяется сразу после баланса в ExecutionService.evaluate(), до
+    # AVAILABLE_MARGIN_UNKNOWN; sizing.calculate_size — страховка.
+    NON_POSITIVE_EQUITY = "NON_POSITIVE_EQUITY"
     SYMBOL_NOT_ALLOWED = "SYMBOL_NOT_ALLOWED"
     # Инструмент в вайтлисте, но биржа не отдала по нему SymbolInfo (список
     # инструментов пуст/не содержит символ) — не то же самое, что осознанный

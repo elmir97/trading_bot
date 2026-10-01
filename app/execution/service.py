@@ -66,7 +66,11 @@ from app.execution.guards import (
 )
 from app.execution.leverage import entry_leverage, leverage_needs_update
 from app.execution.models import ExecutionRefusal, ExecutionRefusalCode, OrderRequest
-from app.execution.sizing import calculate_size, round_levels_toward_entry
+from app.execution.sizing import (
+    calculate_size,
+    non_positive_equity_message,
+    round_levels_toward_entry,
+)
 from app.market.data import MarketDataService
 from app.trading.calculations import (
     PERCENT_PRECISION,
@@ -545,6 +549,17 @@ class ExecutionService:
 
         balance_row = await self._client.get_balance(max_retries=call_retries)
         balance = balance_row.equity
+        # Пустой счёт — свой код до проверки свободной маржи: при equity ≤ 0
+        # её согласованность уже не важна, объём не из чего считать.
+        if balance <= ZERO:
+            return await refuse(
+                ExecutionRefusal(
+                    ExecutionRefusalCode.NON_POSITIVE_EQUITY,
+                    non_positive_equity_message(balance, balance_row.asset),
+                ),
+                price=current_price,
+                drift=drift,
+            )
         # Свободная маржа — для INSUFFICIENT_MARGIN (хвост 26.09), риск по-
         # прежнему от equity. Нет поля, отрицательное, или 0 при нулевой
         # занятой марже и положительном equity (все средства свободны, но

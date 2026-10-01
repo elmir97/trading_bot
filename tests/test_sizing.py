@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+import pytest
+
 from app.exchanges.base import SymbolInfo
 from app.execution.models import ExecutionRefusal, ExecutionRefusalCode
 from app.execution.sizing import SizingResult, calculate_size, round_levels_toward_entry
@@ -272,3 +274,25 @@ class TestRoundLevelsTowardEntry:
             side=TradeSide.LONG, price_precision=1,
         )
         assert (stop, take) == (Decimal("97.5"), Decimal("110.5"))
+
+
+class TestNonPositiveEquity:
+    """Страховка sizing для вызова в обход evaluate(): пустой счёт — свой код,
+    не INVALID_LEVELS (уровни ни при чём)."""
+
+    @pytest.mark.parametrize("balance", [D("0"), D("-1")])
+    def test_refused_with_own_code(self, balance: Decimal) -> None:
+        result = calculate_size(
+            fee_rate=D("0"),
+            account_balance=balance,
+            available_margin=D("0"),
+            risk_percent=D("1"),
+            entry_price=D("100"),
+            stop_loss=D("97"),
+            side=TradeSide.LONG,
+            leverage=1,
+            symbol_info=_symbol_info(),
+        )
+        assert isinstance(result, ExecutionRefusal)
+        assert result.code is ExecutionRefusalCode.NON_POSITIVE_EQUITY
+        assert "нет средств" in result.message

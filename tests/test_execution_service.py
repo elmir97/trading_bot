@@ -74,6 +74,8 @@ class FakeExchangeClient(ExchangeClient):
         # AVAILABLE_MARGIN_UNKNOWN задают их явно.
         self.available: Decimal | None = balance
         self.used_margin = D("0")
+        # Актив баланса: USDT на боевом, VST на демо — текст NON_POSITIVE_EQUITY.
+        self.asset = "USDT"
         self.symbol_info = symbol_info
         self.closed = False
         # Раздел 8 ТЗ: чем evaluate() реально вызвало эти методы — по этому
@@ -104,7 +106,7 @@ class FakeExchangeClient(ExchangeClient):
     async def get_balance(self, *, max_retries: int | None = None) -> Balance:
         self.balance_retries_seen.append(max_retries)
         return Balance(
-            asset="USDT", available=self.available, used_margin=self.used_margin,
+            asset=self.asset, available=self.available, used_margin=self.used_margin,
             unrealized_pnl=D("0"), equity=self.balance,
         )
 
@@ -1502,3 +1504,127 @@ async def test_bingx_balance_without_equity_or_used_margin_is_error_end_to_end( 
             await _evaluate(service, user, notification, signal)
     finally:
         await client.close()
+
+
+# ---------------------------------------------------------------------------
+# NON_POSITIVE_EQUITY — пустой счёт (хвост 29.09, вечер)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("equity", "shown"),
+    [
+        pytest.param(D("0.0000"), "equity 0 USDT", id="ноль"),
+        pytest.param(D("-5.50"), "equity -5.5 USDT", id="минус"),
+    ],
+)
+async def test_non_positive_equity_refuses_with_own_code(ctx, equity, shown) -> None:  # type: ignore[no-untyped-def]
+    """Equity ≤ 0 — свой код и понятный текст, строка REFUSED с ценой,
+    позиции биржи не читаются. Раньше — INVALID_LEVELS «Баланс должен быть
+    положительным» из sizing."""
+    session, user, client, market = ctx
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _snapshot(session, signal)
+    client.balance = equity
+    client.available = D("0")
+
+    service = _service(session, _live_settings(), client, market)
+    result = await _evaluate(service, user, notification, signal)
+
+    assert isinstance(result, ExecutionRefusal)
+    assert result.code is Code.NON_POSITIVE_EQUITY
+    assert shown in result.message
+    assert "Баланс должен быть положительным" not in result.message
+    assert client.positions_retries_seen == []
+    rows = await _refused_rows(session, signal)
+    assert [r.error_code for r in rows] == [Code.NON_POSITIVE_EQUITY.value]
+    assert rows[0].price == D("100")
+
+
+async def test_non_positive_equity_checked_before_available_margin(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Пустой счёт без availableMargin — NON_POSITIVE_EQUITY, а не
+    AVAILABLE_MARGIN_UNKNOWN: при equity ≤ 0 свободная маржа уже не важна."""
+    session, user, client, market = ctx
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _snapshot(session, signal)
+    client.balance = D("0")
+    client.available = None
+
+    service = _service(session, _live_settings(), client, market)
+    result = await _evaluate(service, user, notification, signal)
+
+    assert isinstance(result, ExecutionRefusal)
+    assert result.code is Code.NON_POSITIVE_EQUITY
+
+
+async def test_non_positive_equity_names_balance_asset(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Демо-счёт — VST, не захардкоженный USDT."""
+    session, user, client, market = ctx
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _snapshot(session, signal)
+    client.balance = D("0")
+    client.available = D("0")
+    client.asset = "VST"
+
+    service = _service(session, _live_settings(), client, market)
+    result = await _evaluate(service, user, notification, signal)
+
+    assert isinstance(result, ExecutionRefusal)
+    assert "equity 0 VST" in result.message
+
+
+async def test_bingx_zero_equity_refuses_end_to_end(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Настоящий BingXClient на MockTransport, баланс — живой дамп
+    test_balance_list_of_assets_shape с нулевыми суммами (синтетика: пустой
+    счёт). Законный ноль "0.0000" разбирается и даёт NON_POSITIVE_EQUITY;
+    /user/positions не запрашивается."""
+    import httpx
+
+    from app.exchanges.bingx import QUOTE_TICKER, USER_BALANCE, BingXClient
+
+    session, user, _, market = ctx
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _snapshot(session, signal)
+
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == QUOTE_TICKER:
+            data: object = {"symbol": "BTC-USDT", "lastPrice": "100", "volume": "1",
+                            "priceChangePercent": "0"}
+        elif request.url.path == USER_BALANCE:
+            data = [{
+                "userId": "1314404133518147588", "asset": "USDT",
+                "balance": "0.0000", "equity": "0.0000",
+                "unrealizedProfit": "0.0000", "realizedProfit": "0",
+                "availableMargin": "0.0000",
+                "usedMargin": "0.0000", "frozenMargin": "0.0000",
+                "shortUid": "21792211",
+            }]
+        else:
+            raise AssertionError(f"неожиданный запрос {request.url.path}")
+        return httpx.Response(200, json={"code": 0, "msg": "", "data": data})
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://open-api.bingx.com"
+    )
+    client = BingXClient(api_key="k", api_secret="s", client=http)
+    try:
+        service = _service(session, _live_settings(), client, market)
+        result = await _evaluate(service, user, notification, signal)
+    finally:
+        await client.close()
+
+    assert isinstance(result, ExecutionRefusal)
+    assert result.code is Code.NON_POSITIVE_EQUITY
+    assert "equity 0 USDT" in result.message
+    assert paths == [QUOTE_TICKER, USER_BALANCE]

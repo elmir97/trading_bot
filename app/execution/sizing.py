@@ -24,6 +24,16 @@ from app.trading.enums import TradeSide
 ZERO = Decimal(0)
 
 
+def non_positive_equity_message(equity: Decimal, asset: str | None) -> str:
+    """Текст отказа NON_POSITIVE_EQUITY. Число без хвостовых нулей
+    (`0.0000` от биржи → «0»), валюта — актив баланса (VST на демо)."""
+    amount = f"{equity.normalize():f}" + (f" {asset}" if asset else "")
+    return (
+        f"На счёте нет средств: equity {amount} — объём входа не из чего считать. "
+        "Пополни счёт и дождись следующего сигнала."
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class SizingResult:
     quantity: Decimal
@@ -86,6 +96,13 @@ def calculate_size(
     занятой марже объём от equity проходил гвард, и отказывала уже биржа."""
     if leverage < 1:
         raise CalculationError("Плечо не может быть меньше 1")
+    # Страховка для вызова в обход evaluate(): там пустой счёт отказывает
+    # раньше. Не INVALID_LEVELS — уровни тут ни при чём.
+    if account_balance <= ZERO:
+        return ExecutionRefusal(
+            ExecutionRefusalCode.NON_POSITIVE_EQUITY,
+            non_positive_equity_message(account_balance, None),
+        )
 
     try:
         raw = calculate_position_size(

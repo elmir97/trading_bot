@@ -3245,3 +3245,26 @@ async def test_audit_failure_log_has_no_telegram_id(ctx, bot, monkeypatch, caplo
     assert errors[0].exc_info is None
     assert errors[0].error == "RuntimeError"  # type: ignore[attr-defined]
     assert all(str(LONG_TG_ID) not in _logged_values(r) for r in caplog.records)
+
+
+async def test_card_on_empty_account_says_no_funds(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Пустой счёт (хвост 29.09): карточка — понятный отказ NON_POSITIVE_EQUITY
+    в валюте баланса, не «Баланс должен быть положительным» под INVALID_LEVELS."""
+    dp, session, user, client, _redis, _settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    client.balance = D("0")
+    client.available = D("0")
+    client.asset = "VST"
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _notify(session, signal)
+
+    await _feed(dp, bot, 1, make_callback(f"exn:open:{notification.id}", message_id=1))
+
+    texts = bot.recorder.sent_texts()
+    assert len(texts) == 1
+    assert texts[0].startswith("🚫 Не открыл: На счёте нет средств: equity 0 VST")
+    assert "Баланс должен быть положительным" not in texts[0]
+    orders = await _orders_for_signal(session, signal.id)
+    assert [o.error_code for o in orders] == ["NON_POSITIVE_EQUITY"]
