@@ -64,7 +64,6 @@ BOT_COMMANDS = [
     BotCommand(command="open", description="Открытые позиции"),
     BotCommand(command="trade", description="Добавить сделку"),
     BotCommand(command="risk", description="Калькулятор позиции"),
-    BotCommand(command="signal", description="Поиск точки входа"),
     BotCommand(command="analysis", description="Анализ рынка"),
     BotCommand(command="balance", description="Баланс на бирже"),
     BotCommand(command="prices", description="Цены инструментов"),

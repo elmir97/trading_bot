@@ -54,7 +54,7 @@ async def cmd_help(message: Message) -> None:
         "/risk — калькулятор позиции\n"
         "/today, /week, /month — отчёты\n"
         "/mistakes — анализ ошибок\n"
-        "/signal — поиск точки входа\n"
+        "/analysis — анализ рынка\n"
         "/settings — настройки\n"
         "/ping — проверка базы данных\n\n"
         "Быстрее пользоваться кнопками из /start.",

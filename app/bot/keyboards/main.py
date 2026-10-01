@@ -21,7 +21,6 @@ class MenuCallback:
     ADD_TRADE = "menu:add_trade"
     OPEN_POSITIONS = "menu:open"
     ANALYSIS = "menu:analysis"
-    FIND_ENTRY = "menu:find_entry"
     MISTAKES = "menu:mistakes"
     RISK = "menu:risk"
     DRAWDOWN = "menu:drawdown"
@@ -42,18 +41,17 @@ def main_menu() -> InlineKeyboardMarkup:
     )
     builder.row(
         InlineKeyboardButton(text="🔎 Анализ рынка", callback_data=MenuCallback.ANALYSIS),
-        InlineKeyboardButton(text="🎯 Найти вход", callback_data=MenuCallback.FIND_ENTRY),
-    )
-    builder.row(
         InlineKeyboardButton(text="🧠 Анализ ошибок", callback_data="insights:menu"),
+    )
+    builder.row(
         InlineKeyboardButton(text="📉 Просадка", callback_data=MenuCallback.DRAWDOWN),
-    )
-    builder.row(
         InlineKeyboardButton(text="🧮 Риск", callback_data=MenuCallback.RISK),
-        InlineKeyboardButton(text="📄 Отчёт", callback_data=MenuCallback.REPORT),
     )
     builder.row(
+        InlineKeyboardButton(text="📄 Отчёт", callback_data=MenuCallback.REPORT),
         InlineKeyboardButton(text="🏦 Биржа", callback_data=MenuCallback.EXCHANGE),
+    )
+    builder.row(
         InlineKeyboardButton(text="⚙️ Настройки", callback_data=MenuCallback.SETTINGS),
     )
     return builder.as_markup()

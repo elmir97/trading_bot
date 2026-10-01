@@ -16,7 +16,10 @@ router = Router(name="pending_sections")
 
 _PENDING: dict[str, str] = {
     MenuCallback.ANALYSIS: "Анализ рынка — этап 9, после подключения BingX.",
-    MenuCallback.FIND_ENTRY: "Поиск входа — этап 10, после индикаторов.",
+    # Кнопка «🎯 Найти вход» в меню прошлых сообщений: сигналы удалены
+    # 02.10.2026, константы MenuCallback.FIND_ENTRY больше нет.
+    "menu:find_entry": "Поиск входа убран: сигналы отключены. Техническая "
+    "картина — в «Анализе рынка».",
 }
 
 

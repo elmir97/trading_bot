@@ -1,8 +1,12 @@
-"""Тесты свечных паттернов и структуры рынка.
+"""Тесты структуры рынка и уровней (app/analysis/structure.py).
 
 Проверяются на свечах, собранных вручную под конкретный случай:
 описания из методологии («длинный хвост», «полнотелая свеча») здесь
 превращаются в числа, и важно убедиться, что превращение верное.
+
+02.10.2026: вынесены без изменений из tests/test_analysis.py — свечные
+паттерны (app/analysis/patterns.py) удалены вместе с детекторами, структура
+и уровни нужны экрану «Анализ рынка».
 """
 
 from __future__ import annotations
@@ -10,15 +14,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-import pytest
 
-from app.analysis.patterns import (
-    detect_confirmation,
-    detect_engulfing,
-    detect_pin_bar,
-    is_doji,
-    is_strong_body,
-)
 from app.analysis.structure import (
     detect_structure,
     find_levels,
@@ -78,100 +74,6 @@ def wave(pivots: list[tuple[str, str]], steps: int = 3) -> list[Kline]:
         previous = target
 
     return candles
-
-
-class TestBodyStrength:
-    def test_full_bodied_candle_confirms_breakout(self) -> None:
-        """Пробой требует уверенного закрытия, а не свечи-волчка."""
-        strong = bar("100", "110", "99", "109")   # тело 9 из 11
-        assert is_strong_body(strong)
-
-    def test_spinning_top_is_not_confirmation(self) -> None:
-        weak = bar("100", "110", "90", "101")     # тело 1 из 20
-        assert not is_strong_body(weak)
-
-    def test_doji(self) -> None:
-        assert is_doji(bar("100", "105", "95", "100.2"))
-        assert not is_doji(bar("100", "110", "99", "109"))
-
-
-class TestPinBar:
-    def test_bullish_pin_bar(self) -> None:
-        """Длинный нижний хвост: цена снизу отвергнута."""
-        candle = bar("104", "105", "95", "104.5")
-        match = detect_pin_bar(candle)
-        assert match is not None
-        assert match.bullish
-        assert "нижний хвост" in match.description
-
-    def test_bearish_pin_bar(self) -> None:
-        candle = bar("96", "105", "95", "95.5")
-        match = detect_pin_bar(candle)
-        assert match is not None
-        assert not match.bullish
-
-    def test_big_body_is_not_pin_bar(self) -> None:
-        assert detect_pin_bar(bar("95", "105", "94", "104")) is None
-
-    def test_two_long_wicks_is_not_pin_bar(self) -> None:
-        """Хвосты с обеих сторон — нерешительность, а не отвержение."""
-        assert detect_pin_bar(bar("100", "110", "90", "100.5")) is None
-
-    def test_zero_range_candle(self) -> None:
-        assert detect_pin_bar(bar("100", "100", "100", "100")) is None
-
-
-class TestEngulfing:
-    def test_bullish_engulfing(self) -> None:
-        previous = bar("105", "106", "100", "101", index=0)   # медвежья
-        current = bar("100", "108", "99", "107", index=1)     # бычья, поглощает
-        match = detect_engulfing(previous, current)
-        assert match is not None
-        assert match.bullish
-
-    def test_bearish_engulfing(self) -> None:
-        previous = bar("100", "106", "99", "105", index=0)
-        current = bar("106", "107", "98", "99", index=1)
-        match = detect_engulfing(previous, current)
-        assert match is not None
-        assert not match.bullish
-
-    def test_same_direction_is_not_engulfing(self) -> None:
-        """Поглощение означает смену контроля, а не продолжение."""
-        previous = bar("100", "103", "99", "102", index=0)
-        current = bar("99", "106", "98", "105", index=1)
-        assert detect_engulfing(previous, current) is None
-
-    def test_partial_overlap_is_not_engulfing(self) -> None:
-        previous = bar("105", "106", "100", "101", index=0)
-        current = bar("102", "104", "101", "103.5", index=1)
-        assert detect_engulfing(previous, current) is None
-
-
-class TestConfirmation:
-    def test_finds_bullish_confirmation(self) -> None:
-        candles = [
-            bar("105", "106", "100", "101", index=0),
-            bar("100", "108", "99", "107", index=1),
-        ]
-        match = detect_confirmation(candles, bullish=True)
-        assert match is not None
-        assert match.bullish
-
-    def test_wrong_direction_is_rejected(self) -> None:
-        """Бычье подтверждение не годится для входа в шорт."""
-        candles = [
-            bar("105", "106", "100", "101", index=0),
-            bar("100", "108", "99", "107", index=1),
-        ]
-        assert detect_confirmation(candles, bullish=False) is None
-
-    def test_no_pattern_is_valid_answer(self) -> None:
-        candles = [
-            bar("100", "101", "99", "100.5", index=0),
-            bar("100.5", "101", "100", "100.6", index=1),
-        ]
-        assert detect_confirmation(candles, bullish=True) is None
 
 
 class TestSwings:

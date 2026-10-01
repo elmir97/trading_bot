@@ -1,19 +1,20 @@
 """Движок анализа рынка.
 
-Собирает рыночный контекст (свечи, индикаторы, структура, уровни) и
-прогоняет через него детекторы сетапов. Возвращает лучший найденный
-сигнал либо WAIT с объяснением, чего не хватило.
+Собирает рыночный контекст инструмента: свечи, индикаторы, структура,
+уровни, старший таймфрейм. Порядок намеренный: сначала данные, потом
+индикаторы, потом структура. Потребители (экран «Анализ рынка», график)
+за данными сами не ходят — иначе один и тот же индикатор считался бы по
+нескольку раз, а значения между ними могли бы разойтись.
 
-Порядок намеренный: сначала данные, потом индикаторы, потом структура,
-и только затем стратегия. Детекторы не ходят за данными сами — иначе
-один и тот же индикатор считался бы по нескольку раз, а значения между
-детекторами могли бы разойтись.
+02.10.2026: детекторы сетапов и вердикт LONG/SHORT/WAIT удалены — движок
+только описывает рынок, решений не принимает.
 """
 
 from __future__ import annotations
 
 from decimal import Decimal
 
+from app.analysis.context import VOLUME_RATIO_PERIOD, MarketContext
 from app.analysis.indicators import (
     atr as calc_atr,
 )
@@ -26,13 +27,11 @@ from app.analysis.indicators import (
 from app.analysis.indicators import (
     rsi as calc_rsi,
 )
-from app.analysis.setups import DEFAULT_DETECTORS, SetupDetector
-from app.analysis.signals import MarketContext, Signal, wait_signal
 from app.analysis.structure import detect_structure, find_levels
 from app.core.logging import get_logger
 from app.exchanges.base import Kline, SymbolInfo
 from app.market.data import MarketDataService
-from app.trading.enums import MarketStructure, SignalDirection, Timeframe
+from app.trading.enums import MarketStructure, Timeframe
 
 logger = get_logger(__name__)
 
@@ -48,13 +47,8 @@ def context_from_candles(
     higher_timeframe: str | None = None,
     higher_structure: MarketStructure | None = None,
     higher_ema200: Decimal | None = None,
-    d1_ema200: Decimal | None = None,
 ) -> MarketContext:
-    """Индикаторы, структура и уровни по готовым свечам — ядро build_context.
-
-    Вынесено (28.09), чтобы отчёт исходов (scripts/signal_outcomes.py)
-    прогонял детектор на исторических свечах тем же расчётом, что сканер,
-    а не своей копией."""
+    """Индикаторы, структура и уровни по готовым свечам — ядро build_context."""
     closes = [c.close for c in candles]
     highs = [c.high for c in candles]
     lows = [c.low for c in candles]
@@ -75,24 +69,18 @@ def context_from_candles(
         rsi=last_value(calc_rsi(closes, 14)),
         atr=atr_value,
         macd_histogram=last_value(macd(closes).histogram),
-        volume_ratio=last_value(volume_ratio(volumes, 20)),
+        volume_ratio=last_value(volume_ratio(volumes, VOLUME_RATIO_PERIOD)),
         structure=structure.structure,
         levels=levels,
         higher_timeframe=higher_timeframe,
         higher_structure=higher_structure,
         higher_ema200=higher_ema200,
-        d1_ema200=d1_ema200,
     )
 
 
 class AnalysisEngine:
-    def __init__(
-        self,
-        market: MarketDataService,
-        detectors: list[SetupDetector] | None = None,
-    ) -> None:
+    def __init__(self, market: MarketDataService) -> None:
         self._market = market
-        self._detectors = detectors or DEFAULT_DETECTORS
 
     async def get_symbol_info(self, symbol: str) -> SymbolInfo | None:
         """Точность цены/объёма символа — для форматирования на выводе.
@@ -102,15 +90,6 @@ class AnalysisEngine:
         карточки не превращается в отдельный поход на биржу.
         """
         return await self._market.get_symbol_info(symbol)
-
-    async def get_symbols(self) -> list[SymbolInfo]:
-        """Полный список инструментов — для сканирования сразу по многим
-        символам: один вызов и локальный dict вместо N обращений к кэшу
-        (сам по себе кэш это тоже не размножит, т.к. ключ один на всю
-        биржу — но так это гарантировано структурой кода, а не поведением
-        TTLCache, которое не должно быть контрактом для вызывающей стороны).
-        """
-        return await self._market.get_symbols()
 
     async def build_context(
         self, symbol: str, timeframe: str, *, with_higher: bool = True
@@ -157,72 +136,4 @@ class AnalysisEngine:
             higher_timeframe=higher_tf,
             higher_structure=higher_structure,
             higher_ema200=higher_ema200,
-        )
-
-    async def analyze(self, symbol: str, timeframe: str) -> Signal:
-        """Ищет сетап по одному инструменту."""
-        context = await self.build_context(symbol, timeframe)
-        if context is None:
-            return wait_signal(
-                symbol, timeframe,
-                "Недостаточно рыночных данных для анализа.",
-            )
-
-        return self.evaluate(context)
-
-    def evaluate(self, context: MarketContext) -> Signal:
-        """Прогоняет контекст через детекторы и выбирает лучший результат.
-
-        Если сетапов несколько, берётся с наибольшей оценкой. Если нет
-        ни одного — возвращается WAIT того детектора, который прошёл
-        дальше остальных: пользователю полезнее увидеть «ждём ретеста»,
-        чем «нет пробоя».
-        """
-        signals: list[Signal] = []
-        for detector in self._detectors:
-            try:
-                signals.append(detector.detect(context))
-            except Exception:
-                logger.exception(
-                    "Детектор упал",
-                    extra={"detector": detector.name, "symbol": context.symbol},
-                )
-
-        if not signals:
-            return wait_signal(
-                context.symbol, context.timeframe,
-                "Ни один детектор не отработал.",
-            )
-
-        actionable = [s for s in signals if s.is_actionable]
-        if actionable:
-            return max(actionable, key=lambda s: s.confidence)
-
-        # Ни одного сетапа: показываем тот WAIT, где выполнено больше
-        # условий — он ближе всего к готовому входу.
-        return max(signals, key=lambda s: len(s.passed_conditions))
-
-    async def scan(
-        self, symbols: list[str], timeframe: str
-    ) -> list[Signal]:
-        """Анализирует несколько инструментов.
-
-        Ошибка по одному символу не должна прерывать сканирование:
-        недоступный инструмент не повод скрыть сетапы по остальным.
-        """
-        results: list[Signal] = []
-        for symbol in symbols:
-            try:
-                results.append(await self.analyze(symbol, timeframe))
-            except Exception:
-                logger.exception("Ошибка анализа", extra={"symbol": symbol})
-                results.append(
-                    wait_signal(symbol, timeframe, "Ошибка при анализе.")
-                )
-
-        # Сначала готовые сетапы по убыванию оценки, затем ожидания.
-        return sorted(
-            results,
-            key=lambda s: (s.direction is not SignalDirection.WAIT, s.confidence),
-            reverse=True,
         )

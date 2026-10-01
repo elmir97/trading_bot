@@ -254,7 +254,7 @@ async def _run_scenarios(sim, tg, db, redis, settings) -> None:  # type: ignore[
     print("\n[1] Базовые команды")
     text = await sim.send("/start")
     check("/start открывает меню", has(text, "торговый журнал", "выбери раздел"), text[:60])
-    check("меню содержит все разделы", len(sim.available_buttons()) == 12,
+    check("меню содержит все разделы", len(sim.available_buttons()) == 11,
           f"кнопок {len(sim.available_buttons())}")
 
     text = await sim.send("/ping")
@@ -417,6 +417,16 @@ async def _run_scenarios(sim, tg, db, redis, settings) -> None:  # type: ignore[
     text = await sim.tap("Анализ рынка")
     check("раздел не заглушка", "этап" not in text.lower(), text[:100])
     check("просит выбрать инструмент", has(text, "выбери инструмент"), text[:150])
+    # Сигналы удалены 02.10.2026: экран — информация, не рекомендация.
+    check("пометка «не торговая рекомендация»", has(text, "не торговая рекомендация"), text[:300])
+    await sim.send("/start")
+    buttons = list(sim.available_buttons())
+    check("в меню нет «Найти вход»", not any("найти вход" in b.lower() for b in buttons),
+          str(buttons))
+    text = await sim.send("/help")
+    check("/help без /signal", "/signal" not in text, text[:300])
+    text = await sim.tap_data("menu:find_entry")
+    check("старая кнопка «Найти вход» отвечает", has(text, "сигналы отключены"), text[:150])
 
     print("\n[14] Ключи биржи и старые кнопки сигналов")
     await _run_execution_scenario(sim, tg, db, redis, settings)

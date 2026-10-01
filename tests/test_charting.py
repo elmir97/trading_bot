@@ -1,8 +1,9 @@
-"""Тесты рендера графика сетапа (app/analysis/charting.py).
+"""Тесты графика экрана «Анализ рынка» (app/analysis/charting.py).
 
-render_setup_chart не должен бросать исключения наружу ни при каких
-входных данных — сканер шлёт текст уведомления независимо от того,
-построилась картинка или нет (см. app/workers/scanner.py).
+render_analysis_chart не бросает исключения наружу ни при каких входных
+данных — экран уходит текстом, если картинка не построилась. 02.10.2026:
+сигналы удалены — на графике только рынок: свечи, EMA50/200, ближайшие
+уровни, без зоны входа, стопа и цели.
 """
 
 from __future__ import annotations
@@ -13,16 +14,15 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-import pytest
 from matplotlib.axes import Axes
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 
 from app.analysis import charting
-from app.analysis.charting import _nearby_levels, render_analysis_chart, render_setup_chart
-from app.analysis.signals import MarketContext, Signal, SignalCondition
+from app.analysis.charting import _nearby_levels, render_analysis_chart
+from app.analysis.context import MarketContext
 from app.analysis.structure import Level
 from app.exchanges.base import Kline
-from app.trading.enums import MarketStructure, SignalDirection, SignalLevel
+from app.trading.enums import MarketStructure
 
 D = Decimal
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -68,59 +68,6 @@ def _context(candles: list[Kline] | None = None) -> MarketContext:
     )
 
 
-def _signal(**overrides) -> Signal:
-    defaults = dict(
-        symbol="BTC-USDT",
-        timeframe="1h",
-        direction=SignalDirection.LONG,
-        setup="Пробой с ретестом",
-        entry_zone_low=D("99"),
-        entry_zone_high=D("100"),
-        stop_loss=D("97"),
-        take_profit_1=D("106"),
-        level_price=D("99.5"),
-        confidence=7,
-    )
-    defaults.update(overrides)
-    return Signal(**defaults)
-
-
-class TestRenderSetupChart:
-    def test_returns_valid_png(self) -> None:
-        png = render_setup_chart(_context(), _signal(), SignalLevel.READY)
-        assert png is not None
-        assert png[:8] == PNG_MAGIC
-
-    def test_narrow_entry_zone_around_level_still_renders(self) -> None:
-        # Ретест по конструкции происходит у самого уровня — зона входа и
-        # уровень почти совпадают. Раньше подписи на графике накладывались
-        # друг на друга в этом случае; теперь подписи вынесены в легенду.
-        signal = _signal(
-            entry_zone_low=D("99.4"), entry_zone_high=D("99.6"), level_price=D("99.5"),
-        )
-        png = render_setup_chart(_context(), signal, SignalLevel.FORMING)
-        assert png is not None
-        assert png[:8] == PNG_MAGIC
-
-    def test_missing_optional_fields_still_renders(self) -> None:
-        # FORMING-сигнал от EMAPullback: нет level_price и зоны входа.
-        signal = _signal(
-            direction=SignalDirection.WAIT,
-            entry_zone_low=None, entry_zone_high=None,
-            stop_loss=None, take_profit_1=None, level_price=None,
-        )
-        png = render_setup_chart(_context(), signal, SignalLevel.FORMING)
-        assert png is not None
-        assert png[:8] == PNG_MAGIC
-
-    def test_broken_context_returns_none_not_raises(self) -> None:
-        """Пустые свечи ломают расчёт EMA — рендер обязан проглотить это
-        и вернуть None, а не уронить вызывающий код."""
-        broken = _context(candles=[])
-        result = render_setup_chart(broken, _signal(), SignalLevel.FORMING)
-        assert result is None
-
-
 def _level(price: Decimal, *, resistance: bool) -> Level:
     return Level(
         price=price, touches=2, last_touch_index=1, is_resistance=resistance, strength=D("0.5")
@@ -138,25 +85,12 @@ def _windowed_context(*, wide_at: int = -50) -> MarketContext:
 
 
 class TestRenderAnalysisChart:
-    """График экрана «Анализ рынка»: рисуется и при найденном сетапе, и при
-    FORMING, и при WAIT — при WAIT видно, чего ждём."""
-
-    def test_found_setup_renders(self) -> None:
-        png = render_analysis_chart(_context(), _signal())
+    def test_returns_valid_png(self) -> None:
+        png = render_analysis_chart(_context())
         assert png is not None
         assert png[:8] == PNG_MAGIC
 
-    def test_forming_renders(self) -> None:
-        signal = Signal(
-            symbol="BTC-USDT", timeframe="1h", direction=SignalDirection.WAIT,
-            setup="Нет сетапа",
-            conditions=[SignalCondition("Подтверждающий паттерн", False, "")],
-        )
-        png = render_analysis_chart(_context(), signal)
-        assert png is not None
-        assert png[:8] == PNG_MAGIC
-
-    def test_wait_with_nearby_levels_renders(self) -> None:
+    def test_with_nearby_levels_renders(self) -> None:
         context = replace(
             _windowed_context(),
             levels=[
@@ -165,11 +99,7 @@ class TestRenderAnalysisChart:
                 _level(D("95"), resistance=False),
             ],
         )
-        signal = Signal(
-            symbol="BTC-USDT", timeframe="1h", direction=SignalDirection.WAIT,
-            setup="Нет сетапа", level_price=D("105"),
-        )
-        png = render_analysis_chart(context, signal)
+        png = render_analysis_chart(context)
         assert png is not None
         assert png[:8] == PNG_MAGIC
 
@@ -242,69 +172,81 @@ class TestRenderAnalysisChart:
             _windowed_context(),
             levels=[_level(D("105"), resistance=True), _level(D("60"), resistance=False)],
         )
-        signal = Signal(
-            symbol="BTC-USDT", timeframe="1h", direction=SignalDirection.WAIT, setup="Нет сетапа"
-        )
-        assert render_analysis_chart(context, signal) is not None
+        assert render_analysis_chart(context) is not None
         assert 105.0 in drawn
         assert 60.0 not in drawn
 
-    def test_title_does_not_claim_scanner_status(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def test_no_signal_overlays(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """Сигналы удалены: ни зоны входа (axhspan), ни линий стоп/цель."""
+        spans: list[object] = []
+        labels: list[str] = []
+        real_hline = Axes.axhline
+
+        def hline(self, y=0, *args, **kwargs):  # type: ignore[no-untyped-def]
+            labels.append(kwargs.get("label", ""))
+            return real_hline(self, y, *args, **kwargs)
+
+        monkeypatch.setattr(Axes, "axhline", hline)
+        monkeypatch.setattr(Axes, "axhspan", lambda self, *a, **k: spans.append(a))
+        context = replace(_windowed_context(), levels=[_level(D("105"), resistance=True)])
+        assert render_analysis_chart(context, 2) is not None
+        assert spans == []
+        assert all(label.startswith(("Сопротивление", "Поддержка")) for label in labels)
+
+    def test_title_is_symbol_and_timeframe_only(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         titles: list[str] = []
-        real = charting._render
+        real = charting.mpf.plot
 
-        def spy(context, signal, label, **kwargs):  # type: ignore[no-untyped-def]
-            titles.append(label)
-            return real(context, signal, label, **kwargs)
+        def spy(*args, **kwargs):  # type: ignore[no-untyped-def]
+            titles.append(kwargs.get("title", ""))
+            return real(*args, **kwargs)
 
-        monkeypatch.setattr(charting, "_render", spy)
-        render_analysis_chart(_context(), _signal())
-        assert titles and "READY" not in titles[0]
-        assert "по запросу" in titles[0]
+        monkeypatch.setattr(charting.mpf, "plot", spy)
+        assert render_analysis_chart(_context()) is not None
+        assert titles == ["BTC-USDT · 1H"]
 
     def test_broken_context_returns_none_not_raises(self) -> None:
-        assert render_analysis_chart(_context(candles=[]), _signal()) is None
+        """Пустые свечи ломают расчёт EMA — рендер обязан проглотить это
+        и вернуть None, а не уронить вызывающий код."""
+        assert render_analysis_chart(_context(candles=[])) is None
 
     def test_concurrent_renders_do_not_interfere(self) -> None:
-        """Рендеры из разных потоков (сканер + хендлер бота) сериализуются:
-        pyplot держит глобальное состояние и не потокобезопасен."""
+        """Рендеры из разных потоков сериализуются: pyplot держит глобальное
+        состояние и не потокобезопасен."""
         with ThreadPoolExecutor(max_workers=4) as pool:
-            results = list(
-                pool.map(lambda _: render_analysis_chart(_context(), _signal()), range(6))
-            )
+            results = list(pool.map(lambda _: render_analysis_chart(_context()), range(6)))
         assert all(r is not None and r[:8] == PNG_MAGIC for r in results)
 
 
 class TestTimeAxis:
     """Подписи оси времени: короткий формат без года и запятой, ограниченное
-    число делений. Одинаково для графика сканера и графика экрана анализа."""
+    число делений."""
 
-    @staticmethod
-    def _labels(monkeypatch, render) -> list[str]:  # type: ignore[no-untyped-def]
+    def test_short_format_and_tick_limit(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         figures = []
         real_close = charting.plt.close
         monkeypatch.setattr(
             charting.plt, "close", lambda fig=None: (figures.append(fig), real_close(fig))[1]
         )
-        assert render() is not None
+        assert render_analysis_chart(_context()) is not None
         assert figures, "фигура не была закрыта — нечего проверять"
-        axis = figures[0].axes[0]
-        return [t.get_text() for t in axis.get_xticklabels() if t.get_text()]
-
-    @pytest.mark.parametrize(
-        "render",
-        [
-            lambda: render_setup_chart(_context(), _signal(), SignalLevel.READY),
-            lambda: render_analysis_chart(_context(), _signal()),
-        ],
-        ids=["scanner", "analysis"],
-    )
-    def test_short_format_and_tick_limit(self, monkeypatch, render) -> None:  # type: ignore[no-untyped-def]
-        labels = self._labels(monkeypatch, render)
+        labels = [t.get_text() for t in figures[0].axes[0].get_xticklabels() if t.get_text()]
         assert 2 <= len(labels) <= charting.XAXIS_MAX_TICKS
         for label in labels:
             # 17.09 08:00 — без года и запятой
             assert re.fullmatch(r"\d{2}\.\d{2} \d{2}:\d{2}", label), label
+
+
+def _spy_addplot(monkeypatch) -> list[list[float]]:  # type: ignore[no-untyped-def]
+    plotted: list[list[float]] = []
+    real = charting.mpf.make_addplot
+
+    def spy(data, *args, **kwargs):  # type: ignore[no-untyped-def]
+        plotted.append(list(data))
+        return real(data, *args, **kwargs)
+
+    monkeypatch.setattr(charting.mpf, "make_addplot", spy)
+    return plotted
 
 
 def _stepped_context(low_close: str = "100", high_close: str = "200") -> MarketContext:
@@ -355,7 +297,7 @@ class TestVisibleWindowLines:
         """EMA200 целиком под окном свечей в mplfinance не передаётся, а
         EMA50 (частично в окне) передаётся, обрезанная по окну."""
         plotted = _spy_addplot(monkeypatch)
-        assert render_analysis_chart(_stepped_context(), _signal()) is not None
+        assert render_analysis_chart(_stepped_context()) is not None
 
         assert len(plotted) == 1  # только EMA50; EMA200 (~100..163) ниже окна ~[198; 202]
         ema50 = plotted[0]
@@ -366,46 +308,36 @@ class TestVisibleWindowLines:
     def test_lines_inside_window_are_untouched(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         plotted = _spy_addplot(monkeypatch)
         # 300 свечей: EMA200 прогрета на всём окне, NaN могут дать только обрезка
-        assert render_analysis_chart(_context(_candles(300)), _signal()) is not None
+        assert render_analysis_chart(_context(_candles(300))) is not None
         assert len(plotted) == 2
         assert all(v == v for line in plotted for v in line)  # ни одного NaN
 
-    def test_scanner_chart_gets_the_same_clipping(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-        plotted = _spy_addplot(monkeypatch)
-        assert render_setup_chart(_stepped_context(), _signal(), SignalLevel.READY) is not None
-        assert len(plotted) == 1
-
 
 class TestLegend:
-    @staticmethod
-    def _geometry(monkeypatch, render):  # type: ignore[no-untyped-def]
+    def test_legend_is_below_the_plot(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         figures = []
         real_close = charting.plt.close
         monkeypatch.setattr(
             charting.plt, "close", lambda fig=None: (figures.append(fig), real_close(fig))[1]
         )
-        assert render() is not None
+        context = replace(_windowed_context(), levels=[_level(D("105"), resistance=True)])
+        assert render_analysis_chart(context) is not None
         fig = figures[0]
         canvas = FigureCanvasAgg(fig)  # у закрытой фигуры canvas базовый, без рендерера
         canvas.draw()
-        ax = fig.axes[0]
         renderer = canvas.get_renderer()
-        return ax.get_window_extent(renderer), ax.get_legend().get_window_extent(renderer)
-
-    def test_analysis_legend_is_below_the_plot(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-        context = replace(_windowed_context(), levels=[_level(D("105"), resistance=True)])
-        axes_box, legend_box = self._geometry(
-            monkeypatch, lambda: render_analysis_chart(context, _signal())
-        )
+        axes_box = fig.axes[0].get_window_extent(renderer)
+        legend_box = fig.axes[0].get_legend().get_window_extent(renderer)
         assert legend_box.y1 <= axes_box.y0, "легенда не должна перекрывать область свечей"
 
-    def test_scanner_legend_stays_inside_top_left(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-        axes_box, legend_box = self._geometry(
-            monkeypatch,
-            lambda: render_setup_chart(_context(), _signal(), SignalLevel.READY),
+    def test_no_levels_no_legend(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        figures = []
+        real_close = charting.plt.close
+        monkeypatch.setattr(
+            charting.plt, "close", lambda fig=None: (figures.append(fig), real_close(fig))[1]
         )
-        assert legend_box.y0 >= axes_box.y0
-        assert legend_box.x0 <= axes_box.x0 + axes_box.width / 2
+        assert render_analysis_chart(_context()) is not None
+        assert figures[0].axes[0].get_legend() is None
 
 
 class TestPriceLabels:
@@ -416,40 +348,26 @@ class TestPriceLabels:
     @staticmethod
     def _labels(monkeypatch, render) -> list[str]:  # type: ignore[no-untyped-def]
         labels: list[str] = []
-        real_hline, real_span = Axes.axhline, Axes.axhspan
+        real_hline = Axes.axhline
 
         def hline(self, y=0, *args, **kwargs):  # type: ignore[no-untyped-def]
             labels.append(kwargs.get("label", ""))
             return real_hline(self, y, *args, **kwargs)
 
-        def span(self, ymin=0, ymax=1, *args, **kwargs):  # type: ignore[no-untyped-def]
-            labels.append(kwargs.get("label", ""))
-            return real_span(self, ymin, ymax, *args, **kwargs)
-
         monkeypatch.setattr(Axes, "axhline", hline)
-        monkeypatch.setattr(Axes, "axhspan", span)
         assert render() is not None
         return labels
 
-    @staticmethod
-    def _signal() -> Signal:
-        return _signal(
-            level_price=D("2668.5432"),
-            entry_zone_low=D("2600.1234"), entry_zone_high=D("2610.9876"),
-            stop_loss=D("2590.5"), take_profit_1=D("2700.0049"),
-        )
-
-    def test_analysis_labels_use_symbol_precision(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def test_labels_use_symbol_precision(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         context = replace(_windowed_context(), levels=[_level(D("105.1234"), resistance=True)])
-        labels = self._labels(
-            monkeypatch, lambda: render_analysis_chart(context, self._signal(), 2)
-        )
-        assert "Уровень 2668.54" in labels
-        assert "Вход 2600.12–2610.99" in labels
-        assert "Стоп 2590.5" in labels
-        assert "Цель 2700" in labels
+        labels = self._labels(monkeypatch, lambda: render_analysis_chart(context, 2))
         assert "Сопротивление 105.12" in labels
         assert not [x for x in labels if self.RAW.search(x)]
+
+    def test_other_precision_is_respected(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        context = replace(_windowed_context(), levels=[_level(D("105.1234"), resistance=True)])
+        labels = self._labels(monkeypatch, lambda: render_analysis_chart(context, 3))
+        assert "Сопротивление 105.123" in labels
 
     def test_role_follows_price_not_detection_flag(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         """Подпись — по положению относительно цены (~100): пробитое
@@ -461,37 +379,8 @@ class TestPriceLabels:
                 _level(D("105"), resistance=False),
             ],
         )
-        labels = self._labels(
-            monkeypatch, lambda: render_analysis_chart(context, _signal(level_price=None), 2)
-        )
+        labels = self._labels(monkeypatch, lambda: render_analysis_chart(context, 2))
         assert "Поддержка 95" in labels
         assert "Сопротивление 105" in labels
         assert "Сопротивление 95" not in labels
         assert "Поддержка 105" not in labels
-
-    def test_other_precision_is_respected(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-        labels = self._labels(
-            monkeypatch, lambda: render_analysis_chart(_windowed_context(), self._signal(), 3)
-        )
-        assert "Уровень 2668.543" in labels
-        assert "Вход 2600.123–2610.988" in labels
-
-    def test_scanner_labels_are_formatted_too(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-        labels = self._labels(
-            monkeypatch,
-            lambda: render_setup_chart(_context(), self._signal(), SignalLevel.READY, 2),
-        )
-        assert "Уровень 2668.54" in labels
-        assert "Вход 2600.12–2610.99" in labels
-        assert not [x for x in labels if self.RAW.search(x)]
-
-    def test_without_precision_falls_back_to_price_magnitude(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-        """Сканер точность символа не знает: подпись по порядку величины цены
-        (>=1000 — два знака), а не четыре знака с хвостом нулей."""
-        labels = self._labels(
-            monkeypatch,
-            lambda: render_setup_chart(_context(), self._signal(), SignalLevel.READY),
-        )
-        assert "Уровень 2668.54" in labels
-        assert "Цель 2700" in labels
-        assert not [x for x in labels if self.RAW.search(x)]
