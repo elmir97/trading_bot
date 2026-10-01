@@ -32,3 +32,6 @@ htmlcov/
 postgres_data/
 logs/
 *.log
+
+# Кэш свечей и funding для scripts/replay_history.py — данные биржи, не код
+data/
