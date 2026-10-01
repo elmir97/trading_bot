@@ -44,6 +44,26 @@ B4) — раздел «29.09», подраздел «Деплой 29.09 10:28 UT
   Строки и схема — как в прогоне 1 (diff — те же 12 колонок). Источник после — тот же
   (`7b4e2c9a1f35|2|3|3`), `tb_fakeprod`/сеть удалены, `tb_*`, тега, дампов, логов нет;
   `trading_bot` running, restarts 0
+- SQL md5 (по запросу владельца показан): агрегация строк — `string_agg(r, chr(10) ORDER BY r
+  COLLATE "C")`, колонки в `ROW` — `ORDER BY x COLLATE "C"`; ORDER BY был с `43c5aa9`. Тест
+  (`a85d3db`): md5 многострочной таблицы из Python (строки `ROW(…)::text`, сортировка по байтам
+  UTF-8) = md5 скрипта
+- **`--fault data-change` (`a85d3db`)** — только с `--checksum`, `--source-container` не прода,
+  без `--rewind-to`: после upgrade 1 в КОПИИ к первой text-колонке непустой таблицы (порядок
+  снимка схемы, без `--allow-data-change`) « [fault]» в одной строке (DO-блок, ROW_COUNT ≠ 1 —
+  исключение). Тест на `trading_bot_test` в транзакции с откатом: меняется md5 ровно целевой
+  таблицы, после отката — как было; пустая таблица — исключение. SQL-шаблоны — только ASCII
+  (кириллица в `RAISE` ломалась на Windows: argv psql — cp1251; тест на все шаблоны). Тестов
+  1506 (0 skipped), shellcheck 0, ruff E501 55. Поддельный docker: fault → 1 с ❌ signals; fault
+  при исключённой text-колонке → 1 «нет непустой таблицы с text-колонкой»; без fault — OK
+- **Прогон `--checksum --fault data-change` на `tb_fakeprod` с данными, 01.10 11:38 UTC
+  (`a85d3db`, лог `rehearsal_20261001_113809`) — exit 1 (ожидался):** шаги 1–7 ✅, шаг 8 FAULT
+  `UPDATE signals.detail` ✅, шаг 9 downgrade 1 ❌ «данные (downgrade 1) ≠ baseline по md5:
+  signals»; таблица md5 — ❌ только у signals (`77fc3bfb` → `26c980a3`), остальные 14 = baseline;
+  строки и схема без расхождений. md5 signals/users отличаются от прогона 11:05 — `created_at`
+  = `now()` при новой заливке источника. Источник после — `7b4e2c9a1f35|2|3|3`, md5
+  `signals.detail` до и после один (`e187dd35…`), строк с `[fault]` 0; `tb_fakeprod`/сеть
+  удалены, `tb_*`, тега, дампов, логов нет; `trading_bot` running, restarts 0
 - **На копии прода с `--checksum` — не прогонялся, только после «да» владельца**
 
 ## 01.10 — `scripts/rehearse_migration.sh` (проверен на сервере, копия прода — OK)
