@@ -32,6 +32,19 @@ B4) — раздел «29.09», подраздел «Деплой 29.09 10:28 UT
   же с `--allow-data-change` → OK; неизвестная колонка в `--allow-data-change` → 2; не-NULL
   после upgrade → 1; без флагов — как раньше. Спецификация в SQL — `signals:id` (без
   исключённой `atr_old`)
+- В git — `43c5aa9`; тестов 1492 (0 skipped), shellcheck 0, ruff E501 55
+- **Прогон на `tb_fakeprod` с данными, 01.10 11:05 UTC (`43c5aa9`, лог `rehearsal_20261001_110556`)
+  — exit 0, ИТОГ: OK.** Источник на `7b4e2c9a1f35`: users 2, signals 3 (detail с кириллицей,
+  `|`, пустой строкой; NULL в nullable), signal_notifications 3. Флаги `--checksum
+  --expect-columns signals.atr,signal_notifications.atr --expect-null` на все 12 новых
+  колонок. 11 шагов ✅: baseline — 15 таблиц, 313 объектов схемы, md5 по 15 таблицам; оба
+  upgrade — 12 колонок целиком NULL; оба downgrade — md5 всех 15 таблиц = baseline (signals
+  `29cb9e24`, signal_notifications `1fe1dbf0`, users `84d8aa8f`, alembic_version `aef35e63`,
+  пустые — `d41d8cd9`). Независимо: `aef35e63` = md5 «(7b4e2c9a1f35)», `d41d8cd9` = md5 ''.
+  Строки и схема — как в прогоне 1 (diff — те же 12 колонок). Источник после — тот же
+  (`7b4e2c9a1f35|2|3|3`), `tb_fakeprod`/сеть удалены, `tb_*`, тега, дампов, логов нет;
+  `trading_bot` running, restarts 0
+- **На копии прода с `--checksum` — не прогонялся, только после «да» владельца**
 
 ## 01.10 — `scripts/rehearse_migration.sh` (проверен на сервере, копия прода — OK)
 
