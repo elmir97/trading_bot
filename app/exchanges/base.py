@@ -36,7 +36,7 @@ class ExchangeError(RuntimeError):
     BingXClient._parse_order()/_to_decimal). Это различие и есть граница
     между REJECTED (биржа явно отказала — code не None и не 0) и UNKNOWN
     (мы не знаем, что произошло на её стороне) на пути отправки ордера —
-    см. app/execution/service.py, ExecutionService.submit_entry_order()."""
+    см. путь входа по сигналу (удалён 02.10.2026; в истории git)."""
 
     def __init__(
         self, message: str, *, code: int | None = None, payload: dict[str, Any] | None = None
@@ -334,7 +334,7 @@ class ApiRestrictions:
 class MarginType(StrEnum):
     """Режим маржи символа — GET /openApi/swap/v2/trade/marginType
     (28.09, живьём на демо: data.marginType = "ISOLATED" для LINK и SOL).
-    Плечо от стопа (app/execution/leverage.py) и проверка ликвидации
+    Плечо от стопа (бывший app/execution/leverage.py) и проверка ликвидации
     в read-back рассчитаны на изолированную маржу."""
 
     ISOLATED = "ISOLATED"
@@ -352,7 +352,7 @@ class LeverageInfo:
     для аккаунта — эта ручка. Текущее и максимум идут раздельно по
     сторонам (long/short): в хедж-режиме плечо LONG и SHORT независимо,
     сравнивать значение "не по той стороне" — значит сравнивать не то,
-    что реально спросят при входе (см. app/execution/leverage.py)."""
+    что реально спросят при входе (бывший app/execution/leverage.py)."""
 
     symbol: str
     long_leverage: int
@@ -367,7 +367,7 @@ class OrderResult:
 
     status — оригинальная строка биржи (NEW/PENDING/FILLED/...), не наш
     внутренний OrderStatus из app.trading.enums: перевод одного в другой —
-    ответственность execution/service.py, а не биржевого клиента.
+    ответственность вызывающего кода, а не биржевого клиента.
 
     Чисел ордера (цена, объём, комиссия) нет: форма ответа на POST живьём
     не снята, а вызывающие берут только order_id и raw. Исполнение читает
@@ -542,7 +542,7 @@ class ExchangeClient(ABC):
     ) -> MarginType:
         """Режим маржи символа (28.09). Не abstractmethod: клиент, который
         его не умеет, отвечает явной ошибкой — вызывающий код
-        (app/services/margin_mode.py) превращает её в отказ
+        (бывший app/services/margin_mode.py) превращает её в отказ
         MARGIN_MODE_UNKNOWN, а не в молчаливое «изолированная»."""
         raise ExchangeResponseError(f"{self.name}: режим маржи не поддерживается")
 
@@ -551,7 +551,7 @@ class ExchangeClient(ABC):
     # Здесь и только здесь проходит граница с биржей: методы отправляют
     # запрос и возвращают то, что ответила биржа, ничего не решая сами
     # (например, в каком режиме позиций аккаунт и что поэтому положить в
-    # position_side — это знание execution/service.py, не биржевого
+    # position_side — это знание вызывающего кода, не биржевого
     # клиента).
 
     @abstractmethod

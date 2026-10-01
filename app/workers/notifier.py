@@ -23,9 +23,6 @@ from app.database.models.user import DEFAULT_NOTIFICATIONS, UserSettings
 logger = get_logger(__name__)
 
 NOTIFICATION_LABELS: dict[str, str] = {
-    "setup_ready": "🎯 сетапы READY",
-    "setup_forming": "🌱 формирующиеся сетапы",
-    "setup_charts": "🖼️ графики к сигналам",
     "tp_sl_approaching": "📍 приближение к TP/SL",
     "daily_report": "📄 дневная сводка",
     "daily_limit_reached": "🛑 дневной лимит убытка",

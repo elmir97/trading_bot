@@ -1,11 +1,9 @@
 """Тесты DailyJobs._maybe_send_execution_digest (этап 15.4, раздел 12а ТЗ).
 
-Против настоящей БД (нужны User/UserSettings/TradingPlan/ExecutionOrder —
-как остальные интеграционные тесты этапа 15), Bot — свой минимальный дублёр
-(как FakeBot в tests/test_notifier.py), в Telegram ничего не уходит.
-Проверяется именно склейка DailyJobs с execution_digest.build_stats/
-render_execution_digest и три её собственных условия отправки (переключатель,
-"уже отправляли сегодня", час) — подсчёты и аномалии уже покрыты
+Против настоящей БД (User/UserSettings/ReconciliationEvent), Bot — свой
+минимальный дублёр (как FakeBot в tests/test_notifier.py), в Telegram ничего
+не уходит. Проверяется склейка DailyJobs с execution_digest и три её условия
+отправки (переключатель, "уже отправляли сегодня", час) — подсчёты покрыты
 tests/test_execution_digest.py.
 """
 
@@ -13,34 +11,23 @@ from __future__ import annotations
 
 import os
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 
 import pytest
 import pytest_asyncio
 
 from app.core.config import Settings
 from app.core.security import SecretCipher
-from app.database.models.execution_order import ExecutionOrder
-from app.database.models.trade import Trade
+from app.database.models.reconciliation_event import ReconciliationEvent
 from app.database.repositories.strategy import MistakeTypeRepository, StrategyRepository
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
 from app.services.user_service import UserService
-from app.trading.enums import (
-    OrderRole,
-    OrderSide,
-    OrderStatus,
-    OrderType,
-    TradeSide,
-    TradeSource,
-)
+from app.trading.enums import ReconciliationKind
 from app.trading.risk import tz_offset_for
 from app.workers.daily import DailyJobs
 from tests.conftest import cleanup_user
 
 pytestmark = pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="Нужен PostgreSQL")
-
-D = Decimal
 
 
 class FakeBot:
@@ -49,20 +36,6 @@ class FakeBot:
 
     async def send_message(self, chat_id: int, text: str, reply_markup=None) -> None:  # type: ignore[no-untyped-def]
         self.sent_messages.append((chat_id, text))
-
-
-def _row(user_id: int, status: OrderStatus, **overrides: object) -> ExecutionOrder:
-    fields: dict[str, object] = {
-        "user_id": user_id,
-        "symbol": "BTC-USDT",
-        "side": OrderSide.BUY,
-        "position_side": TradeSide.LONG,
-        "order_type": OrderType.MARKET,
-        "role": OrderRole.ENTRY,
-        "status": status,
-    }
-    fields.update(overrides)
-    return ExecutionOrder(**fields)  # type: ignore[arg-type]
 
 
 @pytest_asyncio.fixture
@@ -90,61 +63,24 @@ def _call_args(user, settings: Settings, *, local_hour: int):
     return now, tz_offset, today_local, local_hour
 
 
-async def test_sends_digest_reflecting_todays_rows(ctx) -> None:  # type: ignore[no-untyped-def]
-    daily, session, user, bot, settings = ctx
+def _call_args(user, settings: Settings, *, local_hour: int):
     now = datetime.now(UTC)
-    # Окно теперь window_start..now с исключающей верхней границей (как и
-    # раньше у day_bounds) — строки должны лечь строго ДО now, иначе флюш
-    # может сравняться с now до микросекунды и вылететь из окна. В проде
-    # так и есть: данные всегда написаны раньше, чем DailyJobs захватит now.
-    moment = now - timedelta(minutes=1)
-    session.add(
-        _row(
-            user.id, OrderStatus.DRY_RUN, risk_percent=D("1.0"), risk_reward=D("2.0"),
-            created_at=moment,
-        )
-    )
-    session.add(_row(user.id, OrderStatus.DECLINED, created_at=moment))
-    session.add(_row(user.id, OrderStatus.REFUSED, error_code="MAX_POSITIONS", created_at=moment))
-    await session.flush()
-
-    _now, _tz_offset, today_local, local_hour = _call_args(
-        user, settings, local_hour=settings.exec_daily_digest_hour
-    )
-    await daily._maybe_send_execution_digest(
-        session, user, user.settings, now, today_local, local_hour
-    )
-
-    assert len(bot.sent_messages) == 1
-    _chat_id, text = bot.sent_messages[0]
-    assert "показана карточка: 2" in text
-    assert "подтверждено: 1" in text
-    assert "отказ пользователя: 1" in text
-    assert "MAX_POSITIONS — 1" in text
-    assert user.settings.execution_digest_last_sent_date == today_local
+    tz_offset = tz_offset_for(user.settings.timezone)
+    today_local = (now + timedelta(hours=tz_offset)).date()
+    return now, tz_offset, today_local, local_hour
 
 
 async def test_window_is_rolling_24h_not_calendar_day(ctx) -> None:  # type: ignore[no-untyped-def]
-    """Регрессия на баг из разведки: при часе отправки, отличном от локальной
-    полночи, календарные сутки (day_bounds) резали бы события между часом
-    отправки и полночью — они не попадали бы ни в сегодняшнюю сводку (её уже
-    нет), ни в завтрашнюю (окно уже следующего дня). Окно теперь строго
-    "последние 24 часа до now", без оглядки на календарную границу: строка
-    23 часа назад видна, строка 25 часов назад — нет, независимо от того, где
-    по местному времени проходит полночь."""
+    """Окно — строго "последние 24 часа до now": событие 23 часа назад
+    видно, 25 часов назад — нет, независимо от местной полуночи."""
     daily, session, user, bot, settings = ctx
     now = datetime.now(UTC)
-
-    session.add(
-        _row(
-            user.id, OrderStatus.DECLINED, created_at=now - timedelta(hours=23)
-        )
-    )
-    session.add(
-        _row(
-            user.id, OrderStatus.EXPIRED, created_at=now - timedelta(hours=25)
-        )
-    )
+    for hours, kind in ((23, ReconciliationKind.CLOSED_STOP_LOSS),
+                        (25, ReconciliationKind.CLOSED_TAKE_PROFIT)):
+        session.add(ReconciliationEvent(
+            user_id=user.id, symbol="LINK-USDT", kind=kind, dedup_key=f"w:{hours}",
+            detail="d", notified_at=now, created_at=now - timedelta(hours=hours),
+        ))
     await session.flush()
 
     _now, _tz_offset, today_local, local_hour = _call_args(
@@ -154,16 +90,12 @@ async def test_window_is_rolling_24h_not_calendar_day(ctx) -> None:  # type: ign
         session, user, user.settings, now, today_local, local_hour
     )
 
-    assert len(bot.sent_messages) == 1
     text = bot.sent_messages[0][1]
-    # 23ч назад — внутри окна: 1 показанная карточка (отказ пользователя).
-    # 25ч назад — вне окна, не должно попасть ни в одно число.
-    assert "показана карточка: 1" in text
-    assert "отказ пользователя: 1" in text
-    assert "истекло по TTL: 0" in text
+    assert "Сверка с биржей: закрыто по стопу — 1" in text
+    assert "по тейку" not in text
 
 
-async def test_zero_signals_day_still_sends_digest(ctx) -> None:  # type: ignore[no-untyped-def]
+async def test_empty_day_still_sends_digest(ctx) -> None:  # type: ignore[no-untyped-def]
     """Раздел 12а ТЗ: "пустая строка тут не годится" — нулевой день тоже
     шлёт сводку, а не молчит."""
     daily, session, user, bot, settings = ctx
@@ -222,143 +154,6 @@ async def test_respects_notification_toggle(ctx) -> None:  # type: ignore[no-unt
 
     assert bot.sent_messages == []
     assert user.settings.execution_digest_last_sent_date is None
-
-
-async def test_stage_and_error_rows_reach_the_digest_through_the_db(ctx) -> None:  # type: ignore[no-untyped-def]
-    """stage и статус ERROR доезжают из БД до текста сводки: колонка stage
-    читается моделью, ERROR не роняет загрузку строк."""
-    daily, session, user, bot, settings = ctx
-    now, _tz_offset, today_local, local_hour = _call_args(
-        user, settings, local_hour=settings.exec_daily_digest_hour
-    )
-    moment = now - timedelta(minutes=1)
-    session.add(
-        _row(
-            user.id, OrderStatus.REFUSED, error_code="PRICE_DRIFT", stage="confirm",
-            created_at=moment,
-        )
-    )
-    session.add(
-        _row(
-            user.id, OrderStatus.REFUSED, error_code="MAX_POSITIONS", stage="card",
-            created_at=moment,
-        )
-    )
-    session.add(
-        _row(
-            user.id, OrderStatus.ERROR, error_code="ExchangeAuthError", stage="card",
-            created_at=moment,
-        )
-    )
-    await session.flush()
-
-    await daily._maybe_send_execution_digest(
-        session, user, user.settings, now, today_local, local_hour
-    )
-
-    _chat_id, text = bot.sent_messages[0]
-    lines = text.splitlines()
-    assert "  показана карточка: 1" in lines
-    assert "    отказ кода при подтверждении: 1" in lines
-    assert "  отказ кода до карточки: 1" in lines
-    assert "  сбой биржи до карточки: 1" in lines
-    assert "сбои биржи при попытках входа: 1 из 3 (ExchangeAuthError — 1)" in text
-
-
-async def test_real_submission_statuses_reach_the_digest(ctx) -> None:  # type: ignore[no-untyped-def]
-    """Шаг 15.5.2а: SUBMITTED/REJECTED/UNKNOWN/PENDING — исходы «Да» при
-    реальной отправке. До этого шага сводка их не видела вовсе."""
-    daily, session, user, bot, settings = ctx
-    now = datetime.now(UTC)
-    moment = now - timedelta(minutes=1)
-    for status in (
-        OrderStatus.SUBMITTED, OrderStatus.SUBMITTED, OrderStatus.REJECTED,
-        OrderStatus.UNKNOWN, OrderStatus.PENDING,
-    ):
-        session.add(_row(user.id, status, created_at=moment))
-    await session.flush()
-
-    _now, _tz_offset, today_local, local_hour = _call_args(
-        user, settings, local_hour=settings.exec_daily_digest_hour
-    )
-    await daily._maybe_send_execution_digest(
-        session, user, user.settings, now, today_local, local_hour
-    )
-
-    lines = bot.sent_messages[0][1].splitlines()
-    assert "  показана карточка: 5" in lines
-    assert "    отправлено на биржу: 2" in lines
-    assert "    отклонено биржей: 1" in lines
-    assert "    исход неизвестен: 1" in lines
-    assert "    без ответа биржи (PENDING): 1" in lines
-
-
-
-async def test_unprotected_position_reaches_the_digest(ctx) -> None:  # type: ignore[no-untyped-def]
-    """Шаг 15.5.3: спасение стопа не удалось (строка STOP_LOSS REJECTED) —
-    в «Аномалиях» сводки первой строкой «позиция без стопа»."""
-    daily, session, user, bot, settings = ctx
-    now = datetime.now(UTC)
-    moment = now - timedelta(minutes=1)
-    session.add(_row(user.id, OrderStatus.FILLED, created_at=moment))
-    session.add(_row(
-        user.id, OrderStatus.REJECTED, role=OrderRole.STOP_LOSS, side=OrderSide.SELL,
-        order_type=OrderType.STOP_MARKET, error_code="80012", created_at=moment,
-    ))
-    session.add(_row(
-        user.id, OrderStatus.ERROR, role=OrderRole.STOP_LOSS, side=OrderSide.SELL,
-        order_type=OrderType.STOP_MARKET, error_code="STOP_UNVERIFIED",
-        symbol="ETH-USDT", created_at=moment,
-    ))
-    await session.flush()
-
-    _now, _tz_offset, today_local, local_hour = _call_args(
-        user, settings, local_hour=settings.exec_daily_digest_hour
-    )
-    await daily._maybe_send_execution_digest(
-        session, user, user.settings, now, today_local, local_hour
-    )
-
-    lines = bot.sent_messages[0][1].splitlines()
-    assert "    исполнено (read-back): 1" in lines
-    anomalies = lines[lines.index("Аномалии:") + 1:]
-    assert anomalies[0].strip().startswith("позиция без стопа:")
-    assert "  позиция без стопа: BTC-USDT LONG — 1" in lines
-    assert "  позиция без стопа: ETH-USDT LONG — 1" in lines
-
-
-async def test_execution_slippage_reaches_the_digest_through_the_db(ctx) -> None:  # type: ignore[no-untyped-def]
-    """Проскальзывание исполнения берёт avgPrice из trades.entry_price по
-    execution_orders.trade_id — через list_entries_between (selectinload),
-    ленивая загрузка в async-сессии упала бы."""
-    daily, session, user, bot, settings = ctx
-    now = datetime.now(UTC)
-    moment = now - timedelta(minutes=1)
-    trade = Trade(
-        user_id=user.id, symbol="BTC-USDT", side=TradeSide.LONG, quantity=D("1"),
-        entry_price=D("100.3"), opened_at=moment, source=TradeSource.SIGNAL_EXECUTION,
-        fill_confirmed=True,
-    )
-    session.add(trade)
-    await session.flush()
-    # Только trade_id, не row.trade, и сделка убрана из памяти сессии: иначе
-    # связь многие-к-одному достаётся из identity map без SQL, и тест прошёл
-    # бы и без selectinload. В проде сводка читает строки свежей сессией —
-    # ленивая загрузка там упала бы (MissingGreenlet).
-    session.add(_row(user.id, OrderStatus.FILLED, price=D("100"), trade_id=trade.id,
-                     created_at=moment))
-    await session.flush()
-    session.expunge(trade)
-
-    _now, _tz_offset, today_local, local_hour = _call_args(
-        user, settings, local_hour=settings.exec_daily_digest_hour
-    )
-    await daily._maybe_send_execution_digest(
-        session, user, user.settings, now, today_local, local_hour
-    )
-
-    text = bot.sent_messages[0][1]
-    assert "Проскальзывание исполнения (на «Да» → исполнение): среднее +0.3%" in text
 
 
 async def test_reconciler_discrepancy_reaches_the_digest_through_the_db(ctx) -> None:  # type: ignore[no-untyped-def]

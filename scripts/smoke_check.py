@@ -12,8 +12,7 @@ from __future__ import annotations
 import asyncio
 import re
 import sys
-from datetime import UTC, datetime, timedelta
-from decimal import Decimal as D
+from datetime import UTC, datetime
 from typing import Any, NoReturn
 
 sys.path.insert(0, ".")
@@ -24,19 +23,14 @@ from sqlalchemy import delete, select
 from sqlalchemy.engine import make_url
 
 from app.core.config import get_settings
-from app.core.locks import RedisLock, confirm_lock_key
 from app.core.security import SecretCipher, mask_secret
 from app.database.models.credentials import ExchangeCredentials
 from app.database.models.execution_callback import ExecutionCallback
 from app.database.models.execution_order import ExecutionOrder
-from app.database.models.signal import SignalRecord
-from app.database.models.signal_notification import SignalNotification
 from app.database.models.user import User
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
-from app.exchanges.base import Balance, MarginType, Position, SymbolInfo, Ticker
-from app.exchanges.bingx import BingXClient
-from app.trading.enums import ExchangeKeyMode, SignalDirection, SignalLevel, SignalRecordStatus
+from app.trading.enums import ExchangeKeyMode
 from scripts.simulate_chat import USER_ID, build  # noqa: E402
 
 # Скрипт пишет и удаляет реальные строки — только тестовая база. Имя, а не
@@ -132,18 +126,14 @@ def _ensure_test_database(database_url: str) -> None:
 
 
 def _ensure_execution_enabled(execution_enabled: bool) -> None:
-    """Без TRADING_EXECUTION_ENABLED=true guard EXECUTION_DISABLED в
-    evaluate() отказывает раньше похода за ценой — раздел [14] не строит
-    карточку и падает шестью разными проверками с непохожими друг на
-    друга деталями (одна REFUSED-строка вместо трёх DRY_RUN и т.п.),
-    выглядя как баг execution-пути, а не как забытая переменная запуска."""
+    """Smoke гоняется в конфигурации прода — с включённым исполнением.
+    Вход по сигналу удалён 02.10.2026; карточки управления позициями
+    (этап 4) вернут сюда сценарий, которому флаг нужен, — требование
+    оставлено, чтобы прогоны до и после были сравнимы."""
     if not execution_enabled:
         print(
-            "Отказ: TRADING_EXECUTION_ENABLED не включён. Раздел [14] "
-            "(execution-путь) не сможет построить карточку подтверждения "
-            "и упадёт шестью проверками, которые выглядят как баг, а не как "
-            "забытая переменная окружения. Запусти с "
-            "TRADING_EXECUTION_ENABLED=true."
+            "Отказ: TRADING_EXECUTION_ENABLED не включён — smoke гоняется в "
+            "конфигурации прода. Запусти с TRADING_EXECUTION_ENABLED=true."
         )
         sys.exit(1)
 
@@ -428,92 +418,20 @@ async def _run_scenarios(sim, tg, db, redis, settings) -> None:  # type: ignore[
     check("раздел не заглушка", "этап" not in text.lower(), text[:100])
     check("просит выбрать инструмент", has(text, "выбери инструмент"), text[:150])
 
-    print("\n[14] Execution: карточка подтверждения")
+    print("\n[14] Ключи биржи и старые кнопки сигналов")
     await _run_execution_scenario(sim, tg, db, redis, settings)
 
 
-# --- [14] Execution: карточка подтверждения, сухой прогон, лок --------------
+# --- [14] Ключи биржи и старые кнопки сигналов --------------------------------
 #
-# ExecutionService.evaluate() (app/execution/service.py) трогает биржу в
-# трёх местах: get_ticker (цена), get_symbols→get_symbol_info (лот/тик),
-# get_balance. _build_quote() (app/bot/handlers/execution.py) добавляет
-# четвёртое место сама, ДО evaluate(): get_position_mode() — раздел 16 ТЗ,
-# шаг 15.5.1, гвард POSITION_MODE_UNKNOWN. Пятое — get_positions() карточки,
-# шаг 15.5.4а, гвард EXCHANGE_POSITION_EXISTS. Шестое — get_margin_type()
-# карточки (28.09, гвард MARGIN_NOT_ISOLATED). Подставляем все шесть на уровне
-# готовых типизированных методов BingXClient — то же, что делает
-# FakeExchangeClient в tests/test_execution_service.py, но там клиент
-# подставляется через конструктор ExecutionService, а здесь настоящий
-# хендлер сам строит BingXClient внутри ExchangeFactory.for_user(), поэтому
-# патчим шесть leaf-методов на классе на время сценария и возвращаем
-# оригиналы в finally. ExchangeFactory и MarketDataService не подменяются:
-# расшифровка ключей, выбор режима/хоста, кэш — всё настоящее. Метод без
-# заглушки в сеть не уйдёт — упрётся в запрет сети (_install_network_guard)
-# и уронит прогон строкой «✗ СЕТЬ».
-
-# Снято вручную: GET https://open-api.bingx.com/openApi/swap/v2/quote/contracts
-# 2026-09-11, запись для symbol="BTC-USDT". price_precision/quantity_precision/
-# min_quantity/min_notional — поля pricePrecision/quantityPrecision/
-# tradeMinQuantity/tradeMinUSDT из ответа биржи (влияют на округление объёма,
-# выдумывать их нельзя). max_leverage поля больше нет вовсе (раздел 16 ТЗ,
-# шаг 15.5.1): BingX для этого контракта не отдаёт maxLongLeverage, а
-# get_symbols() (app/exchanges/bingx.py) раньше молча подставляла дефолт 20 —
-# убрано как тихий фолбэк; реальный источник максимума плеча теперь
-# BingXClient.get_leverage(), не эта ручка.
-_FAKE_SYMBOL_INFO = SymbolInfo(
-    symbol="BTC-USDT",
-    price_precision=1,
-    quantity_precision=4,
-    min_quantity=D("0.0001"),
-    min_notional=D("2"),
-)
-_FAKE_PRICE = D("100250")  # середина зоны входа сигнала ниже — дрейф ровно 0%
-_FAKE_BALANCE = D("10000")
+# Вход по сигналу удалён 02.10.2026. Под старыми уведомлениями в чате остались
+# кнопки «exn:…» — они обязаны ответить «Сигналы отключены», ничего не записав
+# в базу и не сходив на биржу (запрет сети стоит на весь прогон).
 
 
-async def _fake_get_ticker(self, symbol: str, *, max_retries=None) -> Ticker:  # type: ignore[no-untyped-def]
-    return Ticker(
-        symbol=symbol, last_price=_FAKE_PRICE,
-        timestamp=datetime.now(UTC),
-    )
-
-
-async def _fake_get_symbols(self, *, max_retries=None) -> list[SymbolInfo]:  # type: ignore[no-untyped-def]
-    return [_FAKE_SYMBOL_INFO]
-
-
-async def _fake_get_balance(self, *, max_retries=None) -> Balance:  # type: ignore[no-untyped-def]
-    return Balance(
-        asset="USDT", available=_FAKE_BALANCE, used_margin=D("0"),
-        unrealized_pnl=D("0"), equity=_FAKE_BALANCE,
-    )
-
-
-async def _fake_get_position_mode(self, *, max_retries=None) -> bool:  # type: ignore[no-untyped-def]
-    # True = hedge mode. Тот же дефолт, что демо-аккаунт BingX отдаёт в
-    # реальной проверке раздела 16 ТЗ (recon, 2026-09) — не выдумка, а
-    # согласованная во всех фейках этого шага величина.
-    return True
-
-
-async def _fake_get_positions(self, *, max_retries=None) -> list[Position]:  # type: ignore[no-untyped-def]
-    # Позиций на бирже нет — как в живом прогоне (a) шага 15.5.4а: пустой список.
-    return []
-
-
-async def _fake_get_margin_type(self, symbol: str, *, max_retries=None) -> MarginType:  # type: ignore[no-untyped-def]
-    # Изолированная — как живые LINK и SOL на демо (28.09).
-    return MarginType.ISOLATED
-
-
-async def _seed_execution_fixtures(  # type: ignore[no-untyped-def]
-    db: Database, settings
-) -> tuple[SignalRecord, SignalNotification]:
-    """SignalRecord (READY/ACTIVE) + снимок его уведомления (шаг 15.5.2а:
-    кнопки адресуют notification_id) + фейковые ключи биржи, тем же путём, что
-    и бот: repository + SecretCipher.encrypt (не сырой INSERT) — расшифровка
-    в ExchangeFactory.for_user() должна реально отработать, не просто найти
-    непустую строку в базе."""
+async def _seed_exchange_credentials(db: Database, settings) -> int:  # type: ignore[no-untyped-def]
+    """Фейковые ключи биржи тем же путём, что и бот: repository +
+    SecretCipher.encrypt (не сырой INSERT). Возвращает user_id."""
     cipher = SecretCipher(settings.encryption_key.get_secret_value())
     async with db.session() as session:
         user = await UserRepository(session).get_by_telegram_id(USER_ID)
@@ -522,58 +440,19 @@ async def _seed_execution_fixtures(  # type: ignore[no-untyped-def]
         creds = ExchangeCredentials(
             user_id=user.id, exchange="bingx", mode=ExchangeKeyMode.DEMO,
             is_read_only=False, is_active=True,
-            # Раздел 8 ТЗ: отметка сразу свежая — иначе _build_quote() при
-            # check_permissions=True (открытие карточки) сходит за
-            # get_api_restrictions() в РЕАЛЬНЫЙ BingXClient (не патчится
-            # ниже вместе с get_ticker/get_symbols/get_balance) — и упрётся
-            # в запрет сети (_install_network_guard), уронив прогон.
+            # Отметка сразу свежая — экран ключей не идёт за правами на биржу.
             permissions_checked_at=datetime.now(UTC),
         )
         creds.api_key_encrypted = cipher.encrypt("smoke-test-fake-api-key")
         creds.api_secret_encrypted = cipher.encrypt("smoke-test-fake-api-secret")
         creds.api_key_masked = mask_secret("smoke-test-fake-api-key")
         session.add(creds)
-
-        signal = SignalRecord(
-            user_id=user.id,
-            symbol="BTC-USDT",
-            timeframe="4h",
-            level=SignalLevel.READY,
-            status=SignalRecordStatus.ACTIVE,
-            direction=SignalDirection.LONG,
-            setup="Пробой с ретестом",
-            fingerprint="smoke-check-fingerprint",
-            detail="Сигнал для execution-сценария smoke_check.py.",
-            entry_low=D("100000"),
-            entry_high=D("100500"),
-            stop_loss=D("99000"),
-            take_profit=D("103000"),
-            confidence=8,
-            expires_at=datetime.now(UTC) + timedelta(hours=4),
-        )
-        session.add(signal)
         await session.flush()
-        now = datetime.now(UTC)
-        notification = SignalNotification.snapshot_of(
-            signal, notified_at=now, expires_at=now + timedelta(hours=4)
-        )
-        session.add(notification)
-        await session.flush()
-        return signal, notification
+        return user.id
 
 
 async def _run_execution_scenario(sim, tg, db, redis, settings) -> None:  # type: ignore[no-untyped-def]
-    # Гвард MODE_NOT_ALLOWED (execution.py) требует user.settings.active_exchange_mode
-    # == settings.bingx_allowed_exchange_mode (DEMO по умолчанию — BINGX_TRADING_MODE
-    # =demo). Дефолт нового пользователя — LIVE, переключаем тем же тапом, что и
-    # пользователь: кнопка "💱 Счёт: ..." в «Настройках» (SetCB.MODE).
-    await sim.send("/start")
-    await sim.tap("Настройки")
-    await sim.tap("Счёт")
-
-    signal, notification = await _seed_execution_fixtures(db, settings)
-    signal_id = signal.id
-    notification_id = notification.id
+    user_id = await _seed_exchange_credentials(db, settings)
 
     # Раздел "общие ключи BingX": ровно одна пара сохранена (DEMO, только
     # что засеяна выше) — экран "Ключи" обязан показать её как ОДИН ключ
@@ -604,91 +483,31 @@ async def _run_execution_scenario(sim, tg, db, redis, settings) -> None:  # type
         str(list(buttons)),
     )
 
-    originals = (
-        BingXClient.get_ticker,
-        BingXClient.get_symbols,
-        BingXClient.get_balance,
-        BingXClient.get_position_mode,
-        BingXClient.get_positions,
-        BingXClient.get_margin_type,
-    )
-    BingXClient.get_ticker = _fake_get_ticker
-    BingXClient.get_symbols = _fake_get_symbols
-    BingXClient.get_balance = _fake_get_balance
-    BingXClient.get_position_mode = _fake_get_position_mode
-    BingXClient.get_positions = _fake_get_positions
-    BingXClient.get_margin_type = _fake_get_margin_type
-    try:
-        text = await sim.tap_data(f"exn:open:{notification_id}")
-        check("карточка: объём", has(text, "объём"), text[:300])
-        check("карточка: риск", has(text, "риск"), text[:300])
-        check("карточка: RR", has(text, "rr"), text[:300])
-
-        text = await sim.tap_data(f"exn:yes:{notification_id}")
-        # "Да" отправляет ДВА сообщения (execution.py:478-483): edit_text
-        # "Подтверждено" на самой карточке, затем отдельным send детали
-        # ордера ("Сухой прогон: ушёл бы..."). tap_data() возвращает только
-        # последнее, поэтому первое проверяем по tg.log.
-        edit_text = tg.log[-2][1]
-        check("подтверждение: карточка помечена", has(edit_text, "подтверждено"), edit_text[:120])
-        check("подтверждение: детали сухого прогона", has(text, "сухой прогон"), text[:200])
-
-        async with db.session() as session:
-            rows = (
-                await session.scalars(
-                    select(ExecutionOrder).where(ExecutionOrder.signal_id == signal_id)
-                )
-            ).all()
-        check(
-            "execution_orders: 3 строки DRY_RUN",
-            len(rows) == 3 and all(r.status.value == "DRY_RUN" for r in rows),
-            f"{len(rows)} строк, статусы {[r.status.value for r in rows]}",
-        )
-
-        # Второе "Да" держим за руку: лок ставит тот же RedisLock/ключ, что
-        # и хендлер (confirm_lock_key), но берём его снаружи ДО тапа — так
-        # результат детерминирован (не зависит от того, как event loop
-        # чередует две по-настоящему параллельные корутины), а код хендлера
-        # исполняется настоящий: confirm_yes реально получит LockBusyError.
-        lock_key = confirm_lock_key(user_id=signal.user_id, notification_id=notification_id)
-        blocker = RedisLock(redis, lock_key, ttl_seconds=15)
-        await blocker.__aenter__()
-        try:
-            await sim.tap_data(f"exn:yes:{notification_id}")
-        finally:
-            await blocker.__aexit__(None, None, None)
-
+    for data in ("exn:open:1", "exn:yes:1", "exn:no:1"):
+        await sim.tap_data(data)
         last_alert = next((entry for entry in reversed(tg.log) if entry[0] == "alert"), None)
         check(
-            "повторное «Да»: отказ по локу, не трейс",
-            last_alert is not None and "уже обрабатывается" in last_alert[1].lower(),
+            f"старая кнопка {data.rsplit(':', 1)[0]}: «Сигналы отключены»",
+            last_alert is not None and "сигналы отключены" in last_alert[1].lower(),
             str(last_alert),
         )
 
-        # Префлайт 15.7: каждое нажатие — строка журнала, и двойной тап тоже
-        # (запись до лока). Уборка — каскадом от удаления пользователя.
-        async with db.session() as session:
-            presses = (
-                await session.scalars(
-                    select(ExecutionCallback)
-                    .where(ExecutionCallback.notification_id == notification_id)
-                    .order_by(ExecutionCallback.id)
-                )
-            ).all()
-        check(
-            "журнал нажатий: open, yes, yes",
-            [p.action for p in presses] == ["open", "yes", "yes"],
-            str([p.action for p in presses]),
-        )
-    finally:
-        (
-            BingXClient.get_ticker,
-            BingXClient.get_symbols,
-            BingXClient.get_balance,
-            BingXClient.get_position_mode,
-            BingXClient.get_positions,
-            BingXClient.get_margin_type,
-        ) = originals
+    async with db.session() as session:
+        presses = (
+            await session.scalars(
+                select(ExecutionCallback).where(ExecutionCallback.user_id == user_id)
+            )
+        ).all()
+        orders = (
+            await session.scalars(
+                select(ExecutionOrder).where(ExecutionOrder.user_id == user_id)
+            )
+        ).all()
+    check(
+        "старые кнопки ничего не пишут в базу",
+        not presses and not orders,
+        f"нажатий {len(presses)}, ордеров {len(orders)}",
+    )
 
 
 if __name__ == "__main__":

@@ -28,10 +28,10 @@ from app.bot.handlers import (
     diagnostics,
     exchange,
     exchange_menu,
-    execution,
     fsm_guard,
     insights,
     pending,
+    signals_retired,
     statistics,
     trades,
 )
@@ -132,7 +132,7 @@ def build_dispatcher(
     dp.include_router(statistics.router)
     dp.include_router(settings_handlers.router)
     dp.include_router(insights.router)
-    dp.include_router(execution.router)
+    dp.include_router(signals_retired.router)
     dp.include_router(pending.router)
 
     return dp

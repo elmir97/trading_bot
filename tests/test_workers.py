@@ -35,19 +35,20 @@ class TestProgressFraction:
 
 class TestNotificationEnabled:
     def test_missing_settings_falls_back_to_default(self) -> None:
-        assert notification_enabled(None, "setup_ready") is True
+        assert notification_enabled(None, "tp_sl_approaching") is True
 
     def test_reads_explicit_false(self) -> None:
-        settings = UserSettings(notifications={"setup_ready": False})
-        assert notification_enabled(settings, "setup_ready") is False
+        settings = UserSettings(notifications={"tp_sl_approaching": False})
+        assert notification_enabled(settings, "tp_sl_approaching") is False
 
     def test_missing_key_falls_back_to_default_not_false(self) -> None:
         """Старый пользователь без нового ключа в JSONB — включено по
         умолчанию, а не выключено молча."""
         settings = UserSettings(notifications={})
-        assert notification_enabled(settings, "setup_forming") is True
+        assert notification_enabled(settings, "daily_report") is True
 
-    def test_default_notifications_has_all_stage12_keys(self) -> None:
-        for key in ("setup_ready", "setup_forming", "setup_charts", "tp_sl_approaching"):
-            assert DEFAULT_NOTIFICATIONS[key] is True
-        assert "setup_found" not in DEFAULT_NOTIFICATIONS
+    def test_default_notifications_keep_monitor_and_drop_signal_keys(self) -> None:
+        assert DEFAULT_NOTIFICATIONS["tp_sl_approaching"] is True
+        # Сигналы удалены 02.10.2026 — их переключателей в дефолтах нет.
+        for key in ("setup_found", "setup_ready", "setup_forming", "setup_charts"):
+            assert key not in DEFAULT_NOTIFICATIONS

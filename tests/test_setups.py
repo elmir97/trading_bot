@@ -14,7 +14,6 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from types import SimpleNamespace
 
 import pytest
 
@@ -25,7 +24,6 @@ from app.analysis.setups import BreakoutRetest, EMAPullback
 from app.analysis.signals import MarketContext, validate_geometry, wait_signal
 from app.analysis.structure import detect_structure, find_levels
 from app.exchanges.base import Kline
-from app.execution.service import signal_reference_price
 from app.trading.enums import MarketStructure, SignalDirection
 
 D = Decimal
@@ -377,15 +375,15 @@ class TestStopBelowBrokenLevel:
         не бывает. Подтверждающая свеча высоко над уровнем."""
         signal = BreakoutRetest().detect(build_context(retest_chart_with_high_confirmation(212.5)))
         assert signal.direction is SignalDirection.LONG, signal.note
-        record = SimpleNamespace(entry_low=signal.entry_zone_low, entry_high=signal.entry_zone_high)
-        assert signal_reference_price(record) > signal.stop_loss  # type: ignore[arg-type]
+        assert signal.entry_zone_low is not None and signal.entry_zone_high is not None
+        assert (signal.entry_zone_low + signal.entry_zone_high) / 2 > signal.stop_loss  # type: ignore[operator]
 
     def test_short_reference_price_is_below_stop(self) -> None:
         chart = mirrored(retest_chart_with_high_confirmation(212.5))
         signal = BreakoutRetest().detect(build_context(chart))
         assert signal.direction is SignalDirection.SHORT, signal.note
-        record = SimpleNamespace(entry_low=signal.entry_zone_low, entry_high=signal.entry_zone_high)
-        assert signal_reference_price(record) < signal.stop_loss  # type: ignore[arg-type]
+        assert signal.entry_zone_low is not None and signal.entry_zone_high is not None
+        assert (signal.entry_zone_low + signal.entry_zone_high) / 2 < signal.stop_loss  # type: ignore[operator]
 
     def test_existing_fixture_geometry_unchanged(self) -> None:
         """Когда минимум свечи и так ниже уровня, стоп прежний."""

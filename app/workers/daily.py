@@ -22,8 +22,8 @@ PlanValidator при сохранении сделки, взять его нео
 для пользователей без подключённых ключей — то же самое ограничение уже
 есть в PlanValidator.check().
 
-Сводка исполнения на биржу не ходит: она считает уже накопленные строки
-execution_orders и reconciliation_events (см. app/workers/execution_digest.py), поэтому
+Сводка исполнения на биржу не ходит: она считает уже накопленные события
+reconciliation_events (см. app/workers/execution_digest.py), поэтому
 доступна даже пользователям без подключённых ключей.
 """
 
@@ -38,7 +38,6 @@ from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.security import SecretCipher
 from app.database.models.user import User, UserSettings
-from app.database.repositories.execution_order import ExecutionOrderRepository
 from app.database.repositories.reconciliation_event import ReconciliationEventRepository
 from app.database.repositories.trade import TradeRepository
 from app.database.repositories.user import UserRepository
@@ -270,27 +269,13 @@ class DailyJobs:
             return
 
         window_start = now - timedelta(hours=24)
-        rows = await ExecutionOrderRepository(session).list_entries_between(
-            user.id, window_start, now
-        )
-        unprotected = await ExecutionOrderRepository(session).list_unprotected_between(
-            user.id, window_start, now
-        )
         reconciler_events = await ReconciliationEventRepository(session).list_between(
             user.id, window_start, now
         )
-        plan = user.trading_plan
-        target_risk_percent = plan.risk_per_trade_percent if plan else None
-        stats = build_stats(
-            rows,
-            target_risk_percent=target_risk_percent,
-            unprotected=unprotected,
-            reconciler_events=reconciler_events,
-        )
+        stats = build_stats(reconciler_events)
 
         text = render_execution_digest(
             stats,
-            max_price_drift_ratio=self._settings.exec_max_price_drift_ratio,
             reconciler=self._reconciler.pulse.window(now) if self._reconciler else None,
             tz_offset_hours=tz_offset_for(settings_row.timezone),
         )

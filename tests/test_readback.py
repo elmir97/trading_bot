@@ -38,7 +38,6 @@ from app.exchanges.base import (
 from app.exchanges.bingx import BingXClient
 from app.execution.models import OrderRequest
 from app.execution.readback import ConditionalOutcome, find_our_conditional, verify_entry
-from app.execution.service import build_entry_order_pending
 from app.services.user_service import UserService
 from app.trading.enums import (
     OrderRole,
@@ -237,7 +236,28 @@ def _order(
 async def _entry(  # type: ignore[no-untyped-def]
     session, order: OrderRequest, status: OrderStatus = OrderStatus.SUBMITTED
 ) -> ExecutionOrder:
-    row = build_entry_order_pending(order)
+    # PENDING-строка входа, как её писал путь «Да» до удаления входа по
+    # сигналу (02.10) — read-back её читает.
+    row = ExecutionOrder(
+        user_id=order.user_id,
+        signal_id=order.signal_id,
+        notification_id=order.notification_id,
+        client_order_id=order.entry_client_order_id,
+        symbol=order.symbol,
+        side=order.side,
+        position_side=order.position_side,
+        order_type=OrderType.MARKET,
+        role=OrderRole.ENTRY,
+        quantity=order.quantity,
+        price=order.entry_price,
+        notional=order.notional,
+        margin=order.margin,
+        leverage=order.leverage,
+        risk_amount=order.risk_amount,
+        risk_percent=order.risk_percent,
+        risk_reward=order.risk_reward,
+        risk_reward_net=order.risk_reward_net,
+    )
     row.status = status
     row.raw_response = {"orderId": LINK_ENTRY}
     row.created_at = LIVE_ENTRY_PLACED

@@ -17,6 +17,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from app.analysis.ai.pricing import is_known, pricing_for
 from app.trading.enums import ExchangeKeyMode
 
+# 02.10.2026: путь входа по сигналу удалён (ExecutionService, handlers/
+# execution.py). Расчёт ниже описывает его и пока остаётся источником TTL
+# лока (confirm_lock_ttl_seconds, его видит reconciler); путь действий с
+# позициями (этап 4) пересчитает его под себя.
+#
 # Раздел 8 ТЗ / раздел 16 ТЗ (шаг 15.5.1): число HTTP-вызовов на пути
 # подтверждения («Да»), каждый max_retries=1 (не путать с картой карточки —
 # там обычный ретрай клиента, см. ExecutionService.evaluate()). Список:
@@ -154,17 +159,6 @@ class Settings(BaseSettings):
             "дополнительно, но не включить при False здесь."
         ),
     )
-    exec_max_open_positions: int = 4
-    exec_max_total_risk_percent: Decimal = Decimal("5")
-    # Доля расстояния до стопа, в пределах которой дрейф цены на подтверждении
-    # ещё не требует пересчёта карточки (раздел 5, 9 ТЗ).
-    exec_max_price_drift_ratio: Decimal = Decimal("0.3")
-    # Пакет B: доля расстояния от опорной цены сигнала (середина entry-зоны)
-    # до его же стопа — насколько цена может уйти в сторону тейка с момента
-    # сигнала, прежде чем гвард SIGNAL_STALE откажет. В отличие от
-    # exec_max_price_drift_ratio, который сравнивает с ценой карточки, этот
-    # сравнивает с ценой сигнала и работает уже на первом показе.
-    exec_max_signal_staleness_ratio: Decimal = Decimal("1.0")
     exec_confirm_ttl_seconds: int = 60
     # Запас поверх расчётного худшего случая пути подтверждения — см.
     # Settings.confirm_lock_ttl_seconds ниже. Покрывает локальную часть
@@ -193,27 +187,10 @@ class Settings(BaseSettings):
     # ключа, и промах кэша здесь дешевле (один лишний GET, не поход за
     # apiRestrictions с более тяжёлыми последствиями отказа).
     exec_position_mode_ttl_seconds: int = 300
-    # 28.09: режим маржи символа (ISOLATED/CROSSED) — тот же механизм, что
-    # режим позиций: приватный TTLCache в памяти, сбой не кэшируется,
-    # читается только на карточке, на «Да» — из ExecutionQuote.
-    exec_margin_type_ttl_seconds: int = 300
-    exec_min_rr: Decimal = Decimal("1.5")
     # Taker-комиссия BingX на ногу — вход маркетом и выход условником (оба
     # исполняются как taker). Биржевую ставку не читаем: живьём на демо
     # 0.05% (27.09, SOL/LINK вход и выход). Боевую сверить в префлайте 15.7.
-    # Входит в RR гварда INVALID_LEVELS и в объём (sizing), не в детекторы.
     exec_taker_fee_rate: Decimal = Decimal("0.0005")
-    # Плечо входа — от стопа (28.09): min(plan.max_leverage,
-    # floor(1 / (стоп × EXEC_LIQ_BUFFER + EXEC_MAINT_MARGIN_RATE))). Буфер —
-    # во сколько раз ликвидация дальше стопа; поддерживающая маржа —
-    # калибровка по живой LINK: 10x изолированная, ликвидация 13.08 при входе
-    # 14.4 (9.17% = 1/10 − 0.83%). Режим маржи — изолированный.
-    exec_liq_buffer: Decimal = Decimal("1.5")
-    exec_maint_margin_rate: Decimal = Decimal("0.008")
-    exec_symbol_whitelist: str = Field(
-        default="BTC-USDT,ETH-USDT",
-        description="Через запятую. Пустая строка = ограничения нет.",
-    )
     # Час по местному времени пользователя для сводки исполнения (раздел 12а).
     exec_daily_digest_hour: int = 21
     # Раздел 16 ТЗ, шаг 15.5.1: дефолт True — только DRY_RUN. False — реальная
@@ -295,24 +272,6 @@ class Settings(BaseSettings):
         if not Decimal(0) <= value < Decimal("0.01"):
             raise ValueError(
                 f"EXEC_TAKER_FEE_RATE должен быть в [0; 0.01) — доля, не проценты: {value}"
-            )
-        return value
-
-    @field_validator("exec_liq_buffer")
-    @classmethod
-    def _sane_liq_buffer(cls, value: Decimal) -> Decimal:
-        """Буфер < 1 значит «ликвидация ближе стопа» — ровно то, от чего
-        формула защищает."""
-        if value < Decimal(1):
-            raise ValueError(f"EXEC_LIQ_BUFFER должен быть ≥ 1: {value}")
-        return value
-
-    @field_validator("exec_maint_margin_rate")
-    @classmethod
-    def _sane_maint_margin(cls, value: Decimal) -> Decimal:
-        if not Decimal(0) <= value < Decimal("0.1"):
-            raise ValueError(
-                f"EXEC_MAINT_MARGIN_RATE должен быть в [0; 0.1) — доля, не проценты: {value}"
             )
         return value
 
@@ -425,17 +384,6 @@ class Settings(BaseSettings):
         ТЗ) — guards.check_mode_allowed (этап 15.4в) сверяет с ним то, что
         выбрано в настройках пользователя, и отказывает при расхождении."""
         return ExchangeKeyMode.LIVE if self.bingx_trading_mode == "live" else ExchangeKeyMode.DEMO
-
-    @property
-    def exec_symbol_whitelist_symbols(self) -> tuple[str, ...]:
-        """Разобранный список инструментов, разрешённых к исполнению.
-
-        Пустой кортеж = ограничения нет (см. guards.check_symbol_allowed).
-        """
-        raw = self.exec_symbol_whitelist.strip()
-        if not raw:
-            return ()
-        return tuple(part.strip().upper() for part in raw.split(",") if part.strip())
 
     @property
     def secret_values(self) -> tuple[str, ...]:

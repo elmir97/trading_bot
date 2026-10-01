@@ -111,9 +111,6 @@ DEFAULT_NOTIFICATIONS: dict[str, bool] = {
     "take_profit_hit": True,
     "stop_loss_hit": True,
     "daily_limit_reached": True,
-    "setup_ready": True,        # этап 12: сетап полностью готов ко входу
-    "setup_forming": True,      # этап 12: не хватает только подтверждения
-    "setup_charts": True,       # график свечей к уведомлению о сетапе
     "tp_sl_approaching": True,  # этап 12: цена рядом с TP или SL
     "daily_report": True,
     "unannotated_trades": True,

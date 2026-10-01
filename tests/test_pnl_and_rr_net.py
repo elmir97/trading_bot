@@ -1,30 +1,22 @@
-"""28.09, блоки C и A (часть в БД): сверка PnL с биржей и RR с комиссией
-в сводке. Чистая логика, без БД — числа живого SOL #4 (27.09)."""
+"""28.09, блок C: сверка PnL с биржей и её аномалия в сводке. Чистая
+логика, без БД — числа живого SOL #4 (27.09). Средний RR входов из сводки
+ушёл вместе с входом по сигналу (02.10.2026)."""
 
 from __future__ import annotations
 
 from dataclasses import replace
 from decimal import Decimal
 
-from app.database.models.execution_order import ExecutionOrder
 from app.database.models.reconciliation_event import ReconciliationEvent
 from app.exchanges.base import Position
 from app.exchanges.bingx import _parse_history_order
 from app.execution.reconciler import PNL_TOLERANCE_R, decide_trade, pnl_mismatch
 from app.trading.enums import (
     ANOMALY_KINDS,
-    OrderRole,
-    OrderSide,
-    OrderStatus,
-    OrderType,
     ReconciliationKind,
     TradeSide,
 )
-from app.workers.execution_digest import (
-    build_stats,
-    detect_anomalies,
-    render_execution_digest,
-)
+from app.workers.execution_digest import build_stats, detect_anomalies
 from tests.bingx_fixtures import live_items
 from tests.test_reconciler_logic import SOL_STOP_CHILD, _sol_trade
 
@@ -105,40 +97,11 @@ class TestExitCarriesProfit:
         ]
 
 
-def _entry(**overrides: object) -> ExecutionOrder:
-    fields: dict[str, object] = {
-        "user_id": 1, "symbol": "SOL-USDT", "side": OrderSide.BUY,
-        "position_side": TradeSide.LONG, "order_type": OrderType.MARKET,
-        "role": OrderRole.ENTRY, "status": OrderStatus.DRY_RUN, "risk_percent": D("2"),
-    }
-    fields.update(overrides)
-    return ExecutionOrder(**fields)  # type: ignore[arg-type]
-
-
 class TestDigest:
-    def test_average_rr_shows_both_numbers(self) -> None:
-        rows = [
-            _entry(risk_reward=D("2.42"), risk_reward_net=D("2.12")),
-            _entry(risk_reward=D("2.14"), risk_reward_net=D("2.09")),
-        ]
-        text = render_execution_digest(
-            build_stats(rows, target_risk_percent=None), max_price_drift_ratio=D("0.3")
-        )
-        assert "Средний RR: 2.28 · с комиссией 2.105" in text
-
-    def test_old_rows_without_net_keep_old_line(self) -> None:
-        text = render_execution_digest(
-            build_stats([_entry(risk_reward=D("2.5"))], target_risk_percent=None),
-            max_price_drift_ratio=D("0.3"),
-        )
-        assert "Средний RR: 2.5\n" in text + "\n"
-        assert "с комиссией" not in text
-
     def test_pnl_mismatch_is_listed_as_anomaly(self) -> None:
         event = ReconciliationEvent(
             user_id=1, symbol="SOL-USDT", kind=ReconciliationKind.PNL_MISMATCH,
             dedup_key="pnl:4", detail="d",
         )
-        stats = build_stats([], target_risk_percent=None, reconciler_events=[event])
-        anomalies = detect_anomalies(stats, max_price_drift_ratio=D("0.3"))
+        anomalies = detect_anomalies(build_stats([event]))
         assert "сверка с биржей: расхождений 1 (PnL не сходится с биржей — 1)" in anomalies

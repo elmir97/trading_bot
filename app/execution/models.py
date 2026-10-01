@@ -20,7 +20,12 @@ class ExecutionRefusalCode(StrEnum):
     в него не входят — это отказы, которые ExecutionService.evaluate()
     строит сам, до/помимо run_guards(). LEVERAGE_FAILED — ещё дальше:
     не evaluate(), а ExecutionService.adjust_leverage() на фазе отправки
-    (раздел 16 ТЗ, шаг 15.5.2), после того как карточка уже подтверждена."""
+    (раздел 16 ТЗ, шаг 15.5.2), после того как карточка уже подтверждена.
+
+    02.10.2026: вход по сигналу удалён, ExecutionService и run_guards() —
+    вместе с ним. Коды остаются: ими подписаны строки execution_orders прошлых
+    попыток, а OrderRequest нужен read-back (app/execution/readback.py).
+    Этап 4 (действия с позициями) переберёт их под себя."""
 
     EXECUTION_DISABLED = "EXECUTION_DISABLED"
     # Раздел 16 ТЗ, шаг 15.5.1: LIVE запрещён конфигом (EXEC_ALLOW_LIVE_

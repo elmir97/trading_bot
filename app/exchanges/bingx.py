@@ -622,7 +622,7 @@ class BingXClient(ExchangeClient):
             # взялся", а "биржа его не назвала совсем", что здесь не так —
             # code присутствовал, просто не int. Смешивать эти два случая
             # значило бы ронять REJECTED-классификацию на пути отправки
-            # ордера (см. ExecutionService.submit_entry_order()).
+            # ордера (так его разбирал путь входа, удалённый 02.10.2026).
             code_int = int(code) if str(code).lstrip("-").isdigit() else None
             if code_int in _FATAL_CODES:
                 raise ExchangeAuthError(
