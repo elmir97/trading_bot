@@ -50,9 +50,20 @@ I001 10, E501 55 — прирост только RUF001–003 (кириллиц�
   на `trading_bot_test` видит `modify_default` для `exchange_credentials.mode` — модель и БД
   расходятся в серверном дефолте. Не от этой работы (было и до `0bf103d4a84d`), на поведение
   не влияет; разобрать отдельно, иначе следующая автогенерация миграции его подхватит
-- **Деплой — только с «да» владельца**, по процедуре «с миграцией»; репетиция:
-  `--from ea93de72860d --checksum --expect-columns execution_callbacks.action
-  --allow-count-change execution_callbacks`
+- **Репетиция на копии прода, 01.10 13:28 UTC (`e6a30ad`, лог `rehearsal_20261001_132801` удалён)
+  — exit 0, ИТОГ: OK.** `--from ea93de72860d --checksum --expect-columns execution_callbacks.action
+  --allow-count-change execution_callbacks`; free -m available 976–988 МБ, свежая сборка. 11
+  шагов ✅: база 10 МБ → tmpfs 256; копия 172.19.0.2; baseline 15 таблиц, 325 объектов схемы,
+  md5 по 15; upgrade/downgrade ×2 по одной строке Running; строки 15 таблиц = baseline на всех
+  шагах (`execution_callbacks` — «—» / 0 ⚠ допущено); md5 всех 15 таблиц после обоих downgrade =
+  baseline; схема после downgrade = baseline, после второго upgrade = первому. Diff baseline →
+  up1 — 8 колонок, CHECK `action`, FK CASCADE, PK, 2 индекса — совпадает с офлайн-SQL. Строки
+  прода на момент: execution_orders 54, signal_notifications 237, trades 7, trade_fills 12.
+  После: `tb_*`, тега, дампов нет; `trading_bot` running, restarts 0, ревизия `ea93de72860d`
+- **На проде открыты две демо-сделки бота** (01.10): AVAX #6 (11:21 UTC) и BNB #7 (12:21 UTC),
+  `fill_confirmed`, 4 строки SUBMITTED — их SL/TP. Деплой с остановкой бота на время миграции —
+  как при открытой LINK #3 (SL/TP на бирже, reconciler догонит после старта)
+- **Деплой — только с «да» владельца**, по процедуре «с миграцией»
 
 ## 01.10 — репетиция миграции скриптом: DONE
 
