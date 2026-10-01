@@ -48,6 +48,7 @@ def context_from_candles(
     higher_timeframe: str | None = None,
     higher_structure: MarketStructure | None = None,
     higher_ema200: Decimal | None = None,
+    d1_ema200: Decimal | None = None,
 ) -> MarketContext:
     """Индикаторы, структура и уровни по готовым свечам — ядро build_context.
 
@@ -80,6 +81,7 @@ def context_from_candles(
         higher_timeframe=higher_timeframe,
         higher_structure=higher_structure,
         higher_ema200=higher_ema200,
+        d1_ema200=d1_ema200,
     )
 
 

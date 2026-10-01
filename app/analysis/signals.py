@@ -50,6 +50,10 @@ class MarketContext:
     higher_timeframe: str | None = None
     higher_structure: MarketStructure | None = None
     higher_ema200: Decimal | None = None
+    # EMA200 по закрытым дневным свечам — тренд для FalseBreakout
+    # (app/analysis/false_breakout.py). Не higher_ema200: у H1 старший
+    # таймфрейм H4. Сканер не заполняет — детектор в нём не подключён.
+    d1_ema200: Decimal | None = None
 
     @property
     def above_ema200(self) -> bool | None:
@@ -114,6 +118,10 @@ class Signal:
     breakout_at: datetime | None = None
     # EMAPullback: |цена − EMA50| / ATR — глубина касания.
     ema50_distance_atr: Decimal | None = None
+    # FalseBreakout: open_time свечи прокола и её объём к среднему за 20.
+    # В БД пока не пишутся — решим при подключении к сканеру.
+    probe_at: datetime | None = None
+    probe_volume_ratio: Decimal | None = None
 
     confidence: int = 0            # 0..10
     confirmation: str = ""
