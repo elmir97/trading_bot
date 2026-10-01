@@ -65,6 +65,7 @@ from scripts.signal_outcomes import (
     TAKE,
     Features,
     KlineFetcher,
+    Outcome,
     RateLimitStopError,
     Result,
     Row,
@@ -72,6 +73,13 @@ from scripts.signal_outcomes import (
     forward_window,
     score,
     simulate,
+)
+from scripts.trend_research import (
+    MAX_HOLD_DAYS,
+    TrendTrade,
+    d1_series,
+    filter_a,
+    trend_trades,
 )
 
 TF_MINUTES = {"1h": 60, "4h": 240, "1d": 1440}
@@ -269,6 +277,139 @@ async def fetch_funding(
             break
         cursor = earliest - timedelta(milliseconds=1)
     return sorted((e for e in collected.values() if e.time <= end), key=lambda e: e.time)
+
+
+# --- funding Binance — приближение, где у BingX истории нет ----------------------
+#
+# Финальный тест 01.10 (окно 2022-10 → 2024-10): у SOL, BNB, XRP, ADA, AVAX
+# история funding BingX начинается внутри окна (раньше — data: null).
+# Публичная история Binance (/fapi/v1/fundingRate) есть с 2022-09 — ей
+# закрывается только часть до первого начисления BingX; в отчёте помечено.
+
+BINANCE_FUNDING_URL = "https://fapi.binance.com/fapi/v1/fundingRate"
+BINANCE_LIMIT = 1000
+
+
+@dataclass(frozen=True, slots=True)
+class BinanceFunding:
+    time: datetime
+    rate: Decimal
+    mark_price: Decimal | None   # пусто в части старых записей
+
+
+def parse_binance_funding(data: Any) -> list[BinanceFunding]:
+    """Живая форма 01.10: список {symbol, fundingTime, fundingRate, markPrice,
+    rateType}. fundingTime и fundingRate обязательны; markPrice "" — None."""
+    if not isinstance(data, list):
+        raise ValueError(f"Binance fundingRate: ожидался список, пришёл {data!r:.200}")
+    out: list[BinanceFunding] = []
+    for item in data:
+        try:
+            mark = item.get("markPrice")
+            out.append(BinanceFunding(
+                _from_ms(int(item["fundingTime"])),
+                Decimal(str(item["fundingRate"])),
+                Decimal(str(mark)) if mark not in (None, "") else None,
+            ))
+        except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
+            raise ValueError(f"Binance fundingRate: битая запись {item!r}") from exc
+    return out
+
+
+def binance_symbol(symbol: str) -> str:
+    return symbol.replace("-", "")
+
+
+class BinanceFundingFetcher:
+    def __init__(self, client: Any, pause: float = 0.5) -> None:
+        self._client = client
+        self._pause = pause
+        self.requests = 0
+
+    async def get(self, symbol: str, start: datetime) -> list[BinanceFunding]:
+        response = await self._client.get(BINANCE_FUNDING_URL, params={
+            "symbol": binance_symbol(symbol), "startTime": _ms(start), "limit": BINANCE_LIMIT,
+        })
+        self.requests += 1
+        if response.status_code in (418, 429):
+            raise RateLimitStopError(f"Binance {response.status_code} на fundingRate")
+        response.raise_for_status()
+        await asyncio.sleep(self._pause)
+        return parse_binance_funding(response.json())
+
+
+async def fetch_binance_funding(
+    fetcher: Any, symbol: str, start: datetime, end: datetime
+) -> list[BinanceFunding]:
+    """Вперёд по startTime страницами, пока не дойдём до end."""
+    out: dict[datetime, BinanceFunding] = {}
+    cursor = start
+    while True:
+        batch = await fetcher.get(symbol, cursor)
+        fresh = [e for e in batch if e.time not in out]
+        for e in batch:
+            out[e.time] = e
+        if not fresh or len(batch) < BINANCE_LIMIT:
+            break
+        latest = max(e.time for e in batch)
+        if latest >= end:
+            break
+        cursor = latest + timedelta(milliseconds=1)
+    return sorted((e for e in out.values() if e.time <= end), key=lambda e: e.time)
+
+
+def save_binance(path: Path, events: Sequence[BinanceFunding]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(path, "wt", encoding="utf-8") as fh:
+        for e in events:
+            fh.write(json.dumps({
+                "t": _ms(e.time), "r": str(e.rate),
+                "m": None if e.mark_price is None else str(e.mark_price),
+            }) + "\n")
+
+
+def load_binance(path: Path) -> list[BinanceFunding]:
+    with gzip.open(path, "rt", encoding="utf-8") as fh:
+        return [
+            BinanceFunding(
+                _from_ms(d["t"]), Decimal(d["r"]),
+                None if d["m"] is None else Decimal(d["m"]),
+            )
+            for d in (json.loads(line) for line in fh)
+        ]
+
+
+def resolve_marks(
+    events: Sequence[BinanceFunding], h4: Sequence[Kline]
+) -> tuple[list[FundingEvent], int]:
+    """Пустой markPrice — закрытие H4-свечи, в которую попало начисление
+    (решение владельца 01.10); число таких — второй элемент. Нет свечи —
+    ошибка, не догадка."""
+    opens = [c.open_time for c in h4]
+    out: list[FundingEvent] = []
+    substituted = 0
+    for e in events:
+        mark = e.mark_price
+        if mark is None:
+            i = bisect_right(opens, e.time) - 1
+            if i < 0 or not (h4[i].open_time <= e.time < h4[i].close_time):
+                raise ValueError(f"нет свечи H4 для начисления {e.time:%d.%m.%Y %H:%M}")
+            mark = h4[i].close
+            substituted += 1
+        out.append(FundingEvent(e.time, e.rate, mark))
+    return out, substituted
+
+
+def stitch_funding(
+    bingx: Sequence[FundingEvent], binance: Sequence[FundingEvent]
+) -> tuple[list[FundingEvent], datetime | None]:
+    """BingX везде, где он есть; Binance — строго до первого начисления BingX.
+    Второй элемент — до какого момента взят Binance (None — не брали)."""
+    if not bingx:
+        return list(binance), (binance[-1].time if binance else None)
+    first = bingx[0].time
+    before = [e for e in binance if e.time < first]
+    return [*before, *bingx], (first if before else None)
 
 
 # --- replay: слоты сканера ----------------------------------------------------
@@ -817,6 +958,38 @@ def bootstrap_ci(
     return Decimal(f"{lo:.4f}"), Decimal(f"{hi:.4f}")
 
 
+def week_key(moment: datetime) -> tuple[int, int]:
+    iso = moment.isocalendar()
+    return iso.year, iso.week
+
+
+def block_bootstrap_ci(
+    pairs: Sequence[tuple[object, Decimal]], *, level: float = CI_LEVEL,
+    resamples: int = BOOTSTRAP_RESAMPLES, seed: int = BOOTSTRAP_SEED,
+) -> tuple[Decimal, Decimal] | None:
+    """Перцентильный блочный бутстрэп среднего: блок — все значения с одним
+    ключом (календарная неделя входа); выборка блоков с возвращением, среднее
+    по сделкам. Меньше 2 блоков — None."""
+    blocks: dict[object, list[float]] = {}
+    for key, value in pairs:
+        blocks.setdefault(key, []).append(float(value))
+    groups = list(blocks.values())
+    if len(groups) < 2:
+        return None
+    rng = random.Random(seed)
+    means = []
+    for _ in range(resamples):
+        total = count = 0.0
+        for g in rng.choices(groups, k=len(groups)):
+            total += sum(g)
+            count += len(g)
+        means.append(total / count)
+    means.sort()
+    lo = means[int(resamples * (1 - level) / 2)]
+    hi = means[int(resamples * (1 + level) / 2) - 1]
+    return Decimal(f"{lo:.4f}"), Decimal(f"{hi:.4f}")
+
+
 @dataclass(slots=True)
 class HalfStats:
     n: int
@@ -829,6 +1002,9 @@ class HalfStats:
     ci: tuple[Decimal, Decimal] | None
     short: tuple[int, int, Decimal | None]   # n, тейков, R нетто+funding
     long: tuple[int, int, Decimal | None]
+    # Блочный по календарным неделям входа (финальный тест 01.10): сделки
+    # одной недели по разным символам коррелированы — один блок.
+    ci_week: tuple[Decimal, Decimal] | None = None
 
 
 def _side(items: Sequence[Scored], direction: SignalDirection) -> tuple[int, int, Decimal | None]:
@@ -852,6 +1028,10 @@ def half_stats(items: Sequence[Scored], days: float) -> HalfStats:
         ci=bootstrap_ci(nf),
         short=_side(items, SignalDirection.SHORT),
         long=_side(items, SignalDirection.LONG),
+        ci_week=block_bootstrap_ci([
+            (week_key(s.result.row.notified_at), s.r_net_funding)
+            for s in closed if s.r_net_funding is not None
+        ]),
     )
 
 
@@ -1159,11 +1339,14 @@ async def run(
     timeframes: Sequence[str] = REPLAY_TIMEFRAMES,
     end: datetime | None = None,
     fbo_configs: Sequence[str] | None = None,
+    start_at: datetime | None = None,
 ) -> int:
     """end — конец окна (по умолчанию сейчас): свечи и исходы — только
     закрытые к нему; так прогоны разных стратегий сравнимы на одних данных."""
     now = end or datetime.now(UTC)
-    start = now - timedelta(days=round(months * 365 / 12))
+    start = start_at or now - timedelta(days=round(months * 365 / 12))
+    if strategy == "final":
+        return await run_final(start, now, symbols, cache, json_path)
     if strategy == "fbo":
         return await run_fbo(start, now, symbols, cache, json_path, timeframes, fbo_configs)
     client = _public_client()
@@ -1386,6 +1569,224 @@ async def run_fbo(
     return 0
 
 
+# --- финальный тест: A, B и справка (--strategy final) ------------------------------
+#
+# Зафиксирован владельцем 01.10 до прогона, результат обязательный: не прошло —
+# исследование закрыто. Окно 2022-10-13 → 2024-10-01 (полный прогрев H4).
+
+FINAL_A = "A: старая + ADX(14) D1 ≥ 25 и тренд EMA200 D1"
+FINAL_B = "B: тренд D1 — пробой 20 дней, трейлинг 3×ATR"
+FINAL_REF = "справка: старая без фильтра"
+FINAL_MIN_CLOSED = {FINAL_A: 30, FINAL_B: 15}
+
+
+def final_ok(h: HalfStats, min_closed: int) -> bool:
+    """Критерий финала — по недельному блочному ДИ90 (обычный — справка)."""
+    return (
+        h.closed >= min_closed and h.r_nf is not None and h.r_nf > 0
+        and h.ci_week is not None and h.ci_week[0] > CI_FLOOR
+    )
+
+
+def trend_scored(
+    trade: TrendTrade, nid: int, funding: Sequence[FundingEvent], d1: Sequence[Kline],
+    rate: Decimal = FEE_RATE,
+) -> Scored:
+    """Сделка B в общем виде исхода: «тейк» — закрыта в плюсе (брутто),
+    «стоп» — в минусе, «открыт» — не закрыта к концу окна. Тейка у B нет:
+    take_profit строки — заглушка, RR не считается."""
+    row = Row(
+        id=nid, symbol=trade.symbol, timeframe="1d", setup="Тренд D1",
+        direction=trade.direction, entry_low=trade.entry, entry_high=trade.entry,
+        stop_loss=trade.initial_stop, take_profit=trade.entry, notified_at=trade.entry_at,
+    )
+    gross = trade.r_gross
+    net = trade.r_net(rate)
+    kind = OPEN if gross is None else (TAKE if gross > 0 else STOP)
+    result = Result(row, Outcome(kind, trade.days_held, trade.days_held or 0, True), gross, net)
+    regime = d1_regime(d1, trade.entry_at, trade.entry)
+    if trade.exit_at is None or net is None:
+        return Scored(result, None, None, regime)
+    fr = funding_r(row, trade.entry_at, trade.exit_at, funding)
+    return Scored(result, fr, None if fr is None else net + fr, regime, trade.exit_at)
+
+
+def b_details(pairs: Sequence[tuple[Scored, TrendTrade]]) -> str:
+    closed = [(s, t) for s, t in pairs if t.exit_price is not None]
+    if not pairs:
+        return "сделок нет"
+    held = [t.days_held for _, t in closed if t.days_held is not None]
+    reasons: dict[str, int] = {}
+    for _, t in pairs:
+        reasons[t.exit_reason] = reasons.get(t.exit_reason, 0) + 1
+    rs = [s.r_net_funding for s, _ in closed if s.r_net_funding is not None]
+    avg_held = f"{sum(held) / len(held):.1f}" if held else "—"
+    return (
+        f"удержание в среднем {avg_held} дн.; выходы: "
+        + ", ".join(f"{k} {v}" for k, v in sorted(reasons.items()))
+        + (f"; лучший {_fmt(max(rs))}, худший {_fmt(min(rs))} R нетто+f" if rs else "")
+    )
+
+
+def render_final(
+    stats: dict[str, tuple[HalfStats, HalfStats]],
+    bounds: tuple[datetime, datetime, datetime],
+    b_halves: tuple[list[tuple[Scored, TrendTrade]], list[tuple[Scored, TrendTrade]]],
+) -> str:
+    start, middle, end = bounds
+    out: list[str] = []
+    for half, title in ((0, f"первая половина {start:%d.%m.%Y}–{middle:%d.%m.%Y}"),
+                        (1, f"вторая половина {middle:%d.%m.%Y}–{end:%d.%m.%Y}")):
+        out += [
+            f"\n## {title}\n",
+            "| конфигурация | n | закрытых | в сутки | % тейков (B — в плюсе) | R брутто "
+            "| R нетто | R нетто+funding | ДИ90 недельный (критерий) | ДИ90 обычный "
+            "| SHORT n·тейк·R | LONG n·тейк·R |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|",
+        ]
+        for name, h in stats.items():
+            s = h[half]
+            out.append(
+                f"| {name} | {s.n} | {s.closed} | {s.per_day} | {_pct(s.win_pct)} "
+                f"| {_fmt(s.r_gross)} | {_fmt(s.r_net)} | {_fmt(s.r_nf)} | {_ci(s.ci_week)} "
+                f"| {_ci(s.ci)} | {_side_fmt(s.short)} | {_side_fmt(s.long)} |"
+            )
+        out.append(f"\nB, {title}: {b_details(b_halves[half])}")
+    out += [
+        f"\n## Принятие: обе половины — R нетто+funding > 0, нижняя граница недельного "
+        f"ДИ90 > {CI_FLOOR}, закрытых ≥ A {FINAL_MIN_CLOSED[FINAL_A]} / "
+        f"B {FINAL_MIN_CLOSED[FINAL_B]} (у B выборка слабая)\n",
+        "| конфигурация | 1-я: закрытых · R · ДИ90 нед. "
+        "| 2-я: закрытых · R · ДИ90 нед. | принята |",
+        "|---|---|---|---|",
+    ]
+    for name, (a, b) in stats.items():
+        if name == FINAL_REF:
+            verdict = "— (справка)"
+        else:
+            need = FINAL_MIN_CLOSED[name]
+            verdict = "да" if final_ok(a, need) and final_ok(b, need) else "нет"
+        out.append(
+            f"| {name} | {a.closed} · {_fmt(a.r_nf)} · {_ci(a.ci_week)} "
+            f"| {b.closed} · {_fmt(b.r_nf)} · {_ci(b.ci_week)} | {verdict} |"
+        )
+    return "\n".join(out)
+
+
+async def run_final(
+    start: datetime, now: datetime, symbols: Sequence[str], cache: Path,
+    json_path: Path | None,
+) -> int:
+    import httpx
+
+    client = _public_client()
+    fetcher = KlineFetcher(client)
+    ffetcher = FundingFetcher(client)
+    http = httpx.AsyncClient(timeout=30)
+    bfetcher = BinanceFundingFetcher(http)
+    results: dict[str, list[Scored]] = {FINAL_A: [], FINAL_B: [], FINAL_REF: []}
+    b_pairs: list[tuple[Scored, TrendTrade]] = []
+    excluded: list[str] = []
+    notes: list[str] = []
+    next_id = 1
+    try:
+        for symbol in symbols:
+            h4 = await cached_klines(
+                fetcher, cache, symbol, "4h", start - step("4h") * (CANDLES_REQUIRED + 5), now
+            )
+            gap = history_gap(symbol, {"4h": h4}, start)
+            if gap is not None:
+                excluded.append(gap)
+                continue
+            d1 = await cached_klines(
+                fetcher, cache, symbol, "1d", start - timedelta(days=D1_EMA_PERIOD + 30), now
+            )
+            if len([d for d in d1 if d.close_time <= start]) < D1_EMA_PERIOD:
+                excluded.append(f"{symbol} (дневных до окна < {D1_EMA_PERIOD})")
+                continue
+            bingx = await cached_funding(ffetcher, cache, symbol, start, now)
+            funding: list[FundingEvent] = bingx
+            note = "BingX"
+            if funding_gap(symbol, bingx, start) is not None:
+                path = cache / f"{symbol}_binance_funding.jsonl.gz"
+                if path.exists():
+                    raw = load_binance(path)
+                else:
+                    raw = await fetch_binance_funding(
+                        bfetcher, symbol, start - timedelta(days=2), now
+                    )
+                    save_binance(path, raw)
+                events, substituted = resolve_marks(raw, h4)
+                funding, until = stitch_funding(bingx, events)
+                note = (f"Binance до {until:%d.%m.%Y}" if until else "Binance") + (
+                    f", markPrice по закрытию H4: {substituted}"
+                )
+            gap = funding_gap(symbol, funding, start)
+            if gap is not None:
+                excluded.append(gap)
+                continue
+            notes.append(f"{symbol}: funding {note}")
+            series = d1_series(d1)
+            rows = replay_multi(
+                symbol, "4h", h4, start, now, {OLD_STRATEGY: engine_evaluate}, first_id=next_id
+            )[OLD_STRATEGY]
+            next_id += len(rows)
+            ref = [score_row(r, h4, funding, d1, now=now) for r in rows]
+            results[FINAL_REF] += ref
+            results[FINAL_A] += [
+                s for s in ref
+                if filter_a(s.result.row.direction, s.result.row.entry, series,
+                            s.result.row.notified_at)
+            ]
+            for trade in trend_trades(symbol, series, start, now):
+                scored = trend_scored(trade, next_id, funding, d1)
+                next_id += 1
+                results[FINAL_B].append(scored)
+                b_pairs.append((scored, trade))
+            print(f"{symbol}: готово", file=sys.stderr)
+    except RateLimitStopError as exc:
+        print(f"СТОП по лимиту: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        await client.close()
+        await http.aclose()
+
+    middle = start + (now - start) / 2
+    days = ((middle - start).total_seconds() / 86400, (now - middle).total_seconds() / 86400)
+    print(f"Финальный тест {start:%d.%m.%Y %H:%M}–{now:%d.%m.%Y %H:%M} UTC; A и справка — H4, "
+          f"горизонт {HORIZON}; B — D1, до трейлинга, максимум {MAX_HOLD_DAYS} дней; taker "
+          f"{FEE_RATE}; бутстрэп {BOOTSTRAP_RESAMPLES}, сид {BOOTSTRAP_SEED}; запросов klines "
+          f"{fetcher.requests}, funding BingX {ffetcher.requests}, Binance {bfetcher.requests}")
+    if excluded:
+        print("Исключены: " + ", ".join(excluded))
+    print("Funding: " + "; ".join(notes))
+    stats: dict[str, tuple[HalfStats, HalfStats]] = {}
+    regimes: dict[str, tuple[dict[str, HalfStats], dict[str, HalfStats]]] = {}
+    for name, items in results.items():
+        h1, h2 = split_halves(items, start, now)
+        stats[name] = (half_stats(h1, days[0]), half_stats(h2, days[1]))
+        regimes[name] = (regime_stats(h1, days[0]), regime_stats(h2, days[1]))
+    b_halves = (
+        [(s, t) for s, t in b_pairs if s.result.row.notified_at < middle],
+        [(s, t) for s, t in b_pairs if s.result.row.notified_at >= middle],
+    )
+    print(render_final(stats, (start, middle, now), b_halves))
+    print(render_regimes("финал", regimes) + "\n(ДИ90 в таблице режимов — обычный бутстрэп)")
+    if json_path is not None:
+        json_path.write_text(json.dumps([
+            {
+                "config": name,
+                **{k: v for k, v in asdict(s.result.row).items() if k != "features"},
+                "outcome": s.result.outcome.kind, "bar": s.result.outcome.bar,
+                "r_gross": s.result.r_gross, "r_net": s.result.r_net,
+                "r_funding": s.r_funding, "r_net_funding": s.r_net_funding, "regime": s.regime,
+                "exit_at": s.exit_at,
+            }
+            for name, items in results.items() for s in items
+        ], ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+    return 0
+
+
 def parse_end(value: str) -> datetime:
     """ISO 8601 с зоной (2026-10-01T16:13Z); без зоны — ошибка, не догадка."""
     moment = datetime.fromisoformat(value)
@@ -1404,7 +1805,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     rn.add_argument("--months", type=int, default=12)
     rn.add_argument("--symbols", default=",".join(DEFAULT_SYMBOLS))
     rn.add_argument("--json", dest="json_path", type=Path)
-    rn.add_argument("--strategy", choices=("breakout", "fbo"), default="breakout")
+    rn.add_argument("--strategy", choices=("breakout", "fbo", "final"), default="breakout")
+    rn.add_argument("--start", type=parse_end, help="начало окна, ISO с зоной; иначе end − months")
     rn.add_argument(
         "--timeframes", help="через запятую; по умолчанию 1h,4h (breakout) или 4h,1h (fbo)"
     )
@@ -1418,13 +1820,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     cov.add_argument("--symbols", default=",".join(DEFAULT_SYMBOLS))
     cov.add_argument("--timeframes", default="4h")
     cov.add_argument("--end", type=parse_end, required=True)
+    cov.add_argument("--start", type=parse_end)
     args = parser.parse_args(argv)
     if args.command == "calibrate":
         return asyncio.run(calibrate(args.live, args.cache))
     if args.command == "coverage":
         end = args.end
         return asyncio.run(coverage(
-            end - timedelta(days=round(args.months * 365 / 12)), end,
+            args.start or end - timedelta(days=round(args.months * 365 / 12)), end,
             [s for s in args.symbols.split(",") if s], args.cache,
             [t for t in args.timeframes.split(",") if t],
         ))
@@ -1441,7 +1844,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     return asyncio.run(run(
         args.months, [s for s in args.symbols.split(",") if s], args.cache, args.json_path,
         strategy=args.strategy, timeframes=timeframes, end=args.end,
-        fbo_configs=args.fbo_configs,
+        fbo_configs=args.fbo_configs, start_at=args.start,
     ))
 
 

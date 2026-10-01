@@ -726,3 +726,150 @@ async def test_funding_null_on_older_page_is_end_of_history(monkeypatch) -> None
     events = await rh.fetch_funding(fetcher, "GRAMTON-USDT", T0, T0 + 100 * H)
     assert len(events) == 4
     assert rh.funding_gap("GRAMTON-USDT", events, T0) is not None
+
+
+# --- финальный тест: недельный бутстрэп, funding Binance, склейка, B ----------------------
+
+
+class TestBlockBootstrap:
+    def test_week_key_iso(self) -> None:
+        assert rh.week_key(datetime(2023, 1, 2, tzinfo=UTC)) == (2023, 1)
+        assert rh.week_key(datetime(2023, 1, 1, tzinfo=UTC)) == (2022, 52)
+
+    def test_deterministic_contains_mean_and_wider_than_iid(self) -> None:
+        """Сделки одной недели синхронны (одинаковые) — блочный ДИ шире обычного."""
+        pairs = []
+        for w in range(20):
+            value = D("1.5") if w % 2 else D(-1)
+            pairs += [((2023, w), value)] * 6
+        a = rh.block_bootstrap_ci(pairs)
+        assert a is not None and a == rh.block_bootstrap_ci(pairs)
+        mean = sum((v for _, v in pairs), D(0)) / len(pairs)
+        assert a[0] <= mean <= a[1]
+        iid = rh.bootstrap_ci([v for _, v in pairs])
+        assert iid is not None and (a[1] - a[0]) > (iid[1] - iid[0])
+
+    def test_single_block_is_none(self) -> None:
+        assert rh.block_bootstrap_ci([((2023, 1), D(1)), ((2023, 1), D(2))]) is None
+
+
+def test_half_stats_has_week_ci() -> None:
+    items = [_scored("тейк", "2", "1.9", r_nf="1.9", at=T0 + timedelta(days=7 * i))
+             for i in range(5)]
+    h = rh.half_stats(items, 30.0)
+    assert h.ci_week is not None and h.ci is not None
+
+
+def test_final_ok_uses_week_ci_and_min_closed() -> None:
+    good = _hs(15, "0.2", ("-0.5", "0.4"))
+    good.ci_week = (D("-0.05"), D("0.5"))
+    assert rh.final_ok(good, 15)
+    assert not rh.final_ok(good, 30)                    # A требует 30
+    bad = _hs(40, "0.2", ("0.1", "0.4"))
+    bad.ci_week = (D("-0.2"), D("0.6"))                 # обычный ДИ хороший, недельный — нет
+    assert not rh.final_ok(bad, 30)
+
+
+class TestBinanceFunding:
+    def test_parse_live_shape_and_empty_mark(self) -> None:
+        events = rh.parse_binance_funding([
+            {"symbol": "SOLUSDT", "fundingTime": 1664064000000, "fundingRate": "0.00010000",
+             "markPrice": "33.1", "rateType": "FUNDING"},
+            {"symbol": "SOLUSDT", "fundingTime": 1664092800000, "fundingRate": "-0.0002",
+             "markPrice": "", "rateType": "FUNDING"},
+        ])
+        assert events[0].mark_price == D("33.1") and events[1].mark_price is None
+        assert events[1].rate == D("-0.0002")
+
+    @pytest.mark.parametrize("missing", ["fundingTime", "fundingRate"])
+    def test_parse_missing_required_is_error(self, missing: str) -> None:
+        item = {"fundingTime": 1664064000000, "fundingRate": "0.0001", "markPrice": "1"}
+        del item[missing]
+        with pytest.raises(ValueError, match="битая запись"):
+            rh.parse_binance_funding([item])
+
+    def test_resolve_marks_uses_h4_close_and_counts(self) -> None:
+        h4 = [kline(i, "50", tf=4 * H) for i in range(3)]
+        events = [
+            rh.BinanceFunding(T0 + 8 * H, D("0.0001"), None),        # свеча #2 (8–12 ч)
+            rh.BinanceFunding(T0, D("0.0001"), D("49")),
+        ]
+        resolved, substituted = rh.resolve_marks(events, h4)
+        assert resolved[0].mark_price == D(50) and resolved[1].mark_price == D(49)
+        assert substituted == 1
+
+    def test_resolve_marks_without_candle_is_error(self) -> None:
+        with pytest.raises(ValueError, match="нет свечи H4"):
+            rh.resolve_marks([rh.BinanceFunding(T0 + 100 * H, D(0), None)], [kline(0)])
+
+    async def test_fetch_pages_forward_until_end(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        monkeypatch.setattr(rh, "BINANCE_LIMIT", 3)
+        all_events = [rh.BinanceFunding(T0 + 8 * H * i, D("0.0001"), D(1)) for i in range(8)]
+
+        class Fake:
+            def __init__(self) -> None:
+                self.starts: list[datetime] = []
+
+            async def get(self, symbol: str, start: datetime) -> list[rh.BinanceFunding]:
+                self.starts.append(start)
+                return [e for e in all_events if e.time >= start][:3]
+
+        fake = Fake()
+        got = await rh.fetch_binance_funding(fake, "SOL-USDT", T0, T0 + 8 * H * 6)
+        assert [e.time for e in got] == [e.time for e in all_events[:7]]
+        assert fake.starts[0] == T0
+
+    def test_binance_cache_roundtrip(self, tmp_path: Path) -> None:
+        events = [rh.BinanceFunding(T0, D("0.0001"), None), rh.BinanceFunding(T0 + H, D(0), D(2))]
+        path = tmp_path / "b.jsonl.gz"
+        rh.save_binance(path, events)
+        assert rh.load_binance(path) == events
+
+
+class TestStitch:
+    bingx = [rh.FundingEvent(T0 + 8 * H * i, D("0.0003"), D(1)) for i in range(3, 6)]
+    binance = [rh.FundingEvent(T0 + 8 * H * i, D("0.0001"), D(1)) for i in range(0, 6)]
+
+    def test_binance_only_before_first_bingx(self) -> None:
+        funding, until = rh.stitch_funding(self.bingx, self.binance)
+        assert [e.rate for e in funding] == [D("0.0001")] * 3 + [D("0.0003")] * 3
+        assert until == self.bingx[0].time
+
+    def test_bingx_covers_all_no_binance(self) -> None:
+        funding, until = rh.stitch_funding(self.binance, self.bingx)
+        assert funding == self.binance and until is None
+
+
+def test_trend_scored_long_funding_and_kind() -> None:
+    from scripts.trend_research import TrendTrade
+
+    trade = TrendTrade(
+        symbol="BTC-USDT", direction=SignalDirection.LONG, entry_at=T0, entry=D(100),
+        initial_stop=D(96), risk=D(4), exit_at=T0 + 16 * H, exit_price=D(108),
+        exit_reason="трейлинг", days_held=1,
+    )
+    events = [   # история покрывает вход; в удержание (T0; T0+16h] — одно начисление
+        rh.FundingEvent(T0 - 8 * H, D("0.5"), D(100)),
+        rh.FundingEvent(T0 + 8 * H, D("0.001"), D(100)),
+    ]
+    s = rh.trend_scored(trade, 1, events, [], rate=D(0))
+    assert s.result.outcome.kind == "тейк"
+    assert s.result.r_gross == D(2) and s.result.r_net == D(2)
+    assert s.r_funding == D("-0.025")       # 0.001 × 100 / 4, LONG платит
+    assert s.r_net_funding == D("1.975")
+
+
+def test_trend_scored_open_has_no_r() -> None:
+    from scripts.trend_research import TrendTrade
+
+    trade = TrendTrade(
+        symbol="BTC-USDT", direction=SignalDirection.SHORT, entry_at=T0, entry=D(100),
+        initial_stop=D(104), risk=D(4), exit_at=None, exit_price=None,
+        exit_reason="открыт", days_held=None,
+    )
+    s = rh.trend_scored(trade, 1, [], [])
+    assert s.result.outcome.kind == "открыт" and s.r_net_funding is None
+
+
+def test_parse_start_for_final_window() -> None:
+    assert rh.parse_end("2022-10-13T00:00Z") == datetime(2022, 10, 13, tzinfo=UTC)
