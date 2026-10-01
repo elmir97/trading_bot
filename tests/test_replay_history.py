@@ -533,3 +533,131 @@ async def test_funding_null_data_every_time_is_error() -> None:
     with pytest.raises(ValueError, match="NoneType"):
         await rh.FundingFetcher(client, pause=0, null_pause=0).get("BTC-USDT", T0)
     assert len(client.params) == rh.NULL_RETRIES + 1
+
+
+# --- ложный пробой по тренду (--strategy fbo) ---------------------------------------------
+
+
+def test_d1_ema_lookup_uses_only_closed_days() -> None:
+    days = timedelta(days=1)
+    d1 = [kline(i, "100", tf=days) for i in range(205)]
+    lookup = rh.d1_ema_lookup(d1)
+    at = d1[202].close_time
+    before = lookup(at)
+    assert before is not None
+    future = [*d1[:203], kline(203, "100000", tf=days), kline(204, "100000", tf=days)]
+    assert rh.d1_ema_lookup(future)(at) == before
+    assert lookup(d1[100].close_time) is None   # меньше 200 закрытых дней
+    assert lookup(T0) is None
+
+
+class TestFundingAllows:
+    events = [
+        rh.FundingEvent(T0, D("0.0001"), D("1")),
+        rh.FundingEvent(T0 + 8 * H, D("-0.0002"), D("1")),
+        rh.FundingEvent(T0 + 16 * H, D("0"), D("1")),
+    ]
+
+    def test_sign_by_direction(self) -> None:
+        short = row(direction=SignalDirection.SHORT, stop_loss=D(102), notified_at=T0 + H)
+        long_ = row(notified_at=T0 + 9 * H)
+        assert rh.funding_allows(short, self.events)          # ставка +0.0001
+        assert not rh.funding_allows(row(notified_at=T0 + H), self.events)
+        assert rh.funding_allows(long_, self.events)          # ставка −0.0002
+        assert not rh.funding_allows(
+            row(direction=SignalDirection.SHORT, stop_loss=D(102), notified_at=T0 + 9 * H),
+            self.events,
+        )
+
+    def test_zero_or_no_rate_rejected(self) -> None:
+        assert not rh.funding_allows(row(notified_at=T0 + 17 * H), self.events)
+        assert not rh.funding_allows(row(notified_at=T0 - H), self.events)
+
+    def test_future_rate_not_used(self) -> None:
+        """Ставка начисления после уведомления не смотрится."""
+        long_ = row(notified_at=T0 + 7 * H)  # последняя известная +0.0001
+        assert not rh.funding_allows(long_, self.events)
+
+
+class TestBootstrap:
+    def test_deterministic_and_contains_mean(self) -> None:
+        values = [D(x) for x in ("-1", "-1", "2.5", "-1", "1.8", "-1", "3", "-1.1")]
+        a = rh.bootstrap_ci(values)
+        assert a is not None and a == rh.bootstrap_ci(values)
+        mean = sum(values, D(0)) / len(values)
+        assert a[0] <= mean <= a[1]
+
+    def test_constant_and_short(self) -> None:
+        assert rh.bootstrap_ci([D("0.5")] * 10) == (D("0.5000"), D("0.5000"))
+        assert rh.bootstrap_ci([D(1)]) is None
+
+
+def _hs(closed: int, r: str | None, ci: tuple[str, str] | None) -> rh.HalfStats:
+    return rh.HalfStats(
+        n=closed, closed=closed, per_day=D(1), win_pct=None, r_gross=None, r_net=None,
+        r_nf=None if r is None else D(r), ci=None if ci is None else (D(ci[0]), D(ci[1])),
+        short=(0, 0, None), long=(0, 0, None),
+    )
+
+
+def test_half_ok_thresholds() -> None:
+    assert rh.half_ok(_hs(30, "0.2", ("-0.05", "0.4")))
+    assert not rh.half_ok(_hs(29, "0.2", ("-0.05", "0.4")))       # < 30 закрытых
+    assert not rh.half_ok(_hs(40, "0", ("-0.05", "0.1")))         # R не > 0
+    assert not rh.half_ok(_hs(40, "0.2", ("-0.1", "0.4")))        # граница ДИ не > −0.1
+    assert not rh.half_ok(_hs(40, "0.2", None))
+
+
+def test_fbo_select_both_ways_excludes_old() -> None:
+    stats = {
+        rh.OLD_STRATEGY: (_hs(100, "0.9", ("0.5", "1")), _hs(100, "0.9", ("0.5", "1"))),
+        "A": (_hs(40, "0.3", ("0", "0.6")), _hs(40, "-0.2", ("-0.5", "0.1"))),
+        "B": (_hs(20, "0.8", ("0.1", "1")), _hs(50, "0.4", ("0.1", "0.7"))),
+    }
+    name, fit, test = rh.fbo_select(stats, 0)  # type: ignore[misc]
+    assert name == "A" and test.r_nf == D("-0.2")      # B исключена: 20 закрытых
+    name, fit, test = rh.fbo_select(stats, 1)  # type: ignore[misc]
+    assert name == "B" and test.closed == 20
+
+
+def test_fbo_setup_sixteen_configs() -> None:
+    evaluators, configs = rh.fbo_setup()
+    fbo = [c for c in configs if c.name != rh.OLD_STRATEGY]
+    assert len(fbo) == 16 and len({c.name for c in configs}) == 17
+    assert len(evaluators) == 1 + 12                    # старая + 12 детекторов
+    funding = [c for c in fbo if c.funding]
+    assert len(funding) == 4
+    assert all(not c.detector.endswith(("объём", "подтв")) for c in funding)
+    assert all(c.detector in evaluators for c in configs)
+
+
+def test_replay_multi_one_context_per_candle_and_separate_slots() -> None:
+    candles = [kline(i) for i in range(70)]
+    seen: list[int] = []
+    d1_seen: list[Any] = []
+
+    def first(context: Any) -> Signal:
+        seen.append(id(context))
+        d1_seen.append(context.d1_ema200)
+        return _ready("99")
+
+    def second(context: Any) -> Signal:
+        seen.append(id(context))
+        return _ready("99") if len(seen) % 4 == 0 else wait_signal("BTC-USDT", "1h", "нет")
+
+    rows = rh.replay_multi(
+        "BTC-USDT", "1h", candles, candles[60].close_time, candles[-1].close_time,
+        {"a": first, "b": second}, ttl=timedelta(hours=100), d1_ema=lambda at: D(7),
+    )
+    assert seen[0::2] == seen[1::2]                      # один контекст на свечу
+    assert set(d1_seen) == {D(7)}
+    assert len(rows["a"]) == 1                           # слот «a» не гаснет — одно уведомление
+    assert len(rows["b"]) > 1                            # у «b» свой слот, гаснет и снова READY
+    ids = [r.id for rs in rows.values() for r in rs]
+    assert len(ids) == len(set(ids))
+
+
+def test_parse_end() -> None:
+    assert rh.parse_end("2026-10-01T16:13Z") == datetime(2026, 10, 1, 16, 13, tzinfo=UTC)
+    with pytest.raises(Exception, match="нужна зона"):
+        rh.parse_end("2026-10-01T16:13")

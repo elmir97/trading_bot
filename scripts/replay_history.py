@@ -38,7 +38,9 @@ import argparse
 import asyncio
 import gzip
 import json
+import random
 import sys
+from bisect import bisect_right
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
@@ -48,6 +50,7 @@ from typing import Any
 
 from app.analysis.classify import classify_signal
 from app.analysis.engine import CANDLES_REQUIRED, AnalysisEngine, context_from_candles
+from app.analysis.false_breakout import FalseBreakout
 from app.analysis.indicators import ema, last_value
 from app.analysis.setups import BreakoutRetest
 from app.analysis.signals import MarketContext, Signal, stop_percent
@@ -339,8 +342,29 @@ def replay_series(
 ) -> list[Row]:
     """Скан на закрытии каждой свечи из [start; end] по CANDLES_REQUIRED
     закрытым свечам. Свеча closes at close_time — это и время уведомления."""
-    state = SlotState()
-    rows: list[Row] = []
+    return replay_multi(
+        symbol, tf, candles, start, end, {"_": evaluate}, ttl=ttl, first_id=first_id
+    )["_"]
+
+
+def replay_multi(
+    symbol: str,
+    tf: str,
+    candles: Sequence[Kline],
+    start: datetime,
+    end: datetime,
+    evaluators: dict[str, Callable[[MarketContext], Signal]],
+    *,
+    ttl: timedelta = TTL,
+    d1_ema: Callable[[datetime], Decimal | None] | None = None,
+    first_id: int = 1,
+) -> dict[str, list[Row]]:
+    """Как replay_series, но контекст свечи строится один раз и прогоняется
+    через все детекторы; у каждого — свой слот сканера. d1_ema — EMA200 D1
+    на момент закрытия свечи (только закрытые дни) для FalseBreakout."""
+    states = {name: SlotState() for name in evaluators}
+    rows: dict[str, list[Row]] = {name: [] for name in evaluators}
+    next_id = first_id
     for i, candle in enumerate(candles):
         at = candle.close_time
         if at < start or at > end:
@@ -348,13 +372,32 @@ def replay_series(
         window = list(candles[max(0, i + 1 - CANDLES_REQUIRED): i + 1])
         if len(window) < 50:
             continue
-        context = context_from_candles(symbol, tf, window)
-        signal = evaluate(context)
-        level = classify_signal(signal)
-        fingerprint = build_fingerprint(signal, level) if level is SignalLevel.READY else None
-        if slot_step(state, level, fingerprint, at, ttl):
-            rows.append(row_from_signal(first_id + len(rows), signal, context, symbol, tf, at))
+        context = context_from_candles(
+            symbol, tf, window, d1_ema200=d1_ema(at) if d1_ema is not None else None
+        )
+        for name, evaluate in evaluators.items():
+            signal = evaluate(context)
+            level = classify_signal(signal)
+            fingerprint = (
+                build_fingerprint(signal, level) if level is SignalLevel.READY else None
+            )
+            if slot_step(states[name], level, fingerprint, at, ttl):
+                rows[name].append(row_from_signal(next_id, signal, context, symbol, tf, at))
+                next_id += 1
     return rows
+
+
+def d1_ema_lookup(d1: Sequence[Kline]) -> Callable[[datetime], Decimal | None]:
+    """EMA200 по дневным закрытиям: на момент `at` — значение последнего дня,
+    закрытого к `at`. EMA дня зависит только от дней до него — будущего нет."""
+    times = [c.close_time for c in d1]
+    values = ema([c.close for c in d1], D1_EMA_PERIOD)
+
+    def at(moment: datetime) -> Decimal | None:
+        i = bisect_right(times, moment) - 1
+        return values[i] if i >= 0 else None
+
+    return at
 
 
 # --- исход, funding, режим ------------------------------------------------------
@@ -693,6 +736,210 @@ def render_lines(title: str, lines: Sequence[Line]) -> str:
     return "\n".join(out)
 
 
+# --- ложный пробой по тренду (--strategy fbo) ------------------------------------
+#
+# Список конфигураций зафиксирован владельцем до прогона (01.10) и после
+# него не расширяется: 4 базы d × N, поверх каждой по одному фильтру.
+
+FBO_BASES = ((Decimal("0.1"), 1), (Decimal("0.1"), 3), (Decimal("0.3"), 1), (Decimal("0.3"), 3))
+FBO_VOLUME = Decimal("1.3")
+OLD_STRATEGY = "старая: пробой + откат (сканер)"
+MIN_CLOSED_FBO = 30
+CI_LEVEL = 0.9
+CI_FLOOR = Decimal("-0.1")
+BOOTSTRAP_RESAMPLES = 2000
+BOOTSTRAP_SEED = 20261001
+
+
+@dataclass(frozen=True, slots=True)
+class FboConfig:
+    name: str
+    detector: str     # ключ evaluators в replay_multi
+    funding: bool     # фильтр funding поверх строк детектора
+
+
+def fbo_setup() -> tuple[dict[str, Callable[[MarketContext], Signal]], list[FboConfig]]:
+    """Детекторы для replay_multi и 16 конфигураций (+ старая стратегия для
+    сравнения). Конфигурация с funding — те же строки базы, отфильтрованные:
+    отдельный детектор ей не нужен."""
+    evaluators: dict[str, Callable[[MarketContext], Signal]] = {OLD_STRATEGY: engine_evaluate}
+    configs = [FboConfig(OLD_STRATEGY, OLD_STRATEGY, False)]
+    for d, n in FBO_BASES:
+        base = f"d={d} N={n}"
+        evaluators[base] = FalseBreakout(probe_atr=d, return_bars=n).detect
+        evaluators[f"{base} объём"] = FalseBreakout(
+            probe_atr=d, return_bars=n, min_probe_volume_ratio=FBO_VOLUME
+        ).detect
+        evaluators[f"{base} подтв"] = FalseBreakout(
+            probe_atr=d, return_bars=n, confirm_next=True
+        ).detect
+        configs += [
+            FboConfig(f"{base} · база", base, False),
+            FboConfig(f"{base} · объём ≥{FBO_VOLUME}", f"{base} объём", False),
+            FboConfig(f"{base} · подтверждение", f"{base} подтв", False),
+            FboConfig(f"{base} · funding", base, True),
+        ]
+    return evaluators, configs
+
+
+def funding_allows(row: Row, events: Sequence[FundingEvent]) -> bool:
+    """SHORT — только при последней ставке > 0, LONG — только < 0. Ставка —
+    последнее начисление не позже уведомления; нет такого или ноль — нет."""
+    times = [e.time for e in events]
+    i = bisect_right(times, row.notified_at) - 1
+    if i < 0:
+        return False
+    rate = events[i].rate
+    return rate > 0 if row.direction is SignalDirection.SHORT else rate < 0
+
+
+def bootstrap_ci(
+    values: Sequence[Decimal], *, level: float = CI_LEVEL,
+    resamples: int = BOOTSTRAP_RESAMPLES, seed: int = BOOTSTRAP_SEED,
+) -> tuple[Decimal, Decimal] | None:
+    """Перцентильный бутстрэп-интервал среднего; сид фиксирован —
+    повторный прогон даёт те же границы. Меньше 2 значений — None."""
+    if len(values) < 2:
+        return None
+    xs = [float(v) for v in values]
+    n = len(xs)
+    rng = random.Random(seed)
+    means = sorted(sum(rng.choices(xs, k=n)) / n for _ in range(resamples))
+    lo = means[int(resamples * (1 - level) / 2)]
+    hi = means[int(resamples * (1 + level) / 2) - 1]
+    return Decimal(f"{lo:.4f}"), Decimal(f"{hi:.4f}")
+
+
+@dataclass(slots=True)
+class HalfStats:
+    n: int
+    closed: int
+    per_day: Decimal
+    win_pct: Decimal | None
+    r_gross: Decimal | None
+    r_net: Decimal | None
+    r_nf: Decimal | None
+    ci: tuple[Decimal, Decimal] | None
+    short: tuple[int, int, Decimal | None]   # n, тейков, R нетто+funding
+    long: tuple[int, int, Decimal | None]
+
+
+def _side(items: Sequence[Scored], direction: SignalDirection) -> tuple[int, int, Decimal | None]:
+    sel = [s for s in items if s.result.row.direction is direction]
+    takes = sum(1 for s in sel if s.result.outcome.kind == TAKE)
+    return len(sel), takes, _avg([s.r_net_funding for s in sel if s.r_net_funding is not None])
+
+
+def half_stats(items: Sequence[Scored], days: float) -> HalfStats:
+    closed = [s for s in items if s.result.r_net is not None]
+    nf = [s.r_net_funding for s in closed if s.r_net_funding is not None]
+    takes = sum(1 for s in closed if s.result.outcome.kind == TAKE)
+    return HalfStats(
+        n=len(items),
+        closed=len(closed),
+        per_day=Decimal(f"{len(items) / days:.2f}") if days else Decimal(0),
+        win_pct=Decimal(takes * 100) / Decimal(len(closed)) if closed else None,
+        r_gross=_avg([s.result.r_gross for s in closed if s.result.r_gross is not None]),
+        r_net=_avg([s.result.r_net for s in closed if s.result.r_net is not None]),
+        r_nf=_avg(nf),
+        ci=bootstrap_ci(nf),
+        short=_side(items, SignalDirection.SHORT),
+        long=_side(items, SignalDirection.LONG),
+    )
+
+
+def half_ok(h: HalfStats) -> bool:
+    """Половина «держится»: ≥ 30 закрытых, R нетто+funding > 0, нижняя
+    граница 90% интервала > −0.1R."""
+    return (
+        h.closed >= MIN_CLOSED_FBO and h.r_nf is not None and h.r_nf > 0
+        and h.ci is not None and h.ci[0] > CI_FLOOR
+    )
+
+
+def fbo_select(
+    stats: dict[str, tuple[HalfStats, HalfStats]], fit: int
+) -> tuple[str, HalfStats, HalfStats] | None:
+    """Лучшая по R нетто+funding на половине `fit` (0/1) среди FBO-конфигураций
+    с ≥ 30 закрытых; возвращает её и обе половины. Старая стратегия — не кандидат."""
+    cands = [
+        (name, h) for name, h in stats.items()
+        if name != OLD_STRATEGY and h[fit].closed >= MIN_CLOSED_FBO and h[fit].r_nf is not None
+    ]
+    if not cands:
+        return None
+    name, h = max(cands, key=lambda c: c[1][fit].r_nf or Decimal(-99))
+    return name, h[fit], h[1 - fit]
+
+
+def _pct(value: Decimal | None) -> str:
+    return "—" if value is None else f"{value:.0f}%"
+
+
+def _ci(ci: tuple[Decimal, Decimal] | None) -> str:
+    return "—" if ci is None else f"[{ci[0]:+.2f}; {ci[1]:+.2f}]"
+
+
+def _side_fmt(side: tuple[int, int, Decimal | None]) -> str:
+    n, takes, r = side
+    return f"{n} · {takes} · {_fmt(r)}" if n else "0"
+
+
+def render_fbo(
+    tf: str,
+    stats: dict[str, tuple[HalfStats, HalfStats]],
+    bounds: tuple[datetime, datetime, datetime],
+) -> str:
+    start, middle, end = bounds
+    out = [f"\n# {tf}: ложный пробой по тренду — 16 конфигураций и старая стратегия"]
+    for half, title in ((0, f"первая половина {start:%d.%m.%Y}–{middle:%d.%m.%Y}"),
+                        (1, f"вторая половина {middle:%d.%m.%Y}–{end:%d.%m.%Y}")):
+        out += [
+            f"\n## {tf} — {title}\n",
+            "| конфигурация | n | закрытых | в сутки | % тейков | R брутто | R нетто "
+            "| R нетто+funding | ДИ90 R нетто+f | SHORT n·тейк·R | LONG n·тейк·R |",
+            "|---|---|---|---|---|---|---|---|---|---|---|",
+        ]
+        for name, h in stats.items():
+            s = h[half]
+            out.append(
+                f"| {name} | {s.n} | {s.closed} | {s.per_day} | {_pct(s.win_pct)} "
+                f"| {_fmt(s.r_gross)} | {_fmt(s.r_net)} | {_fmt(s.r_nf)} | {_ci(s.ci)} "
+                f"| {_side_fmt(s.short)} | {_side_fmt(s.long)} |"
+            )
+    out.append(
+        f"\n## {tf} — отбор в обе стороны (по R нетто+funding, ≥{MIN_CLOSED_FBO} закрытых)\n"
+    )
+    directions = ((0, "подбор на 1-й → проверка на 2-й"), (1, "подбор на 2-й → проверка на 1-й"))
+    for fit, label in directions:
+        sel = fbo_select(stats, fit)
+        if sel is None:
+            out.append(f"- {label}: нет конфигураций с ≥{MIN_CLOSED_FBO} закрытых")
+            continue
+        name, fit_h, test_h = sel
+        out.append(
+            f"- {label}: **{name}** — подбор {_fmt(fit_h.r_nf)} {_ci(fit_h.ci)} "
+            f"(n {fit_h.closed}); "
+            f"проверка {_fmt(test_h.r_nf)} {_ci(test_h.ci)} (n {test_h.closed}) — "
+            f"{'держится' if half_ok(test_h) else 'не держится'}"
+        )
+    out += [
+        f"\n## {tf} — принятие: обе половины ≥{MIN_CLOSED_FBO} закрытых, R нетто+funding > 0, "
+        f"нижняя граница ДИ90 > {CI_FLOOR}\n",
+        "| конфигурация | 1-я: закрытых · R · ДИ90 | 2-я: закрытых · R · ДИ90 | принята |",
+        "|---|---|---|---|",
+    ]
+    for name, (a, b) in stats.items():
+        verdict = "да" if half_ok(a) and half_ok(b) else "нет"
+        if name == OLD_STRATEGY:
+            verdict += " (для сравнения)"
+        out.append(
+            f"| {name} | {a.closed} · {_fmt(a.r_nf)} · {_ci(a.ci)} "
+            f"| {b.closed} · {_fmt(b.r_nf)} · {_ci(b.ci)} | {verdict} |"
+        )
+    return "\n".join(out)
+
+
 # --- калибровка ---------------------------------------------------------------
 
 
@@ -837,9 +1084,22 @@ def history_gap(symbol: str, data: dict[str, list[Kline]], start: datetime) -> s
     return None
 
 
-async def run(months: int, symbols: Sequence[str], cache: Path, json_path: Path | None) -> int:
-    now = datetime.now(UTC)
+async def run(
+    months: int,
+    symbols: Sequence[str],
+    cache: Path,
+    json_path: Path | None,
+    *,
+    strategy: str = "breakout",
+    timeframes: Sequence[str] = REPLAY_TIMEFRAMES,
+    end: datetime | None = None,
+) -> int:
+    """end — конец окна (по умолчанию сейчас): свечи и исходы — только
+    закрытые к нему; так прогоны разных стратегий сравнимы на одних данных."""
+    now = end or datetime.now(UTC)
     start = now - timedelta(days=round(months * 365 / 12))
+    if strategy == "fbo":
+        return await run_fbo(start, now, symbols, cache, json_path, timeframes)
     client = _public_client()
     fetcher = KlineFetcher(client)
     ffetcher = FundingFetcher(client)
@@ -850,7 +1110,7 @@ async def run(months: int, symbols: Sequence[str], cache: Path, json_path: Path 
         for symbol in symbols:
             data: dict[str, list[Kline]] = {}
             gap: str | None = None
-            for tf in REPLAY_TIMEFRAMES:
+            for tf in timeframes:
                 warm = start - step(tf) * (CANDLES_REQUIRED + 5)
                 data[tf] = await cached_klines(fetcher, cache, symbol, tf, warm, now)
                 gap = history_gap(symbol, data, start)
@@ -864,7 +1124,7 @@ async def run(months: int, symbols: Sequence[str], cache: Path, json_path: Path 
             )
             funding = await cached_funding(ffetcher, cache, symbol, start, now)
             funding_from[symbol] = funding[0].time if funding else None
-            for tf in REPLAY_TIMEFRAMES:
+            for tf in timeframes:
                 rows = replay_series(symbol, tf, data[tf], start, now, first_id=len(scored) + 1)
                 scored += [score_row(r, data[tf], funding, d1, now=now) for r in rows]
             print(f"{symbol}: готово, всего READY {len(scored)}", file=sys.stderr)
@@ -882,7 +1142,7 @@ async def run(months: int, symbols: Sequence[str], cache: Path, json_path: Path 
     print("Funding с: " + ", ".join(
         f"{s} {t:%d.%m.%Y}" if t else f"{s} нет" for s, t in funding_from.items()
     ))
-    for tf in REPLAY_TIMEFRAMES:
+    for tf in timeframes:
         items = [s for s in scored if s.result.row.timeframe == tf]
         halves = split_halves(items, start, now)
         middle = start + (now - start) / 2
@@ -917,6 +1177,105 @@ async def run(months: int, symbols: Sequence[str], cache: Path, json_path: Path 
     return 0
 
 
+async def load_symbol(
+    fetcher: KlineFetcher, ffetcher: FundingFetcher, cache: Path, symbol: str,
+    timeframes: Sequence[str], start: datetime, now: datetime,
+) -> tuple[dict[str, list[Kline]], list[Kline], list[FundingEvent]] | str:
+    """Свечи ТФ, дневные и funding символа; строка — причина исключения."""
+    data: dict[str, list[Kline]] = {}
+    for tf in timeframes:
+        warm = start - step(tf) * (CANDLES_REQUIRED + 5)
+        data[tf] = await cached_klines(fetcher, cache, symbol, tf, warm, now)
+        gap = history_gap(symbol, data, start)
+        if gap is not None:
+            return gap
+    d1 = await cached_klines(
+        fetcher, cache, symbol, "1d", start - timedelta(days=D1_EMA_PERIOD + 30), now
+    )
+    funding = await cached_funding(ffetcher, cache, symbol, start, now)
+    return data, d1, funding
+
+
+async def run_fbo(
+    start: datetime, now: datetime, symbols: Sequence[str], cache: Path,
+    json_path: Path | None, timeframes: Sequence[str],
+) -> int:
+    client = _public_client()
+    fetcher = KlineFetcher(client)
+    ffetcher = FundingFetcher(client)
+    evaluators, configs = fbo_setup()
+    results: dict[str, dict[str, list[Scored]]] = {
+        tf: {c.name: [] for c in configs} for tf in timeframes
+    }
+    excluded: list[str] = []
+    next_id = 1
+    try:
+        for symbol in symbols:
+            loaded = await load_symbol(fetcher, ffetcher, cache, symbol, timeframes, start, now)
+            if isinstance(loaded, str):
+                excluded.append(loaded)
+                continue
+            data, d1, funding = loaded
+            lookup = d1_ema_lookup(d1)
+            for tf in timeframes:
+                rows = replay_multi(
+                    symbol, tf, data[tf], start, now, evaluators, d1_ema=lookup,
+                    first_id=next_id,
+                )
+                next_id += sum(len(v) for v in rows.values())
+                scored = {
+                    key: [score_row(r, data[tf], funding, d1, now=now) for r in rs]
+                    for key, rs in rows.items()
+                }
+                for c in configs:
+                    items = scored[c.detector]
+                    if c.funding:
+                        items = [s for s in items if funding_allows(s.result.row, funding)]
+                    results[tf][c.name] += items
+            print(f"{symbol}: готово", file=sys.stderr)
+    except RateLimitStopError as exc:
+        print(f"СТОП по лимиту BingX: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        await client.close()
+
+    middle = start + (now - start) / 2
+    days = ((middle - start).total_seconds() / 86400, (now - middle).total_seconds() / 86400)
+    print(f"Replay FBO {start:%d.%m.%Y %H:%M}–{now:%d.%m.%Y %H:%M} UTC, горизонт {HORIZON}, "
+          f"taker {FEE_RATE}, TTL слота {TTL}; запросов klines {fetcher.requests}, "
+          f"funding {ffetcher.requests}; бутстрэп {BOOTSTRAP_RESAMPLES}, сид {BOOTSTRAP_SEED}")
+    if excluded:
+        print("Исключены (нет полной истории): " + ", ".join(excluded))
+    print(f"Конфигураций FBO: {len(configs) - 1}; множественное сравнение — "
+          f"{len(configs) - 1} × {len(timeframes)} ТФ, критерий строгий намеренно")
+    for tf in timeframes:
+        stats: dict[str, tuple[HalfStats, HalfStats]] = {}
+        for c in configs:
+            h1, h2 = split_halves(results[tf][c.name], start, now)
+            stats[c.name] = (half_stats(h1, days[0]), half_stats(h2, days[1]))
+        print(render_fbo(tf, stats, (start, middle, now)))
+    if json_path is not None:
+        json_path.write_text(json.dumps([
+            {
+                "config": name,
+                **{k: v for k, v in asdict(s.result.row).items() if k != "features"},
+                "outcome": s.result.outcome.kind, "bar": s.result.outcome.bar,
+                "r_gross": s.result.r_gross, "r_net": s.result.r_net,
+                "r_funding": s.r_funding, "r_net_funding": s.r_net_funding, "regime": s.regime,
+            }
+            for tf in timeframes for name, items in results[tf].items() for s in items
+        ], ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+    return 0
+
+
+def parse_end(value: str) -> datetime:
+    """ISO 8601 с зоной (2026-10-01T16:13Z); без зоны — ошибка, не догадка."""
+    moment = datetime.fromisoformat(value)
+    if moment.tzinfo is None:
+        raise argparse.ArgumentTypeError(f"--end {value}: нужна зона (Z или +00:00)")
+    return moment.astimezone(UTC)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--cache", type=Path, default=CACHE_DIR)
@@ -927,11 +1286,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     rn.add_argument("--months", type=int, default=12)
     rn.add_argument("--symbols", default=",".join(DEFAULT_SYMBOLS))
     rn.add_argument("--json", dest="json_path", type=Path)
+    rn.add_argument("--strategy", choices=("breakout", "fbo"), default="breakout")
+    rn.add_argument(
+        "--timeframes", help="через запятую; по умолчанию 1h,4h (breakout) или 4h,1h (fbo)"
+    )
+    rn.add_argument("--end", type=parse_end, help="конец окна, ISO с зоной; по умолчанию сейчас")
     args = parser.parse_args(argv)
     if args.command == "calibrate":
         return asyncio.run(calibrate(args.live, args.cache))
+    default_tfs = "4h,1h" if args.strategy == "fbo" else "1h,4h"
+    timeframes = [t for t in (args.timeframes or default_tfs).split(",") if t]
+    unknown = [t for t in timeframes if t not in REPLAY_TIMEFRAMES]
+    if unknown:
+        parser.error(f"--timeframes: неизвестные {unknown}, доступны {REPLAY_TIMEFRAMES}")
     return asyncio.run(run(
-        args.months, [s for s in args.symbols.split(",") if s], args.cache, args.json_path
+        args.months, [s for s in args.symbols.split(",") if s], args.cache, args.json_path,
+        strategy=args.strategy, timeframes=timeframes, end=args.end,
     ))
 
 
