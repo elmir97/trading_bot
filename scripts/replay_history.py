@@ -1297,7 +1297,7 @@ async def coverage(
                 "ок" if d1_ok else f"{symbol} (дневных до окна < {D1_EMA_PERIOD})"
             )
             print(f"| {symbol} | " + " | ".join(cells)
-                  + f" | {d1[0].open_time:%d.%m.%Y} | "
+                  + " | " + (f"{d1[0].open_time:%d.%m.%Y}" if d1 else "нет") + " | "
                   + (f"{funding[0].time:%d.%m.%Y}" if funding else "нет") + f" | {verdict} |")
     except RateLimitStopError as exc:
         print(f"СТОП по лимиту BingX: {exc}", file=sys.stderr)
