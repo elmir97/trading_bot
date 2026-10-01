@@ -13,6 +13,7 @@ from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject, User
 
 from app.core.logging import get_logger
+from app.core.security import mask_telegram_id
 
 logger = get_logger(__name__)
 
@@ -33,7 +34,7 @@ class AccessMiddleware(BaseMiddleware):
         user: User | None = data.get("event_from_user")
         if user is None or user.id not in self._allowed_ids:
             if user is not None:
-                logger.warning("Отклонён доступ", extra={"telegram_id": user.id})
+                logger.warning("Отклонён доступ", extra={"tg": mask_telegram_id(user.id)})
             await self._reject(event)
             return None
 

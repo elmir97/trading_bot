@@ -16,6 +16,7 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.types import CallbackQuery, Message, TelegramObject
 
 from app.core.logging import get_logger
+from app.core.security import mask_telegram_id
 
 logger = get_logger(__name__)
 
@@ -43,7 +44,7 @@ class ErrorMiddleware(BaseMiddleware):
             raise
         except Exception:
             user_id = getattr(data.get("event_from_user"), "id", None)
-            logger.exception("Необработанная ошибка", extra={"telegram_id": user_id})
+            logger.exception("Необработанная ошибка", extra={"tg": mask_telegram_id(user_id)})
             await self._notify(event)
             return None
 
