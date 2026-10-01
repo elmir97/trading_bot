@@ -5,6 +5,7 @@ SELECT в транзакции READ ONLY, с биржи — публичные �
 ключи не нужны. Запуск на проде, после деплоя миграции ea93de72860d:
 
     docker compose exec -T bot python -m scripts.signal_outcomes [--json out.json]
+        [--include-backfill]
 
 Что считается:
 
@@ -23,6 +24,10 @@ SELECT в транзакции READ ONLY, с биржи — публичные �
   снимка, точно.
 - Срез «один сигнал на пробой»: пробой с ретестом, ключ (символ, ТФ,
   направление, breakout_at), первое уведомление.
+- Строки до миграции b0943282b974 (notified_at < BACKFILL_CUTOFF, 23.09) —
+  бэкфилл по строке на слот: эталон неполный, уровни не от notified_at. По
+  умолчанию исключены (число — в шапке), --include-backfill включает их
+  отдельным срезом «Эталон». Отчёты 28.09/29.09 строились с ними.
 
 Лимиты BingX: пауза между запросами; остаток лимита по klines ≤ 2 — стоп
 без отчёта (CLAUDE.md, «Замер лимитов — тоже нагрузка»).
@@ -50,6 +55,14 @@ HORIZON = 50
 TF_MINUTES = {"1h": 60, "4h": 240}
 REQUEST_PAUSE_SECONDS = 0.3
 RATE_LIMIT_STOP_REMAIN = 2
+# Миграция b0943282b974 (23.09) создала signal_notifications с бэкфиллом —
+# по строке на слот signals из его состояния на момент миграции. Слот один
+# на (символ, ТФ, уровень) и перезаписывается: до миграции эталон неполный
+# (остальные READY потеряны), а уровни строки — от последнего скана слота,
+# не от notified_at. На проде блок бэкфилла — id 74–110, notified_at ≤
+# 23.09 09:08:32 UTC; первое настоящее уведомление — id 111, 12:13:46.
+# Отсечка — между ними. Строки раньше неё по умолчанию не считаются.
+BACKFILL_CUTOFF = datetime(2026, 9, 23, 10, 0, tzinfo=UTC)
 
 TAKE, STOP, OPEN = "тейк", "стоп", "открыт"
 SNAPSHOT, REPLAY, REPLAY_MISMATCH = "снимок", "replay", "replay≠"
@@ -103,6 +116,8 @@ class Row:
     notified_at: datetime
     features: Features = field(default_factory=Features)
     features_source: str = SNAPSHOT
+    # Строка бэкфилла миграции b0943282b974 (см. BACKFILL_CUTOFF).
+    backfill: bool = False
 
     @property
     def entry(self) -> Decimal:
@@ -307,8 +322,17 @@ def slices(results: Sequence[Result]) -> dict[str, list[Summary]]:
     breakout = [r for r in results if r.row.setup == BreakoutRetest.name]
     first_per_breakout = one_per_breakout(results)
     pullback = [r for r in results if r.row.setup == EMAPullback.name]
+    marked = {r.row.backfill for r in results}
     return {
         "Всего": [summarize("все", results)],
+        **(
+            {"Эталон": group(
+                results,
+                lambda r: "бэкфилл до 23.09 (неполный)" if r.row.backfill else "после миграции",
+            )}
+            if True in marked
+            else {}
+        ),
         "ТФ": group(results, lambda r: r.row.timeframe),
         "Сетап": group(results, lambda r: r.row.setup),
         "Направление": group(results, lambda r: r.row.direction.value),
@@ -338,7 +362,11 @@ def _fmt(value: Decimal | None) -> str:
 
 
 def render(
-    results: Sequence[Result], rate: Decimal, horizon: int, skipped: Sequence[int] = ()
+    results: Sequence[Result],
+    rate: Decimal,
+    horizon: int,
+    skipped: Sequence[int] = (),
+    backfill_excluded: int = 0,
 ) -> str:
     replayed = [r for r in results if r.row.features_source != SNAPSHOT]
     matched = sum(1 for r in replayed if r.row.features_source == REPLAY)
@@ -357,6 +385,14 @@ def render(
         f"Открытые вне среднего R; из них горизонт ещё не пройден: {immature}. "
         f"Вход задет после уведомления: {touched}/{len(results)}",
     ]
+    if backfill_excluded:
+        lines.append(
+            f"Исключено строк бэкфилла до миграции b0943282b974 (notified_at < "
+            f"{BACKFILL_CUTOFF:%d.%m %H:%M} UTC): {backfill_excluded} — эталон до неё неполный; "
+            "включить: --include-backfill"
+        )
+    if any(r.row.backfill for r in results):
+        lines.append("Строки бэкфилла включены — срез «Эталон»: до 23.09 эталон неполный")
     if skipped:
         lines.append(
             f"Пропущено READY без направления/цен/известного ТФ: {len(skipped)} "
@@ -404,6 +440,19 @@ def row_from_db(values: Sequence[Any]) -> Row | None:
         notified_at=notified_at,
         features=Features(atr, vr_last, stop_pct, br_vr, br_at, ema_dist),
     )
+
+
+def split_backfill(rows: Sequence[Row]) -> tuple[list[Row], list[Row]]:
+    """(после миграции, бэкфилл до BACKFILL_CUTOFF); у бэкфилла backfill=True."""
+    after: list[Row] = []
+    before: list[Row] = []
+    for row in rows:
+        if row.notified_at < BACKFILL_CUTOFF:
+            row.backfill = True
+            before.append(row)
+        else:
+            after.append(row)
+    return after, before
 
 
 async def load_rows() -> tuple[list[Row], list[int]]:
@@ -485,6 +534,10 @@ async def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--horizon", type=int, default=HORIZON)
     parser.add_argument("--json", dest="json_path", help="сырые строки в JSON-файл")
+    parser.add_argument(
+        "--include-backfill", action="store_true",
+        help="считать и строки бэкфилла до миграции b0943282b974 (срез «Эталон»)",
+    )
     args = parser.parse_args(argv)
 
     from app.core.config import get_settings
@@ -493,6 +546,9 @@ async def main(argv: Sequence[str] | None = None) -> int:
     settings = get_settings()
     rate = settings.exec_taker_fee_rate
     rows, skipped = await load_rows()
+    rows, backfill = split_backfill(rows)
+    if args.include_backfill:
+        rows = sorted([*backfill, *rows], key=lambda r: (r.notified_at, r.id))
     client = ExchangeFactory(settings, None).public_client()  # type: ignore[arg-type]
     try:
         results = await evaluate(
@@ -504,7 +560,8 @@ async def main(argv: Sequence[str] | None = None) -> int:
     finally:
         await client.close()
 
-    print(render(results, rate, args.horizon, skipped))
+    excluded = 0 if args.include_backfill else len(backfill)
+    print(render(results, rate, args.horizon, skipped, excluded))
     if args.json_path:
         with open(args.json_path, "w", encoding="utf-8") as fh:
             json.dump(

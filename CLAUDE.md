@@ -26,7 +26,7 @@ DATABASE_URL=postgresql+asyncpg://test:test@localhost:5432/trading_bot_test
 **Прогон зелёный только при нуле skipped.** Без `DATABASE_URL` молча
 пропускается ~115 интеграционных тестов, и счёт врёт.
 
-Ориентир на 01.10.2026 (`63d7777`, replay_history): 1574 passed, 0 skipped, 0 failed.
+Ориентир на 01.10.2026 (signal_outcomes без бэкфилла): 1586 passed, 0 skipped, 0 failed.
 
 Число тестов в этом файле — ориентир на момент записи, а не факт. Перед
 тем как называть его в плане или отчёте, прогонять пакет и брать свежую
@@ -82,7 +82,7 @@ ruff check .
 **только с разрешения владельца**:
 
 ```
-docker compose exec -T bot python -m scripts.signal_outcomes [--horizon 50] [--json out.json]
+docker compose exec -T bot python -m scripts.signal_outcomes [--horizon 50] [--json out.json] [--include-backfill]
 ```
 
 - только чтение: SELECT в транзакции `READ ONLY` + публичные свечи BingX (GET klines),
@@ -94,6 +94,9 @@ docker compose exec -T bot python -m scripts.signal_outcomes [--horizon 50] [--j
   (`replay` совпал со снимком / `replay≠`); срезы по ТФ, сетапу, направлению,
   порогам признаков и «один сигнал на пробой» (`breakout_at`)
 - `--json` пишет файл внутри контейнера — забрать и удалить
+- строки до миграции `b0943282b974` (23.09, `notified_at` < 23.09 10:00 UTC) — бэкфилл по
+  строке на слот: эталон неполный, уровни не от `notified_at`. По умолчанию исключены
+  (число в шапке), `--include-backfill` — включить отдельным срезом «Эталон»
 
 `scripts/rehearse_migration.sh` — репетиция миграции на копии прода, запуск и отчёт —
 «Деплой» → «Репетиция миграции».

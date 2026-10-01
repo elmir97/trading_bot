@@ -295,3 +295,37 @@ async def test_load_rows_runs_read_only_select() -> None:
     assert all(isinstance(r, so.Row) for r in rows)
     assert all(isinstance(nid, int) for nid in skipped)
     assert so.SELECT_READY.lstrip().upper().startswith("SELECT")
+
+
+class TestBackfill:
+    """Миграция b0943282b974: до неё signal_notifications — бэкфилл по строке
+    на слот (эталон неполный). Блок на проде — notified_at ≤ 23.09 09:08:32,
+    первое настоящее уведомление — 12:13:46."""
+
+    def test_split_by_cutoff(self) -> None:
+        last_backfill = row(id=110, notified_at=datetime(2026, 9, 23, 9, 8, 32, tzinfo=UTC))
+        first_real = row(id=111, notified_at=datetime(2026, 9, 23, 12, 13, 46, tzinfo=UTC))
+        after, before = so.split_backfill([last_backfill, first_real])
+        assert after == [first_real] and before == [last_backfill]
+        assert last_backfill.backfill is True and first_real.backfill is False
+
+    def test_cutoff_between_blocks(self) -> None:
+        assert datetime(2026, 9, 23, 9, 8, 32, tzinfo=UTC) < so.BACKFILL_CUTOFF
+        assert so.BACKFILL_CUTOFF < datetime(2026, 9, 23, 12, 13, 46, tzinfo=UTC)
+
+    def test_render_states_excluded_count(self) -> None:
+        text = so.render([], D(0), 50, backfill_excluded=17)
+        assert "Исключено строк бэкфилла до миграции b0943282b974" in text
+        assert ": 17 —" in text and "--include-backfill" in text
+
+    def test_included_backfill_gets_own_slice(self) -> None:
+        old = row(id=1, notified_at=T0)
+        old.backfill = True
+        new = row(id=2, notified_at=T0)
+        results = [_result(old), _result(new)]
+        labels = [s.label for s in so.slices(results)["Эталон"]]
+        assert labels == ["бэкфилл до 23.09 (неполный)", "после миграции"]
+        assert "срез «Эталон»" in so.render(results, D(0), 50)
+
+    def test_no_backfill_no_slice(self) -> None:
+        assert "Эталон" not in so.slices([_result(row())])
