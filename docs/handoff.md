@@ -1,6 +1,7 @@
 # Trading Journal Bot — передача в новый чат
 
-Обновлено 01.10.2026: скрипт репетиции миграции в git, на сервере не прогонялся — раздел «01.10».
+Обновлено 01.10.2026: скрипт репетиции миграции — в git и проверен на сервере (одноразовый
+источник, `--fault`, копия прода) — раздел «01.10».
 Прод — `0798194` (код = `4c2e337`: строгий разбор ответов BingX), раздел «29.09, вечер». Предыдущий прод `972df0b` (INSUFFICIENT_MARGIN против свободной маржи, формат
 уведомлений о закрытии) — раздел «29.09, день». Предыдущий деплой `42cc965` (живые формы read-back,
 B4) — раздел «29.09», подраздел «Деплой 29.09 10:28 UTC». Ещё раньше `b90acfd` (ручной стоп/тейк на бирже →
@@ -15,7 +16,7 @@ B4) — раздел «29.09», подраздел «Деплой 29.09 10:28 UT
 репозитория, в `trading/`). Читать вместе с `docs/architecture.md` (отстаёт) и `CLAUDE.md`
 в корне `trading_bot`. ТЗ этапа 15 — `docs/execution-stage-15.md`.
 
-## 01.10 — `scripts/rehearse_migration.sh` (в git, на сервере не прогонялся)
+## 01.10 — `scripts/rehearse_migration.sh` (проверен на сервере, копия прода — OK)
 
 **Прод не менялся: `0798194`, миграция `ea93de72860d`. Тестов 1484 (0 skipped; +48 —
 `tests/test_rehearse_migration_script.py`), shellcheck 0.11 — 0 замечаний, ruff E501 55
@@ -74,10 +75,30 @@ B4) — раздел «29.09», подраздел «Деплой 29.09 10:28 UT
    - после: `tb_fakeprod` до удаления — на `7b4e2c9a1f35` (источник не изменён);
      `tb_fakeprod`/`tb_fakeprod_net` удалены; `tb_*`, `trading_bot:rehearsal`, дампов —
      нет; логи 092204/093313/093346/093418 удалены
-3. Прогон на копии прода с `--from ea93de72860d --rewind-to 7b4e2c9a1f35` — сверить с ручной
-   репетицией 29.09 (12 колонок, строки не менялись)
-4. После зелёного 3 — убрать из CLAUDE.md абзац «Скрипт ещё не прогонялся» и ссылку на
-   ручную процедуру
+3. **Прогон на копии прода 01.10 09:38 UTC (`b41d8a9`, лог `rehearsal_20261001_093759`) —
+   exit 0, ИТОГ: OK.** Аргументы `--from ea93de72860d --rewind-to 7b4e2c9a1f35
+   --expect-columns signals.atr,signal_notifications.atr`; перед ним free -m available
+   1022 МБ, свежая сборка. 12 шагов ✅: база 10 МБ → tmpfs 256; дамп 28K, 600, gzip -t;
+   копия 172.19.0.2 (`--internal`); ревизия копии `ea93de72860d` = --from; перемотка →
+   `7b4e2c9a1f35` (адрес ✅); baseline 15 таблиц / 313 объектов схемы; upgrade, downgrade,
+   upgrade, downgrade — по одной строке Running, адрес ✅, строки = baseline, схема после
+   downgrade = baseline, после второго upgrade = первому, обе ожидаемые колонки ✅.
+   Строки (прод (инфо) = baseline = up1 = down1 = up2 = down2): ai_reports 0,
+   alembic_version 1, exchange_credentials 1, execution_orders 45, mistake_types 13,
+   reconciliation_events 4, signal_notifications 229, signals 38, strategies 3,
+   trade_fills 10, trade_mistakes 2, trades 5, trading_plans 1, user_settings 1, users 1.
+   Diff baseline → up1 — 12 `ADD`: `atr`, `breakout_at` (timestamptz),
+   `breakout_volume_ratio`, `ema50_distance_atr`, `stop_pct`, `volume_ratio_last`
+   (numeric(28,12)), все nullable, в `signals` и `signal_notifications`.
+   **Сверка с ручной репетицией 29.09:** 12 колонок — совпало; число строк между шагами не
+   менялось — совпало (абсолютные числа выросли с 29.09: signals 37→38, notifications
+   180→229, trades 4→5, execution_orders 42→45 — прод живёт). «Новые колонки все NULL»
+   29.09 смотрели руками — скрипт значения не сверяет (только count; md5 — позже).
+   После: `tb_*`, `trading_bot:rehearsal`, дампов нет; `trading_bot` Up 40 hours,
+   restarts 0, started 2026-09-29 17:51:11 UTC — прод не тронут; лог удалён
+4. ~~После зелёного 3 — убрать из CLAUDE.md абзац «Скрипт ещё не прогонялся»~~ **Сделано
+   01.10** — скрипт теперь единственная процедура репетиции; ручная — в истории git
+   (`b74a887:CLAUDE.md`)
 
 ## 29.09, вечер — строгий разбор ответов BingX (прод, читать первым)
 
