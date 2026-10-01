@@ -24,9 +24,12 @@
 # /opt/backups/rehearsal_<ts>.log (600), итог тогда читать в логе. Лог уборка
 # не удаляет.
 #
-# Коды выхода: 0 — OK; 1 — провал миграции или проверки; 2 — отказ до
-# первого изменения копии (аргументы, предусловия, ревизия копии ≠ --from);
-# 3 — уборка неполная (перекрывает 0 и 1).
+# Коды выхода: 0 — OK; 2 — отказ по проверке входа: аргументы, предусловия
+# (команды, docker, остатки, источник, RAM, диск, образ, ревизии в образе),
+# ревизия копии ≠ --from — репетировать нечего или нельзя; 1 — любой сбой
+# выполнения (упала команда: docker, pg_dump, restore, psql, alembic) и провал
+# проверок самой репетиции (защита адреса, ревизия, строки, схема после шага);
+# 3 — уборка неполная (перекрывает 0, 1 и 2).
 
 readonly PG_IMAGE=postgres:16-alpine
 readonly BACKUP_DIR=/opt/backups
@@ -119,10 +122,15 @@ def main(base: str, frm: str, to: str) -> str | None:
     return None
 
 
-sys.exit(main(*sys.argv[1:4]))
+refusal = main(*sys.argv[1:4])
+if refusal:
+    print(refusal, file=sys.stderr)
+    sys.exit(2)
 PY
 }
 
+# ORDER BY — по столбцу information_schema.tables, не по номеру: `1 COLLATE "C"`
+# — выражение (целое с collation), Postgres его отвергает (01.10, прогон 1).
 count_sql() {
     cat <<'SQL'
 SELECT table_name || '|' || (xpath('/row/c/text()', query_to_xml(
@@ -130,7 +138,7 @@ SELECT table_name || '|' || (xpath('/row/c/text()', query_to_xml(
            false, true, '')))[1]::text
 FROM information_schema.tables
 WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
-ORDER BY 1 COLLATE "C";
+ORDER BY table_name COLLATE "C";
 SQL
 }
 
@@ -150,7 +158,7 @@ SELECT line FROM (
     FROM pg_indexes
     WHERE schemaname = 'public'
     UNION ALL
-    SELECT 'con|' || cl.relname || '|' || co.conname || '|' || co.contype
+    SELECT 'con|' || cl.relname || '|' || co.conname || '|' || co.contype::text
            || '|' || pg_get_constraintdef(co.oid)
     FROM pg_constraint co
     JOIN pg_class cl ON cl.oid = co.conrelid
@@ -181,7 +189,8 @@ usage() {
   --fault wrong-db              проверка защиты: URL alembic ведёт в чужую базу; только
                                 с --source-container не прода и без --rewind-to
 
-Коды выхода: 0 OK, 1 FAIL, 2 отказ до изменения копии, 3 уборка неполная.
+Коды выхода: 0 OK; 2 отказ по проверке входа (аргументы, предусловия, ревизия
+копии ≠ --from); 1 сбой выполнения или провал проверки репетиции; 3 уборка неполная.
 EOF
 }
 
@@ -291,12 +300,14 @@ start_log() {
     TEE_PID=$!
 }
 
+# Сбой выполнения или провал проверки репетиции — код 1.
 fail() {
     REASON=$*
     RC=1
     exit 1
 }
 
+# Отказ по проверке входа: условия не позволяют репетировать — код 2.
 refuse() {
     REASON=$*
     RC=2
@@ -405,8 +416,8 @@ step_preconditions() {
     dk version --format '{{.Server.Version}}' >/dev/null 2>&1 || refuse "docker недоступен"
 
     local containers networks dumps left
-    containers=$(dk ps -a --filter name=tb_rehearsal_ --format '{{.Names}}') || refuse "не прочитать список контейнеров"
-    networks=$(dk network ls --filter name=tb_rehearsal_ --format '{{.Name}}') || refuse "не прочитать список сетей"
+    containers=$(dk ps -a --filter name=tb_rehearsal_ --format '{{.Names}}') || fail "не прочитать список контейнеров"
+    networks=$(dk network ls --filter name=tb_rehearsal_ --format '{{.Name}}') || fail "не прочитать список сетей"
     dumps=$(compgen -G "$BACKUP_DIR/rehearsal_*.sql.gz" || true)
     left=$(printf '%s\n' "$containers" "$networks" "$dumps" | grep . | tr '\n' ' ' || true)
     [[ -z $left ]] || refuse "остатки прошлой репетиции (скрипт их не трогает): $left"
@@ -414,7 +425,7 @@ step_preconditions() {
     local running src_image
     running=$(dk inspect -f '{{.State.Running}}' "$SRC" 2>/dev/null) || refuse "нет контейнера $SRC"
     [[ $running == true ]] || refuse "$SRC не запущен"
-    src_image=$(dk inspect -f '{{.Config.Image}}' "$SRC") || refuse "не прочитать образ $SRC"
+    src_image=$(dk inspect -f '{{.Config.Image}}' "$SRC") || fail "не прочитать образ $SRC"
     [[ $src_image == "$PG_IMAGE" ]] ||
         refuse "$SRC на образе $src_image, копия — $PG_IMAGE: обновить PG_IMAGE вместе с docker-compose.yml"
 
@@ -426,18 +437,19 @@ step_preconditions() {
     IMAGE_CHECKED=1
     local image_info meta
     image_info=$(dk image inspect -f '{{slice .Id 7 19}}, собран {{.Created}}' "$IMAGE") ||
-        refuse "не прочитать образ $IMAGE"
-    if ! meta=$(dk run --rm --network none "$IMAGE" python -c "$META_PY" "$BASE" "$FROM" "$TO" 2>&1); then
-        indent "$meta"
-        refuse "ревизии не сходятся с образом (вывод выше)"
-    fi
+        fail "не прочитать образ $IMAGE"
+    local meta_rc=0
+    meta=$(dk run --rm --network none "$IMAGE" python -c "$META_PY" "$BASE" "$FROM" "$TO" 2>&1) || meta_rc=$?
     indent "$meta"
+    # meta_py: 2 — ревизии не сходятся (отказ по проверке), иное — сбой запуска.
+    if ((meta_rc == 2)); then refuse "ревизии не сходятся с образом (вывод выше)"; fi
+    ((meta_rc == 0)) || fail "проверка ревизий в образе не выполнилась, код $meta_rc (вывод выше)"
     TO=$(sed -n 's/^to=//p' <<<"$meta")
     IFS=, read -ra CHAIN <<<"$(sed -n 's/^chain=//p' <<<"$meta")"
-    ((${#CHAIN[@]})) || refuse "цепочка ревизий не прочитана"
+    ((${#CHAIN[@]})) || fail "цепочка ревизий не прочитана"
 
     local size disk
-    size=$(src_sql "SELECT pg_database_size(current_database())") || refuse "не прочитать размер базы $SRC"
+    size=$(src_sql "SELECT pg_database_size(current_database())") || fail "не прочитать размер базы $SRC"
     DB_MB=$(((size + 1048575) / 1048576))
     TMPFS_MB=$((DB_MB * 3 > TMPFS_MIN_MB ? DB_MB * 3 : TMPFS_MIN_MB))
     disk=$(df -Pm "$BACKUP_DIR" | awk 'NR == 2 { print $4 }')

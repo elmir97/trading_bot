@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 from alembic.config import Config
@@ -286,9 +287,20 @@ def test_meta_rewind_from_between() -> None:
     ],
 )
 def test_meta_refuses(base: str, frm: str, to: str, needle: str) -> None:
+    """Код 2 — отказ по проверке: скрипт отвечает refuse (exit 2), не fail."""
     res = _meta(base, frm, to)
-    assert res.returncode != 0
+    assert res.returncode == 2, res.stderr
     assert needle in res.stderr
+
+
+def test_meta_crash_is_not_refusal() -> None:
+    """Сбой самого фрагмента (здесь — нет аргументов) — не 2: скрипт ответит fail."""
+    res = subprocess.run(
+        [sys.executable, "-c", _heredoc("meta_py")],
+        cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
+        env={**os.environ, "PYTHONUTF8": "1"},
+    )
+    assert res.returncode not in (0, 2)
 
 
 # --- guard_py: сверка базы и адреса, против тестовой БД ---------------------
@@ -314,3 +326,108 @@ def test_guard_matches_and_refuses() -> None:
 
     assert guard(db, addr).returncode == 0
     assert guard("trading_bot_rehearsal", addr).returncode == 97
+
+
+# --- SQL скрипта: каждый запрос src_sql/copy_sql — через psql, как в скрипте ---
+#
+# Поддельный docker SQL не выполняет: `ORDER BY 1 COLLATE "C"` дошёл до сервера
+# (01.10, прогон 1). Здесь каждый запрос идёт тем же psql с теми же флагами и в
+# READ ONLY (как src_sql на проде) против trading_bot_test.
+
+_SQL_CALL = re.compile(r'\b(src_sql|copy_sql) "([^"]+)"')
+_SQL_VAR = re.compile(r"^\s*(\w+_SQL)=\$\((\w+)\)$")
+
+
+def _sql_calls() -> dict[str, str]:
+    """Аргумент вызова → текст SQL (переменная *_SQL раскрыта через свой heredoc)."""
+    funcs = {m.group(1): m.group(2) for _, ln in CODE if (m := _SQL_VAR.match(ln))}
+    out: dict[str, str] = {}
+    for _, ln in CODE:
+        for m in _SQL_CALL.finditer(ln):
+            arg = m.group(2)
+            if arg.startswith("$"):
+                var = arg[1:]
+                assert var in funcs, f"{var} не присвоена из функции-heredoc"
+                out[arg] = _heredoc(funcs[var])
+            else:
+                out[arg] = arg
+    return out
+
+
+SQL_CALLS = _sql_calls()
+
+
+def test_sql_call_sites_are_all_known() -> None:
+    """Новый запрос в скрипте обязан попасть сюда — и в прогон ниже."""
+    assert set(SQL_CALLS) == {
+        "$COUNT_SQL",
+        "$SCHEMA_SQL",
+        "SELECT pg_database_size(current_database())",
+        "SELECT version_num FROM alembic_version",
+    }
+
+
+def test_psql_only_in_sql_helpers_and_restore() -> None:
+    # psql как команда (с флагами); слово в тексте сообщений не в счёт.
+    psql = [ln for _, ln in CODE if re.search(r"\bpsql -X\b", ln)]
+    assert len(psql) == 3
+    assert sum('-c "$SQL"' in ln for ln in psql) == 2
+    assert sum("zcat" in ln for ln in psql) == 1
+
+
+def _psql() -> str:
+    found = shutil.which("psql")
+    if found:
+        return found
+    for cand in sorted(Path("C:/Program Files/PostgreSQL").glob("*/bin/psql.exe"), reverse=True):
+        return str(cand)
+    pytest.fail("psql не найден — SQL скрипта не проверить")
+
+
+def _run_sql(sql: str) -> list[str]:
+    url = urlsplit(os.environ["DATABASE_URL"].replace("postgresql+asyncpg://", "postgresql://", 1))
+    env = {
+        **os.environ,
+        "PGPASSWORD": url.password or "",
+        "PGOPTIONS": "-c default_transaction_read_only=on",
+        "PGCLIENTENCODING": "UTF8",
+    }
+    res = subprocess.run(
+        [
+            _psql(), "-X", "-A", "-t", "-q", "-v", "ON_ERROR_STOP=1",
+            "-h", url.hostname or "localhost", "-p", str(url.port or 5432),
+            "-U", url.username or "", "-d", url.path.lstrip("/"), "-c", sql,
+        ],
+        capture_output=True, env=env,
+    )
+    err = res.stderr.decode("utf-8", "replace")
+    assert res.returncode == 0, err
+    assert err == "", err
+    return res.stdout.decode("utf-8").splitlines()
+
+
+def _c_sorted(rows: list[str]) -> bool:
+    return rows == sorted(rows, key=lambda r: r.encode("utf-8"))
+
+
+@pytest.mark.skipif(not os.environ.get("DATABASE_URL"), reason="нужна тестовая БД (DATABASE_URL)")
+@pytest.mark.parametrize("call", sorted(SQL_CALLS))
+def test_sql_runs_read_only_with_expected_shape(call: str) -> None:
+    rows = _run_sql(SQL_CALLS[call])
+    assert rows
+    if call == "$COUNT_SQL":
+        assert all(re.fullmatch(r"[A-Za-z0-9_]+\|\d+", r) for r in rows), rows
+        assert "alembic_version|1" in rows
+        assert _c_sorted(rows)
+    elif call == "$SCHEMA_SQL":
+        assert all(re.match(r"(col|idx|con)\|[^|]+\|[^|]+\|", r) for r in rows), rows[:5]
+        assert "col|alembic_version|version_num|character varying(32)|NO|" in rows
+        assert "con|alembic_version|alembic_version_pkc|p|PRIMARY KEY (version_num)" in rows
+        assert any(r.startswith("idx|alembic_version|alembic_version_pkc|") for r in rows)
+        assert _c_sorted(rows)
+        assert len(rows) == len(set(rows))
+    elif call.startswith("SELECT pg_database_size"):
+        assert len(rows) == 1 and int(rows[0]) > 0
+    else:
+        assert len(rows) == 1
+        assert _SCRIPT_DIR.get_revision(rows[0]) is not None
