@@ -64,7 +64,18 @@ B4) — раздел «29.09», подраздел «Деплой 29.09 10:28 UT
   = `now()` при новой заливке источника. Источник после — `7b4e2c9a1f35|2|3|3`, md5
   `signals.detail` до и после один (`e187dd35…`), строк с `[fault]` 0; `tb_fakeprod`/сеть
   удалены, `tb_*`, тега, дампов, логов нет; `trading_bot` running, restarts 0
-- **На копии прода с `--checksum` — не прогонялся, только после «да» владельца**
+- **Копия прода с `--checksum`, 01.10 11:39 UTC (`540641b`, лог `rehearsal_20261001_113908`) —
+  exit 0, ИТОГ: OK.** `--from ea93de72860d --rewind-to 7b4e2c9a1f35 --checksum --expect-columns
+  signals.atr,signal_notifications.atr --expect-null` на все 12 новых колонок; free -m available
+  1012 МБ, свежая сборка. 12 шагов ✅: база 10 МБ → tmpfs 256; дамп 28K; копия 172.19.0.2;
+  перемотка → `7b4e2c9a1f35`; baseline 15 таблиц, 313 объектов, md5 по 15 таблицам; оба upgrade
+  — 12 колонок целиком NULL (на копии после перемотки — пустые, на проде с 29.09 в них есть
+  значения); оба downgrade — md5 всех 15 таблиц = baseline (signals `708b3462`,
+  signal_notifications `4b66e941`, trades `d97455fe`, execution_orders `c16d568d`, …). Строки
+  (прод = все шаги): execution_orders 48, signal_notifications 231, signals 38, trades 6,
+  trade_fills 11, mistake_types 13, reconciliation_events 4, strategies 3, trade_mistakes 2,
+  остальные 0/1. Diff baseline → up1 — те же 12 колонок. После: `tb_*`, тега, дампов нет;
+  `trading_bot` Up 42 hours, restarts 0, `alembic current` = `ea93de72860d (head)`; лог удалён
 
 ## 01.10 — `scripts/rehearse_migration.sh` (проверен на сервере, копия прода — OK)
 
