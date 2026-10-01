@@ -26,7 +26,7 @@ DATABASE_URL=postgresql+asyncpg://test:test@localhost:5432/trading_bot_test
 **Прогон зелёный только при нуле skipped.** Без `DATABASE_URL` молча
 пропускается ~115 интеграционных тестов, и счёт врёт.
 
-Ориентир на 01.10.2026 (--checksum репетиции миграции): 1492 passed, 0 skipped, 0 failed.
+Ориентир на 01.10.2026 (--fault data-change репетиции миграции): 1506 passed, 0 skipped, 0 failed.
 
 Число тестов в этом файле — ориентир на момент записи, а не факт. Перед
 тем как называть его в плане или отчёте, прогонять пакет и брать свежую
@@ -118,8 +118,12 @@ docker compose exec -T bot python -m scripts.signal_outcomes [--horizon 50] [--j
   restore, psql, alembic) **и провал проверок репетиции** (защита адреса, ревизия,
   строки, схема после шага); 0 OK; 3 — уборка неполная (перекрывает 0/1/2). Лог
   `/opt/backups/rehearsal_<ts>.log` (600) уборка не удаляет — забрать и удалить
-- флаги проверки самого скрипта: `--source-container <не прод>`, `--fault wrong-db`
-  (только с ним, без `--rewind-to`), `--rewind-to <rev>` (репетиция уже стоящей миграции)
+- флаги проверки самого скрипта: `--source-container <не прод>`; `--fault wrong-db`
+  (защита адреса, ждать exit 1) и `--fault data-change` (после первого upgrade в копии
+  меняется одна строка text-колонки, только с `--checksum`; ждать exit 1 и ❌ в таблице
+  md5) — оба только с `--source-container` не прода и без `--rewind-to`; `--rewind-to
+  <rev>` (репетиция уже стоящей миграции)
+- текст SQL в скрипте — только ASCII (тест): psql на Windows получает argv в cp1251
 
 `scripts/check_redis.py` — PING и цикл проверок лока, запускать на проде:
 

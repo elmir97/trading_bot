@@ -186,6 +186,29 @@ ORDER BY t COLLATE "C";
 SQL
 }
 
+# --fault data-change: в КОПИИ дописать « [fault]» к text-колонке одной строки.
+# @SPEC@ — «таблица.колонка»; ровно одна строка, иначе исключение. Текст SQL —
+# только ASCII, как у всех шаблонов (тест): psql на Windows получает argv в cp1251.
+fault_sql() {
+    cat <<'SQL'
+DO $$
+DECLARE
+    t text := split_part('@SPEC@', '.', 1);
+    c text := split_part('@SPEC@', '.', 2);
+    n int;
+BEGIN
+    EXECUTE format(
+        'UPDATE public.%I SET %I = coalesce(%I, '''') || '' [fault]'' WHERE ctid = (SELECT ctid FROM public.%I LIMIT 1)',
+        t, c, c, t);
+    GET DIAGNOSTICS n = ROW_COUNT;
+    IF n <> 1 THEN
+        RAISE EXCEPTION 'fault data-change: % rows updated, expected 1', n;
+    END IF;
+END
+$$;
+SQL
+}
+
 # Число не-NULL значений в колонках --expect-null. @SPEC@ — «таблица.кол,…».
 null_sql() {
     cat <<'SQL'
@@ -224,8 +247,12 @@ usage() {
   --rewind-to <rev>             сначала опустить КОПИЮ до <rev>, репетировать <rev> → --to
                                 (миграция, уже стоящая на проде)
   --source-container <name>     откуда дамп; по умолчанию trading_bot_db (прод)
-  --fault wrong-db              проверка защиты: URL alembic ведёт в чужую базу; только
-                                с --source-container не прода и без --rewind-to
+  --fault wrong-db              проверка защиты: URL alembic ведёт в чужую базу
+  --fault data-change           проверка --checksum: после первого upgrade в КОПИИ
+                                меняется одна строка (text-колонка непустой таблицы);
+                                ждать exit 1 и ❌ в таблице md5; только с --checksum
+                                Оба --fault — только с --source-container не прода и
+                                без --rewind-to
 
 Коды выхода: 0 OK; 2 отказ по проверке входа (аргументы, предусловия, ревизия
 копии ≠ --from); 1 сбой выполнения или провал проверки репетиции; 3 уборка неполная.
@@ -243,6 +270,7 @@ init_state() {
     EXPECT_COLS='' ALLOW_COUNT='' ALLOW_SCHEMA='' BASE=''
     CHECKSUM=0 ALLOW_DATA='' EXPECT_NULL='' CHECKSUM_TEMPLATE='' NULL_TEMPLATE=''
     CHECKSUM_SQL='' NULL_SQL='' CHECKSUM_TABLES=0
+    FAULT_TEMPLATE='' FAULT_SQL='' FAULT_TARGET=''
     TS='' LOG='' DUMP='' NET='' PG='' TEE_PID=''
     COPY_PW='' FERNET='' COPY_ADDR='' GUARD_PY='' META_PY='' COUNT_SQL='' SCHEMA_SQL=''
     TMPFS_MB=0 DB_MB=0
@@ -318,7 +346,8 @@ parse_args() {
     [[ $SRC =~ $NAME_RE ]] || refuse_args "--source-container: «$SRC» — не имя контейнера"
     [[ $SRC != tb_rehearsal_* ]] || refuse_args "--source-container tb_rehearsal_* — имена самого скрипта"
     if [[ -n $FAULT ]]; then
-        [[ $FAULT == wrong-db ]] || refuse_args "--fault: известен только wrong-db"
+        [[ $FAULT == wrong-db || $FAULT == data-change ]] ||
+            refuse_args "--fault: известны только wrong-db и data-change"
         if ((!src_given)) || [[ $SRC == "$PROD_DB_CONTAINER" ]]; then
             refuse_args "--fault — только с --source-container не прода"
         fi
@@ -336,6 +365,9 @@ parse_args() {
     check_list "$EXPECT_NULL" "$IDENT2_RE" --expect-null
     if [[ -n $ALLOW_DATA ]] && ((!CHECKSUM)); then
         refuse_args "--allow-data-change — только с --checksum"
+    fi
+    if [[ $FAULT == data-change ]] && ((!CHECKSUM)); then
+        refuse_args "--fault data-change — только с --checksum: без него подмену нечем поймать"
     fi
     BASE=${REWIND:-$FROM}
 }
@@ -662,6 +694,24 @@ migrate_step() { # upgrade|downgrade цель снимок эталон-схем
     end_step "$REV" "$checks"
 }
 
+# --fault data-change: первая (C-порядок) text-колонка непустой таблицы из
+# спецификации md5 — меняется одна строка копии; downgrade 1 обязан упасть на md5.
+step_fault_data() {
+    begin_step "FAULT data-change"
+    local kind t c type rest
+    while IFS='|' read -r kind t c type rest; do
+        [[ $kind == col && $type == text ]] || continue
+        [[ ,$ALLOW_DATA, != *",$t.$c,"* ]] || continue
+        (($(count_of baseline "$t") > 0)) || continue
+        FAULT_TARGET=$t.$c
+        break
+    done <<<"${SCHEMA[baseline]}"
+    [[ -n $FAULT_TARGET ]] || fail "fault data-change: нет непустой таблицы с text-колонкой"
+    FAULT_SQL=${FAULT_TEMPLATE//@SPEC@/$FAULT_TARGET}
+    copy_sql "$FAULT_SQL" >/dev/null || fail "fault data-change: UPDATE $FAULT_TARGET не выполнен"
+    end_step "$REV" "UPDATE $FAULT_TARGET: 1 строка копии + « [fault]»; ждать ❌ md5 на downgrade 1"
+}
+
 # shellcheck disable=SC2329  # из on_exit (trap)
 cleanup() {
     echo
@@ -827,6 +877,7 @@ main() {
     SCHEMA_SQL=$(schema_sql)
     CHECKSUM_TEMPLATE=$(checksum_sql)
     NULL_TEMPLATE=$(null_sql)
+    FAULT_TEMPLATE=$(fault_sql)
     NULL_SQL=${NULL_TEMPLATE//@SPEC@/$EXPECT_NULL}
     COPY_PW=$(head -c 18 /dev/urandom | base64 | tr -d '+/=')
     FERNET=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_')
@@ -837,6 +888,9 @@ main() {
     step_restore
     step_baseline
     migrate_step upgrade "$TO" "upgrade 1" ""
+    if [[ $FAULT == data-change ]]; then
+        step_fault_data
+    fi
     migrate_step downgrade "$BASE" "downgrade 1" baseline
     migrate_step upgrade "$TO" "upgrade 2" "upgrade 1"
     if ((FINAL_DOWN)); then

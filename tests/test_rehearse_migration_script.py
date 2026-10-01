@@ -213,7 +213,14 @@ FAKE = ["--source-container", "tb_fakeprod"]
          "только с --source-container не прода"),
         (["--from", "abc", *IMG, *FAKE, "--fault", "wrong-db", "--rewind-to", "def"],
          "несовместим с --rewind-to"),
-        (["--from", "abc", *IMG, *FAKE, "--fault", "other"], "известен только wrong-db"),
+        (["--from", "abc", *IMG, *FAKE, "--fault", "other"],
+         "известны только wrong-db и data-change"),
+        (["--from", "abc", *IMG, *FAKE, "--fault", "data-change"], "только с --checksum"),
+        (["--from", "abc", *IMG, "--checksum", "--fault", "data-change"],
+         "только с --source-container не прода"),
+        (["--from", "abc", *IMG, *FAKE, "--checksum", "--fault", "data-change",
+          "--rewind-to", "def"],
+         "несовместим с --rewind-to"),
         (["--from", "abc", *IMG, "--rewind-to", "abc"], "перематывать нечего"),
         (["--from", "abc", *IMG, "--source-container", "tb_rehearsal_db_1"],
          "имена самого скрипта"),
@@ -380,6 +387,7 @@ def test_sql_call_sites_are_all_known() -> None:
         "$SCHEMA_SQL",
         "$CHECKSUM_SQL",
         "$NULL_SQL",
+        "$FAULT_SQL",
         "SELECT pg_database_size(current_database())",
         "SELECT version_num FROM alembic_version",
     }
@@ -402,17 +410,15 @@ def _psql() -> str:
     pytest.fail("psql не найден — SQL скрипта не проверить")
 
 
-def _run_sql(sql: str) -> list[str]:
+def _psql_raw(sql: str, *, read_only: bool = True, extra: tuple[str, ...] = ()) -> bytes:
     url = urlsplit(os.environ["DATABASE_URL"].replace("postgresql+asyncpg://", "postgresql://", 1))
-    env = {
-        **os.environ,
-        "PGPASSWORD": url.password or "",
-        "PGOPTIONS": "-c default_transaction_read_only=on",
-        "PGCLIENTENCODING": "UTF8",
-    }
+    env = {**os.environ, "PGPASSWORD": url.password or "", "PGCLIENTENCODING": "UTF8"}
+    env.pop("PGOPTIONS", None)
+    if read_only:
+        env["PGOPTIONS"] = "-c default_transaction_read_only=on"
     res = subprocess.run(
         [
-            _psql(), "-X", "-A", "-t", "-q", "-v", "ON_ERROR_STOP=1",
+            _psql(), "-X", "-A", "-t", "-q", "-v", "ON_ERROR_STOP=1", *extra,
             "-h", url.hostname or "localhost", "-p", str(url.port or 5432),
             "-U", url.username or "", "-d", url.path.lstrip("/"), "-c", sql,
         ],
@@ -421,7 +427,11 @@ def _run_sql(sql: str) -> list[str]:
     err = res.stderr.decode("utf-8", "replace")
     assert res.returncode == 0, err
     assert err == "", err
-    return res.stdout.decode("utf-8").splitlines()
+    return res.stdout
+
+
+def _run_sql(sql: str, *, read_only: bool = True) -> list[str]:
+    return _psql_raw(sql, read_only=read_only).decode("utf-8").splitlines()
 
 
 def _c_sorted(rows: list[str]) -> bool:
@@ -451,6 +461,9 @@ def _sql_for(call: str) -> str:
 @pytest.mark.skipif(not os.environ.get("DATABASE_URL"), reason="нужна тестовая БД (DATABASE_URL)")
 @pytest.mark.parametrize("call", sorted(SQL_CALLS))
 def test_sql_runs_read_only_with_expected_shape(call: str) -> None:
+    if call == "$FAULT_SQL":
+        _check_fault_sql()
+        return
     rows = _run_sql(_sql_for(call))
     assert rows
     if call == "$CHECKSUM_SQL":
@@ -525,3 +538,91 @@ def test_checksum_exclusion_changes_only_that_table() -> None:
         )
     )
     assert {t for t in full if full[t] != part[t]} == {table}
+
+
+@pytest.mark.parametrize("call", sorted(SQL_CALLS))
+def test_sql_is_ascii(call: str) -> None:
+    """SQL уходит в psql через argv; на Windows argv — cp1251, кириллица ломает UTF8."""
+    assert SQL_CALLS[call].isascii()
+
+
+def test_checksum_aggregation_is_explicitly_ordered() -> None:
+    """Строки — по тексту ROW(…)::text в collation "C", колонки в ROW — по имени."""
+    sql = _heredoc("checksum_sql")
+    assert 'string_agg(r, chr(10) ORDER BY r COLLATE "C")' in sql
+    assert "ORDER BY x COLLATE \"C\"" in sql
+
+
+def _schema_cols() -> tuple[dict[str, int], dict[str, list[tuple[str, str]]]]:
+    counts = {t: int(n) for t, n in (r.split("|") for r in _run_sql(SQL_CALLS["$COUNT_SQL"]))}
+    cols: dict[str, list[tuple[str, str]]] = {}
+    for row in _run_sql(SQL_CALLS["$SCHEMA_SQL"]):
+        kind, table, col, typ = row.split("|")[:4]
+        if kind == "col":
+            cols.setdefault(table, []).append((col, typ))
+    return counts, cols
+
+
+@_needs_db
+def test_checksum_matches_python_over_multirow_table() -> None:
+    """Независимо от SQL: строки ROW(…)::text из psql, сортировка по байтам UTF-8
+    (= collation "C"), склейка через перевод строки, md5 — то же, что в скрипте."""
+    counts, cols = _schema_cols()
+    table = next((t for t in sorted(cols) if counts[t] >= 2), None)
+    assert table, "в trading_bot_test нет таблицы с ≥2 строками"
+    names = sorted((c for c, _ in cols[table]), key=lambda c: c.encode())
+    quoted = ", ".join(f'"{c}"' for c in names)
+    row_sql = f'SELECT ROW({quoted})::text FROM public."{table}"'
+    raw = _psql_raw(row_sql, extra=("-0",))
+    rows = [r.decode("utf-8") for r in raw.split(b"\0") if r]
+    assert len(rows) == counts[table]
+    expected = hashlib.md5("\n".join(sorted(rows, key=lambda r: r.encode())).encode()).hexdigest()
+    sql = SQL_CALLS["$CHECKSUM_SQL"].replace(SPEC, f"{table}:{','.join(names)}")
+    assert _run_sql(sql) == [f"{table}|{expected}"]
+
+
+def _fault_target() -> str:
+    """Как step_fault_data: первая text-колонка (порядок снимка схемы) непустой таблицы."""
+    counts, _ = _schema_cols()
+    for row in _run_sql(SQL_CALLS["$SCHEMA_SQL"]):
+        kind, table, col, typ = row.split("|")[:4]
+        if kind == "col" and typ == "text" and counts[table] > 0:
+            return f"{table}.{col}"
+    pytest.fail("в trading_bot_test нет непустой таблицы с text-колонкой")
+
+
+def _check_fault_sql() -> None:
+    """В транзакции с откатом: подмена меняет md5 ровно своей таблицы, откат — всё как было."""
+    target = _fault_target()
+    full = SQL_CALLS["$CHECKSUM_SQL"].replace(SPEC, _checksum_spec())
+    fault = SQL_CALLS["$FAULT_SQL"].replace(SPEC, target)
+    before = dict(r.split("|") for r in _run_sql(full))
+    inside = _psql_raw(
+        "ROLLBACK", read_only=False, extra=("-c", "BEGIN", "-c", fault, "-c", full)
+    ).decode("utf-8").splitlines()
+    during = dict(r.split("|") for r in inside)
+    assert {t for t in before if before[t] != during[t]} == {target.split(".")[0]}
+    assert dict(r.split("|") for r in _run_sql(full)) == before
+
+
+@_needs_db
+def test_fault_sql_refuses_when_not_exactly_one_row() -> None:
+    """Пустая таблица — исключение «изменено строк 0»; транзакция не закоммичена."""
+    url = urlsplit(os.environ["DATABASE_URL"].replace("postgresql+asyncpg://", "postgresql://", 1))
+    probe = "rehearse_fault_probe"
+    fault = SQL_CALLS["$FAULT_SQL"].replace(SPEC, f"{probe}.x")
+    env = {**os.environ, "PGPASSWORD": url.password or "", "PGCLIENTENCODING": "UTF8"}
+    env.pop("PGOPTIONS", None)
+    res = subprocess.run(
+        [
+            _psql(), "-X", "-A", "-t", "-q", "-v", "ON_ERROR_STOP=1",
+            "-h", url.hostname or "localhost", "-p", str(url.port or 5432),
+            "-U", url.username or "", "-d", url.path.lstrip("/"),
+            "-c", "BEGIN", "-c", f"CREATE TABLE public.{probe} (x text)", "-c", fault,
+        ],
+        capture_output=True, env=env,
+    )
+    assert res.returncode != 0
+    assert "fault data-change" in res.stderr.decode("utf-8", "replace")
+    tables = [r.split("|")[0] for r in _run_sql(SQL_CALLS["$COUNT_SQL"])]
+    assert probe not in tables
