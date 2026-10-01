@@ -707,3 +707,22 @@ def test_render_fbo_single_config_has_no_selection() -> None:
     assert "конфигураций 1 и старая" in text
     cell = "40 · +0.20 · [-0.05; +0.40]"
     assert f"| d=0.3 N=1 · funding | {cell} | {cell} | да |" in text
+
+
+async def test_funding_null_on_older_page_is_end_of_history(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Старая страница отвечает null (раньше начала истории символа) — конец
+    истории: возвращаем полученное, покрытие проверит funding_gap."""
+    monkeypatch.setattr(rh, "FUNDING_LIMIT", 4)
+
+    class Listed(FakeFundingClient):
+        async def _request(self, path: str, params: dict[str, Any]) -> Any:
+            self.params.append(params)
+            if "endTime" in params:
+                return None
+            return self.events[-4:]
+
+    client = Listed(_funding_items(10))
+    fetcher = rh.FundingFetcher(client, pause=0, null_pause=0)
+    events = await rh.fetch_funding(fetcher, "GRAMTON-USDT", T0, T0 + 100 * H)
+    assert len(events) == 4
+    assert rh.funding_gap("GRAMTON-USDT", events, T0) is not None

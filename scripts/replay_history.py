@@ -214,7 +214,9 @@ class FundingFetcher:
         self.requests = 0
         self.null_retries = 0
 
-    async def get(self, symbol: str, end: datetime | None) -> list[FundingEvent]:
+    async def get(
+        self, symbol: str, end: datetime | None, *, null_is_end: bool = False
+    ) -> list[FundingEvent]:
         """end None — последние FUNDING_LIMIT записей. 01.10: endTime в текущем
         периоде funding (сразу после начисления) ручка стабильно отвечает
         data: null; без endTime и с endTime в прошлом — список."""
@@ -239,6 +241,11 @@ class FundingFetcher:
                 f"остаток лимита fundingRate {state.remaining} после {self.requests} запросов"
             )
         await asyncio.sleep(self._pause)
+        if data is None and null_is_end:
+            # 01.10: на endTime раньше начала истории символа (GRAMTON — с 2026)
+            # ручка тоже отвечает null. Для старой страницы это конец истории;
+            # покрытие проверит funding_gap, оценки нет.
+            return []
         return parse_funding(data)
 
 
@@ -251,7 +258,7 @@ async def fetch_funding(
     collected: dict[datetime, FundingEvent] = {}
     cursor: datetime | None = None  # первая страница — без endTime, см. FundingFetcher.get
     while True:
-        batch = await fetcher.get(symbol, cursor)
+        batch = await fetcher.get(symbol, cursor, null_is_end=cursor is not None)
         fresh = [e for e in batch if e.time not in collected]
         for e in batch:
             collected[e.time] = e
