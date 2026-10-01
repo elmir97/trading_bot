@@ -891,7 +891,8 @@ def render_fbo(
     bounds: tuple[datetime, datetime, datetime],
 ) -> str:
     start, middle, end = bounds
-    out = [f"\n# {tf}: ложный пробой по тренду — 16 конфигураций и старая стратегия"]
+    n_fbo = sum(1 for name in stats if name != OLD_STRATEGY)
+    out = [f"\n# {tf}: ложный пробой по тренду — конфигураций {n_fbo} и старая стратегия"]
     for half, title in ((0, f"первая половина {start:%d.%m.%Y}–{middle:%d.%m.%Y}"),
                         (1, f"вторая половина {middle:%d.%m.%Y}–{end:%d.%m.%Y}")):
         out += [
@@ -907,11 +908,12 @@ def render_fbo(
                 f"| {_fmt(s.r_gross)} | {_fmt(s.r_net)} | {_fmt(s.r_nf)} | {_ci(s.ci)} "
                 f"| {_side_fmt(s.short)} | {_side_fmt(s.long)} |"
             )
-    out.append(
-        f"\n## {tf} — отбор в обе стороны (по R нетто+funding, ≥{MIN_CLOSED_FBO} закрытых)\n"
-    )
     directions = ((0, "подбор на 1-й → проверка на 2-й"), (1, "подбор на 2-й → проверка на 1-й"))
-    for fit, label in directions:
+    if n_fbo > 1:
+        out.append(
+            f"\n## {tf} — отбор в обе стороны (по R нетто+funding, ≥{MIN_CLOSED_FBO} закрытых)\n"
+        )
+    for fit, label in directions if n_fbo > 1 else ():
         sel = fbo_select(stats, fit)
         if sel is None:
             out.append(f"- {label}: нет конфигураций с ≥{MIN_CLOSED_FBO} закрытых")
@@ -938,6 +940,62 @@ def render_fbo(
             f"| {b.closed} · {_fmt(b.r_nf)} · {_ci(b.ci)} | {verdict} |"
         )
     return "\n".join(out)
+
+
+def regime_stats(items: Sequence[Scored], days: float) -> dict[str, HalfStats]:
+    return {
+        regime: half_stats([s for s in items if s.regime == regime], days)
+        for regime in sorted({s.regime for s in items})
+    }
+
+
+def render_regimes(
+    tf: str, regimes: dict[str, tuple[dict[str, HalfStats], dict[str, HalfStats]]]
+) -> str:
+    """Режим D1 EMA200 (цена против EMA200 по закрытым дням на момент
+    сигнала) по половинам: закрытых · R нетто+funding · ДИ90."""
+    out = [
+        f"\n## {tf} — режим D1 EMA200 по половинам\n",
+        "| конфигурация | режим | 1-я: n · закрытых · R · ДИ90 | 2-я: n · закрытых · R · ДИ90 |",
+        "|---|---|---|---|",
+    ]
+    for name, (a, b) in regimes.items():
+        for regime in sorted(set(a) | set(b)):
+            cells = []
+            for half in (a, b):
+                h = half.get(regime)
+                cells.append(
+                    "0" if h is None
+                    else f"{h.n} · {h.closed} · {_fmt(h.r_nf)} · {_ci(h.ci)}"
+                )
+            out.append(f"| {name} | {regime} | {cells[0]} | {cells[1]} |")
+    return "\n".join(out)
+
+
+def select_fbo(
+    names: Sequence[str] | None,
+) -> tuple[dict[str, Callable[[MarketContext], Signal]], list[FboConfig]]:
+    """Только названные конфигурации (точные имена из fbo_setup) плюс старая
+    стратегия для справки; детекторы — только нужные им. None — все."""
+    evaluators, configs = fbo_setup()
+    if names is None:
+        return evaluators, configs
+    known = {c.name: c for c in configs}
+    unknown = [n for n in names if n not in known]
+    if unknown:
+        raise ValueError(f"неизвестные конфигурации FBO: {unknown}; есть: {list(known)}")
+    chosen = [known[OLD_STRATEGY], *(known[n] for n in names if n != OLD_STRATEGY)]
+    return {c.detector: evaluators[c.detector] for c in chosen}, chosen
+
+
+def funding_gap(symbol: str, funding: Sequence[FundingEvent], start: datetime) -> str | None:
+    """Funding должен покрывать начало окна: фильтр и R funding берут ставку
+    последнего начисления до сигнала. Иначе символ исключается."""
+    if not funding:
+        return f"{symbol} (funding нет)"
+    if funding[0].time > start:
+        return f"{symbol} (funding с {funding[0].time:%d.%m.%Y})"
+    return None
 
 
 # --- калибровка ---------------------------------------------------------------
@@ -1093,13 +1151,14 @@ async def run(
     strategy: str = "breakout",
     timeframes: Sequence[str] = REPLAY_TIMEFRAMES,
     end: datetime | None = None,
+    fbo_configs: Sequence[str] | None = None,
 ) -> int:
     """end — конец окна (по умолчанию сейчас): свечи и исходы — только
     закрытые к нему; так прогоны разных стратегий сравнимы на одних данных."""
     now = end or datetime.now(UTC)
     start = now - timedelta(days=round(months * 365 / 12))
     if strategy == "fbo":
-        return await run_fbo(start, now, symbols, cache, json_path, timeframes)
+        return await run_fbo(start, now, symbols, cache, json_path, timeframes, fbo_configs)
     client = _public_client()
     fetcher = KlineFetcher(client)
     ffetcher = FundingFetcher(client)
@@ -1193,17 +1252,64 @@ async def load_symbol(
         fetcher, cache, symbol, "1d", start - timedelta(days=D1_EMA_PERIOD + 30), now
     )
     funding = await cached_funding(ffetcher, cache, symbol, start, now)
+    gap = funding_gap(symbol, funding, start)
+    if gap is not None:
+        return gap
     return data, d1, funding
+
+
+async def coverage(
+    start: datetime, now: datetime, symbols: Sequence[str], cache: Path,
+    timeframes: Sequence[str],
+) -> int:
+    """До прогона: покрывают ли свечи (с прогревом), дневные и funding окно.
+    Качает в кэш; печатает по символу первую свечу/начисление против нужного."""
+    client = _public_client()
+    fetcher = KlineFetcher(client)
+    ffetcher = FundingFetcher(client)
+    print(f"Окно {start:%d.%m.%Y %H:%M}–{now:%d.%m.%Y %H:%M} UTC; нужно: свечи ТФ с прогревом "
+          f"{CANDLES_REQUIRED}, дневные с {start - timedelta(days=D1_EMA_PERIOD):%d.%m.%Y} "
+          f"(EMA200), funding с {start:%d.%m.%Y}\n")
+    print("| символ | " + " | ".join(f"{tf} с" for tf in timeframes)
+          + " | 1d с | funding с | итог |")
+    print("|---|" + "---|" * (len(timeframes) + 3))
+    try:
+        for symbol in symbols:
+            cells = []
+            for tf in timeframes:
+                warm = start - step(tf) * (CANDLES_REQUIRED + 5)
+                c = await cached_klines(fetcher, cache, symbol, tf, warm, now)
+                cells.append(f"{c[0].open_time:%d.%m.%Y}" if c else "нет")
+            d1 = await cached_klines(
+                fetcher, cache, symbol, "1d", start - timedelta(days=D1_EMA_PERIOD + 30), now
+            )
+            funding = await cached_funding(ffetcher, cache, symbol, start, now)
+            loaded = await load_symbol(fetcher, ffetcher, cache, symbol, timeframes, start, now)
+            d1_ok = len([k for k in d1 if k.close_time <= start]) >= D1_EMA_PERIOD
+            verdict = loaded if isinstance(loaded, str) else (
+                "ок" if d1_ok else f"{symbol} (дневных до окна < {D1_EMA_PERIOD})"
+            )
+            print(f"| {symbol} | " + " | ".join(cells)
+                  + f" | {d1[0].open_time:%d.%m.%Y} | "
+                  + (f"{funding[0].time:%d.%m.%Y}" if funding else "нет") + f" | {verdict} |")
+    except RateLimitStopError as exc:
+        print(f"СТОП по лимиту BingX: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        await client.close()
+    print(f"\nзапросов klines {fetcher.requests}, funding {ffetcher.requests}")
+    return 0
 
 
 async def run_fbo(
     start: datetime, now: datetime, symbols: Sequence[str], cache: Path,
     json_path: Path | None, timeframes: Sequence[str],
+    config_names: Sequence[str] | None = None,
 ) -> int:
     client = _public_client()
     fetcher = KlineFetcher(client)
     ffetcher = FundingFetcher(client)
-    evaluators, configs = fbo_setup()
+    evaluators, configs = select_fbo(config_names)
     results: dict[str, dict[str, list[Scored]]] = {
         tf: {c.name: [] for c in configs} for tf in timeframes
     }
@@ -1254,6 +1360,11 @@ async def run_fbo(
             h1, h2 = split_halves(results[tf][c.name], start, now)
             stats[c.name] = (half_stats(h1, days[0]), half_stats(h2, days[1]))
         print(render_fbo(tf, stats, (start, middle, now)))
+        regimes: dict[str, tuple[dict[str, HalfStats], dict[str, HalfStats]]] = {}
+        for c in configs:
+            h1, h2 = split_halves(results[tf][c.name], start, now)
+            regimes[c.name] = (regime_stats(h1, days[0]), regime_stats(h2, days[1]))
+        print(render_regimes(tf, regimes))
     if json_path is not None:
         json_path.write_text(json.dumps([
             {
@@ -1291,9 +1402,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--timeframes", help="через запятую; по умолчанию 1h,4h (breakout) или 4h,1h (fbo)"
     )
     rn.add_argument("--end", type=parse_end, help="конец окна, ISO с зоной; по умолчанию сейчас")
+    rn.add_argument(
+        "--fbo-config", action="append", dest="fbo_configs",
+        help="только эта конфигурация FBO (точное имя; можно несколько); старая — всегда",
+    )
+    cov = sub.add_parser("coverage", help="до прогона: покрывают ли свечи и funding окно")
+    cov.add_argument("--months", type=int, default=12)
+    cov.add_argument("--symbols", default=",".join(DEFAULT_SYMBOLS))
+    cov.add_argument("--timeframes", default="4h")
+    cov.add_argument("--end", type=parse_end, required=True)
     args = parser.parse_args(argv)
     if args.command == "calibrate":
         return asyncio.run(calibrate(args.live, args.cache))
+    if args.command == "coverage":
+        end = args.end
+        return asyncio.run(coverage(
+            end - timedelta(days=round(args.months * 365 / 12)), end,
+            [s for s in args.symbols.split(",") if s], args.cache,
+            [t for t in args.timeframes.split(",") if t],
+        ))
+    if args.fbo_configs:
+        try:
+            select_fbo(args.fbo_configs)
+        except ValueError as exc:
+            parser.error(str(exc))
     default_tfs = "4h,1h" if args.strategy == "fbo" else "1h,4h"
     timeframes = [t for t in (args.timeframes or default_tfs).split(",") if t]
     unknown = [t for t in timeframes if t not in REPLAY_TIMEFRAMES]
@@ -1302,6 +1434,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     return asyncio.run(run(
         args.months, [s for s in args.symbols.split(",") if s], args.cache, args.json_path,
         strategy=args.strategy, timeframes=timeframes, end=args.end,
+        fbo_configs=args.fbo_configs,
     ))
 
 

@@ -661,3 +661,49 @@ def test_parse_end() -> None:
     assert rh.parse_end("2026-10-01T16:13Z") == datetime(2026, 10, 1, 16, 13, tzinfo=UTC)
     with pytest.raises(Exception, match="нужна зона"):
         rh.parse_end("2026-10-01T16:13")
+
+
+# --- финальный тест: одна конфигурация, покрытие funding, режимы -------------------------
+
+
+def test_select_fbo_only_named_plus_old() -> None:
+    evaluators, configs = rh.select_fbo(["d=0.3 N=1 · funding"])
+    assert [c.name for c in configs] == [rh.OLD_STRATEGY, "d=0.3 N=1 · funding"]
+    assert set(evaluators) == {rh.OLD_STRATEGY, "d=0.3 N=1"}   # funding — строки базы
+    with pytest.raises(ValueError, match="неизвестные"):
+        rh.select_fbo(["d=0.2 N=1 · funding"])
+    assert len(rh.select_fbo(None)[1]) == 17
+
+
+def test_funding_gap() -> None:
+    ev = [rh.FundingEvent(T0, D("0.0001"), D("1"))]
+    assert rh.funding_gap("BTC-USDT", ev, T0) is None
+    assert rh.funding_gap("BTC-USDT", ev, T0 + H) is None
+    assert "funding с" in str(rh.funding_gap("BTC-USDT", ev, T0 - H))
+    assert "funding нет" in str(rh.funding_gap("BTC-USDT", [], T0))
+
+
+def test_regime_stats_and_render() -> None:
+    items = [
+        _scored("тейк", "2", "1.9", r_nf="1.9"),
+        rh.Scored(
+            Result(row(), Outcome("стоп", 1, 1, True), D(-1), D("-1.1")),
+            None, D("-1.1"), "ниже EMA200 D1",
+        ),
+    ]
+    stats = rh.regime_stats(items, 1.0)
+    assert set(stats) == {"выше EMA200 D1", "ниже EMA200 D1"}
+    assert stats["ниже EMA200 D1"].r_nf == D("-1.1")
+    text = rh.render_regimes("4h", {"X": (stats, {})})
+    assert "| X | выше EMA200 D1 | 1 · 1 · +1.90" in text and "| 0 |" in text
+
+
+def test_render_fbo_single_config_has_no_selection() -> None:
+    hs = _hs(40, "0.2", ("-0.05", "0.4"))
+    text = rh.render_fbo(
+        "4h", {rh.OLD_STRATEGY: (hs, hs), "d=0.3 N=1 · funding": (hs, hs)}, (T0, T0 + H, T0 + 2 * H)
+    )
+    assert "отбор в обе стороны" not in text
+    assert "конфигураций 1 и старая" in text
+    cell = "40 · +0.20 · [-0.05; +0.40]"
+    assert f"| d=0.3 N=1 · funding | {cell} | {cell} | да |" in text
