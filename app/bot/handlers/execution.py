@@ -64,6 +64,7 @@ from app.database.repositories.signal_notification import SignalNotificationRepo
 from app.database.session import Database
 from app.exchanges.base import ExchangeAuthError, ExchangeError, MarginType
 from app.exchanges.bingx import bingx_position_side
+from app.execution.callback_audit import record_callback
 from app.execution.guards import check_live_orders_allowed
 from app.execution.journal_entry import JournalOutcome, record_entry_trade
 from app.execution.models import ExecutionRefusal, ExecutionRefusalCode, OrderRequest
@@ -92,6 +93,7 @@ from app.services.margin_mode import refresh_margin_type
 from app.services.permissions import refresh_permissions
 from app.services.position_mode import refresh_position_mode
 from app.trading.enums import (
+    ExecutionCallbackAction,
     ObservationStage,
     OrderStatus,
     ReconciliationKind,
@@ -151,6 +153,50 @@ def _parse_id(data: str | None, prefix: str) -> int | None:
         return int(data.removeprefix(prefix))
     except ValueError:
         return None
+
+
+AUDIT_FAILED_TEXT = "Не удалось записать подтверждение — вход не выполнен. Попробуй ещё раз."
+
+
+async def _audit(
+    callback: CallbackQuery,
+    db: Database,
+    user: User,
+    action: ExecutionCallbackAction,
+    notification_id: int | None,
+) -> bool:
+    """Префлайт 15.7: нажатие — в execution_callbacks до любых проверок.
+    False — запись не удалась; «Да» по такому нажатию не исполняется.
+
+    Ошибку пишем без трейса и без текста исключения: SQLAlchemy кладёт в
+    текст параметры запроса, а chat_id в личном чате — это telegram_id."""
+    message = callback.message
+    try:
+        await record_callback(
+            db,
+            user_id=user.id,
+            telegram_id=callback.from_user.id if callback.from_user else None,
+            action=action,
+            notification_id=notification_id,
+            raw_data=callback.data,
+            chat_id=message.chat.id if message is not None else None,
+            message_id=message.message_id if message is not None else None,
+            callback_query_id=callback.id,
+        )
+    except Exception as exc:
+        orig = getattr(exc, "orig", None)
+        logger.error(
+            "Нажатие кнопки исполнения не записано",
+            extra={
+                "action": action.value,
+                "notification_id": notification_id,
+                "user_id": user.id,
+                "error": type(exc).__name__,
+                "error_orig": type(orig).__name__ if orig is not None else None,
+            },
+        )
+        return False
+    return True
 
 
 def render_refusal(refusal: ExecutionRefusal) -> str:
@@ -661,6 +707,8 @@ async def open_confirmation(
     db: Database,
 ) -> None:
     notification_id = _parse_id(str(callback.data), ExecutionCB.OPEN)
+    # Сбой записи не останавливает: «Открыть» ничего не исполняет.
+    await _audit(callback, db, user, ExecutionCallbackAction.OPEN, notification_id)
     await callback.answer()
     if (
         notification_id is None
@@ -698,11 +746,15 @@ async def open_confirmation(
 
 
 @router.callback_query(F.data.startswith(ExecutionCB.NO))
-async def confirm_no(callback: CallbackQuery, user: User, session: AsyncSession) -> None:
+async def confirm_no(
+    callback: CallbackQuery, user: User, session: AsyncSession, db: Database
+) -> None:
     """Раздел 12а ТЗ: отказ пользователя пишется тут же, в транзакции этого
     апдейта — карточка ещё жива в _confirmations, повторный поход на биржу
     ради чисел не нужен, они уже посчитаны при показе (state.quote)."""
     notification_id = _parse_id(str(callback.data), ExecutionCB.NO)
+    # Сбой записи не останавливает: «Нет» ничего не исполняет.
+    await _audit(callback, db, user, ExecutionCallbackAction.NO, notification_id)
     await callback.answer()
     if notification_id is None or not isinstance(callback.message, Message):
         return
@@ -745,6 +797,12 @@ async def confirm_yes(
     db: Database,
 ) -> None:
     notification_id = _parse_id(str(callback.data), ExecutionCB.YES)
+    # Префлайт 15.7: вход без записи нажатия хуже пропущенного входа. Запись —
+    # до лока, чтобы попал и двойной тап; не записалось — ни лока, ни
+    # execution_orders, но callback отвечен (кнопка не висит в «часиках»).
+    if not await _audit(callback, db, user, ExecutionCallbackAction.YES, notification_id):
+        await callback.answer(AUDIT_FAILED_TEXT, show_alert=True)
+        return
     if notification_id is None:
         await callback.answer()
         return

@@ -63,7 +63,7 @@ ruff check .
 
 ## Скрипты
 
-`scripts/smoke_check.py` — 66 проверок, гоняет диспетчер. Единственный
+`scripts/smoke_check.py` — 67 проверок, гоняет диспетчер. Единственный
 харнесс для хендлеров `settings.py`.
 
 - отказывается работать против любой БД кроме `trading_bot_test`
@@ -430,6 +430,13 @@ PY
 16. `trades` со `status='OPEN'` по `source`; всего
     `source='SIGNAL_EXECUTION'`; из них `fill_confirmed = false`
     (предварительные, 15.5.4) — при сухом прогоне их быть не должно
+16а. С миграции `0bf103d4a84d`: `execution_callbacks` с окна деплоя по
+    `action`; `notification_id IS NULL` (битые кнопки) — флаг. Каждому
+    `yes` — строка исхода в `execution_orders` по тому же
+    `notification_id`; `yes` без исхода — только двойной тап под локом
+    (пара `yes` по одному уведомлению за секунды). В логе — WARNING/ERROR
+    «Нажатие кнопки исполнения не записано» — флаг: «Да» по нему отказало.
+    `telegram_id` в логе — только маской `mask_telegram_id`
 
 ### F. Redis
 

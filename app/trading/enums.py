@@ -279,6 +279,16 @@ ANOMALY_KINDS = frozenset({
 })
 
 
+class ExecutionCallbackAction(StrEnum):
+    """Кнопка пути исполнения, нажатие которой пишется в execution_callbacks
+    (app/execution/callback_audit.py): exn:open / exn:yes / exn:no. В БД —
+    значение в нижнем регистре, String(8) с CHECK."""
+
+    OPEN = "open"
+    YES = "yes"
+    NO = "no"
+
+
 class ObservationStage(StrEnum):
     """На каком вызове ExecutionService.evaluate() возникла строка REFUSED/ERROR.
 

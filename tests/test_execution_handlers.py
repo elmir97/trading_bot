@@ -13,6 +13,7 @@ ExecutionOrder — как test_execution_service.py.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -39,6 +40,7 @@ from app.bot.handlers import execution
 from app.bot.keyboards.execution import ExecutionCB
 from app.core.config import Settings
 from app.core.locks import confirm_lock_key
+from app.database.models.execution_callback import ExecutionCallback
 from app.database.models.execution_order import ExecutionOrder
 from app.database.models.signal import SignalRecord
 from app.database.models.signal_notification import SignalNotification
@@ -564,6 +566,11 @@ async def ctx(unique_telegram_id):  # type: ignore[no-untyped-def]
             MistakeTypeRepository(session), settings,
         )
         user = await user_service.get_or_create(telegram_id=unique_telegram_id())
+        # Журнал нажатий (callback_audit) пишет из своей сессии с FK на users:
+        # пользователь обязан быть закоммичен, как в проде, где он создан
+        # задолго до первой кнопки. Незакоммиченного своя сессия не видит —
+        # FK-ошибка, и «Да» отказало бы во всех тестах.
+        await session.commit()
         client = FakeExchangeClient(price=D("100"), balance=D("1000"), symbol_info=_symbol_info())
         redis = FakeRedis()
 
@@ -3023,3 +3030,218 @@ async def test_pending_text_edit_failure_does_not_abort_readback(ctx, bot, monke
     [trade] = await _user_trades(session, user.id)
     assert trade.fill_confirmed is True
     assert any(t.startswith("✅ Вход исполнен") for t in edits)
+
+
+# ---------------------------------------------------------------------------
+# Журнал нажатий (префлайт 15.7): execution_callbacks + строка в лог
+# ---------------------------------------------------------------------------
+
+LONG_TG_ID = 1234567890
+
+
+def _callback_from(data: str, message_id: int, tg_id: int = LONG_TG_ID) -> CallbackQuery:
+    message = Message(
+        message_id=message_id, date=datetime.now(UTC),
+        chat=Chat(id=CHAT_ID, type="private"), text="card",
+    )
+    return CallbackQuery(
+        id=f"cb{message_id}", from_user=TgUser(id=tg_id, is_bot=False, first_name="Tester"),
+        chat_instance="ci", data=data, message=message,
+    )
+
+
+async def _presses(db: Database, user_id: int) -> list[ExecutionCallback]:
+    """Из отдельной сессии: запись коммитится сама, не в транзакции теста."""
+    async with db.session() as s:
+        stmt = (
+            select(ExecutionCallback)
+            .where(ExecutionCallback.user_id == user_id)
+            .order_by(ExecutionCallback.id)
+        )
+        return list((await s.scalars(stmt)).all())
+
+
+def _fail_audit(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    async def broken(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(execution, "record_callback", broken)
+
+
+async def test_open_yes_presses_are_recorded(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    dp, session, user, client, _redis, _settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _notify(session, signal)
+
+    await _feed(dp, bot, 1, _callback_from(f"exn:open:{notification.id}", message_id=1))
+    state = execution._confirmations[(user.id, notification.id)]
+    await _feed(
+        dp, bot, 2, _callback_from(f"exn:yes:{notification.id}", message_id=state.message_id)
+    )
+
+    rows = await _presses(dp["db"], user.id)
+    assert [r.action for r in rows] == ["open", "yes"]
+    assert all(r.notification_id == notification.id for r in rows)
+    assert all(r.chat_id == CHAT_ID for r in rows)
+    assert [r.message_id for r in rows] == [1, state.message_id]
+    assert [r.callback_query_id for r in rows] == ["cb1", f"cb{state.message_id}"]
+    assert all(r.created_at is not None for r in rows)
+
+
+async def test_no_press_is_recorded(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    dp, session, user, client, _redis, _settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _notify(session, signal)
+
+    await _feed(dp, bot, 1, _callback_from(f"exn:open:{notification.id}", message_id=1))
+    state = execution._confirmations[(user.id, notification.id)]
+    await _feed(
+        dp, bot, 2, _callback_from(f"exn:no:{notification.id}", message_id=state.message_id)
+    )
+
+    assert [r.action for r in await _presses(dp["db"], user.id)] == ["open", "no"]
+
+
+async def test_press_on_unknown_notification_is_recorded(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Чужое/несуществующее уведомление: «устарело», а нажатие — в журнале
+    (notification_id без FK)."""
+    dp, _session, user, client, _redis, _settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+
+    await _feed(dp, bot, 1, _callback_from("exn:open:999999999", message_id=1))
+
+    assert execution.STALE_NOTIFICATION_TEXT in bot.recorder.sent_texts()
+    rows = await _presses(dp["db"], user.id)
+    assert [(r.action, r.notification_id) for r in rows] == [("open", 999999999)]
+
+
+async def test_yes_press_under_busy_lock_is_recorded(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Двойной тап: запись — до лока, второе нажатие тоже в журнале."""
+    dp, session, user, client, redis, _settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _notify(session, signal)
+
+    await _feed(dp, bot, 1, _callback_from(f"exn:open:{notification.id}", message_id=1))
+    state = execution._confirmations[(user.id, notification.id)]
+    redis.store[confirm_lock_key(user.id, notification.id)] = "someone-elses-token"
+    await _feed(
+        dp, bot, 2, _callback_from(f"exn:yes:{notification.id}", message_id=state.message_id)
+    )
+
+    assert any("уже обрабатывается" in a.lower() for a in bot.recorder.alerts())
+    assert [r.action for r in await _presses(dp["db"], user.id)] == ["open", "yes"]
+
+
+@pytest.mark.parametrize("prefix", ["exn:open:", "exn:yes:", "exn:no:"])
+async def test_broken_callback_data_recorded_as_null(  # type: ignore[no-untyped-def]
+    ctx, bot, monkeypatch, caplog, prefix
+) -> None:
+    """Не число в данных кнопки: notification_id NULL, сырые данные — в лог
+    (обрезаны до 64), хендлер не падает, callback отвечен."""
+    dp, _session, user, client, _redis, _settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    data = prefix + "x" * 80
+
+    with caplog.at_level(logging.INFO, logger="app.execution.callback_audit"):
+        await _feed(dp, bot, 1, _callback_from(data, message_id=1))
+
+    rows = await _presses(dp["db"], user.id)
+    assert [(r.action, r.notification_id) for r in rows] == [(prefix.split(":")[1], None)]
+    assert any(isinstance(m, AnswerCallbackQuery) for m in bot.recorder.calls)
+    logged = [r for r in caplog.records if r.getMessage() == "Нажатие кнопки исполнения"]
+    assert len(logged) == 1
+    assert logged[0].raw_data == data[:64]  # type: ignore[attr-defined]
+
+
+async def test_yes_audit_failure_blocks_without_lock_and_orders(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Сбой записи на «Да»: вход не выполняется — лок не берётся, строк в
+    execution_orders нет, callback отвечен алертом (кнопка не висит)."""
+    dp, session, user, client, redis, _settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _notify(session, signal)
+    await _feed(dp, bot, 1, _callback_from(f"exn:open:{notification.id}", message_id=1))
+    state = execution._confirmations[(user.id, notification.id)]
+    redis.set_calls.clear()
+    _fail_audit(monkeypatch)
+
+    await _feed(
+        dp, bot, 2, _callback_from(f"exn:yes:{notification.id}", message_id=state.message_id)
+    )
+
+    assert execution.AUDIT_FAILED_TEXT in bot.recorder.alerts()
+    assert redis.set_calls == []
+    assert await _orders_for_signal(session, signal.id) == []
+    await session.refresh(notification)
+    assert notification.trade_opened_at is None
+
+
+async def test_open_and_no_continue_when_audit_fails(ctx, bot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """«Открыть» и «Нет» ничего не исполняют — сбой записи их не останавливает."""
+    dp, session, user, client, _redis, _settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+    signal = _signal(user.id)
+    session.add(signal)
+    await session.flush()
+    notification = await _notify(session, signal)
+    _fail_audit(monkeypatch)
+
+    await _feed(dp, bot, 1, _callback_from(f"exn:open:{notification.id}", message_id=1))
+    state = execution._confirmations[(user.id, notification.id)]
+    await _feed(
+        dp, bot, 2, _callback_from(f"exn:no:{notification.id}", message_id=state.message_id)
+    )
+
+    orders = await _orders_for_signal(session, signal.id)
+    assert [o.status for o in orders] == [OrderStatus.DECLINED]
+    assert await _presses(dp["db"], user.id) == []
+
+
+def _logged_values(record: logging.LogRecord) -> str:
+    return " ".join([record.getMessage(), *(str(v) for v in vars(record).values())])
+
+
+async def test_press_log_has_masked_telegram_id_only(ctx, bot, monkeypatch, caplog) -> None:  # type: ignore[no-untyped-def]
+    dp, _session, _user, client, _redis, _settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+
+    with caplog.at_level(logging.INFO):
+        await _feed(dp, bot, 1, _callback_from("exn:open:999999999", message_id=1))
+
+    logged = [r for r in caplog.records if r.getMessage() == "Нажатие кнопки исполнения"]
+    assert len(logged) == 1
+    assert logged[0].tg == "12…890"  # type: ignore[attr-defined]
+    assert all(str(LONG_TG_ID) not in _logged_values(r) for r in caplog.records)
+
+
+async def test_audit_failure_log_has_no_telegram_id(ctx, bot, monkeypatch, caplog) -> None:  # type: ignore[no-untyped-def]
+    """Ошибка записи — без трейса и текста исключения (в нём параметры SQL,
+    chat_id = telegram_id в личном чате)."""
+    dp, _session, _user, client, _redis, _settings = ctx
+    _patch_exchange_factory(monkeypatch, client, FakeCredentials(is_read_only=False))
+
+    async def broken(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError(f"params chat_id={LONG_TG_ID}")
+
+    monkeypatch.setattr(execution, "record_callback", broken)
+    with caplog.at_level(logging.INFO):
+        await _feed(dp, bot, 1, _callback_from("exn:yes:999999999", message_id=1))
+
+    errors = [
+        r for r in caplog.records if r.getMessage() == "Нажатие кнопки исполнения не записано"
+    ]
+    assert len(errors) == 1
+    assert errors[0].exc_info is None
+    assert errors[0].error == "RuntimeError"  # type: ignore[attr-defined]
+    assert all(str(LONG_TG_ID) not in _logged_values(r) for r in caplog.records)

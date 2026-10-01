@@ -42,6 +42,22 @@ class SecretCipher:
         return Fernet.generate_key().decode()
 
 
+def mask_telegram_id(telegram_id: int | str | None) -> str:
+    """telegram_id для логов: 2 первые и 3 последние цифры, «88…918».
+
+    Владельца от чужого в однопользовательском боте отличить хватает,
+    восстановить id — нет. Короче 6 знаков — целиком звёздочками, как
+    mask_secret: из двух концов короткого id он собирается почти целиком.
+    Полный id в логи не пишем — лог уходит в чат и в отчёты.
+    """
+    if telegram_id is None:
+        return "—"
+    text = str(telegram_id)
+    if len(text) < 6:
+        return "*" * len(text)
+    return f"{text[:2]}…{text[-3:]}"
+
+
 def mask_secret(value: str, visible: int = 4) -> str:
     """Безопасное отображение ключа пользователю: 'AbCd...WxYz'.
 

@@ -27,6 +27,7 @@ from app.core.config import get_settings
 from app.core.locks import RedisLock, confirm_lock_key
 from app.core.security import SecretCipher, mask_secret
 from app.database.models.credentials import ExchangeCredentials
+from app.database.models.execution_callback import ExecutionCallback
 from app.database.models.execution_order import ExecutionOrder
 from app.database.models.signal import SignalRecord
 from app.database.models.signal_notification import SignalNotification
@@ -662,6 +663,22 @@ async def _run_execution_scenario(sim, tg, db, redis, settings) -> None:  # type
             "повторное «Да»: отказ по локу, не трейс",
             last_alert is not None and "уже обрабатывается" in last_alert[1].lower(),
             str(last_alert),
+        )
+
+        # Префлайт 15.7: каждое нажатие — строка журнала, и двойной тап тоже
+        # (запись до лока). Уборка — каскадом от удаления пользователя.
+        async with db.session() as session:
+            presses = (
+                await session.scalars(
+                    select(ExecutionCallback)
+                    .where(ExecutionCallback.notification_id == notification_id)
+                    .order_by(ExecutionCallback.id)
+                )
+            ).all()
+        check(
+            "журнал нажатий: open, yes, yes",
+            [p.action for p in presses] == ["open", "yes", "yes"],
+            str([p.action for p in presses]),
         )
     finally:
         (

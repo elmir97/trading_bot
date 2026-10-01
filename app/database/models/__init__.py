@@ -7,6 +7,7 @@ Alembic импортирует именно этот модуль: любая м
 from app.database.base import Base
 from app.database.models.ai_report import AIReport
 from app.database.models.credentials import ExchangeCredentials
+from app.database.models.execution_callback import ExecutionCallback
 from app.database.models.execution_order import ExecutionOrder
 from app.database.models.mistake import SYSTEM_MISTAKES, MistakeType, TradeMistake
 from app.database.models.reconciliation_event import ReconciliationEvent
@@ -30,6 +31,7 @@ __all__ = [
     "AIReport",
     "Base",
     "ExchangeCredentials",
+    "ExecutionCallback",
     "ExecutionOrder",
     "MistakeType",
     "ReconciliationEvent",
