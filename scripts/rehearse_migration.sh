@@ -168,6 +168,38 @@ ORDER BY line COLLATE "C";
 SQL
 }
 
+# md5 строк каждой таблицы по колонкам baseline (--checksum). @SPEC@ —
+# «таблица:кол,кол;таблица:кол» из снимка схемы baseline без --allow-data-change;
+# имена проверены по [A-Za-z0-9_], в SQL идут через format('%I'). Строка —
+# ROW(…)::text (NULL и '' различимы), порядок строк — по тексту, collation "C".
+checksum_sql() {
+    cat <<'SQL'
+SELECT t || '|' || (xpath('/row/h/text()', query_to_xml(format(
+           'SELECT md5(coalesce(string_agg(r, chr(10) ORDER BY r COLLATE "C"), '''')) AS h FROM (SELECT ROW(%s)::text AS r FROM public.%I) s',
+           (SELECT string_agg(format('%I', x), ',' ORDER BY x COLLATE "C") FROM unnest(c) x),
+           t), false, true, '')))[1]::text
+FROM (
+    SELECT split_part(e, ':', 1) AS t, string_to_array(split_part(e, ':', 2), ',') AS c
+    FROM unnest(string_to_array('@SPEC@', ';')) e
+) spec
+ORDER BY t COLLATE "C";
+SQL
+}
+
+# Число не-NULL значений в колонках --expect-null. @SPEC@ — «таблица.кол,…».
+null_sql() {
+    cat <<'SQL'
+SELECT t || '.' || c || '|' || (xpath('/row/n/text()', query_to_xml(format(
+           'SELECT count(*) AS n FROM public.%I WHERE %I IS NOT NULL', t, c),
+           false, true, '')))[1]::text
+FROM (
+    SELECT split_part(e, '.', 1) AS t, split_part(e, '.', 2) AS c
+    FROM unnest(string_to_array('@SPEC@', ',')) e
+) spec
+ORDER BY t COLLATE "C", c COLLATE "C";
+SQL
+}
+
 usage() {
     cat <<'EOF'
 Репетиция миграции на копии прода. Запуск — через stdin (CLAUDE.md):
@@ -183,6 +215,12 @@ usage() {
   --allow-count-change t[,t]    таблицы, где число строк вправе меняться
   --allow-schema-diff o[,o]     объекты схемы (таблица или таблица.имя), которым
                                 разрешено расходиться при сверке после downgrade/upgrade
+  --checksum                    md5 строк каждой таблицы по колонкам baseline: после
+                                каждого downgrade обязан совпасть с baseline
+  --allow-data-change t.c[,t.c] колонки, которые downgrade вправе менять (из md5
+                                исключаются); только с --checksum
+  --expect-null t.c[,t.c]       колонки, которые после каждого upgrade обязаны быть
+                                целиком NULL (новые, без бэкфилла)
   --rewind-to <rev>             сначала опустить КОПИЮ до <rev>, репетировать <rev> → --to
                                 (миграция, уже стоящая на проде)
   --source-container <name>     откуда дамп; по умолчанию trading_bot_db (прод)
@@ -203,14 +241,16 @@ refuse_args() {
 init_state() {
     FROM='' TO=head IMAGE='' REWIND='' SRC=$PROD_DB_CONTAINER FAULT='' FINAL_DOWN=1
     EXPECT_COLS='' ALLOW_COUNT='' ALLOW_SCHEMA='' BASE=''
+    CHECKSUM=0 ALLOW_DATA='' EXPECT_NULL='' CHECKSUM_TEMPLATE='' NULL_TEMPLATE=''
+    CHECKSUM_SQL='' NULL_SQL='' CHECKSUM_TABLES=0
     TS='' LOG='' DUMP='' NET='' PG='' TEE_PID=''
     COPY_PW='' FERNET='' COPY_ADDR='' GUARD_PY='' META_PY='' COUNT_SQL='' SCHEMA_SQL=''
     TMPFS_MB=0 DB_MB=0
     NET_CREATED=0 PG_CREATED=0 DUMP_CREATED=0 IMAGE_CHECKED=0
     REASON='' RC=0 DONE=0 ERR_AT='' CUR_STEP='' STEP_T0=0
     AL_OUT='' GUARD_ADDR='' REV=''
-    CHAIN=() STEPS=() SNAP_ORDER=()
-    declare -gA COUNTS=() SCHEMA=()
+    CHAIN=() STEPS=() SNAP_ORDER=() SUM_ORDER=()
+    declare -gA COUNTS=() SCHEMA=() SUMS=()
 }
 
 check_list() { # значение regex имя-флага
@@ -226,7 +266,8 @@ parse_args() {
     while (($#)); do
         case $1 in
             --from | --to | --image | --rewind-to | --source-container | --fault | \
-                --expect-columns | --allow-count-change | --allow-schema-diff)
+                --expect-columns | --allow-count-change | --allow-schema-diff | \
+                --allow-data-change | --expect-null)
                 (($# >= 2)) || refuse_args "у $1 нет значения"
                 opt=$1 val=$2
                 shift 2
@@ -240,7 +281,13 @@ parse_args() {
                     --expect-columns) EXPECT_COLS+=${EXPECT_COLS:+,}$val ;;
                     --allow-count-change) ALLOW_COUNT+=${ALLOW_COUNT:+,}$val ;;
                     --allow-schema-diff) ALLOW_SCHEMA+=${ALLOW_SCHEMA:+,}$val ;;
+                    --allow-data-change) ALLOW_DATA+=${ALLOW_DATA:+,}$val ;;
+                    --expect-null) EXPECT_NULL+=${EXPECT_NULL:+,}$val ;;
                 esac
+                ;;
+            --checksum)
+                CHECKSUM=1
+                shift
                 ;;
             --final-downgrade)
                 FINAL_DOWN=1
@@ -285,6 +332,11 @@ parse_args() {
         [[ $item =~ $IDENT_RE || $item =~ $IDENT2_RE ]] ||
             refuse_args "--allow-schema-diff: «$item» — нужна таблица или таблица.имя"
     done
+    check_list "$ALLOW_DATA" "$IDENT2_RE" --allow-data-change
+    check_list "$EXPECT_NULL" "$IDENT2_RE" --expect-null
+    if [[ -n $ALLOW_DATA ]] && ((!CHECKSUM)); then
+        refuse_args "--allow-data-change — только с --checksum"
+    fi
     BASE=${REWIND:-$FROM}
 }
 
@@ -372,6 +424,52 @@ check_counts() {
     local bad
     bad=$(counts_mismatch baseline "$1") || fail "сверка числа строк ($1) не выполнилась"
     [[ -z $bad ]] || fail "число строк ($1) ≠ baseline: $bad"
+}
+
+# Спецификация md5 из снимка схемы baseline: колонки по таблицам без
+# --allow-data-change. Таблица, у которой исключены все колонки, выпадает.
+build_checksum_sql() {
+    local spec item items cols
+    IFS=, read -ra items <<<"$ALLOW_DATA"
+    for item in "${items[@]}"; do
+        grep -q "^col|${item%%.*}|${item#*.}|" <<<"${SCHEMA[baseline]}" ||
+            refuse "--allow-data-change $item: такой колонки в baseline нет"
+    done
+    cols=$(awk -F'|' -v allow=",$ALLOW_DATA," '
+        $1 == "col" && index(allow, "," $2 "." $3 ",") == 0 {
+            cols[$2] = cols[$2] (cols[$2] == "" ? "" : ",") $3
+        }
+        END { for (t in cols) print t ":" cols[t] }' <<<"${SCHEMA[baseline]}" | LC_ALL=C sort) ||
+        fail "спецификация md5 не собрана"
+    [[ -n $cols ]] || fail "спецификация md5 пуста"
+    while read -r item; do
+        [[ $item =~ ^[A-Za-z0-9_]+:[A-Za-z0-9_]+(,[A-Za-z0-9_]+)*$ ]] ||
+            fail "md5: имя вне [A-Za-z0-9_] — «$item»"
+    done <<<"$cols"
+    CHECKSUM_TABLES=$(grep -c . <<<"$cols")
+    spec=$(tr '\n' ';' <<<"$cols")
+    CHECKSUM_SQL=${CHECKSUM_TEMPLATE//@SPEC@/${spec%;}}
+}
+
+data_snap() {
+    SUMS[$1]=$(copy_sql "$CHECKSUM_SQL") || fail "md5 строк ($1) не посчитан"
+    SUM_ORDER+=("$1")
+}
+
+check_data() {
+    local bad
+    bad=$(LC_ALL=C join -t'|' -a1 -a2 -e '—' -o 0,1.2,2.2 \
+        <(LC_ALL=C sort <<<"${SUMS[baseline]}") <(LC_ALL=C sort <<<"${SUMS[$1]}") |
+        awk -F'|' '$2 != $3 { printf "%s%s", sep, $1; sep = ", " }') ||
+        fail "сверка md5 ($1) не выполнилась"
+    [[ -z $bad ]] || fail "данные ($1) ≠ baseline по md5: $bad"
+}
+
+check_null() {
+    local out bad
+    out=$(copy_sql "$NULL_SQL") || fail "проверка NULL ($1) не выполнилась"
+    bad=$(awk -F'|' '$2 != 0 { printf "%s%s — не NULL в %s строках", sep, $1, $2; sep = "; " }' <<<"$out")
+    [[ -z $bad ]] || fail "после $1: $bad"
 }
 
 schema_of() {
@@ -522,7 +620,14 @@ step_baseline() {
 
     begin_step "Baseline"
     snap baseline
-    end_step "$REV" "таблиц $(grep -c . <<<"${COUNTS[baseline]}"), объектов схемы $(grep -c . <<<"${SCHEMA[baseline]}")"
+    local checks
+    checks="таблиц $(grep -c . <<<"${COUNTS[baseline]}"), объектов схемы $(grep -c . <<<"${SCHEMA[baseline]}")"
+    if ((CHECKSUM)); then
+        build_checksum_sql
+        data_snap baseline
+        checks+=", md5 строк: таблиц $CHECKSUM_TABLES${ALLOW_DATA:+ (без $ALLOW_DATA)}"
+    fi
+    end_step "$REV" "$checks"
 }
 
 migrate_step() { # upgrade|downgrade цель снимок эталон-схемы
@@ -544,6 +649,15 @@ migrate_step() { # upgrade|downgrade цель снимок эталон-схем
     if [[ $dir == upgrade && -n $EXPECT_COLS ]]; then
         check_expected "$label"
         checks+=", колонки $EXPECT_COLS ✅"
+    fi
+    if [[ $dir == upgrade && -n $EXPECT_NULL ]]; then
+        check_null "$label"
+        checks+=", NULL: $EXPECT_NULL ✅"
+    fi
+    if [[ $dir == downgrade ]] && ((CHECKSUM)); then
+        data_snap "$label"
+        check_data "$label"
+        checks+=", данные = baseline (md5, таблиц $CHECKSUM_TABLES)"
     fi
     end_step "$REV" "$checks"
 }
@@ -609,6 +723,27 @@ count_of() {
     awk -F'|' -v t="$2" '$1 == t { print $2; f = 1 } END { if (!f) print "—" }' <<<"${COUNTS[$1]-}"
 }
 
+# md5 по таблицам: первые 8 знаков, ❌ — расхождение с baseline.
+# shellcheck disable=SC2329  # из on_exit (trap)
+render_sums() {
+    local l t h base_h line hdr="| таблица |" sep="|---|"
+    for l in "${SUM_ORDER[@]}"; do
+        hdr+=" $l |"
+        sep+="---|"
+    done
+    echo "$hdr"
+    echo "$sep"
+    while IFS='|' read -r t base_h; do
+        [[ -n $t ]] || continue
+        line="| $t |"
+        for l in "${SUM_ORDER[@]}"; do
+            h=$(awk -F'|' -v t="$t" '$1 == t { print $2; f = 1 } END { if (!f) print "—" }' <<<"${SUMS[$l]}")
+            line+=" ${h:0:8}$([[ $h == "$base_h" ]] || echo ' ❌') |"
+        done
+        echo "$line"
+    done <<<"${SUMS[baseline]}"
+}
+
 # shellcheck disable=SC2329  # из on_exit (trap)
 report() {
     echo
@@ -622,6 +757,12 @@ report() {
         echo "Число строк (прод — для информации, не сверяется):"
         echo
         render_counts
+    fi
+    if ((${#SUM_ORDER[@]})); then
+        echo
+        echo "md5 строк по колонкам baseline${ALLOW_DATA:+ без $ALLOW_DATA} (первые 8 знаков):"
+        echo
+        render_sums
     fi
     if [[ -n ${SCHEMA[baseline]-} && -n ${SCHEMA[upgrade 1]-} ]]; then
         echo
@@ -684,6 +825,9 @@ main() {
     META_PY=$(meta_py)
     COUNT_SQL=$(count_sql)
     SCHEMA_SQL=$(schema_sql)
+    CHECKSUM_TEMPLATE=$(checksum_sql)
+    NULL_TEMPLATE=$(null_sql)
+    NULL_SQL=${NULL_TEMPLATE//@SPEC@/$EXPECT_NULL}
     COPY_PW=$(head -c 18 /dev/urandom | base64 | tr -d '+/=')
     FERNET=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_')
 

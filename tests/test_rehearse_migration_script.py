@@ -8,6 +8,7 @@ Docker на этой машине не работает, сервер в тес�
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -219,6 +220,10 @@ FAKE = ["--source-container", "tb_fakeprod"]
         (["--from", "abc", *IMG, "--expect-columns", "signals"], "--expect-columns"),
         (["--from", "abc", *IMG, "--allow-count-change", "a.b"], "--allow-count-change"),
         (["--from", "abc", *IMG, "--allow-schema-diff", "a.b.c"], "--allow-schema-diff"),
+        (["--from", "abc", *IMG, "--allow-data-change", "signals.atr"], "только с --checksum"),
+        (["--from", "abc", *IMG, "--checksum", "--allow-data-change", "signals"],
+         "--allow-data-change"),
+        (["--from", "abc", *IMG, "--expect-null", "signals"], "--expect-null"),
         (["--from", "abc", *IMG, "--bogus"], "неизвестный аргумент"),
     ],
 )
@@ -335,22 +340,33 @@ def test_guard_matches_and_refuses() -> None:
 # READ ONLY (как src_sql на проде) против trading_bot_test.
 
 _SQL_CALL = re.compile(r'\b(src_sql|copy_sql) "([^"]+)"')
-_SQL_VAR = re.compile(r"^\s*(\w+_SQL)=\$\((\w+)\)$")
+_VAR_FROM_FUNC = re.compile(r"^\s*(\w+)=\$\((\w+_sql)\)$")
+# Шаблон с подстановкой спецификации: X_SQL=${X_TEMPLATE//@SPEC@/…}
+_VAR_FROM_TEMPLATE = re.compile(r"^\s*(\w+_SQL)=\$\{(\w+_TEMPLATE)//@SPEC@/.+\}$")
+SPEC = "@SPEC@"
 
 
 def _sql_calls() -> dict[str, str]:
-    """Аргумент вызова → текст SQL (переменная *_SQL раскрыта через свой heredoc)."""
-    funcs = {m.group(1): m.group(2) for _, ln in CODE if (m := _SQL_VAR.match(ln))}
+    """Аргумент вызова → текст SQL (переменная раскрыта через свой heredoc;
+    у шаблонных @SPEC@ остаётся — тест подставляет свою спецификацию)."""
+    funcs = {m.group(1): m.group(2) for _, ln in CODE if (m := _VAR_FROM_FUNC.match(ln))}
+    templates = {m.group(1): m.group(2) for _, ln in CODE if (m := _VAR_FROM_TEMPLATE.match(ln))}
     out: dict[str, str] = {}
     for _, ln in CODE:
         for m in _SQL_CALL.finditer(ln):
             arg = m.group(2)
-            if arg.startswith("$"):
-                var = arg[1:]
-                assert var in funcs, f"{var} не присвоена из функции-heredoc"
-                out[arg] = _heredoc(funcs[var])
-            else:
+            if not arg.startswith("$"):
                 out[arg] = arg
+                continue
+            var = arg[1:]
+            if var in templates:
+                assert templates[var] in funcs, f"{templates[var]} не присвоен из функции-heredoc"
+                sql = _heredoc(funcs[templates[var]])
+                assert SPEC in sql
+            else:
+                assert var in funcs, f"{var} не присвоена из функции-heredoc"
+                sql = _heredoc(funcs[var])
+            out[arg] = sql
     return out
 
 
@@ -362,6 +378,8 @@ def test_sql_call_sites_are_all_known() -> None:
     assert set(SQL_CALLS) == {
         "$COUNT_SQL",
         "$SCHEMA_SQL",
+        "$CHECKSUM_SQL",
+        "$NULL_SQL",
         "SELECT pg_database_size(current_database())",
         "SELECT version_num FROM alembic_version",
     }
@@ -410,11 +428,40 @@ def _c_sorted(rows: list[str]) -> bool:
     return rows == sorted(rows, key=lambda r: r.encode("utf-8"))
 
 
+def _checksum_spec(exclude: frozenset[str] = frozenset()) -> str:
+    """Спецификация md5 так же, как build_checksum_sql: все колонки снимка схемы
+    по таблицам, «таблица:кол,кол;…», без exclude («таблица.кол»)."""
+    cols: dict[str, list[str]] = {}
+    for row in _run_sql(SQL_CALLS["$SCHEMA_SQL"]):
+        kind, table, col = row.split("|")[:3]
+        if kind == "col" and f"{table}.{col}" not in exclude:
+            cols.setdefault(table, []).append(col)
+    return ";".join(f"{t}:{','.join(c)}" for t, c in sorted(cols.items()))
+
+
+def _sql_for(call: str) -> str:
+    sql = SQL_CALLS[call]
+    if call == "$CHECKSUM_SQL":
+        return sql.replace(SPEC, _checksum_spec())
+    if call == "$NULL_SQL":
+        return sql.replace(SPEC, "alembic_version.version_num")
+    return sql
+
+
 @pytest.mark.skipif(not os.environ.get("DATABASE_URL"), reason="нужна тестовая БД (DATABASE_URL)")
 @pytest.mark.parametrize("call", sorted(SQL_CALLS))
 def test_sql_runs_read_only_with_expected_shape(call: str) -> None:
-    rows = _run_sql(SQL_CALLS[call])
+    rows = _run_sql(_sql_for(call))
     assert rows
+    if call == "$CHECKSUM_SQL":
+        assert all(re.fullmatch(r"[A-Za-z0-9_]+\|[0-9a-f]{32}", r) for r in rows), rows
+        assert _c_sorted(rows)
+        tables = [r.split("|")[0] for r in _run_sql(SQL_CALLS["$COUNT_SQL"])]
+        assert [r.split("|")[0] for r in rows] == tables
+        return
+    if call == "$NULL_SQL":
+        assert rows == ["alembic_version.version_num|1"]
+        return
     if call == "$COUNT_SQL":
         assert all(re.fullmatch(r"[A-Za-z0-9_]+\|\d+", r) for r in rows), rows
         assert "alembic_version|1" in rows
@@ -431,3 +478,50 @@ def test_sql_runs_read_only_with_expected_shape(call: str) -> None:
     else:
         assert len(rows) == 1
         assert _SCRIPT_DIR.get_revision(rows[0]) is not None
+
+
+_needs_db = pytest.mark.skipif(
+    not os.environ.get("DATABASE_URL"), reason="нужна тестовая БД (DATABASE_URL)"
+)
+
+
+@_needs_db
+def test_checksum_equals_md5_of_row_text() -> None:
+    """md5 = md5 строк ROW(…)::text через перевод строки; alembic_version — одна
+    строка «(rev)»."""
+    rev = _run_sql(SQL_CALLS["SELECT version_num FROM alembic_version"])[0]
+    sql = SQL_CALLS["$CHECKSUM_SQL"].replace(SPEC, "alembic_version:version_num")
+    assert _run_sql(sql) == [f"alembic_version|{hashlib.md5(f'({rev})'.encode()).hexdigest()}"]
+
+
+@_needs_db
+def test_checksum_is_deterministic() -> None:
+    sql = SQL_CALLS["$CHECKSUM_SQL"].replace(SPEC, _checksum_spec())
+    assert _run_sql(sql) == _run_sql(sql)
+
+
+@_needs_db
+def test_checksum_exclusion_changes_only_that_table() -> None:
+    """--allow-data-change: исключённая колонка меняет md5 своей таблицы, и только её."""
+    counts = dict(r.split("|") for r in _run_sql(SQL_CALLS["$COUNT_SQL"]))
+    schema = _run_sql(SQL_CALLS["$SCHEMA_SQL"])
+    cols: dict[str, list[str]] = {}
+    for row in schema:
+        kind, table, col = row.split("|")[:3]
+        if kind == "col":
+            cols.setdefault(table, []).append(col)
+    table = next(
+        (t for t in sorted(cols) if int(counts[t]) > 0 and len(cols[t]) >= 2), None
+    )
+    assert table, "в trading_bot_test нет непустой таблицы с ≥2 колонками"
+    excluded = f"{table}.{cols[table][0]}"
+    full = dict(
+        r.split("|") for r in _run_sql(SQL_CALLS["$CHECKSUM_SQL"].replace(SPEC, _checksum_spec()))
+    )
+    part = dict(
+        r.split("|")
+        for r in _run_sql(
+            SQL_CALLS["$CHECKSUM_SQL"].replace(SPEC, _checksum_spec(frozenset({excluded})))
+        )
+    )
+    assert {t for t in full if full[t] != part[t]} == {table}

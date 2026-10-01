@@ -26,7 +26,7 @@ DATABASE_URL=postgresql+asyncpg://test:test@localhost:5432/trading_bot_test
 **Прогон зелёный только при нуле skipped.** Без `DATABASE_URL` молча
 пропускается ~115 интеграционных тестов, и счёт врёт.
 
-Ориентир на 01.10.2026 (скрипт репетиции миграции): 1484 passed, 0 skipped, 0 failed.
+Ориентир на 01.10.2026 (--checksum репетиции миграции): 1492 passed, 0 skipped, 0 failed.
 
 Число тестов в этом файле — ориентир на момент записи, а не факт. Перед
 тем как называть его в плане или отчёте, прогонять пакет и брать свежую
@@ -254,7 +254,7 @@ downgrade не нужен.
    ```
 2. Репетиция. `--from` — ревизия прода (`alembic current`, чек-ап пункт 7)
    ```
-   git -c core.autocrlf=false show HEAD:scripts/rehearse_migration.sh | ssh root@147.45.111.10 bash -s -- --from <rev> --image trading_bot:rehearsal [--expect-columns t.c,…]
+   git -c core.autocrlf=false show HEAD:scripts/rehearse_migration.sh | ssh root@147.45.111.10 bash -s -- --from <rev> --image trading_bot:rehearsal --checksum [--expect-columns t.c,…] [--expect-null t.c,…] [--allow-data-change t.c,…]
    ```
 
 Что делает скрипт: дамп прода `--no-owner --no-privileges` →
@@ -270,14 +270,20 @@ upgrade → downgrade к явной ревизии `--from` (второй downgr
 ровно по длине цепочки, `alembic_version`, `count(*)` всех таблиц = baseline
 (`--allow-count-change t`), нормализованный снимок схемы (колонки по имени,
 индексы, ограничения) после downgrade = baseline, после второго upgrade = первому
-(`--allow-schema-diff таблица[.имя]`). Уборка в `trap` при любом выходе:
+(`--allow-schema-diff таблица[.имя]`). С `--checksum` — md5 строк каждой таблицы
+по колонкам baseline (`ROW(…)::text`, строки по тексту, collation "C") после
+каждого downgrade = baseline; колонки, которые downgrade законно меняет
+(например вид события → `AMBIGUOUS`), — `--allow-data-change таблица.колонка`.
+`--expect-null таблица.колонка` — после каждого upgrade колонка целиком NULL
+(новая, без бэкфилла). Уборка в `trap` при любом выходе:
 контейнер, сеть, тег `trading_bot:rehearsal` (`rmi` без `-f`), дамп — и
 проверка, что их нет. Обрыв ssh уборку не прерывает, вывод дублируется в
 `/opt/backups/rehearsal_<ts>.log`.
 
 Отчёт принят, если: `ИТОГ: OK` и exit 0; во всех столбцах таблицы строк числа
-равны baseline (столбец прода — для информации, бот пишет во время дампа);
-«Схема baseline → upgrade 1» совпадает с офлайн-SQL миграции. Exit 2 — условия
+равны baseline (столбец прода — для информации, бот пишет во время дампа); в
+таблице md5 после downgrade нет ❌; «Схема baseline → upgrade 1» совпадает с
+офлайн-SQL миграции. Exit 2 — условия
 не позволили начать (причина в ИТОГ), exit 1 — сбой или провал репетиции: стоп,
 вывод владельцу, не чинить на ходу. Exit 3 — показать остатки владельцу, руками
 не чистить без «да». Лог забрать в отчёт и удалить.

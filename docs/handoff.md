@@ -16,6 +16,23 @@ B4) — раздел «29.09», подраздел «Деплой 29.09 10:28 UT
 репозитория, в `trading/`). Читать вместе с `docs/architecture.md` (отстаёт) и `CLAUDE.md`
 в корне `trading_bot`. ТЗ этапа 15 — `docs/execution-stage-15.md`.
 
+## 01.10, --checksum — md5 данных и --expect-null в репетиции
+
+- `--checksum`: md5 строк каждой таблицы по колонкам снимка baseline (`ROW(…)::text`,
+  строки по тексту, collation "C"; через `query_to_xml`, только SELECT) — в baseline и
+  после каждого downgrade, расхождение — exit 1 со списком таблиц; в отчёте таблица md5
+  (8 знаков, ❌). `--allow-data-change t.c` — колонка исключается из md5 (только с
+  `--checksum`; колонки нет в baseline — отказ, exit 2). Таблица без колонок после
+  исключения выпадает
+- `--expect-null t.c`: после каждого upgrade `count(*) WHERE col IS NOT NULL` = 0, иначе 1
+- SQL — шаблоны `checksum_sql`/`null_sql` с `@SPEC@`; тест гоняет их на `trading_bot_test`:
+  md5 `alembic_version` = md5 Python от «(rev)», повторяемость, исключение колонки меняет
+  md5 только своей таблицы, NULL-проверка `alembic_version.version_num` = 1
+- Поддельный docker: OK с `--checksum --expect-null`; смена данных на downgrade → 1; она
+  же с `--allow-data-change` → OK; неизвестная колонка в `--allow-data-change` → 2; не-NULL
+  после upgrade → 1; без флагов — как раньше. Спецификация в SQL — `signals:id` (без
+  исключённой `atr_old`)
+
 ## 01.10 — `scripts/rehearse_migration.sh` (проверен на сервере, копия прода — OK)
 
 **Прод не менялся: `0798194`, миграция `ea93de72860d`. Тестов 1484 (0 skipped; +48 —
@@ -25,8 +42,9 @@ B4) — раздел «29.09», подраздел «Деплой 29.09 10:28 UT
 Закрывает хвост «процедура репетиции миграции — скриптом в репо» (раздел 28.09, поздний
 вечер). Процедура, запуск и критерии приёмки — CLAUDE.md «Репетиция миграции» и «Скрипты».
 Решения владельца 01.10: дамп в файл; второй downgrade по умолчанию; откат на проде —
-`downgrade <rev>`, не `-1` (CLAUDE.md исправлен); данные пока только `count` — **md5 строк
-(`--checksum` + `--allow-data-change table.col`) — отдельным коммитом позже**; count прода —
+`downgrade <rev>`, не `-1` (CLAUDE.md исправлен); данные пока только `count` — ~~md5 строк
+(`--checksum` + `--allow-data-change table.col`) — отдельным коммитом позже~~ **сделано 01.10
+(раздел «01.10, --checksum» ниже)**; count прода —
 для информации; tmpfs = max(256 МБ, 3 × размер базы), `--memory 256m`, `fsync=off`,
 `full_page_writes=off`; `.sh` исключены из образа.
 
