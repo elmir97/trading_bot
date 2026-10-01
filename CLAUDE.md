@@ -26,7 +26,7 @@ DATABASE_URL=postgresql+asyncpg://test:test@localhost:5432/trading_bot_test
 **Прогон зелёный только при нуле skipped.** Без `DATABASE_URL` молча
 пропускается ~115 интеграционных тестов, и счёт врёт.
 
-Ориентир на 29.09.2026 (`4c2e337`): 1436 passed, 0 skipped, 0 failed.
+Ориентир на 01.10.2026 (скрипт репетиции миграции): 1477 passed, 0 skipped, 0 failed.
 
 Число тестов в этом файле — ориентир на момент записи, а не факт. Перед
 тем как называть его в плане или отчёте, прогонять пакет и брать свежую
@@ -94,6 +94,24 @@ docker compose exec -T bot python -m scripts.signal_outcomes [--horizon 50] [--j
   (`replay` совпал со снимком / `replay≠`); срезы по ТФ, сетапу, направлению,
   порогам признаков и «один сигнал на пробой» (`breakout_at`)
 - `--json` пишет файл внутри контейнера — забрать и удалить
+
+`scripts/rehearse_migration.sh` — репетиция миграции на копии прода, запуск и отчёт —
+«Деплой» → «Репетиция миграции».
+
+- на проде только читает: `pg_dump` и SELECT (`count`, `pg_database_size`) в контейнере
+  `trading_bot_db` с `default_transaction_read_only=on`
+- запускать **только из HEAD через stdin** (`git show HEAD:…`), не из
+  `/opt/trading_bot/scripts`: там версия прошлого деплоя. В образ `.sh` не попадают
+  (`.dockerignore`), CRLF им запрещён (`.gitattributes`)
+- docker — только через `dk()` (`</dev/null` внутри), alembic — только через `al()`
+  (проверка адреса в том же контейнере), последняя строка `main "$@"; exit $?` —
+  `tests/test_rehearse_migration_script.py` это проверяет. Правка скрипта —
+  `shellcheck scripts/rehearse_migration.sh` (из `shellcheck-py`, на этой машине
+  `python -m pip install -r requirements-dev.txt`) и этот тест
+- коды выхода: 0 OK, 1 FAIL, 2 отказ до изменения копии, 3 уборка неполная (перекрывает
+  0/1). Лог `/opt/backups/rehearsal_<ts>.log` (600) уборка не удаляет — забрать и удалить
+- флаги проверки самого скрипта: `--source-container <не прод>`, `--fault wrong-db`
+  (только с ним, без `--rewind-to`), `--rewind-to <rev>` (репетиция уже стоящей миграции)
 
 `scripts/check_redis.py` — PING и цикл проверок лока, запускать на проде:
 
@@ -169,7 +187,8 @@ Upgrade идёт одной транзакцией: `alembic/env.py` обора�
 одним `context.begin_transaction()`, `transaction_per_migration` не задан.
 Падение посреди бэкфилла откатывает всё целиком.
 
-0. Репетиция на копии прода (ниже) — пройдена, отчёт принят
+0. Репетиция на копии прода `scripts/rehearse_migration.sh` (ниже) — `ИТОГ: OK`,
+   отчёт принят владельцем
 1. Чек-ап прода, шаги 1-4 обычного деплоя (umask, дамп, снапшот, код, md5,
    **точка отката `rollback_<ts>` с проверкой `docker image inspect`**)
 2. `docker compose build bot` — пока старый бот работает
@@ -192,8 +211,8 @@ Upgrade идёт одной транзакцией: `alembic/env.py` обора�
 **Откат**, если провалился шаг 6 или 7:
 
 ```
-docker compose run --rm --no-deps bot alembic downgrade -1   # НОВЫЙ образ — в нём файл миграции
-docker compose run --rm --no-deps bot alembic current        # == предыдущая ревизия
+docker compose run --rm --no-deps bot alembic downgrade <rev>  # <rev> — ревизия до деплоя; НОВЫЙ образ — в нём файл миграции
+docker compose run --rm --no-deps bot alembic current          # == <rev>
 docker tag trading_bot-bot:rollback_<ts> trading_bot-bot:latest   # образ шага 1
 docker compose up -d --no-deps bot
 docker compose logs --tail 50 bot
@@ -206,31 +225,57 @@ Nullable-колонка без бэкфилла downgrade не требует: �
 работает, откатывается только образ.
 
 Порядок важен: сначала downgrade новым образом (старый образ не знает
-файла миграции), и только потом старый код. Если шаг 6 упал целиком,
+файла миграции), и только потом старый код. Downgrade — к явной ревизии,
+не `-1`: при двух миграциях за деплой `-1` откатит одну, а репетиция
+прогоняла откат именно к `<rev>`. Если шаг 6 упал целиком,
 транзакция уже откатилась — `alembic current` покажет старую ревизию,
 downgrade не нужен.
 
 ### Репетиция миграции
 
-До деплоя, на сервере, данные не покидают его. `umask 077`.
+До деплоя, на сервере, данные не покидают его. Две команды из Git Bash, из
+корня `trading_bot`, на закоммиченном HEAD. Перед ними — показать владельцу
+и получить «да».
 
-1. Свежий дамп прода `pg_dump --no-owner --no-privileges` →
-   `/opt/backups/rehearsal_<ts>.sql.gz`, `gzip -t`, режим 600
-2. Временная сеть `docker network create tb_rehearsal_net` и контейнер
-   Postgres **того же образа, что в `docker-compose.yml` прода** (сейчас
-   `postgres:16-alpine`), `--tmpfs` под данные, без `-p`. Восстановить дамп
-   через `psql -v ON_ERROR_STOP=1`
-3. Образ нового кода под отдельным тегом (`trading_bot:rehearsal`) из
-   `git archive` во временном каталоге — боевой образ и `/opt/trading_bot`
-   не трогать. Alembic запускать с `-e DATABASE_URL=…@<контейнер репетиции>`;
-   перед каждым шагом `SELECT current_database(), inet_server_addr()` —
-   адрес контейнера репетиции, иначе стоп
-4. До миграции: данные, от которых она зависит; снимок значимых колонок
-5. `alembic upgrade head` → проверки схемы и данных
-6. `downgrade -1` → схема вернулась, данные не потеряны → снова `upgrade head`
-7. Ещё раз `downgrade -1` с проверкой — это прогон процедуры отката
-8. Уборка: контейнер, сеть, образ, временный каталог, дамп репетиции.
-   Проверить, что ничего не осталось
+1. Образ нового кода — tar `git archive` прямо в `docker build` (контекст из
+   stdin, на диск сервера ничего, `/opt/trading_bot` и боевой образ не
+   тронуты). Сначала свободная RAM: VPS 1.9 ГБ без swap, рядом работает бот —
+   меньше 700 МБ available, и сборка не запускается
+   ```
+   git -c core.autocrlf=false archive HEAD | ssh root@147.45.111.10 'm=$(free -m | grep "^Mem:" | tr -s " " | cut -d" " -f7); echo "RAM available: $m MB"; [ "$m" -ge 700 ] && exec docker build -t trading_bot:rehearsal -'
+   ```
+2. Репетиция. `--from` — ревизия прода (`alembic current`, чек-ап пункт 7)
+   ```
+   git -c core.autocrlf=false show HEAD:scripts/rehearse_migration.sh | ssh root@147.45.111.10 bash -s -- --from <rev> --image trading_bot:rehearsal [--expect-columns t.c,…]
+   ```
+
+Что делает скрипт: дамп прода `--no-owner --no-privileges` →
+`/opt/backups/rehearsal_<ts>.sql.gz` (600, `gzip -t`); копия — `postgres:16-alpine`
+(образ сверяется с контейнером прода) в tmpfs = max(256 МБ, 3 × размер базы),
+`--memory 256m`, `fsync=off`, своя `--internal`-сеть, без `-p`; restore с
+`ON_ERROR_STOP=1`; ревизия копии == `--from`, иначе отказ; upgrade → downgrade →
+upgrade → downgrade к явной ревизии `--from` (второй downgrade — прогон отката,
+`--no-final-downgrade` убирает). Alembic — `docker run` образа репетиции в сети
+копии, без `.env` и compose; перед каждым шагом тот же контейнер сверяет
+`current_database()` = `trading_bot_rehearsal` и `inet_server_addr()` = адрес копии,
+иначе alembic не запускается. После каждого шага: строк `Running upgrade/downgrade`
+ровно по длине цепочки, `alembic_version`, `count(*)` всех таблиц = baseline
+(`--allow-count-change t`), нормализованный снимок схемы (колонки по имени,
+индексы, ограничения) после downgrade = baseline, после второго upgrade = первому
+(`--allow-schema-diff таблица[.имя]`). Уборка в `trap` при любом выходе:
+контейнер, сеть, тег `trading_bot:rehearsal` (`rmi` без `-f`), дамп — и
+проверка, что их нет. Обрыв ssh уборку не прерывает, вывод дублируется в
+`/opt/backups/rehearsal_<ts>.log`.
+
+Отчёт принят, если: `ИТОГ: OK` и exit 0; во всех столбцах таблицы строк числа
+равны baseline (столбец прода — для информации, бот пишет во время дампа);
+«Схема baseline → upgrade 1» совпадает с офлайн-SQL миграции. Exit 3 —
+показать остатки владельцу, руками не чистить без «да». Лог забрать в отчёт и
+удалить.
+
+**Скрипт ещё не прогонялся на сервере (01.10)** — первые прогоны по плану в
+`docs/handoff.md`. До первого зелёного прогона ручная процедура —
+`git show b74a887:CLAUDE.md`, раздел «Репетиция миграции».
 
 Переменные окружения на проде добавлять через
 `docker-compose.override.yml`, не правкой `.env`. Исключение —
