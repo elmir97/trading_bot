@@ -576,6 +576,9 @@ async def _resolve(
             position_side=position_side,
             order_type=(OrderType.STOP_MARKET if is_stop else OrderType.TAKE_PROFIT_MARKET).value,
             stop_price=level,
+            # Без quantity BingX отклоняет closePosition-ордер (109400,
+            # разведка 02.10) — путь спасения 15.5.3 в проде не работал.
+            quantity=order.quantity,
             client_order_id=row.client_order_id or "",
         )
     except ExchangeError as exc:

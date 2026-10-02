@@ -101,6 +101,23 @@ class ExecutionRefusalCode(StrEnum):
     # подтверждена. См. ExecutionService.adjust_leverage().
     LEVERAGE_FAILED = "LEVERAGE_FAILED"
 
+    # --- Этап 4: действия с позицией ---------------------------------------
+    POSITION_GONE = "POSITION_GONE"              # позиции уже нет на бирже
+    POSITION_CHANGED = "POSITION_CHANGED"        # объём/стоп/тейк изменились после карточки
+    CARD_EXPIRED = "CARD_EXPIRED"                # карточка старше exec_confirm_ttl_seconds
+    CARD_STALE = "CARD_STALE"                    # «Да» не на той карточке / уже обработана
+    STOP_WRONG_SIDE = "STOP_WRONG_SIDE"          # стоп сработал бы сразу
+    TAKE_WRONG_SIDE = "TAKE_WRONG_SIDE"          # тейк сработал бы сразу
+    STOP_AMBIGUOUS = "STOP_AMBIGUOUS"            # несколько стопов (лестница)
+    TAKE_AMBIGUOUS = "TAKE_AMBIGUOUS"            # несколько тейков
+    CLOSE_TOO_SMALL = "CLOSE_TOO_SMALL"          # закрываемая часть меньше минимума биржи
+    REMAINDER_TOO_SMALL = "REMAINDER_TOO_SMALL"  # остаток меньше минимума биржи
+    BREAKEVEN_NOT_REACHED = "BREAKEVEN_NOT_REACHED"  # цена ещё не за безубытком
+    RISK_INCREASE_NOT_CONFIRMED = "RISK_INCREASE_NOT_CONFIRMED"  # нужна «Да, увеличить риск»
+    RISK_CAP_EXCEEDED = "RISK_CAP_EXCEEDED"      # новый риск больше потолка плана
+    RISK_CAP_UNKNOWN = "RISK_CAP_UNKNOWN"        # потолок не проверить (нет плана/equity)
+    INVALID_PRICE = "INVALID_PRICE"              # введённая цена не число / ≤ 0
+
 
 @dataclass(frozen=True, slots=True)
 class ExecutionRefusal:
@@ -203,3 +220,13 @@ class OrderRequest:
             f"client_order_id[sl]={self.stop_loss_client_order_id} "
             f"client_order_id[tp]={self.take_profit_client_order_id}"
         )
+
+
+def action_client_order_id(*, action_id: int, user_id: int, role: OrderRole) -> str:
+    """Этап 4: ключ идемпотентности ордера действия с позицией —
+    f"tm{action_id}u{user_id}{role.letter}" (S — стоп, T — тейк, C —
+    закрытие). Префикс tm, не tj: не пересекается с ключами входа по сигналу.
+    action_id — position_actions.id (снимок карточки): повторное «Да» и «Да»
+    после рестарта дают ту же строку, UNIQUE не пустит второй ордер. Длина
+    на максимумах — 24 символа, лимит BingX 1–40."""
+    return f"tm{action_id}u{user_id}{role.letter}"

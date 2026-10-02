@@ -33,10 +33,12 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 from aiogram import Bot
+from sqlalchemy import select
 
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.security import SecretCipher
+from app.database.models.position_action import PositionAction
 from app.database.models.user import User, UserSettings
 from app.database.repositories.reconciliation_event import ReconciliationEventRepository
 from app.database.repositories.trade import TradeRepository
@@ -272,7 +274,14 @@ class DailyJobs:
         reconciler_events = await ReconciliationEventRepository(session).list_between(
             user.id, window_start, now
         )
-        stats = build_stats(reconciler_events)
+        actions = list(await session.scalars(
+            select(PositionAction).where(
+                PositionAction.user_id == user.id,
+                PositionAction.created_at >= window_start,
+                PositionAction.created_at < now,
+            )
+        ))
+        stats = build_stats(reconciler_events, actions)
 
         text = render_execution_digest(
             stats,

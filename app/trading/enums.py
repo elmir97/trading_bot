@@ -174,6 +174,8 @@ class OrderRole(StrEnum):
     ENTRY = "ENTRY"
     STOP_LOSS = "STOP_LOSS"
     TAKE_PROFIT = "TAKE_PROFIT"
+    # Этап 4: маркет на закрытие позиции (частичное или полное).
+    CLOSE = "CLOSE"
 
     @property
     def letter(self) -> str:
@@ -184,6 +186,7 @@ class OrderRole(StrEnum):
             OrderRole.ENTRY: "E",
             OrderRole.STOP_LOSS: "S",
             OrderRole.TAKE_PROFIT: "T",
+            OrderRole.CLOSE: "C",
         }[self]
 
 

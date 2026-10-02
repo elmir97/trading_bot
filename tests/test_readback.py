@@ -447,6 +447,8 @@ async def test_missing_stop_is_rescued_with_close_position(  # type: ignore[no-u
     assert call["position_side"] == position_side
     assert call["stop_price"] == order.stop_loss
     assert call["client_order_id"] == f"tj{n.id}u{user.id}S"
+    # Путь спасения 15.5.3 без quantity BingX отклонял (109400, разведка 02.10).
+    assert call["quantity"] == order.quantity
     assert result.stop.outcome is ConditionalOutcome.RESCUED
     assert result.alarm is None
     [s] = await _rows(session, n.id, OrderRole.STOP_LOSS)

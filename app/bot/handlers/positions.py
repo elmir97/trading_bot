@@ -8,8 +8,9 @@
 символу). Ниже — открытые сделки только из журнала (без позиции на бирже):
 их закрывают как раньше, вводом цены выхода (app/bot/handlers/trades.py).
 
-Только чтение биржи: ордеров экран не отправляет. Действия с позицией —
-этап 4.
+Сам экран биржу только читает; кнопки действий (стоп в безубыток, стоп,
+тейк, 25%/50%, закрыть) ведут в карточки подтверждения
+(app/bot/handlers/position_actions.py, этап 4).
 """
 
 from __future__ import annotations
@@ -18,11 +19,12 @@ from datetime import UTC, datetime, timedelta
 
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.handlers.exchange import ExchangeCB, _describe, _market_cache
+from app.bot.handlers.position_actions import action_buttons
 from app.bot.keyboards.main import MenuCallback
 from app.bot.keyboards.trade import TradeCB
 from app.bot.messaging import edit_or_replace
@@ -58,20 +60,28 @@ class PositionsCB:
 def positions_keyboard(views: list[PositionView], journal: list[Trade]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for view in views:
+        p = view.position
+        # Этап 4: действия с позицией — по три кнопки в ряд.
+        buttons = [
+            InlineKeyboardButton(text=text, callback_data=data)
+            for text, data in action_buttons(p.symbol, p.side)
+        ]
+        for i in range(0, len(buttons), 3):
+            builder.row(*buttons[i:i + 3])
         if view.trade is None:
-            p = view.position
-            builder.button(
+            builder.row(InlineKeyboardButton(
                 text=f"📥 В журнал: {p.symbol.replace('-USDT', '')} {p.side.value}",
                 callback_data=f"{PositionsCB.IMPORT}{p.symbol}",
-            )
+            ))
     for trade in journal:
-        builder.button(
+        builder.row(InlineKeyboardButton(
             text=f"{trade.symbol} {trade.side.value} #{trade.id}",
             callback_data=f"{TradeCB.CLOSE}{trade.id}",
-        )
-    builder.button(text="🔄 Обновить", callback_data=PositionsCB.REFRESH)
-    builder.button(text="◀️ В меню", callback_data=MenuCallback.MAIN)
-    builder.adjust(1)
+        ))
+    builder.row(
+        InlineKeyboardButton(text="🔄 Обновить", callback_data=PositionsCB.REFRESH),
+        InlineKeyboardButton(text="◀️ В меню", callback_data=MenuCallback.MAIN),
+    )
     return builder.as_markup()
 
 

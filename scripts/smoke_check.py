@@ -13,6 +13,7 @@ import asyncio
 import re
 import sys
 from datetime import UTC, datetime
+from decimal import Decimal as D
 from typing import Any, NoReturn
 
 sys.path.insert(0, ".")
@@ -27,10 +28,13 @@ from app.core.security import SecretCipher, mask_secret
 from app.database.models.credentials import ExchangeCredentials
 from app.database.models.execution_callback import ExecutionCallback
 from app.database.models.execution_order import ExecutionOrder
+from app.database.models.position_action import PositionAction
 from app.database.models.user import User
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
-from app.trading.enums import ExchangeKeyMode
+from app.exchanges.base import Balance, OpenOrder, Position, SymbolInfo
+from app.exchanges.bingx import BingXClient
+from app.trading.enums import ExchangeKeyMode, TradeSide
 from scripts.simulate_chat import USER_ID, build  # noqa: E402
 
 # Скрипт пишет и удаляет реальные строки — только тестовая база. Имя, а не
@@ -437,6 +441,9 @@ async def _run_scenarios(sim, tg, db, redis, settings) -> None:  # type: ignore[
     print("\n[14] Ключи биржи и старые кнопки сигналов")
     await _run_execution_scenario(sim, tg, db, redis, settings)
 
+    print("\n[15] Действия с позицией (этап 4)")
+    await _run_position_actions(sim, tg, db, settings)
+
 
 # --- [14] Ключи биржи и старые кнопки сигналов --------------------------------
 #
@@ -524,6 +531,125 @@ async def _run_execution_scenario(sim, tg, db, redis, settings) -> None:  # type
         not presses and not orders,
         f"нажатий {len(presses)}, ордеров {len(orders)}",
     )
+
+
+# --- [15] Действия с позицией (этап 4) -----------------------------------------
+#
+# Путь кнопки: экран «Позиции» → карточка → «Да». Биржа — заглушки leaf-методов
+# BingXClient (как в бывшем [14] входа); ExchangeFactory, проверки, Redis-лок,
+# журнал нажатий, БД — настоящие. EXEC_DRY_RUN по умолчанию true — «Да» пишет
+# DRY_RUN и на биржу не ходит; метод без заглушки упрётся в запрет сети.
+
+_XRP = SymbolInfo("XRP-USDT", 4, 0, D(2), D(2))
+
+
+async def _fake_positions(self, *, max_retries=None) -> list[Position]:  # type: ignore[no-untyped-def]
+    return [Position(
+        symbol="XRP-USDT", side=TradeSide.LONG, quantity=D(30), entry_price=D("1.5253"),
+        mark_price=D("1.56"), leverage=20, unrealized_pnl=D("1.04"),
+        liquidation_price=D("1.4553"), position_id="2105907655281221634",
+    )]
+
+
+async def _fake_open_orders(self, symbol=None, *, max_retries=None) -> list[OpenOrder]:  # type: ignore[no-untyped-def]
+    now = datetime.now(UTC)
+    return [OpenOrder(
+        order_id="2105910661355233280", client_order_id="", symbol="XRP-USDT", side="SELL",
+        position_side="LONG", order_type="STOP_MARKET", quantity=D(40), executed_qty=D(0),
+        price=D(0), stop_price=D("1.4795"), status="NEW", leverage=20, reduce_only=True,
+        close_position=True, working_type="MARK_PRICE", created_at=now, updated_at=now,
+        take_profit=None, stop_loss=None,
+    )]
+
+
+async def _fake_mark(self, symbol: str) -> D:  # type: ignore[no-untyped-def]
+    return D("1.56")
+
+
+async def _fake_symbols(self, *, max_retries=None) -> list[SymbolInfo]:  # type: ignore[no-untyped-def]
+    return [_XRP]
+
+
+async def _fake_balance(self, *, max_retries=None) -> Balance:  # type: ignore[no-untyped-def]
+    return Balance("USDT", D(9000), D(100), D(0), D(10000))
+
+
+async def _fake_position_mode(self, *, max_retries=None) -> bool:  # type: ignore[no-untyped-def]
+    return True
+
+
+_STUBS = {
+    "get_positions": _fake_positions,
+    "get_open_orders": _fake_open_orders,
+    "get_mark_price": _fake_mark,
+    "get_symbols": _fake_symbols,
+    "get_balance": _fake_balance,
+    "get_position_mode": _fake_position_mode,
+}
+
+
+async def _run_position_actions(sim, tg, db, settings) -> None:  # type: ignore[no-untyped-def]
+    # Действия разрешены на счёте bingx_allowed_exchange_mode (демо по
+    # умолчанию) — переключаем счёт тем же тапом, что пользователь.
+    await sim.send("/start")
+    await sim.tap("Настройки")
+    await sim.tap("Счёт")
+    originals = {name: getattr(BingXClient, name) for name in _STUBS}
+    for name, fake in _STUBS.items():
+        setattr(BingXClient, name, fake)
+    try:
+        await sim.send("/start")
+        text = await sim.tap("Позиции")
+        check("«Позиции»: позиция с биржи", has(text, "XRP-USDT", "на всю позицию"), text[:300])
+        buttons = list(sim.available_buttons())
+        check("«Позиции»: кнопки действий", any("стоп в БУ" in b for b in buttons), str(buttons))
+
+        text = await sim.tap("стоп в БУ")
+        check("карточка безубытка", has(text, "стоп в безубыток", "не торговая рекомендация"),
+              text[:300])
+        text = await sim.tap("Да")
+        check("«Да» в сухом прогоне", has(text, "сухой прогон"), text[:200])
+
+        async with db.session() as session:
+            user = await UserRepository(session).get_by_telegram_id(USER_ID)
+            actions = list(await session.scalars(
+                select(PositionAction).where(PositionAction.user_id == user.id)
+                .order_by(PositionAction.id)
+            ))
+            orders = list(await session.scalars(
+                select(ExecutionOrder).where(ExecutionOrder.position_action_id.is_not(None))
+                .where(ExecutionOrder.user_id == user.id)
+            ))
+            presses = [p.action for p in await session.scalars(
+                select(ExecutionCallback).where(ExecutionCallback.user_id == user.id)
+                .order_by(ExecutionCallback.id)
+            )]
+        check("действие: DRY_RUN",
+              [a.status.value for a in actions] == ["DRY_RUN"], str([a.status for a in actions]))
+        check("ордер действия: DRY_RUN на всю позицию",
+              len(orders) == 1 and orders[0].status.value == "DRY_RUN"
+              and orders[0].quantity == D(30), str([(o.status, o.quantity) for o in orders]))
+        check("журнал нажатий: pm_open, pm_yes", presses == ["pm_open", "pm_yes"], str(presses))
+
+        # Стоп дальше от входа — риск растёт: только «Да, увеличить риск».
+        await sim.send("/start")
+        await sim.tap("Позиции")
+        await sim.tap("✏️")
+        text = await sim.send("1.40")
+        check("карточка роста риска", has(text, "риск увеличится"), text[:300])
+        buttons = list(sim.available_buttons())
+        check("кнопка «Да, увеличить риск»", any("увеличить риск" in b for b in buttons),
+              str(buttons))
+        async with db.session() as session:
+            last = await session.scalar(
+                select(PositionAction).where(PositionAction.user_id == user.id)
+                .order_by(PositionAction.id.desc())
+            )
+        text = await sim.tap_data(f"pm:y:{last.id}")
+        check("обычное «Да» при росте риска отклонено", has(text, "увеличить риск"), text[:200])
+    finally:
+        for name, method in originals.items():
+            setattr(BingXClient, name, method)
 
 
 if __name__ == "__main__":

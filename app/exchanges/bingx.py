@@ -32,6 +32,7 @@ from app.exchanges.base import (
     ApiRestrictions,
     AttachedTpSl,
     Balance,
+    CancelResult,
     ExchangeAuthError,
     ExchangeClient,
     ExchangeRateLimitError,
@@ -45,6 +46,7 @@ from app.exchanges.base import (
     OpenInterest,
     OpenOrder,
     OrderFill,
+    OrderNotFoundError,
     OrderResult,
     Position,
     PremiumIndex,
@@ -64,6 +66,8 @@ QUOTE_TICKER = "/openApi/swap/v2/quote/ticker"
 QUOTE_KLINES = "/openApi/swap/v3/quote/klines"
 QUOTE_PREMIUM_INDEX = "/openApi/swap/v2/quote/premiumIndex"
 QUOTE_OPEN_INTEREST = "/openApi/swap/v2/quote/openInterest"
+# Отмена несуществующего ордера (живьём 02.10): code 109400 + «order not exist».
+ORDER_NOT_EXIST_CANCEL_CODE = 109400
 USER_BALANCE = "/openApi/swap/v3/user/balance"
 USER_POSITIONS = "/openApi/swap/v2/user/positions"
 # Раздел 8 ТЗ: права ключа. Проверено живым запросом (не по документации —
@@ -465,7 +469,8 @@ class BingXClient(ExchangeClient):
             url = f"{path}?{urlencode(params)}" if params else path
             headers = {}
 
-        send = self._client.get if method == "GET" else self._client.post
+        if method not in ("GET", "POST", "DELETE"):
+            raise ValueError(f"Неподдерживаемый метод: {method}")
         retries = max_retries if max_retries is not None else self._max_retries
 
         await self._maybe_throttle(method, path)
@@ -474,7 +479,7 @@ class BingXClient(ExchangeClient):
 
         for attempt in range(1, retries + 1):
             try:
-                response = await send(url, headers=headers)
+                response = await self._client.request(method, url, headers=headers)
                 self.request_count += 1
             except httpx.TimeoutException as exc:
                 last_error = ExchangeUnavailableError(
@@ -1150,14 +1155,15 @@ class BingXClient(ExchangeClient):
         position_side: str,
         order_type: str,
         stop_price: Decimal,
+        quantity: Decimal,
         client_order_id: str,
     ) -> OrderResult:
-        """Шаг 15.5.3: см. ExchangeClient.place_conditional_order. Тот же
-        путь /trade/order, что и у входа, но type — условный, stopPrice
-        вместо quantity и closePosition=true. max_retries=1 — торговый
-        вызов, повтор после обрыва мог бы выставить второй ордер (раздел 8
-        ТЗ, как у place_market_order). Форма параметров — по документации
-        BingX, живьём не снята (раздел 16, 15.5.5)."""
+        """См. ExchangeClient.place_conditional_order. Тот же путь
+        /trade/order, что и у маркета: type — условный, closePosition=true и
+        quantity (обязателен — без него 109400 «parameter quantity or
+        stopPrice is must», разведка 02.10; при срабатывании закрывается весь
+        остаток, исполнено 30 при quantity 40). max_retries=1 — торговый
+        вызов, повтор после обрыва мог бы выставить второй ордер."""
         if order_type not in (OrderType.STOP_MARKET.value, OrderType.TAKE_PROFIT_MARKET.value):
             raise ValueError(f"Не условный тип ордера: {order_type!r}")
         if not 1 <= len(client_order_id) <= 40:
@@ -1171,6 +1177,7 @@ class BingXClient(ExchangeClient):
             "positionSide": position_side,
             "type": order_type,
             "stopPrice": _decimal_literal(stop_price),
+            "quantity": _decimal_literal(quantity),
             "closePosition": "true",
             "workingType": CONDITIONAL_WORKING_TYPE,
             "clientOrderID": client_order_id,
@@ -1180,6 +1187,30 @@ class BingXClient(ExchangeClient):
         )
         order = data.get("order", data) if isinstance(data, dict) else {}
         return self._parse_order(order)
+
+    async def cancel_order(self, symbol: str, order_id: str) -> CancelResult:
+        """DELETE /openApi/swap/v2/trade/order (живьём 02.10): code 0 →
+        data.order со status "CANCELLED"; повторная отмена → code 109400 и
+        msg «order not exist» — OrderNotFoundError (по тексту: тот же код у
+        других ошибок). Ответ — не доказательство (см. CancelResult).
+        max_retries=1 — как у остальных торговых вызовов."""
+        try:
+            data = await self._request(
+                TRADE_ORDER, {"symbol": symbol, "orderId": str(order_id)},
+                signed=True, method="DELETE", max_retries=1,
+            )
+        except ExchangeResponseError as exc:
+            if exc.code == ORDER_NOT_EXIST_CANCEL_CODE and "not exist" in str(exc).lower():
+                raise OrderNotFoundError(str(exc), code=exc.code, payload=exc.payload) from exc
+            raise
+        order = data.get("order", data) if isinstance(data, dict) else {}
+        if not isinstance(order, dict):
+            raise ExchangeResponseError("Ожидался объект ордера в data.order")
+        return CancelResult(
+            order_id=str(order.get("orderId") or order.get("orderID") or order_id),
+            status=str(order.get("status", "")),
+            raw=order,
+        )
 
     async def get_order_fill(
         self, symbol: str, client_order_id: str, *, max_retries: int | None = None

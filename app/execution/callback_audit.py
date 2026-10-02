@@ -48,6 +48,7 @@ async def record_callback(
     chat_id: int | None,
     message_id: int | None,
     callback_query_id: str | None,
+    position_action_id: int | None = None,
 ) -> None:
     async with db.session() as session:
         await session.execute(text(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"))
@@ -56,6 +57,7 @@ async def record_callback(
                 user_id=user_id,
                 action=action.value,
                 notification_id=notification_id,
+                position_action_id=position_action_id,
                 chat_id=chat_id,
                 message_id=message_id,
                 callback_query_id=callback_query_id,
@@ -65,11 +67,12 @@ async def record_callback(
     extra: dict[str, object] = {
         "action": action.value,
         "notification_id": notification_id,
+        "position_action_id": position_action_id,
         "user_id": user_id,
         "tg": mask_telegram_id(telegram_id),
         "message_id": message_id,
         "callback_id": callback_query_id,
     }
-    if notification_id is None:
+    if notification_id is None and position_action_id is None:
         extra["raw_data"] = (raw_data or "")[:RAW_DATA_LOG_LIMIT]
     logger.info("Нажатие кнопки исполнения", extra=extra)

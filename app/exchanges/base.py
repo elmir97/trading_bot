@@ -92,6 +92,15 @@ class UnsupportedPositionMode(ExchangeResponseError):  # noqa: N818 — не с�
         self.symbol = symbol
 
 
+class OrderNotFoundError(ExchangeResponseError):
+    """Ордера нет на бирже — ответ на отмену (DELETE) уже отменённого или
+    исполненного ордера. Живьём 02.10: code 109400, msg «order not exist».
+    Код 109400 общий (им же BingX отвечает «parameter quantity or stopPrice
+    is must»), поэтому различаем по тексту ответа, не по коду. Для
+    идемпотентной отмены это не провал — но и не доказательство: снят ли
+    ордер, подтверждает только повторное чтение openOrders."""
+
+
 class ReadbackIncomplete(ExchangeResponseError):  # noqa: N818 — имя из ТЗ шага 15.5.3
     """Шаг 15.5.3: в ответе чтения ордера нет обязательного поля.
 
@@ -413,6 +422,19 @@ class OrderResult:
 
 
 @dataclass(frozen=True, slots=True)
+class CancelResult:
+    """Ответ на отмену ордера (DELETE /openApi/swap/v2/trade/order).
+
+    Не доказательство отмены: у ордера с closePosition BingX отвечает
+    type "LIMIT", пустыми stopPrice/workingType/closePosition (живьём 02.10),
+    статус — "CANCELLED" (две L). Снят ли ордер — только по openOrders."""
+
+    order_id: str
+    status: str
+    raw: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
 class OrderFill:
     """Шаг 15.5.3: исполнение ордера по строгому чтению (get_order_fill).
 
@@ -612,13 +634,15 @@ class ExchangeClient(ABC):
         position_side: str,
         order_type: str,
         stop_price: Decimal,
+        quantity: Decimal,
         client_order_id: str,
     ) -> OrderResult:
-        """Шаг 15.5.3: отдельный условный ордер (STOP_MARKET/
-        TAKE_PROFIT_MARKET) с closePosition=true — спасение стопа/тейка,
-        которые не прикрепились к входу. Без quantity: closePosition
-        закрывает позицию целиком, не завися от частичного исполнения.
-        Тип триггера — CONDITIONAL_WORKING_TYPE, тот же, что у вложенных."""
+        """Отдельный условный ордер (STOP_MARKET/TAKE_PROFIT_MARKET) с
+        closePosition=true на всю позицию. quantity обязателен (документация
+        BingX с 24.08.2026; без него — 109400, разведка 02.10) — объём
+        позиции, формальный: при срабатывании закрывается весь остаток,
+        после частичного закрытия ордер не переставляется. reduceOnly не
+        отправляется (хедж-режим). Тип триггера — CONDITIONAL_WORKING_TYPE."""
         ...
 
     @abstractmethod
@@ -633,6 +657,11 @@ class ExchangeClient(ABC):
     async def get_mark_price(self, symbol: str) -> Decimal:
         """Mark price символа — по нему срабатывают стопы и тейки бота
         (workingType=MARK_PRICE). Не абстрактный: нужен только монитору."""
+        raise NotImplementedError
+
+    async def cancel_order(self, symbol: str, order_id: str) -> CancelResult:
+        """Отмена ордера (этап 4). OrderNotFoundError — ордера уже нет.
+        Не абстрактный: фейкам, которым отмена не нужна, не обязателен."""
         raise NotImplementedError
 
     async def get_premium_index(self, symbol: str) -> PremiumIndex:

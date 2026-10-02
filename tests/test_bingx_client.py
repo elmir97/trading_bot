@@ -23,6 +23,7 @@ from app.exchanges.base import (
     ExchangeRateLimitError,
     ExchangeResponseError,
     ExchangeUnavailableError,
+    OrderNotFoundError,
     ReadbackIncomplete,
     TpSlSpec,
     UnsupportedPositionMode,
@@ -1669,8 +1670,9 @@ class TestPlaceConditionalOrder:
     ни одного спасения на демо не было."""
 
     async def test_stop_market_close_position_params(self) -> None:
-        """Спасение стопа LONG: закрывающая сторона SELL, positionSide LONG,
-        closePosition=true, без quantity, тот же workingType, что у входа."""
+        """Стоп LONG на всю позицию: SELL, positionSide LONG, closePosition=true
+        И quantity (без него BingX — 109400, разведка 02.10), MARK_PRICE, без
+        reduceOnly (хедж-режим)."""
 
         def handler(request: httpx.Request) -> httpx.Response:
             assert request.method == "POST"
@@ -1682,13 +1684,14 @@ class TestPlaceConditionalOrder:
             assert params["closePosition"] == "true"
             assert params["workingType"] == CONDITIONAL_WORKING_TYPE
             assert params["clientOrderID"] == "tj105u1S"
-            assert "quantity" not in params
+            assert params["quantity"] == "40"
+            assert "reduceOnly" not in params
             return ok({"order": {"orderId": 2100000000000000009, "status": "NEW"}})
 
         client = make_client(handler)
         result = await client.place_conditional_order(
             symbol="BTC-USDT", side=OrderSide.SELL, position_side="LONG",
-            order_type="STOP_MARKET", stop_price=D("84300.1"),
+            order_type="STOP_MARKET", stop_price=D("84300.1"), quantity=D("40"),
             client_order_id="tj105u1S",
         )
         assert result.order_id == "2100000000000000009"
@@ -1699,7 +1702,8 @@ class TestPlaceConditionalOrder:
         with pytest.raises(ValueError, match="Не условный"):
             await client.place_conditional_order(
                 symbol="BTC-USDT", side=OrderSide.SELL, position_side="LONG",
-                order_type="MARKET", stop_price=D("1"), client_order_id="tj1u1S",
+                order_type="MARKET", stop_price=D("1"), quantity=D("1"),
+                client_order_id="tj1u1S",
             )
         await client.close()
 
@@ -1715,7 +1719,7 @@ class TestPlaceConditionalOrder:
         with pytest.raises(ExchangeUnavailableError):
             await client.place_conditional_order(
                 symbol="BTC-USDT", side=OrderSide.BUY, position_side="SHORT",
-                order_type="TAKE_PROFIT_MARKET", stop_price=D("80000"),
+                order_type="TAKE_PROFIT_MARKET", stop_price=D("80000"), quantity=D("0.5"),
                 client_order_id="tj105u1T",
             )
         assert calls["n"] == 1
@@ -2089,4 +2093,70 @@ class TestStrictPublicData:
             symbols = await client.get_symbols()
         assert "BTC-USDT" not in {s.symbol for s in symbols}
         assert not caplog.records
+        await client.close()
+
+
+
+class TestCancelOrder:
+    """DELETE /openApi/swap/v2/trade/order — живые ответы 02.10 (разведка 0в)."""
+
+    async def test_cancel_closeposition_order_live_form(self) -> None:
+        """Ответ на отмену closePosition-ордера живьём: type LIMIT, пустой
+        stopPrice — разбирается, но доказательством не служит."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.method == "DELETE"
+            params = dict(httpx.QueryParams(request.url.query))
+            assert params["symbol"] == "XRP-USDT"
+            assert params["orderId"] == "2105907857156825088"
+            return ok({"order": {
+                "orderId": 2105907857156825088, "symbol": "XRP-USDT", "side": "SELL",
+                "positionSide": "LONG", "type": "LIMIT", "status": "CANCELLED",
+                "stopPrice": "", "price": "0.0000", "origQty": "40", "executedQty": "0",
+                "workingType": "", "closePosition": "", "reduceOnly": False,
+                "clientOrderId": "recon0va",
+            }})
+
+        client = make_client(handler)
+        result = await client.cancel_order("XRP-USDT", "2105907857156825088")
+        assert result.order_id == "2105907857156825088"   # число > 2^53 — строкой без потерь
+        assert result.status == "CANCELLED"
+        await client.close()
+
+    async def test_repeat_cancel_is_order_not_found(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"code": 109400, "msg": "order not exist", "data": {}})
+
+        client = make_client(handler)
+        with pytest.raises(OrderNotFoundError):
+            await client.cancel_order("XRP-USDT", "2105898709895700480")
+        await client.close()
+
+    async def test_same_code_other_text_is_plain_error(self) -> None:
+        """109400 общий: «parameter quantity or stopPrice is must» — не «нет ордера»."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={
+                "code": 109400, "msg": "parameter quantity or stopPrice is must", "data": {},
+            })
+
+        client = make_client(handler)
+        with pytest.raises(ExchangeResponseError) as caught:
+            await client.cancel_order("XRP-USDT", "1")
+        assert not isinstance(caught.value, OrderNotFoundError)
+        assert caught.value.code == 109400
+        await client.close()
+
+    async def test_cancel_does_not_retry(self) -> None:
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            raise httpx.TimeoutException("timeout")
+
+        client = make_client(handler, max_retries=3)
+        client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
+        with pytest.raises(ExchangeUnavailableError):
+            await client.cancel_order("XRP-USDT", "1")
+        assert calls["n"] == 1
         await client.close()

@@ -76,3 +76,10 @@ def confirm_lock_key(user_id: int, notification_id: int) -> str:
     15.5.2а: ключ адресует снимок уведомления, а не слот (прежний формат
     exec:lock:{user_id}:{signal_id}), и два формата не путаются."""
     return f"exec:lock:{user_id}:n{notification_id}"
+
+
+def position_lock_key(user_id: int, symbol: str, side: str) -> str:
+    """Этап 4: лок действия с позицией — exec:lock:{user_id}:p{symbol}:{side}.
+    Одна позиция — одно действие в полёте; префикс exec:lock: тот же, что у
+    входа, — reconciler пропускает цикл, пока жив любой такой ключ."""
+    return f"exec:lock:{user_id}:p{symbol}:{side}"

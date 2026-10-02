@@ -22,8 +22,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+from app.database.models.position_action import PositionAction
 from app.database.models.reconciliation_event import ReconciliationEvent
-from app.trading.enums import ANOMALY_KINDS, ReconciliationKind
+from app.trading.enums import ANOMALY_KINDS, PositionActionStatus, ReconciliationKind
 
 if TYPE_CHECKING:
     # Только тип: сводке не нужен весь reconciler (биржа, журнал) при импорте.
@@ -45,12 +46,20 @@ class ExecutionDigestStats:
     # переотправке или отказ) — и последнее из них (вид, символ).
     undelivered: int = 0
     last_undelivered: tuple[ReconciliationKind, str] | None = None
+    # Этап 4: карточки действий с позицией за окно — по статусу.
+    actions: dict[PositionActionStatus, int] = field(default_factory=dict)
 
 
-def build_stats(reconciler_events: list[ReconciliationEvent]) -> ExecutionDigestStats:
+def build_stats(
+    reconciler_events: list[ReconciliationEvent],
+    actions: list[PositionAction] | None = None,
+) -> ExecutionDigestStats:
     """reconciler_events — события reconciliation_events одного пользователя
-    за окно сводки (ReconciliationEventRepository.list_between)."""
+    за окно сводки (ReconciliationEventRepository.list_between); actions —
+    карточки действий с позицией за то же окно (этап 4)."""
     stats = ExecutionDigestStats()
+    for action in actions or []:
+        stats.actions[action.status] = stats.actions.get(action.status, 0) + 1
     for event in reconciler_events:
         bucket = (
             stats.reconciler_anomalies if event.kind in ANOMALY_KINDS else stats.reconciler_facts
@@ -99,6 +108,27 @@ def _by_kind(counts: dict[ReconciliationKind, int]) -> str:
     )
 
 
+_ACTION_LABELS = {
+    PositionActionStatus.DONE: "выполнено",
+    PositionActionStatus.DRY_RUN: "сухой прогон",
+    PositionActionStatus.FAILED: "сбой",
+    PositionActionStatus.REFUSED: "отказ",
+    PositionActionStatus.DECLINED: "отменено",
+    PositionActionStatus.EXPIRED: "устарело",
+    PositionActionStatus.SUBMITTED: "в процессе",
+    PositionActionStatus.CARD: "без решения",
+}
+
+
+def _actions_line(counts: dict[PositionActionStatus, int]) -> str:
+    total = sum(counts.values())
+    parts = ", ".join(
+        f"{_ACTION_LABELS[status]} {counts[status]}"
+        for status in _ACTION_LABELS if counts.get(status)
+    )
+    return f"карточек {total} ({parts})"
+
+
 def detect_anomalies(stats: ExecutionDigestStats) -> list[str]:
     """Пункты «Аномалий» — то, что человек глазами бы не поймал."""
     anomalies: list[str] = []
@@ -110,6 +140,12 @@ def detect_anomalies(stats: ExecutionDigestStats) -> list[str]:
         anomalies.append(
             f"сверка с биржей: расхождений {total} ({_by_kind(stats.reconciler_anomalies)})"
         )
+
+    # Этап 4: действие не выполнено после «Да» (биржа отказала, read-back не
+    # подтвердил, старый стоп не снялся) — человек должен посмотреть сам.
+    failed = stats.actions.get(PositionActionStatus.FAILED, 0)
+    if failed:
+        anomalies.append(f"действия с позициями не выполнены — {failed}")
 
     # 28.09: уведомление сверки так и не ушло — человек мог не узнать о
     # закрытии или тревоге. От одного случая.
@@ -151,6 +187,9 @@ def render_execution_digest(
         lines.append(f"Сверка с биржей: {_by_kind(stats.reconciler_facts)}")
     else:
         lines.append("Сверка с биржей: событий нет")
+
+    if stats.actions:
+        lines.append(f"Действия с позициями: {_actions_line(stats.actions)}")
 
     lines.append("")
     if anomalies:
