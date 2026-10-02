@@ -16,6 +16,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from app.core.config import Settings
 from app.core.security import mask_telegram_id
 from app.database.models.execution_callback import ExecutionCallback
+from app.database.models.user import User
 from app.database.repositories.strategy import MistakeTypeRepository, StrategyRepository
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
@@ -71,6 +72,7 @@ async def test_record_survives_rollback_of_update_transaction(unique_telegram_id
     """Транзакция апдейта откатилась (хендлер упал) — нажатие осталось."""
     settings = Settings()  # type: ignore[call-arg]
     db = Database(settings)
+    user_id = None
     try:
         async with db.session() as setup:
             users = UserRepository(setup)
@@ -99,7 +101,16 @@ async def test_record_survives_rollback_of_update_transaction(unique_telegram_id
         async with db.session() as s:
             await s.delete(await s.get(type(user), user_id))
         assert await _rows(db, user_id) == []
+        user_id = None
     finally:
+        # Упавший тест тоже убирает за собой: telegram_id в тестах идёт
+        # детерминированно с 500000, и остаток попал бы в следующий прогон
+        # (02.10: два прогона на старом коде оставили два лишних нажатия).
+        if user_id is not None:
+            async with db.session() as s:
+                leftover = await s.get(User, user_id)
+                if leftover is not None:
+                    await s.delete(leftover)
         await db.dispose()
 
 
