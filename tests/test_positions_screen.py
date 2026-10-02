@@ -1,7 +1,7 @@
 """Экран «💼 Позиции» (этап 3, app/bot/handlers/positions.py): позиции с
 биржи со стопом/тейком из openOrders, сделки только из журнала с закрытием,
-кнопка «📥 В журнал» — импорт по символу. Биржа, репозиторий и импорт
-подменены — без сети и БД."""
+кнопка «⚙️ XRP LONG» — экран действий позиции, «📥 В журнал» — только текущая
+позиция. Биржа, репозиторий и импорт подменены — без сети и БД."""
 
 from __future__ import annotations
 
@@ -32,9 +32,9 @@ D = Decimal
 NOW = datetime(2026, 10, 2, 6, 30, tzinfo=UTC)
 
 
-def _position(symbol: str = "XRP-USDT") -> Position:
+def _position(symbol: str = "XRP-USDT", side: TradeSide = TradeSide.LONG) -> Position:
     return Position(
-        symbol=symbol, side=TradeSide.LONG, quantity=D(30), entry_price=D("1.5253"),
+        symbol=symbol, side=side, quantity=D(30), entry_price=D("1.5253"),
         mark_price=D("1.5263"), leverage=20, unrealized_pnl=D("0.03"),
         liquidation_price=D("1.4553"), position_id="2105907655281221634",
     )
@@ -84,7 +84,10 @@ class _Client:
 
 @pytest.fixture
 def env(monkeypatch):  # type: ignore[no-untyped-def]
-    state = SimpleNamespace(client=None, auth_error=False, trades=[], imports=[])
+    state = SimpleNamespace(
+        client=None, auth_error=False, trades=[], imports=[],
+        import_outcome=SimpleNamespace(trade=SimpleNamespace(id=21), refusal=None),
+    )
 
     class Factory:
         def __init__(self, settings, cipher) -> None:  # type: ignore[no-untyped-def]
@@ -99,9 +102,9 @@ def env(monkeypatch):  # type: ignore[no-untyped-def]
         def __init__(self, client, trades, user_id) -> None:  # type: ignore[no-untyped-def]
             pass
 
-        async def import_period(self, start, end, account_balance=None, *, symbol=None):  # type: ignore[no-untyped-def]
-            state.imports.append((end - start, symbol))
-            return SimpleNamespace(errors=[], trades_created=1, render=lambda: "")
+        async def import_open_position(self, start, end, *, symbol, side, quantity):  # type: ignore[no-untyped-def]
+            state.imports.append((end - start, symbol, side, quantity))
+            return state.import_outcome
 
     async def list_open(self, user_id, limit=50):  # type: ignore[no-untyped-def]
         return list(state.trades)
@@ -136,12 +139,17 @@ def _user() -> SimpleNamespace:
 
 async def _open(env, data: str = MenuCallback.OPEN_POSITIONS):  # type: ignore[no-untyped-def]
     callback = _callback(data)
-    importing = data.startswith(PositionsCB.IMPORT)
-    handler = screen.import_position if importing else screen.show_positions
+    if data.startswith(PositionsCB.IMPORT):
+        handler = screen.import_position
+    elif data.startswith(PositionsCB.ACTIONS):
+        handler = screen.show_actions
+    else:
+        handler = screen.show_positions
     await handler(callback, MagicMock(), _user(), settings=None, cipher=None)  # type: ignore[arg-type]
     text = callback.message.edit_text.await_args.args[0]
     keyboard = callback.message.edit_text.await_args.kwargs["reply_markup"]
     buttons = {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
+    env.rows = [[b.text for b in row] for row in keyboard.inline_keyboard]
     return text, buttons
 
 
@@ -152,7 +160,11 @@ async def test_exchange_position_with_close_position_stop(env) -> None:  # type:
     assert "XRP-USDT</b> LONG · 30" in text
     assert "Стоп: 1.5241 (на всю позицию)" in text and "Тейк: нет" in text
     assert "⚠️ Не в журнале" in text
-    assert buttons["📥 В журнал: XRP LONG"] == f"{PositionsCB.IMPORT}XRP-USDT"
+    assert buttons["📥 В журнал: XRP LONG"] == f"{PositionsCB.IMPORT}XRP-USDT:L"
+    assert buttons["⚙️ XRP LONG"] == f"{PositionsCB.ACTIONS}XRP-USDT:L"
+    assert env.rows[0] == ["⚙️ XRP LONG", "📥 В журнал: XRP LONG"]
+    # Действия — на экране позиции, не в списке.
+    assert not any(data.startswith("pa:") for data in buttons.values())
     assert env.client.open_orders_symbols == [None]  # один запрос на все символы
     assert env.client.closed
 
@@ -192,11 +204,62 @@ async def test_empty(env) -> None:  # type: ignore[no-untyped-def]
     assert set(buttons.values()) == {PositionsCB.REFRESH, MenuCallback.MAIN}
 
 
-async def test_import_button_imports_that_symbol(env) -> None:  # type: ignore[no-untyped-def]
+async def test_several_positions_one_row_each(env) -> None:  # type: ignore[no-untyped-def]
+    env.client = _Client([_position(), _position("BTC-USDT"), _position(side=TradeSide.SHORT)], [])
+    env.trades = [_trade(12, "BTC-USDT")]
+    _, buttons = await _open(env)
+    assert sorted(env.rows[:3]) == sorted([
+        ["⚙️ XRP LONG", "📥 В журнал: XRP LONG"],
+        ["⚙️ BTC LONG"],                      # в журнале — без «В журнал»
+        ["⚙️ XRP SHORT", "📥 В журнал: XRP SHORT"],
+    ])
+    assert buttons["⚙️ XRP SHORT"] == f"{PositionsCB.ACTIONS}XRP-USDT:S"
+
+
+async def test_actions_screen_full_labels_two_per_row(env) -> None:  # type: ignore[no-untyped-def]
+    env.client = _Client([_position(), _position(side=TradeSide.SHORT)], [_stop()])
+    text, buttons = await _open(env, f"{PositionsCB.ACTIONS}XRP-USDT:L")
+    assert "<b>⚙️ Действия · XRP-USDT LONG</b>" in text
+    assert "Стоп: 1.5241 (на всю позицию)" in text
+    assert env.rows == [
+        ["🛡 Стоп в безубыток", "✏️ Изменить стоп"],
+        ["🎯 Тейк", "✂️ Закрыть 25%"],
+        ["✂️ Закрыть 50%", "❌ Закрыть всё"],
+        ["◀️ К позициям"],
+    ]
+    assert buttons["🛡 Стоп в безубыток"] == "pa:be:XRP-USDT:L"
+    assert buttons["❌ Закрыть всё"] == "pa:cf:XRP-USDT:L"
+    assert buttons["◀️ К позициям"] == PositionsCB.REFRESH
+
+
+async def test_actions_screen_position_gone_back_to_list(env) -> None:  # type: ignore[no-untyped-def]
+    env.client = _Client([], [])
+    text, _ = await _open(env, f"{PositionsCB.ACTIONS}XRP-USDT:L")
+    assert "Позиции XRP-USDT LONG на бирже уже нет." in text
+    assert "<b>💼 Позиции · " in text
+
+
+async def test_import_button_imports_current_position_only(env) -> None:  # type: ignore[no-untyped-def]
     env.client = _Client([_position()], [])
-    text, _ = await _open(env, f"{PositionsCB.IMPORT}XRP-USDT")
-    assert env.imports == [(timedelta(days=screen.IMPORT_DAYS), "XRP-USDT")]
-    assert "📥 XRP-USDT: сделок создано — 1" in text
+    text, _ = await _open(env, f"{PositionsCB.IMPORT}XRP-USDT:L")
+    assert env.imports == [
+        (timedelta(days=screen.IMPORT_DAYS), "XRP-USDT", TradeSide.LONG, D(30))
+    ]
+    assert "📥 XRP-USDT LONG: в журнале — сделка #21." in text
+
+
+async def test_import_refusal_points_to_full_import(env) -> None:  # type: ignore[no-untyped-def]
+    env.client = _Client([_position()], [])
+    env.import_outcome = SimpleNamespace(trade=None, refusal="Объём не сходится.")
+    text, _ = await _open(env, f"{PositionsCB.IMPORT}XRP-USDT:L")
+    assert "📥 XRP-USDT LONG: Объём не сходится. Историю целиком — /import." in text
+
+
+async def test_import_position_gone_imports_nothing(env) -> None:  # type: ignore[no-untyped-def]
+    env.client = _Client([], [])
+    text, _ = await _open(env, f"{PositionsCB.IMPORT}XRP-USDT:L")
+    assert env.imports == []
+    assert "позиции на бирже уже нет" in text
 
 
 async def test_exchange_menu_button_opens_same_screen(env) -> None:  # type: ignore[no-untyped-def]

@@ -602,9 +602,16 @@ async def _run_position_actions(sim, tg, db, settings) -> None:  # type: ignore[
         text = await sim.tap("Позиции")
         check("«Позиции»: позиция с биржи", has(text, "XRP-USDT", "на всю позицию"), text[:300])
         buttons = list(sim.available_buttons())
-        check("«Позиции»: кнопки действий", any("стоп в БУ" in b for b in buttons), str(buttons))
+        check("«Позиции»: кнопка позиции, действий в списке нет",
+              "⚙️ XRP LONG" in buttons and not any("безубыток" in b for b in buttons),
+              str(buttons))
 
-        text = await sim.tap("стоп в БУ")
+        text = await sim.tap("⚙️ XRP LONG")
+        buttons = list(sim.available_buttons())
+        check("экран действий позиции", has(text, "Действия · XRP-USDT LONG")
+              and "🛡 Стоп в безубыток" in buttons and "◀️ К позициям" in buttons, str(buttons))
+
+        text = await sim.tap("Стоп в безубыток")
         check("карточка безубытка", has(text, "стоп в безубыток", "не торговая рекомендация"),
               text[:300])
         text = await sim.tap("Да")
@@ -634,7 +641,8 @@ async def _run_position_actions(sim, tg, db, settings) -> None:  # type: ignore[
         # Стоп дальше от входа — риск растёт: только «Да, увеличить риск».
         await sim.send("/start")
         await sim.tap("Позиции")
-        await sim.tap("✏️")
+        await sim.tap("⚙️ XRP LONG")
+        await sim.tap("Изменить стоп")
         text = await sim.send("1.40")
         check("карточка роста риска", has(text, "риск увеличится"), text[:300])
         buttons = list(sim.available_buttons())

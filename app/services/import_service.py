@@ -73,6 +73,14 @@ class ImportResult:
         return "\n".join(lines)
 
 
+@dataclass(frozen=True, slots=True)
+class OpenPositionImport:
+    """Итог «📥 В журнал»: сделка или причина отказа (ничего не записано)."""
+
+    trade: Trade | None
+    refusal: str | None
+
+
 @dataclass(slots=True)
 class _PendingTrade:
     """Накопитель исполнений одной позиции до её закрытия."""
@@ -183,16 +191,10 @@ class HistoryImporter:
         start: datetime,
         end: datetime,
         account_balance: Decimal | None = None,
-        *,
-        symbol: str | None = None,
     ) -> ImportResult:
-        """symbol — только исполнения этого инструмента (кнопка «В журнал» на
-        экране «Позиции», этап 3); None — все, как в обычном импорте."""
         result = ImportResult()
 
         fills, errors = await self.fetch_fills(start, end)
-        if symbol is not None:
-            fills = [f for f in fills if f.symbol == symbol]
         result.fills_received = len(fills)
         result.errors = errors
 
@@ -227,6 +229,48 @@ class HistoryImporter:
             },
         )
         return result
+
+    async def import_open_position(
+        self, start: datetime, end: datetime, *, symbol: str, side: TradeSide, quantity: Decimal
+    ) -> OpenPositionImport:
+        """Кнопка «📥 В журнал» (экран «Позиции»): только ТЕКУЩАЯ открытая
+        позиция — исполнения её входа (и частичных выходов, если были).
+        Закрытые сделки символа за период не создаются: история — /import.
+
+        Исполнения символа и стороны группируются как в обычном импорте;
+        текущая позиция — незакрытая группа. Её открытый объём обязан
+        совпасть с объёмом позиции на бирже, иначе отказ без записи: вход
+        старше периода или исполнения не все — сделка с чужой ценой входа
+        испортила бы статистику."""
+        fills, errors = await self.fetch_fills(start, end)
+        if errors:
+            return OpenPositionImport(None, "Биржа отдала историю не полностью: " + errors[0])
+        fills = [f for f in fills if f.symbol == symbol and f.side == side]
+        active = [g for g in group_fills_into_trades(fills) if not g.is_closed]
+        if not active:
+            return OpenPositionImport(None, "Исполнений входа текущей позиции не найдено.")
+        pending = active[-1]
+        if pending.open_quantity != quantity:
+            return OpenPositionImport(
+                None,
+                f"Объём по исполнениям ({pending.open_quantity.normalize():f}) не сходится "
+                f"с позицией на бирже ({quantity.normalize():f}) — вход, видимо, раньше "
+                "периода. Сделку не создал.",
+            )
+        ids = [f.external_id for f in pending.fills if f.external_id is not None]
+        known = await self._trades.existing_fill_ids(self._user_id, self._client.name, ids)
+        result = ImportResult()
+        kept = await self._drop_bot_fills(pending.fills, result)
+        if known or len(kept) != len(pending.fills):
+            return OpenPositionImport(None, "Исполнения этой позиции уже есть в журнале.")
+        trade = self._build_trade(pending, None)
+        self._trades.add(trade)
+        await self._trades.flush()
+        logger.info(
+            "Позиция занесена в журнал",
+            extra={"user_id": self._user_id, "symbol": symbol, "fills": len(pending.fills)},
+        )
+        return OpenPositionImport(trade, None)
 
     async def _drop_bot_fills(self, fills: list[Fill], result: ImportResult) -> list[Fill]:
         """Шаг 15.5.4: исполнения ордеров бота (вход, стоп, тейк) не

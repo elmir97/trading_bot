@@ -395,20 +395,72 @@ async def test_live_fill_with_empty_number_is_window_error_not_trade(ctx, field:
     assert len(result.errors) == 1 and field in result.errors[0]
 
 
-async def test_symbol_filter_imports_only_that_instrument(ctx) -> None:  # type: ignore[no-untyped-def]
-    """Этап 3, кнопка «В журнал» на экране «Позиции»: импорт только
-    исполнений выбранного инструмента."""
+def xrp(fid: str, minutes: int, *, entry: bool, qty: str, price: str = "1.52") -> Fill:
     from dataclasses import replace
 
-    user, repo, session = ctx
-    btc = fill("s1", 0, entry=True, price="100000")
-    xrp = replace(fill("s2", 1, entry=True, price="1.5253", qty="40"), symbol="XRP-USDT")
-    exchange = FakeExchange([btc, xrp])
+    return replace(fill(fid, minutes, entry=entry, price=price, qty=qty), symbol="XRP-USDT")
 
-    result = await HistoryImporter(exchange, repo, user.id).import_period(
-        BASE - timedelta(hours=1), BASE + timedelta(hours=2), symbol="XRP-USDT"
+
+# Кнопка «📥 В журнал» на экране «Позиции»: только текущая позиция. 02.10 на
+# демо она занесла и две закрытые сделки разведки этапа 0 по тому же символу.
+XRP_HISTORY = [
+    xrp("r1", 0, entry=True, qty="40"),            # разведка: закрыта
+    xrp("r2", 9, entry=False, qty="10"),
+    xrp("r3", 10, entry=False, qty="30"),
+    xrp("r4", 40, entry=True, qty="40"),           # разведка: закрыта
+    xrp("r5", 41, entry=False, qty="10"),
+    xrp("r6", 55, entry=False, qty="30"),
+    fill("b1", 60, entry=True, price="100000"),    # другой символ
+    xrp("c1", 90, entry=True, qty="30", price="1.5394"),   # текущая позиция
+    xrp("c2", 91, entry=True, qty="10", price="1.5400"),
+]
+WINDOW = (BASE - timedelta(hours=1), BASE + timedelta(hours=3))
+
+
+async def test_open_position_button_imports_only_current_position(ctx) -> None:  # type: ignore[no-untyped-def]
+    user, repo, session = ctx
+    outcome = await HistoryImporter(FakeExchange(XRP_HISTORY), repo, user.id).import_open_position(
+        *WINDOW, symbol="XRP-USDT", side=TradeSide.LONG, quantity=D(40)
     )
 
-    assert result.trades_created == 1
-    [trade] = await repo.list_open(user.id)
-    assert trade.symbol == "XRP-USDT" and trade.quantity == D(40)
+    assert outcome.refusal is None
+    [trade] = await repo.list_recent(user.id)
+    assert trade.id == outcome.trade.id
+    assert trade.status is TradeStatus.OPEN and trade.symbol == "XRP-USDT"
+    assert trade.quantity == D(40)
+    assert sorted(f.external_fill_id for f in outcome.trade.fills) == ["c1", "c2"]
+
+
+async def test_open_position_quantity_mismatch_writes_nothing(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Вход старше периода: открытый объём по исполнениям ≠ позиции —
+    отказ, без сделки с неверной ценой входа."""
+    user, repo, _ = ctx
+    outcome = await HistoryImporter(FakeExchange(XRP_HISTORY), repo, user.id).import_open_position(
+        *WINDOW, symbol="XRP-USDT", side=TradeSide.LONG, quantity=D(55)
+    )
+
+    assert outcome.trade is None and "не сходится" in str(outcome.refusal)
+    assert await repo.list_recent(user.id) == []
+
+
+async def test_open_position_without_entries_refused(ctx) -> None:  # type: ignore[no-untyped-def]
+    user, repo, _ = ctx
+    outcome = await HistoryImporter(
+        FakeExchange(XRP_HISTORY[:6]), repo, user.id
+    ).import_open_position(*WINDOW, symbol="XRP-USDT", side=TradeSide.LONG, quantity=D(40))
+
+    assert outcome.trade is None and "не найдено" in str(outcome.refusal)
+    assert await repo.list_recent(user.id) == []
+
+
+async def test_open_position_already_in_journal_refused(ctx) -> None:  # type: ignore[no-untyped-def]
+    user, repo, session = ctx
+    importer = HistoryImporter(FakeExchange(XRP_HISTORY), repo, user.id)
+    args = {"symbol": "XRP-USDT", "side": TradeSide.LONG, "quantity": D(40)}
+    first = await importer.import_open_position(*WINDOW, **args)
+    await session.flush()
+    second = await importer.import_open_position(*WINDOW, **args)
+
+    assert first.trade is not None
+    assert second.trade is None and "уже есть в журнале" in str(second.refusal)
+    assert len(await repo.list_recent(user.id)) == 1

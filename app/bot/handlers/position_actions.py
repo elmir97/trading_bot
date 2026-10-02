@@ -1,6 +1,7 @@
 """Кнопки действий с позицией (этап 4): карточка подтверждения и «Да».
 
-Кнопки — на экране «Позиции» (app/bot/handlers/positions.py):
+Кнопки — на экране действий позиции («Позиции» → «⚙️ XRP LONG»,
+app/bot/handlers/positions.py):
 pa:{be|sl|tp|c25|c50|cf}:{SYMBOL}:{L|S}. Стоп/тейк на свою цену — ввод
 числом (FSM). Карточка — pm:y:{id} «Да», pm:r:{id} «⚠️ Да, увеличить риск»,
 pm:n:{id} «Нет»; id — position_actions.id (снимок карточки).
@@ -44,8 +45,8 @@ AUDIT_FAILED_TEXT = (
     "отправлено. Попробуй ещё раз."
 )
 
-_SIDE = {"L": TradeSide.LONG, "S": TradeSide.SHORT}
-_SIDE_CODE = {TradeSide.LONG: "L", TradeSide.SHORT: "S"}
+SIDE_BY_CODE = {"L": TradeSide.LONG, "S": TradeSide.SHORT}
+SIDE_CODE = {TradeSide.LONG: "L", TradeSide.SHORT: "S"}
 
 # Код кнопки → (действие, параметры). sl/tp — сначала ввод цены.
 _DIRECT: dict[str, tuple[PositionActionKind, dict[str, object]]] = {
@@ -72,16 +73,17 @@ class PositionActionStates(StatesGroup):
 
 
 def action_buttons(symbol: str, side: TradeSide) -> list[tuple[str, str]]:
-    """Подписи и callback_data кнопок действий одной позиции."""
-    short = symbol.replace("-USDT", "")
-    tail = f"{symbol}:{_SIDE_CODE[side]}"
+    """Подписи и callback_data кнопок экрана действий одной позиции
+    (app/bot/handlers/positions.py, «⚙️ XRP LONG»): позиция — в заголовке
+    экрана, подписи без символа."""
+    tail = f"{symbol}:{SIDE_CODE[side]}"
     return [
-        (f"🛡 {short}: стоп в БУ", f"{ActionCB.OPEN}be:{tail}"),
-        (f"✏️ {short}: стоп", f"{ActionCB.OPEN}sl:{tail}"),
-        (f"🎯 {short}: тейк", f"{ActionCB.OPEN}tp:{tail}"),
-        (f"✂️ {short}: 25%", f"{ActionCB.OPEN}c25:{tail}"),
-        (f"✂️ {short}: 50%", f"{ActionCB.OPEN}c50:{tail}"),
-        (f"❌ {short}: закрыть", f"{ActionCB.OPEN}cf:{tail}"),
+        ("🛡 Стоп в безубыток", f"{ActionCB.OPEN}be:{tail}"),
+        ("✏️ Изменить стоп", f"{ActionCB.OPEN}sl:{tail}"),
+        ("🎯 Тейк", f"{ActionCB.OPEN}tp:{tail}"),
+        ("✂️ Закрыть 25%", f"{ActionCB.OPEN}c25:{tail}"),
+        ("✂️ Закрыть 50%", f"{ActionCB.OPEN}c50:{tail}"),
+        ("❌ Закрыть всё", f"{ActionCB.OPEN}cf:{tail}"),
     ]
 
 
@@ -106,9 +108,9 @@ def back_to_positions() -> InlineKeyboardMarkup:
 
 def _parse_open(data: str) -> tuple[str, str, TradeSide] | None:
     parts = data.removeprefix(ActionCB.OPEN).split(":")
-    if len(parts) != 3 or parts[2] not in _SIDE:
+    if len(parts) != 3 or parts[2] not in SIDE_BY_CODE:
         return None
-    return parts[0], parts[1], _SIDE[parts[2]]
+    return parts[0], parts[1], SIDE_BY_CODE[parts[2]]
 
 
 def _service(

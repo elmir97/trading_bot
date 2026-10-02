@@ -85,8 +85,11 @@ def fmt_qty(value: Decimal | None, precision: int = 8) -> str:
 def fmt_money(value: Decimal | None) -> str:
     if value is None:
         return "—"
-    sign = "+" if value > 0 else ""
     rounded = value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if rounded == 0:
+        # -0.004 → «0.00», не «-0.00»; и не «+0.00» у +0.004.
+        return "0.00"
+    sign = "+" if rounded > 0 else ""
     return f"{sign}{rounded:f}"
 
 
@@ -99,4 +102,4 @@ def fmt_amount(value: Decimal | None) -> str:
     if value is None:
         return "—"
     rounded = value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    return f"{rounded:f}"
+    return "0.00" if rounded == 0 else f"{rounded:f}"
