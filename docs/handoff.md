@@ -107,6 +107,48 @@ B4) — раздел «29.09», подраздел «Деплой 29.09 10:28 UT
 - Удалён `rollback_20261001_134816` (`e88c7650bbc2`) по «да» владельца. `rollback_20261002_053858` —
   снять после первого «Пульса reconciler» без ошибок (решение владельца)
 
+### Этап 0б — документация BingX (без отправок)
+
+Источник — docs-v3 (bingx-api.github.io/docs-v3, текст из JS-бандла: страница — SPA). Запись журнала
+изменений **2026-08-24**: «quantity and stopPrice remain mandatory when closePosition=true; reduceOnly must
+not be sent in Hedge Mode».
+- **TP/SL на всю позицию через API есть** — тот же `POST /openApi/swap/v2/trade/order`, `type`
+  `STOP_MARKET`/`TAKE_PROFIT_MARKET`, `closePosition=true` **и обязательные `quantity` + `stopPrice`**
+  (пример в документации — `POSITION_STOP_MARKET`). Старая документация v2 писала «not used with
+  quantity» — по ней написан `place_conditional_order`, отсюда 109400
+- `closePosition`: «closes the entire position after triggering… reduce-only effect, must not be used
+  with reduceOnly». `reduceOnly` в хедж-режиме не слать вообще
+- «The accumulative quantity of the pending stop loss orders cannot be greater than the quantity of open
+  positions» (так же тейки). Живьём 1a стоп владельца с `closePosition` + наш с qty 40 при позиции 40
+  приняты — похоже, `closePosition`-ордера в сумму не входят (проверить)
+- `POST /openApi/swap/v1/trade/cancelReplace`: `cancelReplaceMode` `STOP_ON_FAILURE` / `ALLOW_FAILURE`,
+  `cancelOrderId`/`cancelClientOrderId`, `cancelRestrictions` `ONLY_NEW`…; ответ `cancelResult` +
+  `replaceResult`. Гарантии «отмена прошла, новый не встал → старый жив» нет (открытый вопрос
+  github.com/BingX-API/api-ai-skills/issues/2) — для переноса стопа остаётся «сначала новый, потом
+  отмена старого»
+- `POST /openApi/swap/v1/trade/closePosition` (`positionId`) — закрыть позицию целиком
+- `orderId` > 2^53 приходит числом — Python разбирает без потерь, хранить строкой
+- План проверок (по «да», позиция без TP/SL из интерфейса): A — `STOP_MARKET` `closePosition=true` +
+  `quantity`=позиция; B — маркет 25%, смотреть, что стало с нашим стопом; закрытие — владелец в
+  интерфейсе, смотреть, сняла ли биржа стоп
+
+### Этап 2 — «Анализ рынка» (`1c9b88c`, в коде, не задеплоен)
+
+- H1/H4/D1: цена против EMA50/200 (↑ / ↓ / ↗ / ↘), структура HH/HL · LH/LL · диапазон, RSI(14), ATR в %
+  цены, объём последней закрытой свечи к среднему за 20; уровни H4/D1 по 2 с каждой стороны (роль по
+  цене, ближе 0.3·ATR(H4) — склеиваются); funding со знаком и отсчётом до начисления; OI в USDT
+- Данные: 5 публичных запросов (свечи 1h/4h × 300, 1d × 1000; premiumIndex; openInterest), снимок в
+  общем кэше 60 с. Funding/OI при сбое — «н/д», экран строится
+- **Единица OI — USDT** (BTC 908 418 144 при mark 85 864; монетами — больше эмиссии); в документации
+  «Position Amount»/«持倉數量» — неоднозначно
+- Пересказ моделью — флаг `AI_MARKET_SUMMARY_ENABLED` (false) поверх `AI_ENABLED`; ответ отбрасывается
+  при числе не из данных, слове направления/совета, длине > 400; расход — в `ai_reports` с fingerprint
+  `market:…` (общий месячный бюджет), повтор тех же цифр — без вызова; пауза разбора журнала
+  (`last_created_at`) строки `market:…` не учитывает
+- Цифры: pytest 1041 passed, 0 skipped; smoke 67/67 ×2; ruff ключевые коды без изменений (`E501` 55,
+  `I001` 9, `F401` 6, `RUF100` 4, `F841` 2), всего 2483; mypy 65
+- Деплой — только код, после «да» владельца. Миграции нет
+
 ### Этап 0 — разведка (идёт параллельно)
 
 Только публичные GET, локально, 02.10 (демо-хост `open-api-vst.bingx.com`):

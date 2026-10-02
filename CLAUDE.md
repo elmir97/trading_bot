@@ -26,7 +26,7 @@ DATABASE_URL=postgresql+asyncpg://test:test@localhost:5432/trading_bot_test
 **Прогон зелёный только при нуле skipped.** Без `DATABASE_URL` молча
 пропускается ~115 интеграционных тестов, и счёт врёт.
 
-Ориентир на 02.10.2026 (этап 1 — сигналы удалены): 966 passed, 0 skipped, 0 failed.
+Ориентир на 02.10.2026 (этап 2 — «Анализ рынка»): 1041 passed, 0 skipped, 0 failed.
 
 Число тестов в этом файле — ориентир на момент записи, а не факт. Перед
 тем как называть его в плане или отчёте, прогонять пакет и брать свежую
@@ -362,7 +362,8 @@ PY
    `bingx_base_url`, `bingx_demo_base_url`,
    `confirm_lock_ttl_seconds`, `exec_position_mode_ttl_seconds`,
    `exec_daily_digest_hour`, `log_json`, `environment`,
-   `reconciler_notify_max_age_hours`, `reconciler_pulse_every` (с `c8306f9`/`90fae6e`).
+   `reconciler_notify_max_age_hours`, `reconciler_pulse_every` (с `c8306f9`/`90fae6e`),
+   `ai_enabled`, `ai_market_summary_enabled` (с этапа 2; по умолчанию false).
    `bingx_base_url` — только публичный клиент; ключевой клиент в режиме
    demo ходит на `bingx_demo_base_url`
 
