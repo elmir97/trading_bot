@@ -61,6 +61,8 @@ async def record_callback(
                 chat_id=chat_id,
                 message_id=message_id,
                 callback_query_id=callback_query_id,
+                # Этап 5 (M2): код кнопки — связь pm_open с карточкой по базе.
+                raw_data=raw_data[:RAW_DATA_LOG_LIMIT] if raw_data else None,
             )
         )
 

@@ -36,7 +36,9 @@ class BackgroundJobs:
     ) -> None:
         self._settings = settings
         self._scheduler = AsyncIOScheduler(timezone="UTC")
-        self._positions = PositionMonitor(bot, db, settings)
+        # Этап 5: позиции биржи (ключи пользователя) и пропуск цикла, пока
+        # жив лок действия с позицией.
+        self._positions = PositionMonitor(bot, db, settings, cipher, redis)
         # Шаг 15.6: сверка журнала с биржей. Redis — чтобы пропускать цикл,
         # пока жив лок «Да» (вход в полёте).
         self._reconciler = Reconciler(bot, db, settings, cipher, redis)
@@ -50,9 +52,11 @@ class BackgroundJobs:
             return
 
         self._scheduler.add_job(
-            job_wrapper("position_monitor", self._positions.run),
+            # quiet: цикл раз в 15 с; на INFO монитор пишет сам — уведомления
+            # и пульс раз в час.
+            job_wrapper("position_monitor", self._positions.run, quiet=True),
             "interval",
-            minutes=self._settings.position_monitor_interval_minutes,
+            seconds=self._settings.position_monitor_price_seconds,
             id="position_monitor",
             coalesce=True,
             max_instances=1,
@@ -77,7 +81,7 @@ class BackgroundJobs:
         logger.info(
             "Фоновые задачи запущены",
             extra={
-                "position_monitor_minutes": self._settings.position_monitor_interval_minutes,
+                "position_monitor_seconds": self._settings.position_monitor_price_seconds,
                 "daily_jobs_minutes": self._settings.daily_jobs_interval_minutes,
                 "reconciler_seconds": self._settings.reconciler_interval_seconds,
             },

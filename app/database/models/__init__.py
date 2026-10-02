@@ -11,6 +11,7 @@ from app.database.models.execution_callback import ExecutionCallback
 from app.database.models.execution_order import ExecutionOrder
 from app.database.models.mistake import SYSTEM_MISTAKES, MistakeType, TradeMistake
 from app.database.models.position_action import PositionAction
+from app.database.models.position_alert import PositionAlert
 from app.database.models.reconciliation_event import ReconciliationEvent
 from app.database.models.signal import SignalRecord
 from app.database.models.signal_notification import SignalNotification
@@ -36,6 +37,7 @@ __all__ = [
     "ExecutionOrder",
     "MistakeType",
     "PositionAction",
+    "PositionAlert",
     "ReconciliationEvent",
     "SignalNotification",
     "SignalRecord",

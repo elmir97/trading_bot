@@ -50,6 +50,10 @@ class ExecutionCallback(IntPKMixin, Base):
     chat_id: Mapped[int | None] = mapped_column(BigInteger)
     message_id: Mapped[int | None] = mapped_column(BigInteger)
     callback_query_id: Mapped[str | None] = mapped_column(String(64))
+    # Этап 5 (M2): callback_data кнопки как есть (лимит Telegram — 64 байта).
+    # Нажатие pm_open пишется до карточки (position_action_id NULL) — по коду
+    # кнопки (pa:sl:XRP-USDT:L) его связывают с карточкой без лога.
+    raw_data: Mapped[str | None] = mapped_column(String(64))
 
     def __repr__(self) -> str:
         return f"<ExecutionCallback {self.action} n={self.notification_id}>"

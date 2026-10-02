@@ -26,7 +26,7 @@ DATABASE_URL=postgresql+asyncpg://test:test@localhost:5432/trading_bot_test
 **Прогон зелёный только при нуле skipped.** Без `DATABASE_URL` молча
 пропускается ~115 интеграционных тестов, и счёт врёт.
 
-Ориентир на 02.10.2026 (этап 4, перенос стопа/тейка в 4 шага): 1179 passed, 0 skipped, 0 failed.
+Ориентир на 02.10.2026 (этап 5 — уведомления о приближении, M2): 1188 passed, 0 skipped, 0 failed.
 
 Число тестов в этом файле — ориентир на момент записи, а не факт. Перед
 тем как называть его в плане или отчёте, прогонять пакет и брать свежую
@@ -63,7 +63,7 @@ ruff check .
 
 ## Скрипты
 
-`scripts/smoke_check.py` — 79 проверок, гоняет диспетчер. Единственный
+`scripts/smoke_check.py` — 82 проверки, гоняет диспетчер. Единственный
 харнесс для хендлеров `settings.py`.
 
 - отказывается работать против любой БД кроме `trading_bot_test`
@@ -363,7 +363,8 @@ PY
    `confirm_lock_ttl_seconds`, `exec_position_mode_ttl_seconds`,
    `exec_daily_digest_hour`, `log_json`, `environment`,
    `reconciler_notify_max_age_hours`, `reconciler_pulse_every` (с `c8306f9`/`90fae6e`),
-   `ai_enabled`, `ai_market_summary_enabled` (с этапа 2; по умолчанию false).
+   `ai_enabled`, `ai_market_summary_enabled` (с этапа 2; по умолчанию false),
+   `position_monitor_price_seconds` / `position_monitor_snapshot_seconds` (с этапа 5; 15 / 60).
    `bingx_base_url` — только публичный клиент; ключевой клиент в режиме
    demo ходит на `bingx_demo_base_url`
 
@@ -381,9 +382,14 @@ PY
 10. `grep -c Traceback`
 11. `grep -ci -e Conflict -e 'terminated by other getUpdates'` — второй
     экземпляр бота
-12. Последние `Фоновый цикл завершён: position_monitor|daily_jobs`
-    (сканер удалён 02.10.2026 — строк `setup_scanner` и «Цикл сканера
-    завершён» на новом коде нет). С `27ac9db` рассылки
+12. Последние `Фоновый цикл завершён: daily_jobs` (сканер удалён 02.10.2026 —
+    строк `setup_scanner` и «Цикл сканера завершён» на новом коде нет). Монитор
+    позиций с этапа 5 — раз в 15 с, начало/конец цикла на DEBUG; на INFO —
+    `Пульс монитора позиций: …` раз в час (последний не старше часа; `ошибок` —
+    флаг, если не 0), `Уведомление о приближении` (`overshoot_pp` — перескок за
+    порог; регулярно > 5 — повод для WebSocket), «Монитор позиций пропущен: идёт
+    действие с позицией». Пропуск reconciler с этапа 5 — «Сверка пропущена: идёт
+    действие с позицией (exec:lock)». С `27ac9db` рассылки
     daily_jobs пишут INFO `Рассылка отправлена: daily_report|daily_limit_reached|
     execution_digest`, сбой — WARNING `Рассылка не доставлена…` / `…выброшена`;
     на коде до него — только `user_settings.execution_digest_last_sent_date`
@@ -432,6 +438,11 @@ PY
     «Действия с позициями: карточек N (…)»; `trades.initial_stop_loss` по открытым сделкам с позицией на бирже — ставит
     reconciler при синхронизации уровней (INFO «Уровни сделки обновлены по бирже»);
     R считается от него (`Trade.risk_stop`)
+16в. С миграции `605ed85e8944` (M2, этап 5): `position_alerts` — по `kind`; строки только по
+    уровням открытых позиций (исчезнувшие и перенесённые снимает монитор), строка без позиции
+    на бирже старше пары минут — флаг. `execution_callbacks.raw_data` у новых нажатий не NULL.
+    Строки постановки моста переноса (`client_order_id` `…SB`/`…TB`) — CANCELLED при снятом
+    мосте; SUBMITTED — мост остался на бирже (карточка FAILED «не снялся»)
 
 ### F. Redis
 

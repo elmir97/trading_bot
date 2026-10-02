@@ -23,7 +23,13 @@ from app.bot.states.trade import RiskCalculatorStates, SettingsStates
 from app.core.config import Settings
 from app.core.security import SecretCipher, mask_secret
 from app.database.models.credentials import ExchangeCredentials
-from app.database.models.user import DEFAULT_NOTIFICATIONS, User
+from app.database.models.user import (
+    ALERT_PERCENT_CHOICES,
+    DEFAULT_ALERT_PERCENT,
+    DEFAULT_NOTIFICATIONS,
+    User,
+    UserSettings,
+)
 from app.database.repositories.user import UserRepository
 from app.exchanges.base import ExchangeAuthError
 from app.exchanges.bingx import BingXClient
@@ -36,7 +42,7 @@ from app.trading.calculations import (
     to_decimal,
 )
 from app.trading.enums import ExchangeKeyMode, TradeSide
-from app.workers.notifier import NOTIFICATION_LABELS
+from app.workers.notifier import NOTIFICATION_LABELS, approach_enabled
 
 router = Router(name="settings")
 
@@ -47,6 +53,9 @@ class SetCB:
     TRADES = "set:trades"
     NOTIFY = "set:notify:"
     NOTIFICATIONS = "set:notifications"
+    # Этап 5: порог приближения к SL/TP — экран выбора и значение.
+    THRESHOLD = "set:thr:"        # + SL/TP
+    THRESHOLD_VALUE = "set:thrv:"  # + SL/TP:85
     PLAN = "set:plan"
     # Этап 15.4в: переключатель счёта (что показывать) и ключи по режимам.
     MODE = "set:mode"
@@ -898,25 +907,45 @@ async def check_api_permissions(
 # Уведомления (этап 12)
 # ---------------------------------------------------------------------------
 
-# Порядок пунктов в требовании 6: приближение к TP/SL, дневная сводка, дневной
-# лимит. Переключатели сигналов (READY, FORMING, графики) удалены вместе с
-# сигналами 02.10.2026 — старые ключи в JSONB безвредны. "Сводка исполнения"
-# (этап 15.4, раздел 12а) — в конце, включена по умолчанию.
+# Порядок пунктов: приближение к стопу и к тейку (этап 5 — раздельно, с
+# порогом), дневная сводка, дневной лимит. Переключатели сигналов (READY,
+# FORMING, графики) удалены вместе с сигналами 02.10.2026, общий
+# tp_sl_approaching — этапом 5; старые ключи в JSONB безвредны. "Сводка
+# исполнения" (этап 15.4, раздел 12а) — в конце, включена по умолчанию.
 NOTIFICATION_ORDER = [
-    "tp_sl_approaching",
+    "sl_approaching",
+    "tp_approaching",
     "daily_report",
     "daily_limit_reached",
     "execution_digest",
 ]
+_APPROACH = {"SL": ("sl_approaching", "sl_alert_percent", "стопа"),
+             "TP": ("tp_approaching", "tp_alert_percent", "тейка")}
 
 
-def notifications_keyboard(notifications: dict) -> InlineKeyboardMarkup:
+def _enabled(settings_row: UserSettings | None, key: str) -> bool:
+    if key in ("sl_approaching", "tp_approaching"):
+        return approach_enabled(settings_row, key)
+    notifications = settings_row.notifications if settings_row is not None else {}
+    return bool(notifications.get(key, DEFAULT_NOTIFICATIONS.get(key, True)))
+
+
+def _alert_percent(settings_row: UserSettings | None, kind: str) -> int:
+    value = getattr(settings_row, _APPROACH[kind][1], None) if settings_row is not None else None
+    return value or DEFAULT_ALERT_PERCENT
+
+
+def notifications_keyboard(settings_row: UserSettings | None) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for key in NOTIFICATION_ORDER:
-        enabled = notifications.get(key, DEFAULT_NOTIFICATIONS.get(key, True))
-        mark = "✅ " if enabled else "⬜ "
+        mark = "✅ " if _enabled(settings_row, key) else "⬜ "
         builder.button(
             text=f"{mark}{NOTIFICATION_LABELS[key]}", callback_data=f"{SetCB.NOTIFY}{key}"
+        )
+    for kind, (_, _, what) in _APPROACH.items():
+        builder.button(
+            text=f"📏 Порог {what}: {_alert_percent(settings_row, kind)}% пути",
+            callback_data=f"{SetCB.THRESHOLD}{kind}",
         )
     builder.adjust(1)
     builder.row(*nav_row(MenuCallback.SETTINGS))
@@ -927,13 +956,14 @@ async def _show_notifications(
     event: Message | CallbackQuery, user: User, session: AsyncSession
 ) -> None:
     settings_row = await UserRepository(session).get_settings(user.id)
-    notifications = settings_row.notifications if settings_row is not None else {}
     await _reply(
         event,
         "<b>Уведомления</b>\n\n"
+        "Приближение к стопу и тейку — по позициям на бирже: уведомление, когда "
+        "цена прошла заданную долю пути от входа до уровня.\n\n"
         "Тихие часы пока не поддерживаются — уведомления приходят "
         "круглосуточно.",
-        notifications_keyboard(notifications),
+        notifications_keyboard(settings_row),
     )
 
 
@@ -956,10 +986,54 @@ async def toggle_notification(
         await callback.answer()
         return
 
-    current = settings_row.notifications.get(key, DEFAULT_NOTIFICATIONS.get(key, True))
+    current = _enabled(settings_row, key)
     # JSONB-словарь нужно переприсвоить целиком: мутация вложенного dict на
     # месте не помечает атрибут "изменённым" для SQLAlchemy при UPDATE.
     settings_row.notifications = {**settings_row.notifications, key: not current}
     await session.flush()
 
+    await _show_notifications(callback, user, session)
+
+
+def threshold_keyboard(kind: str, current: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for value in ALERT_PERCENT_CHOICES:
+        mark = "• " if value == current else ""
+        builder.button(
+            text=f"{mark}{value}%", callback_data=f"{SetCB.THRESHOLD_VALUE}{kind}:{value}"
+        )
+    builder.adjust(5)
+    builder.row(*nav_row(SetCB.NOTIFICATIONS))
+    return builder.as_markup()
+
+
+@router.callback_query(F.data.startswith(SetCB.THRESHOLD))
+async def show_threshold(callback: CallbackQuery, user: User, session: AsyncSession) -> None:
+    kind = str(callback.data).removeprefix(SetCB.THRESHOLD)
+    if kind not in _APPROACH:
+        await callback.answer()
+        return
+    settings_row = await UserRepository(session).get_settings(user.id)
+    await _reply(
+        callback,
+        f"<b>Порог уведомления: приближение к {'стопу' if kind == 'SL' else 'тейку'}</b>\n\n"
+        "Уведомление придёт, когда цена пройдёт эту долю пути от входа до уровня. "
+        "Повтор по тому же уровню — после отката на 20 п.п. "
+        "и нового подхода.",
+        threshold_keyboard(kind, _alert_percent(settings_row, kind)),
+    )
+
+
+@router.callback_query(F.data.startswith(SetCB.THRESHOLD_VALUE))
+async def set_threshold(callback: CallbackQuery, user: User, session: AsyncSession) -> None:
+    kind, _, raw = str(callback.data).removeprefix(SetCB.THRESHOLD_VALUE).partition(":")
+    if kind not in _APPROACH or not raw.isdigit() or int(raw) not in ALERT_PERCENT_CHOICES:
+        await callback.answer()
+        return
+    settings_row = await UserRepository(session).get_settings(user.id)
+    if settings_row is None:
+        await callback.answer()
+        return
+    setattr(settings_row, _APPROACH[kind][1], int(raw))
+    await session.flush()
     await _show_notifications(callback, user, session)

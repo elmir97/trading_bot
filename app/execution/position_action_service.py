@@ -463,16 +463,17 @@ class PositionActionService:
     async def _place_and_confirm(
         self, client: ExchangeClient, action: PositionAction, role: OrderRole,
         otype: OrderType, level: Decimal, quantity: Decimal, *, bridge: bool,
-    ) -> tuple[OpenOrder | None, str]:
+    ) -> tuple[OpenOrder | None, ExecutionOrder | None, str]:
         """PENDING (UNIQUE client_order_id) → POST → read-back по openOrders.
-        (ордер, "") — встал и подтверждён; (None, причина) — нет."""
+        (ордер, строка, "") — встал и подтверждён; (None, строка|None,
+        причина) — нет."""
         cid = action_client_order_id(
             action_id=action.id, user_id=self._user.id, role=role, bridge=bridge
         )
         row = self._row(action, role, otype, OrderStatus.PENDING, quantity=quantity,
                         trigger=level, client_order_id=cid)
         if not await self._insert_pending(row):
-            return None, "по этой карточке уже отправлялся — повторно не шлю"
+            return None, None, "по этой карточке уже отправлялся — повторно не шлю"
         try:
             placed = await client.place_conditional_order(
                 symbol=action.symbol, side=_CLOSING_SIDE[action.side],
@@ -485,8 +486,8 @@ class PositionActionService:
             row.raw_response = exc.payload
             await self._session.commit()
             if exc.code:
-                return None, f"биржа не приняла: {exc}"
-            return None, f"исход отправки неизвестен ({exc}) — проверь ордера в BingX"
+                return None, row, f"биржа не приняла: {exc}"
+            return None, row, f"исход отправки неизвестен ({exc}) — проверь ордера в BingX"
         row.status = OrderStatus.SUBMITTED
         row.exchange_order_id = str(placed.order_id) or None
         await self._session.commit()
@@ -500,10 +501,10 @@ class PositionActionService:
             if attempt + 1 < self._settings.exec_order_readback_attempts:
                 await self._delay()
         if found is None or found.stop_price != level:
-            return None, "не подтверждён в openOrders — проверь ордера в BingX"
+            return None, row, "не подтверждён в openOrders — проверь ордера в BingX"
         row.exchange_order_id = str(found.order_id)
         await self._session.commit()
-        return found, ""
+        return found, row, ""
 
     def _journal_level(
         self, trade: Trade | None, is_stop: bool, order: OpenOrder, level: Decimal,
@@ -544,7 +545,7 @@ class PositionActionService:
             )
 
         if not plan.replaces_order_id:
-            final, why = await self._place_and_confirm(
+            final, _, why = await self._place_and_confirm(
                 client, action, role, otype, level, p.quantity, bridge=False
             )
             if final is None:
@@ -558,7 +559,7 @@ class PositionActionService:
             )
 
         # Шаг 1: мост — ордер с quantity на новую цену рядом со старым.
-        bridge, why = await self._place_and_confirm(
+        bridge, bridge_row, why = await self._place_and_confirm(
             client, action, role, otype, level, p.quantity, bridge=True
         )
         if bridge is None:
@@ -572,7 +573,8 @@ class PositionActionService:
             client, action, plan.replaces_order_id, role, otype, old_level, p.quantity
         ):
             back = await self._cancel_and_confirm(
-                client, action, str(bridge.order_id), role, otype, level, p.quantity
+                client, action, str(bridge.order_id), role, otype, level, p.quantity,
+                placed_row=bridge_row,
             )
             tail = (
                 f"Промежуточный {new_s} снят — всё как было."
@@ -584,7 +586,7 @@ class PositionActionService:
                 f"❌ {name.capitalize()} не перенесён: старый {name} {old_s} не снялся. {tail}",
             )
         # Шаг 3: closePosition на новую цену; не встал — позицию держит мост.
-        final, why = await self._place_and_confirm(
+        final, _, why = await self._place_and_confirm(
             client, action, role, otype, level, p.quantity, bridge=False
         )
         if final is None:
@@ -600,7 +602,8 @@ class PositionActionService:
         head = f"✅ {name.capitalize()} {old_s} → {new_s} (на всю позицию)."
         # Шаг 4: снять мост.
         if not await self._cancel_and_confirm(
-            client, action, str(bridge.order_id), role, otype, level, p.quantity
+            client, action, str(bridge.order_id), role, otype, level, p.quantity,
+            placed_row=bridge_row,
         ):
             return await failed(
                 f"Промежуточный {name} не снялся.",
@@ -615,9 +618,14 @@ class PositionActionService:
     async def _cancel_and_confirm(
         self, client: ExchangeClient, action: PositionAction, order_id: str, role: OrderRole,
         otype: OrderType, level: Decimal | None, quantity: Decimal | None,
+        *, placed_row: ExecutionOrder | None = None,
     ) -> bool:
         """Отмена и подтверждение только повторным openOrders. Строка-наблюдение
-        в execution_orders: CANCELLED — ордера в openOrders больше нет."""
+        в execution_orders: CANCELLED — ордера в openOrders больше нет.
+
+        placed_row — строка постановки нашего ордера (мост переноса, этап 5):
+        при подтверждённом снятии она сама становится CANCELLED, без строки-
+        наблюдения; не снялся — остаётся SUBMITTED, наблюдение UNKNOWN."""
         try:
             await client.cancel_order(action.symbol, order_id)
         except OrderNotFoundError:
@@ -631,10 +639,13 @@ class PositionActionService:
                 break
             if attempt + 1 < self._settings.exec_order_readback_attempts:
                 await self._delay()
-        self._session.add(self._row(
-            action, role, otype, OrderStatus.CANCELLED if gone else OrderStatus.UNKNOWN,
-            quantity=quantity, trigger=level, exchange_order_id=order_id,
-        ))
+        if gone and placed_row is not None:
+            placed_row.status = OrderStatus.CANCELLED
+        else:
+            self._session.add(self._row(
+                action, role, otype, OrderStatus.CANCELLED if gone else OrderStatus.UNKNOWN,
+                quantity=quantity, trigger=level, exchange_order_id=order_id,
+            ))
         await self._session.commit()
         return gone
 

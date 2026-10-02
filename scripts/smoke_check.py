@@ -363,6 +363,22 @@ async def _run_scenarios(sim, tg, db, redis, settings) -> None:  # type: ignore[
     await sim.tap("Риск на сделку")
     await sim.send("2")
 
+    # Этап 5: приближение к стопу/тейку — раздельно, порог на пользователя.
+    await sim.send("/start")
+    await sim.tap("Настройки")
+    text = await sim.tap("Уведомления")
+    buttons = list(sim.available_buttons())
+    check("уведомления: стоп и тейк раздельно",
+          any("приближение к стопу" in b for b in buttons)
+          and any("приближение к тейку" in b for b in buttons)
+          and not any("TP/SL" in b for b in buttons), str(buttons))
+    check("уведомления: порог по умолчанию 80%",
+          any("Порог стопа: 80%" in b for b in buttons), str(buttons))
+    await sim.tap("Порог стопа")
+    await sim.tap("85%")
+    buttons = list(sim.available_buttons())
+    check("порог стопа меняется", any("Порог стопа: 85%" in b for b in buttons), str(buttons))
+
     print("\n[9] Биржа без ключей")
     await sim.send("/start")
     text = await sim.tap("Биржа")

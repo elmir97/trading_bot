@@ -316,11 +316,12 @@ async def test_move_stop_four_steps(ctx) -> None:  # type: ignore[no-untyped-def
     assert action.status is PositionActionStatus.DONE
     assert "Старый стоп и промежуточный сняты" in text
     rows = await _rows(ctx, action.id)
+    # Этап 5: строка постановки моста закрывается при подтверждённом снятии
+    # (CANCELLED), без отдельной строки-наблюдения; у старого — наблюдение.
     assert [(r.status, r.client_order_id) for r in rows] == [
-        (OrderStatus.SUBMITTED, f"tm{action.id}u{ctx.uid}SB"),
-        (OrderStatus.CANCELLED, None),                       # старый
+        (OrderStatus.CANCELLED, f"tm{action.id}u{ctx.uid}SB"),   # мост, снят
+        (OrderStatus.CANCELLED, None),                           # старый
         (OrderStatus.SUBMITTED, f"tm{action.id}u{ctx.uid}S"),
-        (OrderStatus.CANCELLED, None),                       # мост
     ]
     assert rows[1].exchange_order_id == OLD_STOP
 
@@ -374,9 +375,7 @@ async def test_step2_old_not_removed_bridge_removed(ctx) -> None:  # type: ignor
     assert action.status is PositionActionStatus.FAILED
     assert "старый стоп 1.4795 не снялся" in text and "всё как было" in text
     rows = await _rows(ctx, action.id)
-    assert [r.status for r in rows] == [
-        OrderStatus.SUBMITTED, OrderStatus.UNKNOWN, OrderStatus.CANCELLED,
-    ]
+    assert [r.status for r in rows] == [OrderStatus.CANCELLED, OrderStatus.UNKNOWN]
 
 
 async def test_step2_old_and_bridge_not_removed_two_stops(ctx) -> None:  # type: ignore[no-untyped-def]
@@ -410,6 +409,8 @@ async def test_step4_bridge_not_removed_warns(ctx) -> None:  # type: ignore[no-u
     assert sorted(o.close_position for o in ctx.exchange.orders) == [False, True]
     assert action.status is PositionActionStatus.FAILED
     assert "Стоп 1.4795 →" in text and "Промежуточный стоп" in text and "не снялся" in text
+    bridge = (await _rows(ctx, action.id))[0]
+    assert bridge.status is OrderStatus.SUBMITTED     # не снялся — строка открыта
 
 
 async def test_bingx_rule_second_close_position_rejected(ctx) -> None:  # type: ignore[no-untyped-def]

@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import date
 from typing import TYPE_CHECKING
 
-from sqlalchemy import BigInteger, Boolean, Date, Enum, ForeignKey, String
+from sqlalchemy import BigInteger, Boolean, Date, Enum, ForeignKey, SmallInteger, String
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -102,8 +102,19 @@ class UserSettings(IntPKMixin, TimestampMixin, Base):
     # Этап 15.4, раздел 12а — та же схема "не чаще раза в локальный день".
     execution_digest_last_sent_date: Mapped[date | None] = mapped_column(Date)
 
+    # --- Приближение к SL/TP (этап 5, M2) -------------------------------------
+    # Порог — доля пути от входа к уровню, в процентах (50–95, шаг 5). NULL —
+    # по умолчанию DEFAULT_ALERT_PERCENT. Вкл/выкл — ключи sl_approaching /
+    # tp_approaching в notifications (без ключа — старый tp_sl_approaching).
+    sl_alert_percent: Mapped[int | None] = mapped_column(SmallInteger)
+    tp_alert_percent: Mapped[int | None] = mapped_column(SmallInteger)
+
     user: Mapped[User] = relationship(back_populates="settings")
 
+
+# Этап 5: порог уведомления о приближении — пройдено 80% пути до уровня.
+DEFAULT_ALERT_PERCENT = 80
+ALERT_PERCENT_CHOICES = tuple(range(50, 100, 5))
 
 DEFAULT_NOTIFICATIONS: dict[str, bool] = {
     "position_opened": True,
@@ -111,7 +122,11 @@ DEFAULT_NOTIFICATIONS: dict[str, bool] = {
     "take_profit_hit": True,
     "stop_loss_hit": True,
     "daily_limit_reached": True,
-    "tp_sl_approaching": True,  # этап 12: цена рядом с TP или SL
+    # Этап 5: приближение к SL / TP — раздельно. Старый общий ключ
+    # tp_sl_approaching в JSONB не трогаем: без новых ключей читается он
+    # (app/workers/notifier.approach_enabled).
+    "sl_approaching": True,
+    "tp_approaching": True,
     "daily_report": True,
     "unannotated_trades": True,
     "execution_digest": True,  # этап 15.4: ежедневная сводка исполнения (раздел 12а)

@@ -90,6 +90,8 @@ async def test_record_survives_rollback_of_update_transaction(unique_telegram_id
             ("yes", 42, 555, 10)
         ]
         assert rows[0].callback_query_id == "cb10"
+        # Этап 5 (M2): код кнопки — в базе, связь pm_open с карточкой без лога.
+        assert rows[0].raw_data == "exn:yes:42"
 
         await _record(db, user_id, notification_id=None)
         assert [r.notification_id for r in await _rows(db, user_id)] == [42, None]

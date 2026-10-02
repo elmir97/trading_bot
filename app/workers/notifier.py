@@ -23,7 +23,8 @@ from app.database.models.user import DEFAULT_NOTIFICATIONS, UserSettings
 logger = get_logger(__name__)
 
 NOTIFICATION_LABELS: dict[str, str] = {
-    "tp_sl_approaching": "📍 приближение к TP/SL",
+    "sl_approaching": "🛑 приближение к стопу",
+    "tp_approaching": "🎯 приближение к тейку",
     "daily_report": "📄 дневная сводка",
     "daily_limit_reached": "🛑 дневной лимит убытка",
     "execution_digest": "📊 сводка исполнения",
@@ -59,6 +60,17 @@ def notification_enabled(settings: UserSettings | None, kind: str) -> bool:
     if settings is None:
         return default
     return bool(settings.notifications.get(kind, default))
+
+
+def approach_enabled(settings: UserSettings | None, kind: str) -> bool:
+    """Этап 5: kind — "sl_approaching" / "tp_approaching". Без нового ключа
+    в JSONB — старый общий tp_sl_approaching (до этапа 5 один переключатель
+    на оба), без него — включено. Данные в M2 не переносятся."""
+    if settings is not None and kind in settings.notifications:
+        return bool(settings.notifications[kind])
+    if settings is not None and "tp_sl_approaching" in settings.notifications:
+        return bool(settings.notifications["tp_sl_approaching"])
+    return DEFAULT_NOTIFICATIONS.get(kind, True)
 
 
 async def send_notification(

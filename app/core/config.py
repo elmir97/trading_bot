@@ -242,10 +242,12 @@ class Settings(BaseSettings):
         default=False,
         description="Глобальный выключатель. Держать false на время доработок этапа.",
     )
-    position_monitor_interval_minutes: int = 5
-    # Доля оставшегося пути от входа до TP/SL, при которой считаем, что цена
-    # "приблизилась" — 10 означает последние 10% дистанции.
-    position_monitor_approach_percent: Decimal = Decimal("10")
+    # Этап 5: монитор приближения к SL/TP. Mark price — каждый цикл (один
+    # публичный запрос на символ), позиции и ордера с биржи — раз в
+    # snapshot_seconds (2 приватных запроса на пользователя). Порог — на
+    # пользователя (user_settings.sl/tp_alert_percent), глобального больше нет.
+    position_monitor_price_seconds: int = 15
+    position_monitor_snapshot_seconds: int = 60
     # Шаг 15.6: сверка журнала с биржей (раздел 10 ТЗ). Штатный цикл — один
     # запрос позиций; openOrders (есть ли стоп) — раз в N циклов.
     reconciler_interval_seconds: int = 60

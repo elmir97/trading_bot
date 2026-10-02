@@ -222,7 +222,7 @@ class Reconciler:
     async def run(self) -> None:
         self._cycle += 1
         if await self._confirm_in_flight():
-            logger.info("Сверка пропущена: идёт подтверждение входа (exec:lock)")
+            logger.info("Сверка пропущена: идёт действие с позицией (exec:lock)")
             self.pulse.record_skip()
             self.pulse.log_if_due(datetime.now(UTC), self._settings.reconciler_pulse_every)
             return

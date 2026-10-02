@@ -259,3 +259,19 @@ class TestRenderCard:
         assert isinstance(plan, ActionPlan)
         r = (plan.risk_before / (D("0.0458") * 30)).quantize(D("0.01"), ROUND_HALF_UP)  # type: ignore[operator]
         assert f"({r}R)" in render_card(plan, inputs)
+
+
+def test_action_client_order_ids_unique_case_insensitive() -> None:
+    """BingX хранит clientOrderId в нижнем регистре (docs-v3, живьём 02.10:
+    tm11u1T → tm11u1t) — наши ключи обязаны различаться и без регистра."""
+    from app.execution.models import action_client_order_id
+    from app.trading.enums import OrderRole
+
+    ids = [
+        action_client_order_id(action_id=a, user_id=u, role=role, bridge=bridge)
+        for a in range(1, 120) for u in range(1, 15)
+        for role in (OrderRole.STOP_LOSS, OrderRole.TAKE_PROFIT, OrderRole.CLOSE)
+        for bridge in (False, True)
+    ]
+    assert len({i.casefold() for i in ids}) == len(ids)
+    assert all(1 <= len(i) <= 40 for i in ids)
