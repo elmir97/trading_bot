@@ -11,7 +11,7 @@ _render_open_order). Теперь ловится только ExchangeError и �
 а не соврёт про биржу.
 
 Проверяем на трёх представительных местах (show_balance — общий код
-_with_exchange, используемый ещё show_exchange_positions/show_exchange_orders;
+_with_exchange, используемый ещё show_exchange_orders;
 check_symbols — тот же паттерн, что и в fix_symbols; run_import):
   1) не-ExchangeError (ValueError) не ловится хендлером, пробрасывается;
   2) ExchangeError по-прежнему даёт прежний дружелюбный текст через _describe.
@@ -199,7 +199,7 @@ def _dispatcher(router: Router, session, user, settings) -> Dispatcher:  # type:
 
 
 # ---------------------------------------------------------------------------
-# _with_exchange (show_balance/show_exchange_positions/show_exchange_orders)
+# _with_exchange (show_balance/show_exchange_orders)
 # ---------------------------------------------------------------------------
 
 

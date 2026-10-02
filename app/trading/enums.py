@@ -220,6 +220,12 @@ class OrderStatus(StrEnum):
     по client_order_id (BingX 109421 «order not exist»), и позиции по
     символу и стороне нет. Окончательное «ордер не выставлен» ставит только
     reconciler (раздел 8 ТЗ); повторной отправки нет никогда.
+
+    CANCELED и CANCELLED — оба. CANCELED (одна L) с 15.6 ставит reconciler
+    строке тейка/стопа, снятого биржей при закрытии позиции, — он уже в
+    execution_orders. CANCELLED (две L) — написание BingX в ответе на отмену
+    и в allOrders (разведка 02.10): им помечаются ордера, снятые нашей
+    отменой (этап 4). Подтверждение отмены — только повторным openOrders.
     """
 
     PENDING = "PENDING"
@@ -227,6 +233,7 @@ class OrderStatus(StrEnum):
     FILLED = "FILLED"
     REJECTED = "REJECTED"
     CANCELED = "CANCELED"
+    CANCELLED = "CANCELLED"
     UNKNOWN = "UNKNOWN"
     DRY_RUN = "DRY_RUN"
     REFUSED = "REFUSED"
@@ -282,11 +289,41 @@ ANOMALY_KINDS = frozenset({
 class ExecutionCallbackAction(StrEnum):
     """Кнопка пути исполнения, нажатие которой пишется в execution_callbacks
     (app/execution/callback_audit.py): exn:open / exn:yes / exn:no. В БД —
-    значение в нижнем регистре, String(8) с CHECK."""
+    значение в нижнем регистре, String(16) с CHECK (до миграции M1 — String(8))."""
 
     OPEN = "open"
     YES = "yes"
     NO = "no"
+    # Этап 4 (управление позициями): карточка действия, «Да», «Да, увеличить
+    # риск», «Нет». С миграции M1 колонка String(16).
+    PM_OPEN = "pm_open"
+    PM_YES = "pm_yes"
+    PM_YES_RISK = "pm_yes_risk"
+    PM_NO = "pm_no"
+
+
+class PositionActionKind(StrEnum):
+    """Действие с открытой позицией (этап 4) — строка position_actions.
+    Стоп в безубыток — MOVE_STOP с params {"breakeven": true}."""
+
+    MOVE_STOP = "MOVE_STOP"
+    SET_TAKE = "SET_TAKE"
+    CLOSE_PARTIAL = "CLOSE_PARTIAL"
+    CLOSE_FULL = "CLOSE_FULL"
+
+
+class PositionActionStatus(StrEnum):
+    """Жизненный цикл действия (этап 4): карточка показана → решение
+    пользователя → исход отправки."""
+
+    CARD = "CARD"            # карточка показана, решения нет
+    DECLINED = "DECLINED"    # «Нет»
+    EXPIRED = "EXPIRED"      # карточка устарела без решения
+    REFUSED = "REFUSED"      # отказ проверки (error_code)
+    DRY_RUN = "DRY_RUN"      # «Да» при EXEC_DRY_RUN — на биржу ничего не ушло
+    SUBMITTED = "SUBMITTED"  # отправлено, read-back не завершён
+    DONE = "DONE"            # read-back подтвердил результат
+    FAILED = "FAILED"        # биржа отказала или read-back не подтвердил
 
 
 class ObservationStage(StrEnum):

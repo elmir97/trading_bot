@@ -43,6 +43,7 @@ class ExecutionOrder(IntPKMixin, TimestampMixin, Base):
     __table_args__ = (
         Index("ix_execution_orders_user_status", "user_id", "status"),
         Index("ix_execution_orders_notification_id", "notification_id"),
+        Index("ix_execution_orders_position_action_id", "position_action_id"),
     )
 
     user_id: Mapped[int] = mapped_column(
@@ -62,6 +63,13 @@ class ExecutionOrder(IntPKMixin, TimestampMixin, Base):
     # signal_id. SET NULL по той же причине, что и у signal_id выше.
     notification_id: Mapped[int | None] = mapped_column(
         ForeignKey("signal_notifications.id", ondelete="SET NULL")
+    )
+
+    # Этап 4: действие с позицией (карточка), по которому отправлен ордер —
+    # перенос стопа, тейк, закрытие. NULL у ордеров входа по сигналу. SET NULL
+    # по той же причине, что у signal_id: ордер — факт обращения к бирже.
+    position_action_id: Mapped[int | None] = mapped_column(
+        ForeignKey("position_actions.id", ondelete="SET NULL")
     )
 
     # Детерминированный ключ идемпотентности: f"tj{notification_id}u{user_id}

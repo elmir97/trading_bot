@@ -31,6 +31,7 @@ from app.bot.handlers import (
     fsm_guard,
     insights,
     pending,
+    positions,
     signals_retired,
     statistics,
     trades,
@@ -61,7 +62,7 @@ BOT_COMMANDS = [
     BotCommand(command="help", description="Список команд"),
     BotCommand(command="stats", description="Статистика"),
     BotCommand(command="trades", description="История сделок"),
-    BotCommand(command="open", description="Открытые позиции"),
+    BotCommand(command="open", description="Позиции: биржа и журнал"),
     BotCommand(command="trade", description="Добавить сделку"),
     BotCommand(command="risk", description="Калькулятор позиции"),
     BotCommand(command="analysis", description="Анализ рынка"),
@@ -124,6 +125,7 @@ def build_dispatcher(
     dp.include_router(fsm_guard.router)
     dp.include_router(common.router)
     dp.include_router(diagnostics.router)
+    dp.include_router(positions.router)
     dp.include_router(trades.router)
     dp.include_router(analysis.router)
     dp.include_router(exchange_menu.router)

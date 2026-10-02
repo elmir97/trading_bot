@@ -1,4 +1,5 @@
-"""Журнал нажатий кнопок исполнения (exn:open / exn:yes / exn:no).
+"""Журнал нажатий кнопок исполнения (exn:open / exn:yes / exn:no; с миграции
+M1 — и кнопки действий с позицией pm_*, этап 4).
 
 Префлайт 15.7: на реальном счёте «кто нажал» подтверждается записью, а не
 выводом из кода. Строка пишется первым действием хендлера, из отдельной
@@ -25,9 +26,13 @@ from app.database.base import Base, IntPKMixin
 class ExecutionCallback(IntPKMixin, Base):
     __tablename__ = "execution_callbacks"
     __table_args__ = (
-        CheckConstraint("action IN ('open', 'yes', 'no')", name="action_known"),
+        CheckConstraint(
+            "action IN ('open', 'yes', 'no', 'pm_open', 'pm_yes', 'pm_yes_risk', 'pm_no')",
+            name="action_known",
+        ),
         Index("ix_execution_callbacks_user_created", "user_id", "created_at"),
         Index("ix_execution_callbacks_notification", "notification_id"),
+        Index("ix_execution_callbacks_position_action", "position_action_id"),
     )
 
     created_at: Mapped[datetime] = mapped_column(
@@ -37,8 +42,11 @@ class ExecutionCallback(IntPKMixin, Base):
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
     # ExecutionCallbackAction.value
-    action: Mapped[str] = mapped_column(String(8), nullable=False)
+    action: Mapped[str] = mapped_column(String(16), nullable=False)
     notification_id: Mapped[int | None] = mapped_column()
+    # Этап 4: кнопки действий с позицией (pm_*) адресуют position_actions.id.
+    # Без FK и nullable — по той же причине, что notification_id.
+    position_action_id: Mapped[int | None] = mapped_column()
     chat_id: Mapped[int | None] = mapped_column(BigInteger)
     message_id: Mapped[int | None] = mapped_column(BigInteger)
     callback_query_id: Mapped[str | None] = mapped_column(String(64))

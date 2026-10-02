@@ -158,50 +158,6 @@ async def show_balance(
 
 
 # ---------------------------------------------------------------------------
-# Позиции на бирже
-# ---------------------------------------------------------------------------
-
-
-@router.callback_query(F.data == ExchangeCB.POSITIONS)
-async def show_exchange_positions(
-    callback: CallbackQuery,
-    session: AsyncSession,
-    user: User,
-    settings: Settings,
-    cipher: SecretCipher,
-) -> None:
-    async def action(client) -> str:  # type: ignore[no-untyped-def]
-        positions = await client.get_positions()
-        if not positions:
-            return "На бирже нет открытых позиций."
-
-        lines = [f"<b>Позиции на бирже · {user.settings.active_exchange_mode.label}</b>", ""]
-        for position in positions:
-            icon = "🟢" if position.side.value == "LONG" else "🔴"
-            lines.append(
-                f"{icon} <b>{position.symbol}</b> {position.side.value}\n"
-                f"Объём: {fmt_qty(position.quantity)} · "
-                f"вход {fmt_num(position.entry_price)}\n"
-                f"Текущая: {fmt_num(position.mark_price)} · "
-                f"плечо {position.leverage}x\n"
-                f"PnL: {fmt_money(position.unrealized_pnl)} USDT"
-            )
-            if position.liquidation_price:
-                lines.append(
-                    f"⚠️ Ликвидация: {fmt_num(position.liquidation_price)}"
-                )
-            lines.append("")
-
-        lines.append(
-            "<i>Это позиции с биржи. Журнал ведётся отдельно — "
-            "импортируй историю, чтобы они попали в статистику.</i>"
-        )
-        return "\n".join(lines)
-
-    await _with_exchange(callback, session, user, settings, cipher, action)
-
-
-# ---------------------------------------------------------------------------
 # Открытые (выставленные) ордера на бирже
 # ---------------------------------------------------------------------------
 

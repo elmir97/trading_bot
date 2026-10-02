@@ -190,7 +190,7 @@ async def add_trade(sim, symbol, side, entry, sl, tp, balance="10000"):  # type:
 
 async def close_trade(sim, symbol, exit_price, fee="10", mistakes=()):  # type: ignore[no-untyped-def]
     await sim.send("/start")
-    await sim.tap("Открытые")
+    await sim.tap("Позиции")
     await sim.tap(f"{symbol}-USDT")
     await sim.send(exit_price)
     await sim.send(fee)
@@ -269,12 +269,18 @@ async def _run_scenarios(sim, tg, db, redis, settings) -> None:  # type: ignore[
 
     print("\n[2] Пустое состояние")
     for label, fragment in [
-        ("Статистика", "сделок"), ("Открытые", "нет"),
+        ("Статистика", "сделок"), ("Позиции", "нет"),
         ("Сделки", "нет"), ("Просадка", "нет"),
     ]:
         await sim.send("/start")
         text = await sim.tap(label)
         check(f"«{label}» на пустой базе", len(text) > 10, "пустой ответ")
+
+    # Этап 3: «Позиции» без ключей — только журнал, честная причина, на биржу
+    # не ходит (запрет сети стоит на весь прогон).
+    await sim.send("/start")
+    text = await sim.tap("Позиции")
+    check("«Позиции» без ключей объясняют", has(text, "ключи биржи не подключены"), text[:200])
 
     # «Ошибки» убрали из меню (дублировала «Анализ ошибок»), но команда
     # /mistakes с числовой статистикой по-прежнему работает.

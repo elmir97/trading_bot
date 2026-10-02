@@ -52,6 +52,11 @@ from app.exchanges.base import (
     Position,
 )
 from app.exchanges.bingx import _QUOTE_ASSET_BY_MODE
+from app.execution.position_view import (
+    apply_exchange_levels,
+    protective_orders,
+    tracks_exchange,
+)
 from app.execution.reconciler import (
     ORDER_NOT_EXIST_CODE,
     UNRESOLVED_ENTRY_WINDOW,
@@ -345,9 +350,21 @@ class Reconciler:
             unresolved = await orders_repo.list_unresolved_entries(user_id)
 
             for trade in open_trades:
-                if trade.source is not TradeSource.SIGNAL_EXECUTION or not trade.fill_confirmed:
-                    continue
-                await self._reconcile_trade(ctx, client, trade, positions, check_stops)
+                if trade.source is TradeSource.SIGNAL_EXECUTION:
+                    if not trade.fill_confirmed:
+                        continue
+                    await self._reconcile_trade(ctx, client, trade, positions, check_stops)
+                elif tracks_exchange(
+                    trade, _open_quantity(trade),
+                    exchange_position(positions, trade.symbol, trade.side),
+                ):
+                    # Этап 3: импортированная/ручная сделка, связанная с
+                    # позицией на бирже, — закрытия фактом биржи. Тревоги
+                    # «позиция без стопа» по ним нет: ручную торговлю без
+                    # стопа бот не запрещает.
+                    await self._reconcile_trade(
+                        ctx, client, trade, positions, check_stops=False, bot=False
+                    )
             # Сделка закрыта или ушла из сверки — её отсчёт сбоя не нужен.
             open_ids = {t.id for t in open_trades}
             for trade_id, (owner, _since) in list(self._history_unparsed_since.items()):
@@ -370,6 +387,12 @@ class Reconciler:
 
             for entry in unresolved:
                 await self._resolve_unresolved_entry(ctx, client, entry, positions)
+            if check_stops:
+                # Последним перед commit: list_open_for_reconcile выше идёт с
+                # populate_existing и перечитал бы несохранённые уровни.
+                await self._sync_levels(
+                    ctx, client, await trades_repo.list_open_for_reconcile(user_id), positions
+                )
             await session.commit()
         finally:
             await client.close()
@@ -383,12 +406,14 @@ class Reconciler:
         trade: Trade,
         positions: list[Position],
         check_stops: bool,
+        *,
+        bot: bool = True,
     ) -> None:
         conditionals = (
             await ExecutionOrderRepository(ctx.session).conditionals_for_notification(
                 ctx.user_id, trade.notification_id
             )
-            if trade.notification_id is not None
+            if bot and trade.notification_id is not None
             else []
         )
         stop_row = next((c for c in conditionals if c.role is OrderRole.STOP_LOSS), None)
@@ -403,6 +428,9 @@ class Reconciler:
             take_order_id=take_row.exchange_order_id if take_row else None,
             recorded_order_ids=frozenset(
                 f.external_fill_id for f in trade.fills if f.external_fill_id
+            ),
+            exits_after=(
+                None if bot or not trade.fills else max(f.executed_at for f in trade.fills)
             ),
         )
         position = exchange_position(positions, trade.symbol, trade.side)
@@ -441,6 +469,38 @@ class Reconciler:
         await self._record_exits(
             ctx, trade.id, decision.exits, decision.closes_fully, stop_row, take_row
         )
+
+    async def _sync_levels(
+        self,
+        ctx: _UserCtx,
+        client: ExchangeClient,
+        open_trades: list[Trade],
+        positions: list[Position],
+    ) -> None:
+        """Этап 3: стоп и тейк сделок журнала следуют за ордерами на бирже
+        (перенос в безубыток, ручная правка) — app/execution/position_view.py.
+        Один openOrders на все символы, только если есть сделки с позицией.
+        Сбой биржи — пропуск до следующей проверки, цикл не роняет."""
+        tracked = [
+            (trade, position)
+            for trade in open_trades
+            if (position := exchange_position(positions, trade.symbol, trade.side)) is not None
+        ]
+        if not tracked:
+            return
+        try:
+            orders = await client.get_open_orders()
+        except ExchangeError:
+            logger.warning("openOrders для уровней не получены", extra={"user_id": ctx.user_id})
+            return
+        for trade, position in tracked:
+            stops, takes = protective_orders(position, orders)
+            changes = apply_exchange_levels(trade, stops, takes)
+            if changes:
+                logger.info(
+                    "Уровни сделки обновлены по бирже",
+                    extra={"trade_id": trade.id, "changes": "; ".join(changes)},
+                )
 
     async def _history_unparsed(
         self, ctx: _UserCtx, trade: Trade, exc: ExchangeResponseError
@@ -553,11 +613,12 @@ class Reconciler:
             ctx.user_id, trade.id
         )
         risk_amount = entry.risk_amount if entry is not None else None
-        if (risk_amount is None or risk_amount <= 0) and trade.entry_price and trade.stop_loss:
+        risk_stop = trade.risk_stop
+        if (risk_amount is None or risk_amount <= 0) and trade.entry_price and risk_stop:
             entry_qty = sum(
                 (f.quantity for f in trade.fills if f.fill_side is FillSide.ENTRY), Decimal(0)
             )
-            risk_amount = abs(trade.entry_price - trade.stop_loss) * entry_qty
+            risk_amount = abs(trade.entry_price - risk_stop) * entry_qty
         if (
             trade.pnl is None
             or not exits

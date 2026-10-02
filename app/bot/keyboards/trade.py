@@ -100,18 +100,6 @@ def skip_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def open_trades_keyboard(trades: list[Trade]) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    for trade in trades:
-        builder.button(
-            text=f"{trade.symbol} {trade.side.value}",
-            callback_data=f"{TradeCB.CLOSE}{trade.id}",
-        )
-    builder.button(text="◀️ В меню", callback_data="menu:main")
-    builder.adjust(2)
-    return builder.as_markup()
-
-
 def mistakes_keyboard(
     mistakes: list[MistakeType], selected: set[int]
 ) -> InlineKeyboardMarkup:

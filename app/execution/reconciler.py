@@ -65,7 +65,8 @@ _PROTECTIVE_STOP_TYPES = _MANUAL_STOP_TYPES
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class BotTradeSnapshot:
-    """Открытая сделка бота (SIGNAL_EXECUTION, fill_confirmed) для сверки."""
+    """Открытая сделка для сверки: бота (SIGNAL_EXECUTION, fill_confirmed) или,
+    с этапа 3, импортированная/ручная, связанная с позицией на бирже."""
 
     trade_id: int
     symbol: str
@@ -76,6 +77,10 @@ class BotTradeSnapshot:
     take_order_id: str | None
     # orderId биржи, уже записанные исполнениями этой сделки (вход, выходы).
     recorded_order_ids: frozenset[str] = frozenset()
+    # Этап 3: у импортированной/ручной сделки исполнения записаны с id из
+    # allFillOrders, а не orderId — recorded_order_ids их не узнаёт. Выходами
+    # считаются только ордера позже последнего записанного исполнения.
+    exits_after: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +182,7 @@ def decide_trade(
             and o.status == "FILLED"
             and o.executed_qty > ZERO
             and o.updated_at >= trade.opened_at - HISTORY_SKEW
+            and (trade.exits_after is None or o.updated_at > trade.exits_after)
             and o.order_id not in trade.recorded_order_ids
         ),
         key=lambda o: o.updated_at,

@@ -97,7 +97,9 @@ class LiveDemo:
             assert params["symbol"] in self.all_orders, "история нужна только закрытым"
             return _ok({"orders": self.all_orders[params["symbol"]]})
         if path == "/openApi/swap/v2/trade/openOrders":
-            orders = self.link_open_orders if params["symbol"] == "LINK-USDT" else []
+            # Без символа — все ордера (этап 3: синхронизация уровней журнала).
+            symbol = params.get("symbol")
+            orders = self.link_open_orders if symbol in ("LINK-USDT", None) else []
             return _ok({"orders": orders})
         cid = params.get("clientOrderID")
         if path == "/openApi/swap/v2/trade/order" and cid in self.unknown_cids:

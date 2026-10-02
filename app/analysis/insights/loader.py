@@ -47,15 +47,17 @@ def _risk_amount(trade: Trade) -> Decimal | None:
 def _realized_r(trade: Trade) -> Decimal | None:
     """Фактический результат в единицах риска — по цене входа/стопа/выхода.
 
-    Требует entry_price, stop_loss и exit_price: без одного из них R не
-    посчитать, а не «взять на глаз».
+    Требует entry_price, стоп риска и exit_price: без одного из них R не
+    посчитать, а не «взять на глаз». Стоп риска — исходный (Trade.risk_stop):
+    перенесённый в безубыток стоп дал бы R задним числом.
     """
-    if trade.entry_price is None or trade.stop_loss is None or trade.exit_price is None:
+    risk_stop = trade.risk_stop
+    if trade.entry_price is None or risk_stop is None or trade.exit_price is None:
         return None
     try:
         return calculate_realized_rr(
             entry_price=trade.entry_price,
-            stop_loss=trade.stop_loss,
+            stop_loss=risk_stop,
             exit_price=trade.exit_price,
             side=trade.side,
         )

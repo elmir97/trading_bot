@@ -110,6 +110,11 @@ class Trade(IntPKMixin, TimestampMixin, Base):
     # --- Параметры риска, заданные при входе ------------------------------
     stop_loss: Mapped[Decimal | None] = mapped_column(PriceNumeric)
     take_profit: Mapped[Decimal | None] = mapped_column(PriceNumeric)
+    # Этап 3: первый известный стоп сделки — база 1R. stop_loss с этапа 3
+    # следует за стопом на бирже (перенос в безубыток, ручная правка), а R
+    # обязан считаться от исходного риска. NULL — стоп не переносили (R от
+    # stop_loss, см. risk_stop) или сделка до миграции M1.
+    initial_stop_loss: Mapped[Decimal | None] = mapped_column(PriceNumeric)
     leverage: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
     # --- Монитор приближения к TP/SL (этап 12) -----------------------------
@@ -207,6 +212,13 @@ class Trade(IntPKMixin, TimestampMixin, Base):
         if self.pnl is None or self.status is not TradeStatus.CLOSED:
             return None
         return self.pnl > 0
+
+    @property
+    def risk_stop(self) -> Decimal | None:
+        """Стоп, от которого считается 1R: исходный (initial_stop_loss), а
+        если стоп не переносили — текущий. Перенос в безубыток не должен
+        превращать R сделки в деление на ноль задним числом (этап 3)."""
+        return self.initial_stop_loss if self.initial_stop_loss is not None else self.stop_loss
 
     def __repr__(self) -> str:
         return f"<Trade {self.id} {self.symbol} {self.side} {self.status}>"

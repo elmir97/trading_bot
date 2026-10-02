@@ -245,3 +245,20 @@ async def _open_for_external_close(ctx):  # type: ignore[no-untyped-def]
         entry_price=D("100"), quantity=D("1"),
     )
     return journal, trade, session
+
+
+async def test_close_r_uses_initial_stop_after_breakeven(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Этап 3: стоп перенесён в безубыток (stop_loss = вход), исходный — в
+    initial_stop_loss. R считается от исходного риска: 120 / 60 = +2R, а не
+    деление на ноль или «нет R»."""
+    user, journal, _, _ = ctx
+    trade = await journal.open_trade(
+        user_id=user.id, symbol="ETH-USDT", side=TradeSide.LONG,
+        entry_price=D("3000"), quantity=D("1"), stop_loss=D("2940"),
+        fee=D("1.5"), account_balance=D("10000"),
+    )
+    trade.initial_stop_loss = D("2940")
+    trade.stop_loss = D("3000")
+    await journal.close_trade(trade, exit_price=D("3120"), fee=D("1.5"))
+
+    assert trade.risk_reward == D("2.00")

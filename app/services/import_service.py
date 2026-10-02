@@ -179,11 +179,20 @@ class HistoryImporter:
         return list(collected.values()), errors
 
     async def import_period(
-        self, start: datetime, end: datetime, account_balance: Decimal | None = None
+        self,
+        start: datetime,
+        end: datetime,
+        account_balance: Decimal | None = None,
+        *,
+        symbol: str | None = None,
     ) -> ImportResult:
+        """symbol — только исполнения этого инструмента (кнопка «В журнал» на
+        экране «Позиции», этап 3); None — все, как в обычном импорте."""
         result = ImportResult()
 
         fills, errors = await self.fetch_fills(start, end)
+        if symbol is not None:
+            fills = [f for f in fills if f.symbol == symbol]
         result.fills_received = len(fills)
         result.errors = errors
 

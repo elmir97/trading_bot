@@ -27,7 +27,6 @@ from app.bot.keyboards.main import (
 from app.bot.keyboards.trade import (
     TradeCB,
     mistakes_keyboard,
-    open_trades_keyboard,
     quantity_mode_keyboard,
     side_keyboard,
     skip_keyboard,
@@ -590,31 +589,6 @@ async def _save_trade(
 # ---------------------------------------------------------------------------
 # Просмотр
 # ---------------------------------------------------------------------------
-
-
-@router.callback_query(F.data == MenuCallback.OPEN_POSITIONS)
-@router.message(Command("open"))
-async def show_open_positions(
-    event: Message | CallbackQuery, user: User, session: AsyncSession
-) -> None:
-    trades = await TradeRepository(session).list_open(user.id)
-
-    if not trades:
-        text = "Открытых позиций нет."
-        keyboard = back_to_main()
-    else:
-        lines = ["<b>Открытые позиции</b>", ""]
-        lines += [trade_line(t) for t in trades]
-        lines += ["", "Нажми на позицию, чтобы закрыть её."]
-        text = "\n".join(lines)
-        keyboard = open_trades_keyboard(trades)
-
-    if isinstance(event, CallbackQuery):
-        if isinstance(event.message, Message):
-            await event.message.edit_text(text, reply_markup=keyboard)
-        await event.answer()
-    else:
-        await event.answer(text, reply_markup=keyboard)
 
 
 @router.callback_query(F.data == MenuCallback.TRADES)

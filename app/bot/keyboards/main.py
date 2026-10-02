@@ -36,7 +36,7 @@ def main_menu() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="📝 Добавить сделку", callback_data=MenuCallback.ADD_TRADE),
     )
     builder.row(
-        InlineKeyboardButton(text="💼 Открытые", callback_data=MenuCallback.OPEN_POSITIONS),
+        InlineKeyboardButton(text="💼 Позиции", callback_data=MenuCallback.OPEN_POSITIONS),
         InlineKeyboardButton(text="📈 Сделки", callback_data=MenuCallback.TRADES),
     )
     builder.row(

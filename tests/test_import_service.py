@@ -393,3 +393,22 @@ async def test_live_fill_with_empty_number_is_window_error_not_trade(ctx, field:
 
     assert result.trades_created == 0
     assert len(result.errors) == 1 and field in result.errors[0]
+
+
+async def test_symbol_filter_imports_only_that_instrument(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Этап 3, кнопка «В журнал» на экране «Позиции»: импорт только
+    исполнений выбранного инструмента."""
+    from dataclasses import replace
+
+    user, repo, session = ctx
+    btc = fill("s1", 0, entry=True, price="100000")
+    xrp = replace(fill("s2", 1, entry=True, price="1.5253", qty="40"), symbol="XRP-USDT")
+    exchange = FakeExchange([btc, xrp])
+
+    result = await HistoryImporter(exchange, repo, user.id).import_period(
+        BASE - timedelta(hours=1), BASE + timedelta(hours=2), symbol="XRP-USDT"
+    )
+
+    assert result.trades_created == 1
+    [trade] = await repo.list_open(user.id)
+    assert trade.symbol == "XRP-USDT" and trade.quantity == D(40)

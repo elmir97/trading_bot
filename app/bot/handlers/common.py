@@ -49,7 +49,7 @@ async def cmd_help(message: Message) -> None:
         "/start — главное меню\n"
         "/stats — статистика\n"
         "/trades — история сделок\n"
-        "/open — открытые позиции\n"
+        "/open — позиции: биржа и журнал\n"
         "/trade — добавить сделку\n"
         "/risk — калькулятор позиции\n"
         "/today, /week, /month — отчёты\n"
