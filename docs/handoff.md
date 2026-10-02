@@ -440,6 +440,17 @@ not be sent in Hedge Mode».
   изменений, mypy 63
 - **Очередь после этапа 5** (с прежними пунктами handoff): промежуточный PnL — комиссия входа
   пропорционально закрытой доле (заметка владельца)
+- **`d325250` запушен с 1 failed** (`test_callback_audit`): гейт коммита проверял код `tail`, не
+  pytest; падение — остаток пользователя от прогона новых тестов на старом коде (telegram_id в
+  тестах детерминированный). Код бота не затронут; `dcdd7d3` — тест убирает за собой в `finally`,
+  урок в CLAUDE.md. После него pytest 1188, код выхода 0
+- **Репетиция M2 02.10 ~16:38 UTC:** образ `a26732f20187` из `dcdd7d3` (RAM 1044 МБ); `--from
+  5951467e6d9a --checksum --expect-columns/--expect-null user_settings.sl_alert_percent,
+  user_settings.tp_alert_percent,execution_callbacks.raw_data --allow-count-change position_alerts` →
+  **ИТОГ: OK, exit 0**: upgrade/downgrade ×2 по одной строке «Running», строки = baseline (кроме
+  новой `position_alerts`, 0), схема после downgrade = baseline, md5 всех 17 таблиц после обоих
+  downgrade = baseline, новые колонки NULL. Разница схемы = офлайн-SQL (CREATE TABLE
+  position_alerts + 3 ADD COLUMN). Уборка полная, лог забран и удалён
 
 ### Этап 0 — разведка (идёт параллельно)
 
