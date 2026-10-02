@@ -1697,6 +1697,30 @@ class TestPlaceConditionalOrder:
         assert result.order_id == "2100000000000000009"
         await client.close()
 
+    async def test_bridge_has_quantity_without_close_position(self) -> None:
+        """Мост переноса стопа (этап 4, разведка A 02.10): ордер на объём —
+        quantity есть, closePosition НЕ отправляется; второй closePosition-стоп
+        BingX отклоняет 110406, стоп с quantity рядом принимает."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            params = dict(httpx.QueryParams(request.url.query))
+            assert "closePosition" not in params
+            assert params["quantity"] == "40" and params["stopPrice"] == "1.49"
+            assert params["workingType"] == CONDITIONAL_WORKING_TYPE
+            assert params["clientOrderID"] == "tm12u1SB"
+            assert "reduceOnly" not in params
+            return ok({"order": {"orderId": 2106013507857768448, "status": "NEW",
+                                 "closePosition": "", "reduceOnly": False}})
+
+        client = make_client(handler)
+        result = await client.place_conditional_order(
+            symbol="XRP-USDT", side=OrderSide.SELL, position_side="LONG",
+            order_type="STOP_MARKET", stop_price=D("1.49"), quantity=D("40"),
+            client_order_id="tm12u1SB", close_position=False,
+        )
+        assert result.order_id == "2106013507857768448"
+        await client.close()
+
     async def test_rejects_non_conditional_type(self) -> None:
         client = make_client(lambda r: ok({}))
         with pytest.raises(ValueError, match="Не условный"):

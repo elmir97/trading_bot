@@ -636,13 +636,19 @@ class ExchangeClient(ABC):
         stop_price: Decimal,
         quantity: Decimal,
         client_order_id: str,
+        close_position: bool = True,
     ) -> OrderResult:
         """Отдельный условный ордер (STOP_MARKET/TAKE_PROFIT_MARKET) с
         closePosition=true на всю позицию. quantity обязателен (документация
         BingX с 24.08.2026; без него — 109400, разведка 02.10) — объём
         позиции, формальный: при срабатывании закрывается весь остаток,
         после частичного закрытия ордер не переставляется. reduceOnly не
-        отправляется (хедж-режим). Тип триггера — CONDITIONAL_WORKING_TYPE."""
+        отправляется (хедж-режим). Тип триггера — CONDITIONAL_WORKING_TYPE.
+
+        close_position=False — ордер на объём quantity без closePosition:
+        «мост» переноса стопа/тейка (этап 4). Второй closePosition-ордер того
+        же типа BingX не принимает (110406 стоп / 110407 тейк), ордер с
+        quantity рядом с ним — принимает (разведка A, 02.10)."""
         ...
 
     @abstractmethod

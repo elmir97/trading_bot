@@ -1,6 +1,8 @@
 """Действия с позицией (этап 4, app/execution/position_action_service.py)
 против настоящей БД и фейковой биржи с состоянием: карточка, сухой прогон,
-перенос стопа (новый → read-back → отмена старого → повторный openOrders),
+перенос стопа/тейка в четыре шага (мост с quantity → отмена старого →
+closePosition → отмена моста; фейк, как BingX, не принимает второй
+closePosition-ордер того же типа — 110406/110407) и сбой на каждом шаге,
 закрытие (маркет → get_order_fill → журнал), рост риска, срок карточки,
 повторное «Да», лок, расхождение позиции, идемпотентность по client_order_id.
 """
@@ -64,13 +66,20 @@ ENTRY = D("1.5253")
 BE = breakeven_price(TradeSide.LONG, ENTRY, D("0.0005"), ENTRY * D("0.0005"), 4)
 
 
-def _open_order(oid: str, stop: str, otype: str = "STOP_MARKET", cid: str = "") -> OpenOrder:
+def _open_order(oid: str, stop: str, otype: str = "STOP_MARKET", cid: str = "",
+                close_position: bool = True) -> OpenOrder:
     return OpenOrder(
         order_id=oid, client_order_id=cid, symbol="XRP-USDT", side="SELL", position_side="LONG",
         order_type=otype, quantity=D(40), executed_qty=D(0), price=D(0), stop_price=D(stop),
-        status="NEW", leverage=20, reduce_only=True, close_position=True, working_type="MARK_PRICE",
-        created_at=NOW, updated_at=NOW, take_profit=None, stop_loss=None,
+        status="NEW", leverage=20, reduce_only=True, close_position=close_position,
+        working_type="MARK_PRICE", created_at=NOW, updated_at=NOW, take_profit=None,
+        stop_loss=None,
     )
+
+
+# Второй closePosition-ордер того же типа на позицию BingX не принимает
+# (живьём 02.10 12:23, документация docs-v3).
+_ALREADY_EXISTS = {"STOP_MARKET": 110406, "TAKE_PROFIT_MARKET": 110407}
 
 
 class FakeExchange:
@@ -88,6 +97,12 @@ class FakeExchange:
         self.fail_place = False
         self.drop_new = False
         self.cancel_noop = False
+        # Сбой только на N-м вызове (с 1): шаг схемы переноса.
+        self.fail_place_at: set[int] = set()
+        self.drop_new_at: set[int] = set()
+        self.cancel_noop_at: set[int] = set()
+        self._places = 0
+        self._cancels = 0
         self.auto_cancel_on_close = True
         self._seq = 0
         self.fills: dict[str, OrderFill] = {}
@@ -117,20 +132,29 @@ class FakeExchange:
 
     async def place_conditional_order(self, **kw: Any) -> OrderResult:
         self.calls.append(("place_conditional", kw))
-        if self.fail_place:
+        self._places += 1
+        if self.fail_place or self._places in self.fail_place_at:
             raise ExchangeResponseError("BingX: rejected (код 109400)", code=109400, payload={})
+        close_position = kw.get("close_position", True)
+        otype = kw["order_type"]
+        if close_position and any(o.order_type == otype and o.close_position for o in self.orders):
+            code = _ALREADY_EXISTS[otype]
+            raise ExchangeResponseError(
+                f"BingX: Position SL order already exists (код {code})", code=code, payload={}
+            )
         self._seq += 1
         oid = f"21059{self._seq:014d}"
-        if not self.drop_new:
+        if not (self.drop_new or self._places in self.drop_new_at):
             self.orders.append(_open_order(
-                oid, str(kw["stop_price"]), kw["order_type"], kw["client_order_id"].lower()
+                oid, str(kw["stop_price"]), otype, kw["client_order_id"].lower(), close_position,
             ))
         return OrderResult(oid, kw["client_order_id"], kw["symbol"], kw["side"].value,
                            kw["position_side"], kw["order_type"], "NEW", {})
 
     async def cancel_order(self, symbol: str, order_id: str) -> CancelResult:
         self.calls.append(("cancel", order_id))
-        if not self.cancel_noop:
+        self._cancels += 1
+        if not (self.cancel_noop or self._cancels in self.cancel_noop_at):
             self.orders = [o for o in self.orders if o.order_id != order_id]
         return CancelResult(order_id, "CANCELLED", {"type": "LIMIT", "stopPrice": ""})
 
@@ -259,56 +283,144 @@ async def test_dry_run_writes_rows_and_sends_nothing(ctx) -> None:  # type: igno
 # --- перенос стопа -------------------------------------------------------------------
 
 
-async def test_move_stop_new_first_then_cancel_old(ctx) -> None:  # type: ignore[no-untyped-def]
-    card = await _card(ctx)
-    result = await ctx.service().confirm(card.action.id, message_id=55, risk_confirmed=False)
+def _places(c) -> list[dict[str, Any]]:  # type: ignore[no-untyped-def]
+    return [kw for name, kw in c.exchange.calls if name == "place_conditional"]
 
+
+async def _move(c, **params):  # type: ignore[no-untyped-def]
+    card = await _card(c, **params)
+    result = await c.service().confirm(card.action.id, message_id=55, risk_confirmed=False)
+    await c.session.refresh(card.action)
+    return card.action, result.text
+
+
+async def test_move_stop_four_steps(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Мост с quantity → отмена старого → closePosition → отмена моста;
+    каждый шаг — read-back по openOrders. Итог на бирже — один стоп на всю
+    позицию по новой цене."""
+    action, text = await _move(ctx)
+    bridge_kw, final_kw = _places(ctx)
+    assert bridge_kw["close_position"] is False and final_kw["close_position"] is True
+    assert bridge_kw["stop_price"] == final_kw["stop_price"] == BE
+    assert bridge_kw["quantity"] == final_kw["quantity"] == D(30)
+    assert bridge_kw["client_order_id"] == f"tm{action.id}u{ctx.uid}SB"
+    assert final_kw["client_order_id"] == f"tm{action.id}u{ctx.uid}S"
     names = ctx.exchange.names()
-    assert names.index("place_conditional") < names.index("cancel")
-    [(_, kw)] = [c for c in ctx.exchange.calls if c[0] == "place_conditional"]
-    assert kw["order_type"] == "STOP_MARKET" and kw["stop_price"] == BE
-    assert kw["quantity"] == D(30) and kw["position_side"] == "LONG"
-    assert kw["client_order_id"] == f"tm{card.action.id}u{ctx.uid}S"
-    assert ("cancel", OLD_STOP) in ctx.exchange.calls
-    # после отмены — повторное чтение openOrders (ответ отмены не доказательство)
-    assert names[names.index("cancel") + 1] == "open_orders"
-    assert "Старый стоп снят — проверено по openOrders" in result.text
-    await ctx.session.refresh(card.action)
-    assert card.action.status is PositionActionStatus.DONE
-    new, old = await _rows(ctx, card.action.id)
-    assert new.role is OrderRole.STOP_LOSS and new.status is OrderStatus.SUBMITTED
-    assert old.exchange_order_id == OLD_STOP and old.status is OrderStatus.CANCELLED
+    first_cancel = names.index("cancel")
+    assert names.index("place_conditional") < first_cancel
+    assert ctx.exchange.calls[first_cancel] == ("cancel", OLD_STOP)
+    assert names[first_cancel + 1] == "open_orders"   # снятие — повторным openOrders
+    assert names[-2:] == ["cancel", "open_orders"]    # мост снят последним
+    [stop] = ctx.exchange.orders
+    assert stop.close_position and stop.stop_price == BE
+    assert action.status is PositionActionStatus.DONE
+    assert "Старый стоп и промежуточный сняты" in text
+    rows = await _rows(ctx, action.id)
+    assert [(r.status, r.client_order_id) for r in rows] == [
+        (OrderStatus.SUBMITTED, f"tm{action.id}u{ctx.uid}SB"),
+        (OrderStatus.CANCELLED, None),                       # старый
+        (OrderStatus.SUBMITTED, f"tm{action.id}u{ctx.uid}S"),
+        (OrderStatus.CANCELLED, None),                       # мост
+    ]
+    assert rows[1].exchange_order_id == OLD_STOP
 
 
-async def test_new_stop_not_confirmed_keeps_old(ctx) -> None:  # type: ignore[no-untyped-def]
-    ctx.exchange.drop_new = True
-    card = await _card(ctx)
-    result = await ctx.service().confirm(card.action.id, message_id=55, risk_confirmed=False)
+async def test_move_take_four_steps(ctx) -> None:  # type: ignore[no-untyped-def]
+    ctx.exchange.orders.append(_open_order("2105992400526204928", "1.6", "TAKE_PROFIT_MARKET"))
+    action, text = await _move(ctx, kind=PositionActionKind.SET_TAKE, params={"level": "1.65"})
+    bridge_kw, final_kw = _places(ctx)
+    assert bridge_kw["order_type"] == final_kw["order_type"] == "TAKE_PROFIT_MARKET"
+    assert bridge_kw["close_position"] is False and final_kw["close_position"] is True
+    assert bridge_kw["client_order_id"] == f"tm{action.id}u{ctx.uid}TB"
+    takes = [o for o in ctx.exchange.orders if o.order_type == "TAKE_PROFIT_MARKET"]
+    assert [(o.stop_price, o.close_position) for o in takes] == [(D("1.65"), True)]
+    assert action.status is PositionActionStatus.DONE and "Тейк 1.6 → 1.65" in text
+
+
+async def test_set_take_without_old_is_one_order(ctx) -> None:  # type: ignore[no-untyped-def]
+    action, text = await _move(ctx, kind=PositionActionKind.SET_TAKE, params={"level": "1.65"})
+    [kw] = _places(ctx)
+    assert kw["close_position"] is True and kw["client_order_id"] == f"tm{action.id}u{ctx.uid}T"
     assert "cancel" not in ctx.exchange.names()
-    assert "не подтверждён" in result.text and "Старый не снимаю" in result.text
-    await ctx.session.refresh(card.action)
-    assert card.action.status is PositionActionStatus.FAILED
+    assert action.status is PositionActionStatus.DONE and "Тейк 1.65 (на всю позицию)" in text
 
 
-async def test_old_stop_not_removed_reports_two_stops(ctx) -> None:  # type: ignore[no-untyped-def]
-    ctx.exchange.cancel_noop = True
-    card = await _card(ctx)
-    result = await ctx.service().confirm(card.action.id, message_id=55, risk_confirmed=False)
-    assert "два стопа" in result.text
-    await ctx.session.refresh(card.action)
-    assert card.action.status is PositionActionStatus.FAILED
-    _, old = await _rows(ctx, card.action.id)
-    assert old.status is OrderStatus.UNKNOWN
-
-
-async def test_rejected_stop_leaves_old(ctx) -> None:  # type: ignore[no-untyped-def]
-    ctx.exchange.fail_place = True
-    card = await _card(ctx)
-    result = await ctx.service().confirm(card.action.id, message_id=55, risk_confirmed=False)
-    assert "не приняла" in result.text and "Старый стоп на месте" in result.text
+async def test_step1_bridge_rejected_old_untouched(ctx) -> None:  # type: ignore[no-untyped-def]
+    ctx.exchange.fail_place_at = {1}
+    action, text = await _move(ctx)
+    [kw] = _places(ctx)
+    assert kw["close_position"] is False
     assert "cancel" not in ctx.exchange.names()
-    [row] = await _rows(ctx, card.action.id)
+    assert [o.order_id for o in ctx.exchange.orders] == [OLD_STOP]
+    assert action.status is PositionActionStatus.FAILED
+    assert "не перенесён" in text and "Старый стоп 1.4795 на месте" in text
+    [row] = await _rows(ctx, action.id)
     assert row.status is OrderStatus.REJECTED and row.error_code == "109400"
+
+
+async def test_step1_bridge_not_confirmed_old_untouched(ctx) -> None:  # type: ignore[no-untyped-def]
+    ctx.exchange.drop_new_at = {1}
+    action, text = await _move(ctx)
+    assert "cancel" not in ctx.exchange.names()
+    assert action.status is PositionActionStatus.FAILED
+    assert "не подтверждён" in text and "Старый стоп 1.4795 на месте" in text
+
+
+async def test_step2_old_not_removed_bridge_removed(ctx) -> None:  # type: ignore[no-untyped-def]
+    ctx.exchange.cancel_noop_at = {1}
+    action, text = await _move(ctx)
+    assert len(_places(ctx)) == 1                  # closePosition не ставился
+    assert [o.order_id for o in ctx.exchange.orders] == [OLD_STOP]
+    assert action.status is PositionActionStatus.FAILED
+    assert "старый стоп 1.4795 не снялся" in text and "всё как было" in text
+    rows = await _rows(ctx, action.id)
+    assert [r.status for r in rows] == [
+        OrderStatus.SUBMITTED, OrderStatus.UNKNOWN, OrderStatus.CANCELLED,
+    ]
+
+
+async def test_step2_old_and_bridge_not_removed_two_stops(ctx) -> None:  # type: ignore[no-untyped-def]
+    ctx.exchange.cancel_noop = True
+    action, text = await _move(ctx)
+    assert len(ctx.exchange.orders) == 2
+    assert action.status is PositionActionStatus.FAILED and "два стопа" in text
+
+
+async def test_step3_final_rejected_bridge_holds(ctx) -> None:  # type: ignore[no-untyped-def]
+    trade = await TradeJournal(TradeRepository(ctx.session)).open_trade(
+        user_id=ctx.uid, symbol="XRP-USDT", side=TradeSide.LONG, entry_price=ENTRY,
+        quantity=D(30), stop_loss=D("1.4795"), source=TradeSource.IMPORTED,
+        external_position_id=PID, external_fill_id="f1", fee=D("0.0229"),
+    )
+    await ctx.session.commit()
+    ctx.exchange.fail_place_at = {2}
+    action, text = await _move(ctx)
+    [left] = ctx.exchange.orders
+    assert not left.close_position and left.stop_price == BE     # держит мост
+    assert action.status is PositionActionStatus.FAILED
+    assert "промежуточным ордером" in text and "не «на всю позицию»" in text
+    row = await ctx.session.get(Trade, trade.id)
+    await ctx.session.refresh(row)
+    assert row.stop_loss == BE        # журнал — по стопу, который стоит на бирже
+
+
+async def test_step4_bridge_not_removed_warns(ctx) -> None:  # type: ignore[no-untyped-def]
+    ctx.exchange.cancel_noop_at = {2}
+    action, text = await _move(ctx)
+    assert sorted(o.close_position for o in ctx.exchange.orders) == [False, True]
+    assert action.status is PositionActionStatus.FAILED
+    assert "Стоп 1.4795 →" in text and "Промежуточный стоп" in text and "не снялся" in text
+
+
+async def test_bingx_rule_second_close_position_rejected(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Сам фейк: closePosition поверх closePosition — 110406, как на демо 02.10
+    (старый код переноса падал именно так)."""
+    with pytest.raises(ExchangeResponseError) as err:
+        await ctx.exchange.place_conditional_order(
+            symbol="XRP-USDT", side=SimpleNamespace(value="SELL"), position_side="LONG",
+            order_type="STOP_MARKET", stop_price=D("1.5"), quantity=D(30), client_order_id="x",
+        )
+    assert err.value.code == 110406
 
 
 async def test_move_stop_updates_linked_journal_trade(ctx) -> None:  # type: ignore[no-untyped-def]
@@ -388,8 +500,9 @@ async def test_position_changed_after_card(ctx) -> None:  # type: ignore[no-unty
 
 async def test_pending_row_blocks_second_order(ctx) -> None:  # type: ignore[no-untyped-def]
     card = await _card(ctx)
+    # Перенос начинается с моста — его ключ SB и блокирует повторную отправку.
     ctx.session.add(ExecutionOrder(
-        user_id=ctx.uid, client_order_id=f"tm{card.action.id}u{ctx.uid}S", symbol="XRP-USDT",
+        user_id=ctx.uid, client_order_id=f"tm{card.action.id}u{ctx.uid}SB", symbol="XRP-USDT",
         side="SELL", position_side=TradeSide.LONG, order_type="STOP_MARKET",
         role=OrderRole.STOP_LOSS, status=OrderStatus.PENDING,
     ))

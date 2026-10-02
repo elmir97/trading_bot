@@ -5,9 +5,13 @@
 - стоп/тейк: STOP_MARKET / TAKE_PROFIT_MARKET, closePosition=true, quantity =
   текущий объём позиции, stopPrice, MARK_PRICE, без reduceOnly;
 - после частичного закрытия стоп/тейк не переставляются;
-- перенос стопа: сначала новый, read-back по openOrders, потом отмена
-  старого; снят ли старый — только повторным openOrders (ответ отмены не
-  доказательство: у closePosition-ордера он с type LIMIT и пустым stopPrice);
+- перенос стопа/тейка (разведка A, 02.10): второй closePosition-ордер того же
+  типа BingX не принимает (110406/110407), поэтому четыре шага — мост с
+  quantity на новую цену → отмена старого → closePosition на новую цену →
+  отмена моста; каждый ордер подтверждается read-back по openOrders, снятие —
+  только повторным openOrders (ответ отмены не доказательство: у
+  closePosition-ордера он с type LIMIT и пустым stopPrice). Позиция под
+  стопом/тейком на каждом шаге;
 - orderId строкой.
 
 Идемпотентность: строка position_actions (снимок карточки) порождает
@@ -399,7 +403,11 @@ class PositionActionService:
                 f"{fmt_qty(p.quantity, qp)}, stopPrice {fmt_price(plan.new_level, pp)} (MARK_PRICE)"
             )
             if plan.replaces_order_id:
-                what += f"; затем отмена ордера {plan.replaces_order_id}"
+                what = (
+                    f"мост {otype.value} на {fmt_qty(p.quantity, qp)} по "
+                    f"{fmt_price(plan.new_level, pp)} → отмена ордера {plan.replaces_order_id} → "
+                    f"{what} → отмена моста"
+                )
         else:
             row = self._row(action, OrderRole.CLOSE, OrderType.MARKET, OrderStatus.DRY_RUN,
                             quantity=plan.close_qty, price=inputs.mark)
@@ -452,40 +460,33 @@ class PositionActionService:
                 return o
         return None
 
-    async def _move_level(
-        self, client: ExchangeClient, action: PositionAction, plan: ActionPlan,
-        inputs: ActionInputs, trade: Trade | None,
-    ) -> str:
-        p = inputs.position
-        pp = inputs.symbol_info.price_precision
-        is_stop = action.kind is PositionActionKind.MOVE_STOP
-        name = "стоп" if is_stop else "тейк"
-        role = OrderRole.STOP_LOSS if is_stop else OrderRole.TAKE_PROFIT
-        otype = OrderType.STOP_MARKET if is_stop else OrderType.TAKE_PROFIT_MARKET
-        cid = action_client_order_id(action_id=action.id, user_id=self._user.id, role=role)
-        row = self._row(action, role, otype, OrderStatus.PENDING, quantity=p.quantity,
-                        trigger=plan.new_level, client_order_id=cid)
+    async def _place_and_confirm(
+        self, client: ExchangeClient, action: PositionAction, role: OrderRole,
+        otype: OrderType, level: Decimal, quantity: Decimal, *, bridge: bool,
+    ) -> tuple[OpenOrder | None, str]:
+        """PENDING (UNIQUE client_order_id) → POST → read-back по openOrders.
+        (ордер, "") — встал и подтверждён; (None, причина) — нет."""
+        cid = action_client_order_id(
+            action_id=action.id, user_id=self._user.id, role=role, bridge=bridge
+        )
+        row = self._row(action, role, otype, OrderStatus.PENDING, quantity=quantity,
+                        trigger=level, client_order_id=cid)
         if not await self._insert_pending(row):
-            return await self._finish(action, PositionActionStatus.FAILED, ExecutionRefusal(
-                Code.CARD_STALE, f"Новый {name} по этой карточке уже отправлялся — повторно не шлю."
-            ))
-        assert plan.new_level is not None
+            return None, "по этой карточке уже отправлялся — повторно не шлю"
         try:
             placed = await client.place_conditional_order(
-                symbol=action.symbol, side=_CLOSING_SIDE[p.side], position_side=p.side.value,
-                order_type=otype.value, stop_price=plan.new_level, quantity=p.quantity,
-                client_order_id=cid,
+                symbol=action.symbol, side=_CLOSING_SIDE[action.side],
+                position_side=action.side.value, order_type=otype.value, stop_price=level,
+                quantity=quantity, client_order_id=cid, close_position=not bridge,
             )
         except ExchangeError as exc:
             row.status = OrderStatus.REJECTED if exc.code else OrderStatus.UNKNOWN
             row.error_code = str(exc.code) if exc.code else type(exc).__name__
             row.raw_response = exc.payload
-            old = f"Старый {name} на месте." if plan.replaces_order_id else ""
-            return await self._finish(
-                action, PositionActionStatus.FAILED,
-                ExecutionRefusal(Code.POSITION_CHANGED, f"Биржа не приняла {name}: {exc}. {old}"),
-                text=f"❌ Биржа не приняла новый {name}: {exc}. {old}".strip(),
-            )
+            await self._session.commit()
+            if exc.code:
+                return None, f"биржа не приняла: {exc}"
+            return None, f"исход отправки неизвестен ({exc}) — проверь ордера в BingX"
         row.status = OrderStatus.SUBMITTED
         row.exchange_order_id = str(placed.order_id) or None
         await self._session.commit()
@@ -498,44 +499,117 @@ class PositionActionService:
                 break
             if attempt + 1 < self._settings.exec_order_readback_attempts:
                 await self._delay()
-        if found is None or found.stop_price != plan.new_level:
-            old = " Старый не снимаю." if plan.replaces_order_id else ""
+        if found is None or found.stop_price != level:
+            return None, "не подтверждён в openOrders — проверь ордера в BingX"
+        row.exchange_order_id = str(found.order_id)
+        await self._session.commit()
+        return found, ""
+
+    def _journal_level(
+        self, trade: Trade | None, is_stop: bool, order: OpenOrder, level: Decimal,
+        *, whole: bool,
+    ) -> None:
+        if trade is None:
+            return
+        new = (ProtectiveOrder(
+            str(order.order_id), level, whole, None if whole else order.quantity, "MARK_PRICE"
+        ),)
+        apply_exchange_levels(trade, new if is_stop else (), () if is_stop else new)
+
+    async def _move_level(
+        self, client: ExchangeClient, action: PositionAction, plan: ActionPlan,
+        inputs: ActionInputs, trade: Trade | None,
+    ) -> str:
+        """Стоп/тейк на новую цену. Нет старого — один closePosition-ордер.
+        Есть — четыре шага (мост с quantity → отмена старого → closePosition →
+        отмена моста), позиция под стопом/тейком на каждом шаге."""
+        p = inputs.position
+        pp = inputs.symbol_info.price_precision
+        qp = inputs.symbol_info.quantity_precision
+        is_stop = action.kind is PositionActionKind.MOVE_STOP
+        name = "стоп" if is_stop else "тейк"
+        two = "два стопа" if is_stop else "два тейка"
+        role = OrderRole.STOP_LOSS if is_stop else OrderRole.TAKE_PROFIT
+        otype = OrderType.STOP_MARKET if is_stop else OrderType.TAKE_PROFIT_MARKET
+        assert plan.new_level is not None
+        level = plan.new_level
+        new_s = fmt_price(level, pp)
+        old_level = plan.current_stop if is_stop else plan.current_take
+        old_s = fmt_price(old_level, pp)
+
+        async def failed(message: str, text: str) -> str:
             return await self._finish(
                 action, PositionActionStatus.FAILED,
-                ExecutionRefusal(
-                    Code.POSITION_CHANGED, f"Новый {name} не подтверждён в openOrders."
-                ),
-                text=f"❌ Новый {name} не подтверждён на бирже.{old} Проверь ордера в BingX.",
+                ExecutionRefusal(Code.POSITION_CHANGED, message), text=text,
             )
-        row.exchange_order_id = str(found.order_id)
-        if trade is not None:
-            new = (ProtectiveOrder(str(found.order_id), plan.new_level, True, None, "MARK_PRICE"),)
-            apply_exchange_levels(trade, new if is_stop else (), () if is_stop else new)
-        await self._session.commit()
 
-        moved = (
-            f"{fmt_price(plan.current_stop if is_stop else plan.current_take, pp)} → "
-            if plan.replaces_order_id else ""
-        )
-        head = f"✅ {name.capitalize()} {moved}{fmt_price(plan.new_level, pp)} (на всю позицию)."
         if not plan.replaces_order_id:
-            return await self._finish(action, PositionActionStatus.DONE, text=head)
-        removed = await self._cancel_and_confirm(
-            client, action, plan.replaces_order_id, role, otype,
-            plan.current_stop if is_stop else plan.current_take, p.quantity,
-        )
-        if removed:
+            final, why = await self._place_and_confirm(
+                client, action, role, otype, level, p.quantity, bridge=False
+            )
+            if final is None:
+                return await failed(f"Новый {name}: {why}", f"❌ {name.capitalize()} не "
+                                    f"поставлен: {why}.")
+            self._journal_level(trade, is_stop, final, level, whole=True)
+            await self._session.commit()
             return await self._finish(
                 action, PositionActionStatus.DONE,
-                text=f"{head}\nСтарый {name} снят — проверено по openOrders.",
+                text=f"✅ {name.capitalize()} {new_s} (на всю позицию).",
+            )
+
+        # Шаг 1: мост — ордер с quantity на новую цену рядом со старым.
+        bridge, why = await self._place_and_confirm(
+            client, action, role, otype, level, p.quantity, bridge=True
+        )
+        if bridge is None:
+            return await failed(
+                f"Промежуточный {name}: {why}",
+                f"❌ {name.capitalize()} не перенесён: промежуточный {name} {new_s} — {why}. "
+                f"Старый {name} {old_s} на месте.",
+            )
+        # Шаг 2: снять старый; не снялся — снять мост, вернуть как было.
+        if not await self._cancel_and_confirm(
+            client, action, plan.replaces_order_id, role, otype, old_level, p.quantity
+        ):
+            back = await self._cancel_and_confirm(
+                client, action, str(bridge.order_id), role, otype, level, p.quantity
+            )
+            tail = (
+                f"Промежуточный {new_s} снят — всё как было."
+                if back else
+                f"Промежуточный {new_s} тоже не снялся — на позиции {two}. Проверь BingX."
+            )
+            return await failed(
+                f"Старый {name} не снялся.",
+                f"❌ {name.capitalize()} не перенесён: старый {name} {old_s} не снялся. {tail}",
+            )
+        # Шаг 3: closePosition на новую цену; не встал — позицию держит мост.
+        final, why = await self._place_and_confirm(
+            client, action, role, otype, level, p.quantity, bridge=False
+        )
+        if final is None:
+            self._journal_level(trade, is_stop, bridge, level, whole=False)
+            await self._session.commit()
+            return await failed(
+                f"{name.capitalize()} на всю позицию: {why}",
+                f"⚠️ {name.capitalize()} {old_s} → {new_s} стоит промежуточным ордером на "
+                f"{fmt_qty(p.quantity, qp)} (не «на всю позицию»): {why}. Проверь BingX.",
+            )
+        self._journal_level(trade, is_stop, final, level, whole=True)
+        await self._session.commit()
+        head = f"✅ {name.capitalize()} {old_s} → {new_s} (на всю позицию)."
+        # Шаг 4: снять мост.
+        if not await self._cancel_and_confirm(
+            client, action, str(bridge.order_id), role, otype, level, p.quantity
+        ):
+            return await failed(
+                f"Промежуточный {name} не снялся.",
+                f"{head}\n⚠️ Промежуточный {name} {bridge.order_id} на {new_s} не снялся — "
+                f"на позиции {two} на одной цене. Сними его в BingX.",
             )
         return await self._finish(
-            action, PositionActionStatus.FAILED,
-            ExecutionRefusal(Code.POSITION_CHANGED, f"Старый {name} не снялся."),
-            text=(
-                f"{head}\n⚠️ Старый {name} {plan.replaces_order_id} не снялся — на позиции два "
-                f"{'стопа' if is_stop else 'тейка'}. Сними старый в BingX."
-            ),
+            action, PositionActionStatus.DONE,
+            text=f"{head}\nСтарый {name} и промежуточный сняты — проверено по openOrders.",
         )
 
     async def _cancel_and_confirm(

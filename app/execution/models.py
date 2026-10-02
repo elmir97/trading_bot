@@ -222,11 +222,15 @@ class OrderRequest:
         )
 
 
-def action_client_order_id(*, action_id: int, user_id: int, role: OrderRole) -> str:
+def action_client_order_id(
+    *, action_id: int, user_id: int, role: OrderRole, bridge: bool = False
+) -> str:
     """Этап 4: ключ идемпотентности ордера действия с позицией —
     f"tm{action_id}u{user_id}{role.letter}" (S — стоп, T — тейк, C —
-    закрытие). Префикс tm, не tj: не пересекается с ключами входа по сигналу.
+    закрытие); bridge — промежуточный ордер переноса стопа/тейка, суффикс B
+    (SB/TB). Префикс tm, не tj: не пересекается с ключами входа по сигналу.
     action_id — position_actions.id (снимок карточки): повторное «Да» и «Да»
-    после рестарта дают ту же строку, UNIQUE не пустит второй ордер. Длина
-    на максимумах — 24 символа, лимит BingX 1–40."""
-    return f"tm{action_id}u{user_id}{role.letter}"
+    после рестарта дают ту же строку, UNIQUE не пустит второй ордер. BingX
+    хранит clientOrderId в нижнем регистре — ключи различаются и так. Длина
+    на максимумах — 25 символов, лимит BingX 1–40."""
+    return f"tm{action_id}u{user_id}{role.letter}{'B' if bridge else ''}"

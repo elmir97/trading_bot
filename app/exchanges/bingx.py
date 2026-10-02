@@ -1157,6 +1157,7 @@ class BingXClient(ExchangeClient):
         stop_price: Decimal,
         quantity: Decimal,
         client_order_id: str,
+        close_position: bool = True,
     ) -> OrderResult:
         """См. ExchangeClient.place_conditional_order. Тот же путь
         /trade/order, что и у маркета: type — условный, closePosition=true и
@@ -1178,10 +1179,11 @@ class BingXClient(ExchangeClient):
             "type": order_type,
             "stopPrice": _decimal_literal(stop_price),
             "quantity": _decimal_literal(quantity),
-            "closePosition": "true",
             "workingType": CONDITIONAL_WORKING_TYPE,
             "clientOrderID": client_order_id,
         }
+        if close_position:
+            params["closePosition"] = "true"
         data = await self._request(
             TRADE_ORDER, params, signed=True, method="POST", max_retries=1
         )
