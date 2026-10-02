@@ -21,12 +21,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.analysis.ai.base import LLMClient
 from app.analysis.ai.service import AIAnalysisService
+from app.analysis.market_summary import MarketSummaryService
 from app.core.config import Settings
 from app.database.repositories.ai_report import AIReportRepository
 
 
 class AIServiceMiddleware(BaseMiddleware):
-    """Кладёт в data готовый `ai_service` и фабрику `build_ai_service`."""
+    """Кладёт в data готовый `ai_service`, фабрику `build_ai_service` и
+    `market_summary` — пересказ «Анализа рынка» (этап 2) в той же сессии."""
 
     def __init__(self, llm_client: LLMClient | None, settings: Settings) -> None:
         self._llm_client = llm_client
@@ -55,4 +57,9 @@ class AIServiceMiddleware(BaseMiddleware):
         session: AsyncSession | None = data.get("session")
         if session is not None:
             data["ai_service"] = self._build(session)
+            data["market_summary"] = MarketSummaryService(
+                client=self._llm_client,
+                reports_repo=AIReportRepository(session),
+                settings=self._settings,
+            )
         return await handler(event, data)

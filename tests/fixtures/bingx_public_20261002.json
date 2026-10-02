@@ -1,0 +1,82 @@
+{
+  "captured_at": "2026-10-02T06:10:47+00:00",
+  "host": "live",
+  "_note": "Живые ответы публичных ручек BingX для экрана «Анализ рынка» (этап 2), только GET без ключей, 02.10.2026, по одному запросу на ручку, open-api.bingx.com. Заголовки лимита в этом снятии не записывались (null). openInterest — USDT: BTC в тот же день 908418144.5 при mark 85863.8 (монетами — больше эмиссии).",
+  "calls": [
+    {
+      "label": "premiumIndex XRP (live)",
+      "host": "live",
+      "path": "/openApi/swap/v2/quote/premiumIndex",
+      "params": {"symbol": "XRP-USDT"},
+      "http_status": 200,
+      "rate_remain": null,
+      "rate_expire_ms": null,
+      "code": 0,
+      "msg": "",
+      "top_keys": ["code", "data", "msg"],
+      "data_type": "dict",
+      "items": [
+        {
+          "keys": ["fundingIntervalHours", "indexPrice", "lastFundingRate", "markPrice", "maxFundingRate", "minFundingRate", "nextFundingTime", "symbol", "updateTime"],
+          "fields": {
+            "symbol": {"value": "XRP-USDT", "type": "str"},
+            "markPrice": {"value": "1.5245", "type": "str"},
+            "indexPrice": {"value": "1.5247", "type": "str"},
+            "lastFundingRate": {"value": "0.00010000", "type": "str"},
+            "nextFundingTime": {"value": 1790928000000, "type": "int"},
+            "fundingIntervalHours": {"value": 8, "type": "int"},
+            "minFundingRate": {"value": "-0.005000", "type": "str"},
+            "maxFundingRate": {"value": "0.005000", "type": "str"},
+            "updateTime": {"value": 1790899200000, "type": "int"}
+          }
+        }
+      ]
+    },
+    {
+      "label": "openInterest XRP (live)",
+      "host": "live",
+      "path": "/openApi/swap/v2/quote/openInterest",
+      "params": {"symbol": "XRP-USDT"},
+      "http_status": 200,
+      "rate_remain": null,
+      "rate_expire_ms": null,
+      "code": 0,
+      "msg": "",
+      "top_keys": ["code", "data", "msg"],
+      "data_type": "dict",
+      "items": [
+        {
+          "keys": ["openInterest", "symbol", "time"],
+          "fields": {
+            "openInterest": {"value": "47783401.5019", "type": "str"},
+            "symbol": {"value": "XRP-USDT", "type": "str"},
+            "time": {"value": 1790921447102, "type": "int"}
+          }
+        }
+      ]
+    },
+    {
+      "label": "openInterest DOGE (demo)",
+      "host": "demo",
+      "path": "/openApi/swap/v2/quote/openInterest",
+      "params": {"symbol": "DOGE-USDT"},
+      "http_status": 200,
+      "rate_remain": null,
+      "rate_expire_ms": null,
+      "code": 0,
+      "msg": "",
+      "top_keys": ["code", "data", "msg"],
+      "data_type": "dict",
+      "items": [
+        {
+          "keys": ["openInterest", "symbol", "time"],
+          "fields": {
+            "openInterest": {"value": "12999763.15332", "type": "str"},
+            "symbol": {"value": "DOGE-USDT", "type": "str"},
+            "time": {"value": 1790882821089, "type": "int"}
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -119,6 +119,35 @@ class Ticker:
 
 
 @dataclass(frozen=True, slots=True)
+class PremiumIndex:
+    """GET /openApi/swap/v2/quote/premiumIndex — mark price и funding.
+
+    Живая форма (29.09 и 02.10): data — объект, цены и ставка строками,
+    nextFundingTime — миллисекунды числом. last_funding_rate — доля, не
+    проценты (0.0001 = 0.01%)."""
+
+    symbol: str
+    mark_price: Decimal
+    index_price: Decimal
+    last_funding_rate: Decimal
+    next_funding_time: datetime
+    # Не у всех символов интервал 8 ч; None — биржа поле не отдала.
+    funding_interval_hours: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class OpenInterest:
+    """GET /openApi/swap/v2/quote/openInterest. Значение — в USDT (нотионал),
+    не в монетах: документация пишет «Position Amount», но живые числа
+    (02.10: BTC 908 млн при цене 85 864 — монетами было бы больше эмиссии)
+    однозначны."""
+
+    symbol: str
+    value_usdt: Decimal
+    time: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class Kline:
     """Одна свеча OHLCV.
 
@@ -604,6 +633,15 @@ class ExchangeClient(ABC):
     async def get_mark_price(self, symbol: str) -> Decimal:
         """Mark price символа — по нему срабатывают стопы и тейки бота
         (workingType=MARK_PRICE). Не абстрактный: нужен только монитору."""
+        raise NotImplementedError
+
+    async def get_premium_index(self, symbol: str) -> PremiumIndex:
+        """Mark price и funding символа — экран «Анализ рынка» (этап 2).
+        Не абстрактный: нужен только ему."""
+        raise NotImplementedError
+
+    async def get_open_interest(self, symbol: str) -> OpenInterest:
+        """Открытый интерес символа в USDT — экран «Анализ рынка» (этап 2)."""
         raise NotImplementedError
 
     # Шаг 15.6, reconciler. Не абстрактные: фейки тестов, которым сверка не

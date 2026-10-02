@@ -1,10 +1,9 @@
 """Движок анализа рынка.
 
-Собирает рыночный контекст инструмента: свечи, индикаторы, структура,
-уровни, старший таймфрейм. Порядок намеренный: сначала данные, потом
-индикаторы, потом структура. Потребители (экран «Анализ рынка», график)
-за данными сами не ходят — иначе один и тот же индикатор считался бы по
-нескольку раз, а значения между ними могли бы разойтись.
+Снимок рынка по монете для экрана «Анализ рынка» (свечи H1/H4/D1, funding,
+open interest — market_snapshot) и контекст графика по готовым свечам
+(context_from_candles). Потребители за данными сами не ходят — иначе один и
+тот же индикатор считался бы по нескольку раз, а значения могли бы разойтись.
 
 02.10.2026: детекторы сетапов и вердикт LONG/SHORT/WAIT удалены — движок
 только описывает рынок, решений не принимает.
@@ -27,16 +26,14 @@ from app.analysis.indicators import (
 from app.analysis.indicators import (
     rsi as calc_rsi,
 )
+from app.analysis.market_overview import KLINES_LIMIT, OVERVIEW_TIMEFRAMES, MarketSnapshot
 from app.analysis.structure import detect_structure, find_levels
 from app.core.logging import get_logger
-from app.exchanges.base import Kline, SymbolInfo
+from app.exchanges.base import ExchangeError, Kline, OpenInterest, PremiumIndex, SymbolInfo
 from app.market.data import MarketDataService
-from app.trading.enums import MarketStructure, Timeframe
+from app.trading.enums import MarketStructure
 
 logger = get_logger(__name__)
-
-# Свечей достаточно для EMA200 с запасом на разогрев.
-CANDLES_REQUIRED = 300
 
 
 def context_from_candles(
@@ -48,7 +45,8 @@ def context_from_candles(
     higher_structure: MarketStructure | None = None,
     higher_ema200: Decimal | None = None,
 ) -> MarketContext:
-    """Индикаторы, структура и уровни по готовым свечам — ядро build_context."""
+    """Индикаторы, структура и уровни по готовым свечам — контекст графика
+    «Анализа рынка» (свечи — из снимка AnalysisEngine.market_snapshot)."""
     closes = [c.close for c in candles]
     highs = [c.high for c in candles]
     lows = [c.low for c in candles]
@@ -91,49 +89,23 @@ class AnalysisEngine:
         """
         return await self._market.get_symbol_info(symbol)
 
-    async def build_context(
-        self, symbol: str, timeframe: str, *, with_higher: bool = True
-    ) -> MarketContext | None:
-        """Собирает всё, что нужно для анализа одного инструмента."""
-        candles = await self._market.get_klines(
-            symbol, timeframe, limit=CANDLES_REQUIRED
-        )
-        if len(candles) < 50:
-            logger.info(
-                "Мало свечей для анализа",
-                extra={"symbol": symbol, "count": len(candles)},
-            )
-            return None
-
-        higher_tf: str | None = None
-        higher_structure = None
-        higher_ema200 = None
-
-        if with_higher:
-            # Старший таймфрейм даёт контекст: методология требует
-            # сверяться с ним, потому что пробой на H1 часто оказывается
-            # лишь тенью свечи на H4.
-            try:
-                higher = Timeframe(timeframe).higher
-            except ValueError:
-                higher = None
-
-            if higher is not None:
-                higher_tf = higher.value
-                higher_candles = await self._market.get_klines(
-                    symbol, higher_tf, limit=CANDLES_REQUIRED
-                )
-                if len(higher_candles) >= 50:
-                    higher_structure = detect_structure(higher_candles).structure
-                    higher_ema200 = last_value(
-                        ema([c.close for c in higher_candles], 200)
-                    )
-
-        return context_from_candles(
-            symbol,
-            timeframe,
-            candles,
-            higher_timeframe=higher_tf,
-            higher_structure=higher_structure,
-            higher_ema200=higher_ema200,
-        )
+    async def market_snapshot(self, symbol: str) -> MarketSnapshot:
+        """Данные экрана «Анализ рынка»: закрытые свечи H1/H4/D1, funding и
+        open interest — пять публичных запросов. Свечи обязательны (сбой —
+        исключение наверх); funding и OI — нет: без них экран остаётся
+        полезным, строки пишут «н/д», сбой — в лог."""
+        candles = {
+            tf: await self._market.get_klines(symbol, tf, limit=KLINES_LIMIT[tf])
+            for tf in OVERVIEW_TIMEFRAMES
+        }
+        premium: PremiumIndex | None = None
+        open_interest: OpenInterest | None = None
+        try:
+            premium = await self._market.get_premium_index(symbol)
+        except ExchangeError:
+            logger.warning("premiumIndex недоступен", extra={"symbol": symbol})
+        try:
+            open_interest = await self._market.get_open_interest(symbol)
+        except ExchangeError:
+            logger.warning("openInterest недоступен", extra={"symbol": symbol})
+        return MarketSnapshot(symbol, candles, premium, open_interest)

@@ -17,7 +17,14 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from app.core.logging import get_logger
-from app.exchanges.base import ExchangeClient, Kline, SymbolInfo, Ticker
+from app.exchanges.base import (
+    ExchangeClient,
+    Kline,
+    OpenInterest,
+    PremiumIndex,
+    SymbolInfo,
+    Ticker,
+)
 from app.market.cache import (
     TTL_KLINES,
     TTL_SYMBOLS,
@@ -56,6 +63,24 @@ class MarketDataService:
                 logger.warning("Не удалось получить mark price", extra={"symbol": symbol})
                 result[symbol] = None
         return result
+
+    async def get_premium_index(self, symbol: str) -> PremiumIndex:
+        """Mark price и funding (кэш — как у тикера)."""
+        premium: PremiumIndex = await self._cache.get_or_fetch(
+            f"premium:{self._client.name}:{symbol}",
+            TTL_TICKER,
+            lambda: self._client.get_premium_index(symbol),
+        )
+        return premium
+
+    async def get_open_interest(self, symbol: str) -> OpenInterest:
+        """Открытый интерес в USDT (кэш — как у тикера)."""
+        oi: OpenInterest = await self._cache.get_or_fetch(
+            f"oi:{self._client.name}:{symbol}",
+            TTL_TICKER,
+            lambda: self._client.get_open_interest(symbol),
+        )
+        return oi
 
     async def get_ticker(self, symbol: str) -> Ticker:
         return await self._cache.get_or_fetch(

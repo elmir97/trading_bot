@@ -1,15 +1,21 @@
-"""Экран «Анализ рынка» — техническая картина по выбранной монете.
+"""Экран «Анализ рынка» — техническая картина по выбранной монете (этап 2).
 
-02.10.2026: сигналы удалены — экран больше не ищет вход и не выносит
-вердикт LONG/SHORT/WAIT. Только описание рынка (тренд, структура, RSI, ATR,
-объём, уровни) и график. Полный экран (H1/H4/D1, funding, open interest) —
-этап 2.
+Без направления сделки и без советов входа: тренд H1/H4/D1 (цена против
+EMA50/200), структура, RSI, ATR %, объём, ближайшие уровни, funding и open
+interest (app/analysis/market_overview.py) и график выбранного таймфрейма.
+По флагу — пересказ цифр моделью (app/analysis/market_summary.py).
+
+Данные — один снимок на монету (пять публичных запросов), кэш
+OVERVIEW_TTL_SECONDS: переключение таймфрейма графика и повторный тап на
+биржу не ходят.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import html
+from datetime import UTC, datetime
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
@@ -26,10 +32,15 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.analysis.charting import render_analysis_chart
-from app.analysis.context import MarketContext
-from app.analysis.engine import AnalysisEngine
-from app.analysis.structure import level_role
-from app.bot.formatting import fmt_price, fmt_ratio
+from app.analysis.engine import AnalysisEngine, context_from_candles
+from app.analysis.market_overview import (
+    MIN_CANDLES,
+    OVERVIEW_TIMEFRAMES,
+    MarketSnapshot,
+    build_overview,
+    render_overview,
+)
+from app.analysis.market_summary import MarketSummaryService
 from app.bot.handlers.exchange import _describe, _market_cache
 from app.bot.keyboards.main import MenuCallback, back_to, nav_row
 from app.bot.messaging import edit_or_replace
@@ -44,8 +55,10 @@ from app.services.exchange_factory import ExchangeFactory
 router = Router(name="analysis")
 logger = get_logger(__name__)
 
-# Таймфреймы экрана (бывший SCAN_TIMEFRAMES сканера).
-MARKET_TIMEFRAMES = ("1h", "4h")
+# Таймфреймы графика — те же, что у обзора.
+MARKET_TIMEFRAMES = OVERVIEW_TIMEFRAMES
+DEFAULT_TIMEFRAME = "4h"
+OVERVIEW_TTL_SECONDS = 60
 
 DISCLAIMER = "<i>ℹ️ Информация, не торговая рекомендация.</i>"
 
@@ -87,69 +100,20 @@ def _symbols_keyboard(symbols: list[str], prefix: str) -> InlineKeyboardBuilder:
 # Текст экрана
 # ---------------------------------------------------------------------------
 
-
-def render_market(context: MarketContext, price_precision: int | None = None) -> str:
-    """Сводка по рынку без торговых рекомендаций.
-
-    price_precision — из SymbolInfo.price_precision биржи; None, если
-    инструмент не удалось сопоставить.
-    """
-    lines = [
-        f"<b>{context.symbol} · {context.timeframe.upper()}</b>",
-        "",
-        f"Цена: {fmt_price(context.price, price_precision)}",
-        "",
-        "<b>Тренд</b>",
-    ]
-
-    if context.ema200 is not None:
-        side = "выше" if context.above_ema200 else "ниже"
-        lines.append(f"Цена {side} EMA200 ({fmt_price(context.ema200, price_precision)})")
-    if context.ema50 is not None:
-        lines.append(f"EMA50: {fmt_price(context.ema50, price_precision)}")
-    if context.ema20 is not None:
-        lines.append(f"EMA20: {fmt_price(context.ema20, price_precision)}")
-
-    lines += ["", f"Структура: {context.structure.value}"]
-    if context.higher_structure is not None:
-        lines.append(
-            f"Старший ТФ ({context.higher_timeframe}): "
-            f"{context.higher_structure.value}"
-        )
-
-    lines.append("")
-    if context.rsi is not None:
-        state = ""
-        if context.rsi >= 70:
-            state = " — зона перекупленности"
-        elif context.rsi <= 30:
-            state = " — зона перепроданности"
-        lines.append(f"RSI: {fmt_ratio(context.rsi)}{state}")
-
-    if context.atr is not None:
-        lines.append(f"ATR: {fmt_price(context.atr, price_precision)}")
-    if context.volume_ratio is not None:
-        lines.append(f"Объём к среднему: {fmt_ratio(context.volume_ratio)}")
-
-    if context.levels:
-        lines += ["", "<b>Ближайшие уровни</b>"]
-        nearby = sorted(
-            context.levels, key=lambda level: level.distance_to(context.price)
-        )[:5]
-        for level in sorted(nearby, key=lambda level: level.price, reverse=True):
-            role = level_role(level, context.price)
-            kind = "сопротивление" if role == "resistance" else "поддержка"
-            lines.append(
-                f"{fmt_price(level.price, price_precision)} · {kind} · "
-                f"касаний {level.touches}"
-            )
-
-    return "\n".join(lines)
+# Лимит подписи к фото в Telegram — 1024 символа (len с HTML-тегами — с запасом).
+CAPTION_LIMIT = 1024
 
 
-def render_market_caption(context: MarketContext, price_precision: int | None = None) -> str:
-    """Подпись к графику: сводка по рынку и пометка, что это не рекомендация."""
-    return f"{render_market(context, price_precision)}\n\n{DISCLAIMER}"
+def compose_caption(screen_text: str, summary: str | None) -> str:
+    """Цифры, пересказ модели (если есть и влезает) и пометка."""
+    plain_caption = f"{screen_text}\n\n{DISCLAIMER}"
+    if not summary:
+        return plain_caption
+    with_summary = (
+        f"{screen_text}\n\n<i>Кратко (пересказ цифр выше): {html.escape(summary)}</i>"
+        f"\n\n{DISCLAIMER}"
+    )
+    return with_summary if len(with_summary) <= CAPTION_LIMIT else plain_caption
 
 
 # ---------------------------------------------------------------------------
@@ -171,16 +135,14 @@ async def ask_market_symbol(
     await _reply(
         event,
         "<b>Анализ рынка</b>\n\n"
-        "Покажу график и техническую картину: тренд относительно EMA, "
-        "структуру, RSI, ATR, объём и ближайшие уровни.\n\n"
+        "Покажу техническую картину по H1, H4 и D1: тренд относительно EMA50/200, "
+        "структуру, RSI, ATR, объём, ближайшие уровни, funding и open interest — "
+        "и график.\n\n"
         f"{DISCLAIMER}\n\n"
         "Выбери инструмент:",
         _symbols_keyboard(symbols, AnalysisCB.MARKET).as_markup(),
     )
 
-
-# Лимит подписи к фото в Telegram — 1024 символа.
-CAPTION_LIMIT = 1024
 
 # (user_id, symbol) → идёт расчёт. Повторный тап по той же кнопке, пока
 # рисуется график, не должен запускать второй рендер.
@@ -232,12 +194,26 @@ async def _chat_action(callback: CallbackQuery, message: Message) -> None:
 def _parse_symbol_tf(data: str, prefix: str) -> tuple[str, str]:
     symbol, _, timeframe = data.removeprefix(prefix).partition(":")
     if timeframe not in MARKET_TIMEFRAMES:
-        timeframe = MARKET_TIMEFRAMES[-1]
+        timeframe = DEFAULT_TIMEFRAME
     return symbol, timeframe
 
 
+async def _snapshot(engine: AnalysisEngine, symbol: str) -> MarketSnapshot:
+    """Снимок монеты из общего кэша рынка: повторный тап и смена таймфрейма
+    графика в пределах OVERVIEW_TTL_SECONDS на биржу не ходят."""
+    snapshot: MarketSnapshot = await _market_cache.get_or_fetch(
+        f"overview:{symbol}", OVERVIEW_TTL_SECONDS, lambda: engine.market_snapshot(symbol)
+    )
+    return snapshot
+
+
 async def _show_market_screen(
-    callback: CallbackQuery, user: User, settings: Settings, symbol: str, timeframe: str
+    callback: CallbackQuery,
+    user: User,
+    settings: Settings,
+    symbol: str,
+    timeframe: str,
+    market_summary: MarketSummaryService | None = None,
 ) -> None:
     message = callback.message
     if not isinstance(message, Message):
@@ -255,7 +231,7 @@ async def _show_market_screen(
 
         engine, client = await _engine(settings)
         try:
-            context = await engine.build_context(symbol, timeframe)
+            snapshot = await _snapshot(engine, symbol)
             symbol_info = await engine.get_symbol_info(symbol)
         except Exception as exc:
             logger.exception("Анализ рынка не удался", extra={"symbol": symbol})
@@ -265,19 +241,33 @@ async def _show_market_screen(
             await client.close()  # type: ignore[attr-defined]
 
         keyboard = market_keyboard(symbol, timeframe)
-        if context is None:
+        overview = build_overview(
+            symbol, snapshot.candles, snapshot.premium, snapshot.open_interest
+        )
+        if overview is None:
             await edit_or_replace(
                 message, "Недостаточно рыночных данных для анализа.", keyboard
             )
             return
 
         price_precision = symbol_info.price_precision if symbol_info else None
-        caption = render_market_caption(context, price_precision)
-        await _set_status(message, "🖼 Рисую график…")
-        await _chat_action(callback, message)
-        # В отдельном потоке: matplotlib синхронный и тяжёлый, цикл
-        # событий бота не должен вставать на время рендера.
-        photo = await asyncio.to_thread(render_analysis_chart, context, price_precision)
+        screen_text = render_overview(overview, price_precision, datetime.now(UTC))
+        summary = (
+            await market_summary.summarize(user.id, screen_text)
+            if market_summary is not None
+            else None
+        )
+        caption = compose_caption(screen_text, summary)
+
+        photo: bytes | None = None
+        candles = snapshot.candles.get(timeframe) or []
+        if len(candles) >= MIN_CANDLES:
+            await _set_status(message, "🖼 Рисую график…")
+            await _chat_action(callback, message)
+            context = context_from_candles(symbol, timeframe, candles)
+            # В отдельном потоке: matplotlib синхронный и тяжёлый, цикл
+            # событий бота не должен вставать на время рендера.
+            photo = await asyncio.to_thread(render_analysis_chart, context, price_precision)
 
         await _deliver(message, photo, caption, keyboard)
     finally:
@@ -306,17 +296,27 @@ async def _deliver(
 
 
 @router.callback_query(F.data.startswith(AnalysisCB.MARKET))
-async def show_market(callback: CallbackQuery, user: User, settings: Settings) -> None:
+async def show_market(
+    callback: CallbackQuery,
+    user: User,
+    settings: Settings,
+    market_summary: MarketSummaryService | None = None,
+) -> None:
     symbol = str(callback.data).removeprefix(AnalysisCB.MARKET)
-    await _show_market_screen(callback, user, settings, symbol, MARKET_TIMEFRAMES[-1])
+    await _show_market_screen(
+        callback, user, settings, symbol, DEFAULT_TIMEFRAME, market_summary
+    )
 
 
 @router.callback_query(F.data.startswith(AnalysisCB.MARKET_TF))
 async def switch_market_timeframe(
-    callback: CallbackQuery, user: User, settings: Settings
+    callback: CallbackQuery,
+    user: User,
+    settings: Settings,
+    market_summary: MarketSummaryService | None = None,
 ) -> None:
     symbol, timeframe = _parse_symbol_tf(str(callback.data), AnalysisCB.MARKET_TF)
-    await _show_market_screen(callback, user, settings, symbol, timeframe)
+    await _show_market_screen(callback, user, settings, symbol, timeframe, market_summary)
 
 
 @router.callback_query(F.data == AnalysisCB.NOOP)

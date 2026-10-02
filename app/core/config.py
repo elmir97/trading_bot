@@ -227,6 +227,11 @@ class Settings(BaseSettings):
     ai_monthly_budget_usd: Decimal = Decimal("5")
     ai_base_url: str = "https://api.anthropic.com"
     ai_auth_scheme: str = "x-api-key"
+    # Этап 2: пересказ цифр «Анализа рынка» моделью. Выключен по умолчанию;
+    # включается только вместе с ai_enabled. Модель не добавляет чисел (проверка
+    # в app/analysis/market_summary.py), бюджет — общий ai_monthly_budget_usd.
+    ai_market_summary_enabled: bool = False
+    ai_market_summary_max_tokens: int = 300
 
     # --- Фоновые задачи (этап 12) --------------------------------------------
     background_jobs_enabled: bool = Field(

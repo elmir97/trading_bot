@@ -27,7 +27,12 @@ class AIReportRepository:
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def last_created_at(self, user_id: int) -> datetime | None:
-        stmt = select(func.max(AIReport.created_at)).where(AIReport.user_id == user_id)
+        """Последний разбор журнала — пауза между разборами (insights). Пересказы
+        «Анализа рынка» (fingerprint "market:…", этап 2) в паузу не входят."""
+        stmt = select(func.max(AIReport.created_at)).where(
+            AIReport.user_id == user_id,
+            AIReport.fingerprint.not_like("market:%"),
+        )
         return (await self._session.execute(stmt)).scalar_one()
 
     async def spent_this_month(self, user_id: int) -> Decimal:

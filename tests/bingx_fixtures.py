@@ -17,6 +17,8 @@ LINK_MANUAL_STOP = Path(__file__).parent / "fixtures" / "bingx_demo_20260929_lin
 # 29.09: публичные ручки без ключей — ticker, klines v3, premiumIndex, contracts;
 # live и demo хосты, метки с суффиксом " (live)"/" (demo)".
 PUBLIC = Path(__file__).parent / "fixtures" / "bingx_public_20260929.json"
+# 02.10: экран «Анализ рынка» — premiumIndex и openInterest (live), openInterest (demo).
+MARKET_QUOTES = Path(__file__).parent / "fixtures" / "bingx_public_20261002.json"
 
 
 @cache
