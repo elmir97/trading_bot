@@ -14,12 +14,25 @@ reconciler: лимиты BingX — пути «Да».
 tp_alert_percent, NULL — 80% пути от входа к уровню), каждый выключается
 (notifications sl_approaching / tp_approaching).
 
+Геометрия (approach_geometry, исправлено 02.10 после живого случая): осталось
+— расстояние от mark до уровня в сторону срабатывания ордера (стоп LONG и
+тейк SHORT — цена падает к уровню, стоп SHORT и тейк LONG — растёт); ≤ 0 —
+уровень по mark пройден. База — путь вход → уровень, если уровень с обычной
+стороны (стоп в убытке, тейк в прибыли); иначе (стоп перенесён в безубыток
+или в прибыль, тейк с убыточной стороны) — 1R сделки журнала, а без R —
+max(|вход − уровень|, 1% цены входа) (решение владельца). Уведомление —
+когда осталось ≤ (1 − порог) × база; для обычной стороны это ровно
+«пройдено ≥ порога пути». Прежняя доля пути (mark − вход)/(уровень − вход)
+для стопа в безубытке переворачивалась: 18:00:48 02.10 SHORT, стоп 1.5053
+ниже входа 1.5069, mark 1.5002 — «пройдено 418.8%», ложное уведомление, а при
+настоящем подходе к стопу — ни одного.
+
 Дедуп — по уровню: строка position_alerts (пользователь, символ, сторона,
 SL/TP, цена уровня) ставится только после окончательного исхода доставки
 (delivery.final). Перенос уровня — новый ключ; старые ключи позиции, уровня
 которых больше нет, и ключи исчезнувших позиций удаляются при обновлении
-снимка. Повтор по тому же уровню — только после ухода назад за порог минус
-HYSTERESIS (80% → сброс ниже 60%) и нового подхода.
+снимка. Повтор по тому же уровню — только после отката: осталось больше
+(1 − порог + HYSTERESIS) × база (80% → больше 40% базы), и нового подхода.
 
 Чтобы понять, хватает ли 15 секунд, в лог пишется, сколько пути было
 пройдено в момент уведомления (перескок за порог, п.п.).
@@ -60,9 +73,11 @@ logger = get_logger(__name__)
 ZERO = Decimal(0)
 ONE = Decimal(1)
 HUNDRED = Decimal(100)
-# Отметка снимается, когда пройдено меньше порога минус HYSTERESIS доли пути
-# (80% → ниже 60%): гистерезис против дребезга у края полосы.
+# Отметка снимается, когда до уровня снова больше полосы плюс HYSTERESIS
+# базы (80% → осталось больше 40%): гистерезис против дребезга у края полосы.
 HYSTERESIS = Decimal("0.20")
+# База «перевёрнутого» уровня без R журнала — не меньше 1% цены входа.
+FALLBACK_BASE = Decimal("0.01")
 LOCK_PATTERN = "exec:lock:*"
 PULSE_EVERY = timedelta(hours=1)
 
@@ -75,17 +90,40 @@ SIDE_CODE = {TradeSide.LONG: "L", TradeSide.SHORT: "S"}
 KINDS = ("SL", "TP")
 
 
-def progress_fraction(entry: Decimal, target: Decimal, price: Decimal) -> Decimal | None:
-    """Доля пути от входа к цели, пройденная текущей ценой.
+def falls_to_level(side: TradeSide, kind: str) -> bool:
+    """Ордер срабатывает при падении цены к уровню: стоп LONG, тейк SHORT."""
+    return (kind == "SL") == (side is TradeSide.LONG)
 
-    0 — цена ещё у входа, 1 — цена дошла до цели. Работает и для TP, и для
-    SL, и для LONG, и для SHORT одинаково: знак (target - entry) сам
-    отражает направление, поэтому сторону сделки передавать не нужно.
-    """
-    total = target - entry
-    if total == ZERO:
+
+def approach_geometry(
+    side: TradeSide, kind: str, entry: Decimal, level: Decimal, mark: Decimal,
+    r_unit: Decimal | None,
+) -> tuple[Decimal, Decimal]:
+    """(осталось, база). Осталось — от mark до уровня в сторону срабатывания
+    (≤ 0 — пройден). База — путь вход → уровень для уровня с обычной
+    стороны; для «перевёрнутого» (стоп в безубытке/прибыли, тейк в убытке) —
+    1R журнала, без него max(|вход − уровень|, 1% входа)."""
+    falls = falls_to_level(side, kind)
+    remaining = mark - level if falls else level - mark
+    natural = (entry - level > ZERO) if falls else (level - entry > ZERO)
+    if natural:
+        base = abs(entry - level)
+    elif r_unit:
+        base = r_unit
+    else:
+        base = max(abs(entry - level), entry * FALLBACK_BASE)
+    return remaining, base
+
+
+def risk_unit(side: TradeSide, entry: Decimal, risk_stop: Decimal | None) -> Decimal | None:
+    """1R на единицу — от исходного стопа журнала, только если он с
+    убыточной стороны входа. Сделка, у которой первым стопом стал безубыток
+    (02.10, #11: стоп 1.5053 при входе SHORT 1.5069), R не имеет: 0.0016 —
+    не риск, R «неизвестен»."""
+    if risk_stop is None:
         return None
-    return (price - entry) / total
+    loss_side = risk_stop < entry if side is TradeSide.LONG else risk_stop > entry
+    return abs(entry - risk_stop) if loss_side else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,8 +138,8 @@ class UserSnapshot:
     sl_percent: int
     tp_percent: int
     views: tuple[PositionView, ...]
-    # (symbol, side) → |вход − стоп R| на единицу (Trade.risk_stop журнала);
-    # нет сделки или стопа — None, R «н/д».
+    # (symbol, side) → |вход − стоп R| на единицу (Trade.risk_stop журнала,
+    # risk_unit); нет сделки, стопа или стоп не в убытке — None, R «н/д».
     r_unit: dict[tuple[str, TradeSide], Decimal | None]
     precision: dict[str, int]
 
@@ -114,16 +152,15 @@ def level_of(view: PositionView, kind: str) -> Decimal | None:
 
 def render_alert(
     view: PositionView, kind: str, level: Decimal, mark: Decimal,
-    r_unit: Decimal | None, precision: int | None,
+    r_unit: Decimal | None, precision: int | None, remaining: Decimal,
 ) -> str:
     p = view.position
     sign = ONE if p.side is TradeSide.LONG else -ONE
     icon, name = ("🛑", "стопу") if kind == "SL" else ("🎯", "тейку")
     level_name = "стоп" if kind == "SL" else "тейк"
-    left = abs(level - mark)
+    left = abs(remaining)
     left_pct = (left / mark * HUNDRED).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    passed = progress_fraction(p.entry_price, level, mark)
-    beyond = passed is not None and passed > ONE
+    beyond = remaining <= ZERO
     pnl = (mark - p.entry_price) * p.quantity * sign
 
     def r(value: Decimal) -> str:
@@ -278,9 +315,8 @@ class PositionMonitor:
                 r_unit: dict[tuple[str, TradeSide], Decimal | None] = {}
                 for view in views:
                     stop = view.trade.risk_stop if view.trade is not None else None
-                    r_unit[(view.position.symbol, view.position.side)] = (
-                        abs(view.position.entry_price - stop) or None if stop is not None else None
-                    )
+                    pos = view.position
+                    r_unit[(pos.symbol, pos.side)] = risk_unit(pos.side, pos.entry_price, stop)
                 precision = await self._precision({v.position.symbol for v in views})
                 await self._prune(session, user.id, views)
                 snapshots.append(UserSnapshot(
@@ -333,25 +369,26 @@ class PositionMonitor:
         if level is None:
             return
         p = view.position
-        progress = progress_fraction(p.entry_price, level, mark)
-        if progress is None:
+        r_unit = snap.r_unit.get((p.symbol, p.side))
+        remaining, base = approach_geometry(p.side, kind, p.entry_price, level, mark, r_unit)
+        if base <= ZERO:
             return
         threshold = Decimal(snap.sl_percent if kind == "SL" else snap.tp_percent) / HUNDRED
+        band = (ONE - threshold) * base
         existing = await session.scalar(select(PositionAlert).where(
             PositionAlert.user_id == snap.user_id, PositionAlert.symbol == p.symbol,
             PositionAlert.side == p.side, PositionAlert.kind == kind,
             PositionAlert.level_price == level,
         ))
         if existing is not None:
-            if progress < threshold - HYSTERESIS:
+            if remaining > band + HYSTERESIS * base:
                 await session.delete(existing)
                 await session.commit()
             return
-        if progress < threshold:
+        if remaining > band:
             return
         precision = snap.precision.get(p.symbol)
-        text = render_alert(view, kind, level, mark, snap.r_unit.get((p.symbol, p.side)),
-                            precision)
+        text = render_alert(view, kind, level, mark, r_unit, precision, remaining)
         keyboard = alert_keyboard(
             view, mark, fee_rate=self._settings.exec_taker_fee_rate,
             min_distance_percent=self._settings.exec_min_stop_distance_percent,
@@ -364,8 +401,13 @@ class PositionMonitor:
             extra={
                 "user_id": snap.user_id, "symbol": p.symbol, "side": p.side.value, "kind": kind,
                 "level": str(level), "mark": str(mark),
-                "passed_pct": str((progress * HUNDRED).quantize(Decimal("0.1"))),
-                "overshoot_pp": str(((progress - threshold) * HUNDRED).quantize(Decimal("0.1"))),
+                # Доля «пройдено» — 1 − осталось/база; для обычной стороны —
+                # доля пути от входа к уровню.
+                "passed_pct": str(((ONE - remaining / base) * HUNDRED).quantize(Decimal("0.1"))),
+                "overshoot_pp": str(
+                    ((ONE - remaining / base - threshold) * HUNDRED).quantize(Decimal("0.1"))
+                ),
+                "base": str(base),
                 "delivery": delivery.value,
             },
         )

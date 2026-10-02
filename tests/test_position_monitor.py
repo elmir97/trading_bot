@@ -33,7 +33,7 @@ from app.services.user_service import UserService
 from app.trading.enums import ExchangeKeyMode, TradeSide, TradeSource
 from app.trading.journal import TradeJournal
 from app.workers import positions as monitor_module
-from app.workers.positions import PositionMonitor, progress_fraction
+from app.workers.positions import PositionMonitor
 from tests.conftest import cleanup_user
 
 pytestmark = pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="Нужен PostgreSQL")
@@ -150,12 +150,6 @@ async def ctx(unique_telegram_id):  # type: ignore[no-untyped-def]
     await db.dispose()
 
 
-def test_progress_fraction_both_directions() -> None:
-    assert progress_fraction(D(100), D(90), D(92)) == D("0.8")    # LONG к стопу
-    assert progress_fraction(D(100), D(110), D(108)) == D("0.8")  # SHORT к стопу
-    assert progress_fraction(D(100), D(100), D(100)) is None
-
-
 async def test_stop_80_percent_long(ctx) -> None:  # type: ignore[no-untyped-def]
     assert await ctx.step("92.5") == []          # 75% пути — рано
     [text] = await ctx.step("92")                # 80%
@@ -262,3 +256,70 @@ async def test_buttons_lead_to_stage4_cards(ctx) -> None:  # type: ignore[no-unt
     data = [b.callback_data for row in keyboard.inline_keyboard for b in row]
     assert data == ["pa:be:SOL-USDT:L", "pa:cf:SOL-USDT:L", "pos:act:SOL-USDT:L"]
     assert all(len(d.encode()) <= 64 for d in data)
+
+
+# --- «перевёрнутые» уровни (02.10 18:00:48: стоп SHORT в безубытке) ----------
+
+
+async def _as_short(ctx, *, stop: str | None = None, take: str | None = None) -> None:  # type: ignore[no-untyped-def]
+    ctx.exchange.position = replace(ctx.exchange.position, side=TradeSide.SHORT)
+    ctx.exchange.orders = (
+        ([_order("ss", "STOP_MARKET", D(stop), "SHORT")] if stop else [])
+        + ([_order("st", "TAKE_PROFIT_MARKET", D(take), "SHORT")] if take else [])
+    )
+
+
+async def test_short_breakeven_stop_no_alert_in_profit_alert_near_stop(ctx) -> None:  # type: ignore[no-untyped-def]
+    """SHORT вход 100, стоп в безубытке 99 (ниже входа), без журнала: база
+    1% входа = 1, полоса 20% = 0.2 — уведомление при mark ≥ 98.8."""
+    await _as_short(ctx, stop="99")
+    assert await ctx.step("95") == []            # прибыль растёт — стоп всё дальше
+    assert await ctx.step("98.5") == []          # до стопа 0.5 > 0.2
+    [text] = await ctx.step("98.9")              # до стопа 0.1
+    assert "SOL-USDT SHORT</b> приближается к стопу" in text and "осталось" in text
+    assert await ctx.alerts() == [("SL", D(99))]
+
+
+async def test_long_stop_above_entry_uses_r(ctx) -> None:  # type: ignore[no-untyped-def]
+    """LONG стоп перенесён выше входа (101 при входе 100), в журнале исходный
+    стоп 90 → 1R = 10, полоса 2: уведомление при mark ≤ 103."""
+    async with ctx.db.session() as session:
+        trade = await TradeJournal(TradeRepository(session)).open_trade(
+            user_id=ctx.uid, symbol="SOL-USDT", side=TradeSide.LONG, entry_price=ENTRY,
+            quantity=D(2), stop_loss=D(90), source=TradeSource.IMPORTED,
+            external_position_id="p1", external_fill_id="f1", fee=D("0.1"),
+        )
+        trade.initial_stop_loss = D(90)
+    ctx.exchange.orders = [_order("s9", "STOP_MARKET", D(101))]
+    assert await ctx.step("110") == []           # было: «пройдено 1000%»
+    assert await ctx.step("103.5") == []
+    [text] = await ctx.step("102.5")             # до стопа 1.5 = 0.15R
+    assert "приближается к стопу" in text and "(0.15R)" in text
+
+
+async def test_short_take_above_entry(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Тейк SHORT выше входа (101, с убыточной стороны): срабатывает при
+    падении к 101; без журнала база max(1, 1% входа) = 1, полоса 0.2."""
+    await _as_short(ctx, take="101")
+    assert await ctx.step("102") == []           # было: «пройдено 200%»
+    [text] = await ctx.step("101.1")
+    assert "приближается к тейку" in text
+
+
+async def test_fallback_one_percent_without_journal(ctx) -> None:  # type: ignore[no-untyped-def]
+    """|вход − уровень| = 0.2 < 1% входа: база 1, полоса 0.2 (а не 0.04 —
+    «только у самого уровня»)."""
+    await _as_short(ctx, stop="99.8")
+    assert await ctx.step("99.5") == []          # до стопа 0.3
+    assert len(await ctx.step("99.65")) == 1     # до стопа 0.15
+
+
+async def test_hysteresis_for_flipped_level(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Полоса 0.2, сброс — когда до стопа больше 0.2 + 20% базы = 0.4."""
+    await _as_short(ctx, stop="99")
+    assert len(await ctx.step("98.9")) == 1
+    assert await ctx.step("98.7") == []          # до стопа 0.3 — отметка держится
+    assert await ctx.alerts() == [("SL", D(99))]
+    assert await ctx.step("98.5") == []          # 0.5 > 0.4 — сброс
+    assert await ctx.alerts() == []
+    assert len(await ctx.step("98.9")) == 1      # новый подход
