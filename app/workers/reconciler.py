@@ -371,6 +371,7 @@ class Reconciler:
             orders_repo = ExecutionOrderRepository(session)
             open_trades = await trades_repo.list_open_for_reconcile(user_id)
             unresolved = await orders_repo.list_unresolved_entries(user_id)
+            journal_open_keys: set[str] = set()
 
             for trade in open_trades:
                 if trade.source is TradeSource.SIGNAL_EXECUTION:
@@ -403,6 +404,24 @@ class Reconciler:
                     await self._reconcile_trade(
                         ctx, client, trade, positions, check_stops=False, bot=False
                     )
+                elif trade.source is TradeSource.IMPORTED and _open_quantity(trade) > 0:
+                    # 03.10: импортированная сделка без positionId, позиции на
+                    # бирже нет — связь не увидена ни разу (позиция закрылась до
+                    # первого цикла). Журнал не правим (чужие выходы приписать
+                    # нельзя) — одно уведомление на сделку.
+                    key = f"{JOURNAL_OPEN_PREFIX}{trade.id}"
+                    journal_open_keys.add(key)
+                    await self._discrepancy(ctx, Discrepancy(
+                        kind=ReconciliationKind.AMBIGUOUS, dedup_key=key, symbol=trade.symbol,
+                        detail=(
+                            f"сделка #{trade.id} {trade.side.value} открыта в журнале, позиции "
+                            "на бирже нет — закрой её или проверь"
+                        ),
+                        trade_id=trade.id,
+                    ))
+            await self._resolve_missing(
+                ctx, ReconciliationKind.AMBIGUOUS, journal_open_keys, prefix=JOURNAL_OPEN_PREFIX
+            )
             # Сделка закрыта или ушла из сверки — её отсчёт сбоя не нужен.
             open_ids = {t.id for t in open_trades}
             for trade_id, (owner, _since) in list(self._history_unparsed_since.items()):

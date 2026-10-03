@@ -177,16 +177,32 @@ async def test_button_import_closed_before_first_cycle_is_closed(ctx) -> None:  
     assert (await _trade(db, link.id)).status is TradeStatus.CLOSED
 
 
-async def test_history_import_without_position_id_closed_before_cycle_stays_open(ctx) -> None:  # type: ignore[no-untyped-def]
-    """Остаток после правки: открытая сделка из /import (история, positionId
-    нет), позиция закрылась до первого цикла reconciler — связи нет, сделка
-    остаётся OPEN. Фиксирует текущее поведение; как не терять такие случаи —
-    отдельное решение владельца (handoff, этап 5)."""
+async def test_history_import_without_link_notifies_once(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Открытая сделка из /import (истории) без positionId, позиция закрылась
+    до первого цикла reconciler: журнал не правится (чужие выходы приписать
+    нельзя) — одно уведомление «сделка открыта в журнале, позиции нет»
+    (AMBIGUOUS, дедуп по сделке; решение владельца 03.10). На старом коде —
+    тишина, сделка висела OPEN."""
     settings, db, session, user, demo = ctx
     demo.positions = live_items("positions LINK (фильтр по символу на клиенте)", LINK_MANUAL_STOP)
     demo.all_orders = {"LINK-USDT": live_items("allOrders LINK", LINK_MANUAL_STOP)}
     link = await _imported_link(session, user.id, position_id=None)
+    bot = FakeBot()
 
-    await _run_reconciler(settings, db, FakeBot())
+    await _run_reconciler(settings, db, bot)
+    await _run_reconciler(settings, db, bot)
 
     assert (await _trade(db, link.id)).status is TradeStatus.OPEN
+    [notice] = [e for e in await _trade_events(db, link.id)
+                if e.dedup_key == f"journal_open:{link.id}"]
+    assert notice.kind is ReconciliationKind.AMBIGUOUS and notice.notified_at is not None
+    assert sum(f"сделка #{link.id} LONG открыта в журнале" in t for t in bot.sent) == 1
+
+    # Сделку убрали из открытых (отменил вручную) — расхождение разрешено.
+    async with db.session() as s:
+        row = await s.get(Trade, link.id)
+        row.status = TradeStatus.CANCELLED
+    await _run_reconciler(settings, db, bot)
+    [notice] = [e for e in await _trade_events(db, link.id)
+                if e.dedup_key == f"journal_open:{link.id}"]
+    assert notice.resolved_at is not None

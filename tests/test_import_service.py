@@ -467,3 +467,42 @@ async def test_open_position_already_in_journal_refused(ctx) -> None:  # type: i
     assert first.trade is not None
     assert second.trade is None and "уже есть в журнале" in str(second.refusal)
     assert len(await repo.list_recent(user.id)) == 1
+
+
+async def test_history_import_links_open_trade_to_live_position(ctx) -> None:  # type: ignore[no-untyped-def]
+    """/import (03.10): незакрытой сделке — positionId живой позиции того же
+    символа и стороны с тем же объёмом; закрытым — нет. Объём не сходится —
+    не записываем."""
+    user, repo, session = ctx
+    live = Position(
+        symbol="XRP-USDT", side=TradeSide.LONG, quantity=D(40), entry_price=D("1.54"),
+        mark_price=D("1.54"), leverage=20, unrealized_pnl=D(0), liquidation_price=None,
+        position_id="2106063262781022210",
+    )
+    exchange = FakeExchange(XRP_HISTORY)
+    exchange.get_positions = lambda **_: _async([live])  # type: ignore[method-assign]
+    await HistoryImporter(exchange, repo, user.id).import_period(*WINDOW)
+
+    trades = {t.status: t for t in await repo.list_recent(user.id) if t.symbol == "XRP-USDT"}
+    assert trades[TradeStatus.OPEN].external_position_id == "2106063262781022210"
+    closed = [t for t in await repo.list_recent(user.id)
+              if t.symbol == "XRP-USDT" and t.status is TradeStatus.CLOSED]
+    assert closed and all(t.external_position_id is None for t in closed)
+
+
+async def test_history_import_quantity_mismatch_no_link(ctx) -> None:  # type: ignore[no-untyped-def]
+    user, repo, session = ctx
+    live = Position(
+        symbol="XRP-USDT", side=TradeSide.LONG, quantity=D(55), entry_price=D("1.54"),
+        mark_price=D("1.54"), leverage=20, unrealized_pnl=D(0), liquidation_price=None,
+        position_id="p-other",
+    )
+    exchange = FakeExchange(XRP_HISTORY)
+    exchange.get_positions = lambda **_: _async([live])  # type: ignore[method-assign]
+    await HistoryImporter(exchange, repo, user.id).import_period(*WINDOW)
+    [open_trade] = [t for t in await repo.list_open(user.id) if t.symbol == "XRP-USDT"]
+    assert open_trade.external_position_id is None
+
+
+async def _async(value):  # type: ignore[no-untyped-def]
+    return value

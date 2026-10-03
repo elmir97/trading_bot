@@ -23,7 +23,7 @@ from app.core.logging import get_logger
 from app.database.models.trade import Trade, TradeFill
 from app.database.repositories.execution_order import ExecutionOrderRepository
 from app.database.repositories.trade import TradeRepository
-from app.exchanges.base import ExchangeClient, Fill
+from app.exchanges.base import ExchangeClient, ExchangeError, Fill, Position
 from app.trading.calculations import (
     FillData,
     aggregate_fills,
@@ -214,8 +214,23 @@ class HistoryImporter:
         if not fresh:
             return result
 
-        for pending in group_fills_into_trades(fresh):
+        groups = group_fills_into_trades(fresh)
+        live = await self._live_positions() if any(not g.is_closed for g in groups) else []
+        for pending in groups:
             trade = self._build_trade(pending, account_balance)
+            if not pending.is_closed:
+                # 03.10: незакрытой сделке — positionId живой позиции того же
+                # символа и стороны с тем же объёмом (в истории исполнений
+                # BingX его нет): reconciler закроет сделку, даже если позиция
+                # закроется до его первого цикла.
+                position = next(
+                    (p for p in live
+                     if p.symbol == pending.symbol and p.side is pending.side
+                     and p.quantity == pending.open_quantity),
+                    None,
+                )
+                if position is not None and position.position_id:
+                    trade.external_position_id = position.position_id
             self._trades.add(trade)
             result.trades_created += 1
 
@@ -229,6 +244,14 @@ class HistoryImporter:
             },
         )
         return result
+
+    async def _live_positions(self) -> list[Position]:
+        try:
+            return list(await self._client.get_positions() or [])
+        except ExchangeError:
+            logger.warning("Импорт: позиции биржи не получены — positionId не записан",
+                           extra={"user_id": self._user_id})
+            return []
 
     async def import_open_position(
         self, start: datetime, end: datetime, *, symbol: str, side: TradeSide, quantity: Decimal,
