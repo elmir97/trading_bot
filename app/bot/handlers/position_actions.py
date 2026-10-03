@@ -14,7 +14,7 @@ app/execution/position_action_service.py.
 
 from __future__ import annotations
 
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 from aiogram import F, Router
@@ -270,12 +270,23 @@ async def price_entered(
     message: Message, state: FSMContext, session: AsyncSession, user: User,
     settings: Settings, cipher: SecretCipher, redis: Any,
 ) -> None:
+    # 03.10: сначала проверка ввода, потом снятие состояния. Не число —
+    # ответ, состояние остаётся, PromptMiddleware задаёт вопрос заново
+    # (раньше «Абв» сбрасывало ввод и превращалось в карточку-отказ).
+    raw = (message.text or "").strip().replace(",", ".")
+    try:
+        level = Decimal(raw)
+    except InvalidOperation:
+        level = None
+    if level is None or not level.is_finite() or level <= 0:
+        await message.answer("Не понял — нужна цена числом, например 1.4850.")
+        return
     data = await state.get_data()
     await state.clear()
     kind = PositionActionKind(data["kind"])
     await _show_card(
         message, _service(session, settings, cipher, user, redis), kind,
-        {"level": (message.text or "").strip()}, data["symbol"], TradeSide(data["side"]),
+        {"level": raw}, data["symbol"], TradeSide(data["side"]),
         edit=False,
     )
 

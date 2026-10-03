@@ -72,7 +72,10 @@ async def test_ask_number_force_reply_with_placeholder() -> None:
     await ask_number(_message(bot), state, "Цена стопа, например 1.4750 " + "x" * 80)
     [(text, markup)] = bot.sent
     assert text == ASK_TEXT
-    assert isinstance(markup, ForceReply) and markup.force_reply and markup.selective
+    assert isinstance(markup, ForceReply) and markup.force_reply
+    # 03.10, проверка на телефоне: selective в личном чате не нацелен ни на
+    # кого — клиент не открывал «ответ на» и не показывал подсказку.
+    assert not markup.selective
     assert markup.input_field_placeholder.startswith("Цена стопа, например 1.4750")
     assert len(markup.input_field_placeholder) == 64
     data = await state.get_data()
@@ -285,3 +288,83 @@ async def test_stage4_price_prompt_force_reply_and_cancel(monkeypatch) -> None: 
 
     await handlers.cancel_input(callback, state)
     assert await state.get_state() is None
+
+
+# --- настоящие обработчики через PromptMiddleware (03.10) -------------------------
+
+
+def _user_message(bot: FakeBot, text: str) -> MagicMock:
+    message = _message(bot)
+    message.text = text
+    return message
+
+
+async def test_stage4_invalid_price_keeps_input_and_asks_again(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """«Абв» на вопрос о цене стопа: состояние ввода остаётся, вопрос — заново;
+    число — карточка, вопрос удалён. До правки «Абв» снимало ввод и
+    становилось карточкой-отказом «⛔ Цена стопа — положительное число»."""
+    from app.bot.handlers import position_actions as handlers
+
+    shown: list[dict[str, object]] = []
+
+    async def show_card(target, service, kind, params, symbol, side, *, edit):  # type: ignore[no-untyped-def]
+        shown.append(params)
+
+    monkeypatch.setattr(handlers, "_show_card", show_card)
+    monkeypatch.setattr(handlers, "_service", lambda *a, **k: None)
+    bot, storage = FakeBot(), MemoryStorage()
+    state = _state(storage)
+    await state.set_state(handlers.PositionActionStates.price)
+    await state.update_data(kind="MOVE_STOP", symbol="XRP-USDT", side="SHORT")
+    await ask_number(_message(bot), state, "Цена стопа, например 1.5371")
+
+    async def run(text: str) -> MagicMock:
+        message = _user_message(bot, text)
+
+        async def handler(event, data):  # type: ignore[no-untyped-def]
+            await handlers.price_entered(event, state, None, None, None, None, None)  # type: ignore[arg-type]
+
+        await PromptMiddleware()(handler, message, {"state": state})
+        return message
+
+    bad = await run("Абв")
+    assert "нужна цена числом" in bad.answer.await_args.args[0]
+    assert await state.get_state() == handlers.PositionActionStates.price.state
+    assert shown == []
+    text, markup = bot.sent[-1]
+    assert text == REPEAT_TEXT and markup.input_field_placeholder == "Цена стопа, например 1.5371"
+
+    await run("1,4850")
+    assert shown == [{"level": "1.4850"}]
+    assert await state.get_state() is None
+    assert (await state.get_data()) == {}
+    assert PROMPT_ID_KEY not in await state.get_data()
+
+
+async def test_wizard_entry_price_invalid_asks_again() -> None:
+    """Мастер «Добавить сделку», шаг «Цена входа»: «abc» — состояние остаётся,
+    вопрос заново; число — следующий шаг (стоп) со своим вопросом."""
+    from app.bot.handlers import trades as handlers
+    from app.bot.states.trade import AddTradeStates
+
+    bot, storage = FakeBot(), MemoryStorage()
+    state = _state(storage)
+    await state.set_state(AddTradeStates.entry_price)
+    await state.update_data(symbol="XRP-USDT", side="LONG")
+    await ask_number(_message(bot), state, "Цена входа числом")
+
+    async def run(text: str) -> MagicMock:
+        message = _user_message(bot, text)
+
+        async def handler(event, data):  # type: ignore[no-untyped-def]
+            await handlers.set_entry_price(event, state)
+
+        await PromptMiddleware()(handler, message, {"state": state})
+        return message
+
+    await run("abc")
+    assert await state.get_state() == AddTradeStates.entry_price.state
+    assert bot.sent[-1][0] == REPEAT_TEXT
+    await run("1.5054")
+    assert await state.get_state() == AddTradeStates.stop_loss.state
+    assert bot.sent[-1][1].input_field_placeholder.startswith("Цена стопа")

@@ -72,10 +72,16 @@ async def ask_number(
         await _delete(bot, chat_id, old)
     sent = await bot.send_message(
         chat_id, text,
+        # selective не включать (03.10): в личном чате без @упоминания и без
+        # ответа на сообщение он не нацелен ни на кого — клиент не открывал
+        # «ответ на» и не показывал подсказку (проверка владельца на телефоне).
         reply_markup=ForceReply(
             force_reply=True, input_field_placeholder=placeholder[:PLACEHOLDER_LIMIT],
-            selective=True,
         ),
+    )
+    logger.info(
+        "Вопрос с ForceReply отправлен",
+        extra={"message_id": sent.message_id, "placeholder": placeholder[:PLACEHOLDER_LIMIT]},
     )
     await state.update_data({
         PROMPT_ID_KEY: sent.message_id,

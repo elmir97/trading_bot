@@ -663,6 +663,11 @@ async def _run_position_actions(sim, tg, db, settings) -> None:  # type: ignore[
         placeholder = tg.force_reply.input_field_placeholder if tg.force_reply else ""
         check("вопрос о цене с ForceReply и примером",
               placeholder.startswith("Цена стопа, например"), repr(placeholder))
+        # Не число — ввод не сбрасывается, вопрос задаётся заново (03.10).
+        text = await sim.send("Абв")
+        check("«Абв» — вопрос о цене заново, ввод не сброшен",
+              tg.asks[-1].startswith("✍️ Не принял") and "нужна цена числом" in text,
+              f"{tg.asks[-1:]!r} {text[:120]!r}")
         text = await sim.send("1.40")
         check("карточка роста риска", has(text, "риск увеличится"), text[:300])
         buttons = list(sim.available_buttons())
