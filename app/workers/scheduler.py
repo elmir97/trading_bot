@@ -14,6 +14,7 @@ from aiogram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.core.config import Settings
+from app.core.input_prompt import InputGate
 from app.core.logging import get_logger
 from app.core.security import SecretCipher
 from app.database.session import Database
@@ -33,6 +34,7 @@ class BackgroundJobs:
         settings: Settings,
         cipher: SecretCipher,
         redis: Any = None,
+        input_gate: InputGate | None = None,
     ) -> None:
         self._settings = settings
         self._scheduler = AsyncIOScheduler(timezone="UTC")
@@ -41,8 +43,12 @@ class BackgroundJobs:
         self._positions = PositionMonitor(bot, db, settings, cipher, redis)
         # Шаг 15.6: сверка журнала с биржей. Redis — чтобы пропускать цикл,
         # пока жив лок «Да» (вход в полёте).
-        self._reconciler = Reconciler(bot, db, settings, cipher, redis)
-        self._daily = DailyJobs(bot, db, settings, cipher, reconciler=self._reconciler)
+        # 03.10: пока пользователь вводит число, некритичные уведомления
+        # откладываются (app/core/input_prompt.py).
+        self._reconciler = Reconciler(bot, db, settings, cipher, redis, input_gate=input_gate)
+        self._daily = DailyJobs(
+            bot, db, settings, cipher, reconciler=self._reconciler, input_gate=input_gate
+        )
 
     def start(self) -> None:
         """Требование 8: пока BACKGROUND_JOBS_ENABLED=false — не регистрирует

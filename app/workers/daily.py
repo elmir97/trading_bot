@@ -36,6 +36,7 @@ from aiogram import Bot
 from sqlalchemy import select
 
 from app.core.config import Settings
+from app.core.input_prompt import InputGate
 from app.core.logging import get_logger
 from app.core.security import SecretCipher
 from app.database.models.position_action import PositionAction
@@ -76,6 +77,10 @@ def render_daily_summary(stats: Statistics) -> str:
     return "\n".join(lines)
 
 
+# 03.10: что можно отложить, пока пользователь вводит число.
+DEFERRABLE_DAILY = frozenset({"daily_report", "execution_digest"})
+
+
 class DailyJobs:
     def __init__(
         self,
@@ -85,8 +90,10 @@ class DailyJobs:
         cipher: SecretCipher,
         *,
         reconciler: Reconciler | None = None,
+        input_gate: InputGate | None = None,
     ) -> None:
         self._bot = bot
+        self._input_gate = input_gate
         self._db = db
         self._settings = settings
         self._exchange_factory = ExchangeFactory(settings, cipher)
@@ -102,7 +109,18 @@ class DailyJobs:
     async def _deliver(self, user: User, kind: str, text: str, today_local: date) -> bool:
         """Отправка рассылки daily_jobs. True — исход окончательный
         (доставлено или бот заблокирован): можно ставить дату отправки.
-        False — сбой сети, дата не ставится, повтор в следующем цикле."""
+        False — сбой сети, дата не ставится, повтор в следующем цикле.
+
+        03.10: пока пользователь вводит число (InputGate), некритичные
+        рассылки откладываются — дата не ставится, следующий цикл (15 мин)
+        отправит. Дневной лимит убытка не откладывается."""
+        if (
+            kind in DEFERRABLE_DAILY and self._input_gate is not None
+            and await self._input_gate.entering(user.telegram_id)
+        ):
+            logger.info(f"Рассылка отложена: идёт ввод числа: {kind}",
+                        extra={"user_id": user.id, "kind": kind})
+            return False
         delivery = await send_notification(self._bot, user.telegram_id, text)
         key = (user.id, kind)
         extra = {"user_id": user.id, "kind": kind, "local_date": today_local.isoformat()}

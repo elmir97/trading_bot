@@ -36,6 +36,7 @@ from app.bot.keyboards.trade import (
     trade_card,
     trade_line,
 )
+from app.bot.prompts import ask_number
 from app.bot.states.trade import AddTradeStates, CloseTradeStates
 from app.core.config import Settings
 from app.core.logging import get_logger
@@ -115,6 +116,7 @@ async def _show_side_prompt(event: Message | CallbackQuery, state: FSMContext) -
 async def _show_entry_price_prompt(event: Message | CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AddTradeStates.entry_price)
     await _send(event, "Цена входа:", back_to(TradeCB.BACK, with_menu=True))
+    await ask_number(event, state, "Цена входа числом")
 
 
 async def _show_stop_loss_prompt(event: Message | CallbackQuery, state: FSMContext) -> None:
@@ -129,6 +131,7 @@ async def _show_stop_loss_prompt(event: Message | CallbackQuery, state: FSMConte
         f"сделку в журнал можно — она будет отмечена как нарушение.</i>",
         with_nav(skip_keyboard(), parent_data=TradeCB.BACK, with_menu=True),
     )
+    await ask_number(event, state, f"Цена стопа ({hint} входа)")
 
 
 async def _show_take_profit_prompt(event: Message | CallbackQuery, state: FSMContext) -> None:
@@ -140,6 +143,7 @@ async def _show_take_profit_prompt(event: Message | CallbackQuery, state: FSMCon
     await _send(
         event, text, with_nav(skip_keyboard(), parent_data=TradeCB.BACK, with_menu=True)
     )
+    await ask_number(event, state, "Цена тейка числом")
 
 
 async def _ask_quantity_mode(
@@ -170,8 +174,10 @@ async def _show_quantity_prompt(
             f"Объём рассчитаю от риска {fmt_num(risk)}% по твоему плану.",
             keyboard,
         )
+        await ask_number(event, state, "Баланс в USDT, например 1000")
     else:
         await _send(event, "Объём в базовом активе (например 0.1):", keyboard)
+        await ask_number(event, state, "Объём, например 0.1")
 
 
 async def _show_leverage_prompt(event: Message | CallbackQuery, state: FSMContext) -> None:
@@ -181,6 +187,7 @@ async def _show_leverage_prompt(event: Message | CallbackQuery, state: FSMContex
         "Плечо (число, например 10):",
         with_nav(skip_keyboard(), parent_data=TradeCB.BACK, with_menu=True),
     )
+    await ask_number(event, state, "Плечо, например 10")
 
 
 async def _ask_strategy(
@@ -626,6 +633,8 @@ async def _show_exit_price_prompt(
     await state.set_state(CloseTradeStates.exit_price)
     text = "Сделка не найдена." if trade is None else trade_card(trade) + "\n\nЦена выхода:"
     await _reply_close(event, text, back_to(MenuCallback.OPEN_POSITIONS))
+    if trade is not None:
+        await ask_number(event, state, "Цена выхода числом")
 
 
 async def _show_fee_prompt(event: Message | CallbackQuery, state: FSMContext) -> None:
@@ -633,6 +642,7 @@ async def _show_fee_prompt(event: Message | CallbackQuery, state: FSMContext) ->
     await _reply_close(
         event, "Комиссия в USDT:", with_nav(skip_keyboard(), parent_data=TradeCB.CLOSE_BACK, with_menu=True)
     )
+    await ask_number(event, state, "Комиссия в USDT, например 0.03")
 
 
 async def _show_exit_reason_prompt(event: Message | CallbackQuery, state: FSMContext) -> None:

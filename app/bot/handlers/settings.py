@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.bot.formatting import fmt_amount, fmt_num, fmt_price, fmt_qty
 from app.bot.keyboards.main import MenuCallback, back_to, back_to_main, nav_row
 from app.bot.keyboards.trade import TradeCB
+from app.bot.prompts import ask_number
 from app.bot.states.trade import RiskCalculatorStates, SettingsStates
 from app.core.config import Settings
 from app.core.security import SecretCipher, mask_secret
@@ -95,6 +96,7 @@ async def _show_balance_prompt(
         "Введи баланс депозита в USDT:",
         back_to_main(),
     )
+    await ask_number(event, state, "Баланс в USDT, например 1000")
 
 
 async def _show_risk_percent_prompt(event: Message | CallbackQuery, state: FSMContext) -> None:
@@ -109,11 +111,13 @@ async def _show_risk_percent_prompt(event: Message | CallbackQuery, state: FSMCo
     await _reply(
         event, "Риск в процентах или оставь значение из плана:", builder.as_markup()
     )
+    await ask_number(event, state, "Риск в %, например 1")
 
 
 async def _show_entry_price_prompt(event: Message | CallbackQuery, state: FSMContext) -> None:
     await state.set_state(RiskCalculatorStates.entry_price)
     await _reply(event, "Цена входа:", back_to(RISK_BACK, with_menu=True))
+    await ask_number(event, state, "Цена входа числом")
 
 
 async def _show_stop_loss_prompt(event: Message | CallbackQuery, state: FSMContext) -> None:
@@ -123,6 +127,7 @@ async def _show_stop_loss_prompt(event: Message | CallbackQuery, state: FSMConte
         "Стоп-лосс:\n\n<i>Направление определю по тому, выше он или ниже входа.</i>",
         back_to(RISK_BACK, with_menu=True),
     )
+    await ask_number(event, state, "Цена стопа числом")
 
 
 @router.callback_query(F.data == MenuCallback.RISK)
@@ -255,6 +260,7 @@ async def calc_stop(message: Message, state: FSMContext) -> None:
         f"Введи take-profit, чтобы посчитать RR и потенциальную прибыль:",
         reply_markup=builder.as_markup(),
     )
+    await ask_number(message, state, "Цена тейка числом")
 
 
 @router.callback_query(RiskCalculatorStates.take_profit, F.data == RISK_BACK)
@@ -468,6 +474,7 @@ async def ask_risk(callback: CallbackQuery, state: FSMContext) -> None:
             reply_markup=back_to(MenuCallback.SETTINGS),
         )
     await callback.answer()
+    await ask_number(callback, state, "Риск на сделку в %, например 1")
 
 
 @router.message(SettingsStates.risk_per_trade)
@@ -514,6 +521,7 @@ async def ask_daily(callback: CallbackQuery, state: FSMContext) -> None:
             reply_markup=back_to(MenuCallback.SETTINGS),
         )
     await callback.answer()
+    await ask_number(callback, state, "Дневной лимит в %, например 3")
 
 
 @router.message(SettingsStates.max_daily_loss)
@@ -547,6 +555,7 @@ async def ask_trades(callback: CallbackQuery, state: FSMContext) -> None:
             "Максимум сделок в день:", reply_markup=back_to(MenuCallback.SETTINGS)
         )
     await callback.answer()
+    await ask_number(callback, state, "Сделок в день, например 5")
 
 
 @router.message(SettingsStates.max_trades_per_day)

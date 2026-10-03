@@ -31,6 +31,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
+from app.core.input_prompt import InputGate
 from app.core.logging import get_logger
 from app.core.numfmt import fmt_amount, fmt_money, fmt_price, fmt_qty
 from app.core.security import SecretCipher
@@ -98,6 +99,14 @@ logger = get_logger(__name__)
 
 ZERO = Decimal(0)
 LOCK_PATTERN = "exec:lock:*"
+# 03.10: некритичные расхождения, которые ждут, пока пользователь вводит число.
+JOURNAL_OPEN_PREFIX = "journal_open:"
+
+
+def deferrable(event: ReconciliationEvent) -> bool:
+    return event.kind is ReconciliationKind.ORPHAN_POSITION or event.dedup_key.startswith(
+        JOURNAL_OPEN_PREFIX
+    )
 HISTORY_LIMIT = timedelta(days=7) - timedelta(minutes=1)
 # История ордеров сделки не разбирается дольше — одно событие владельцу
 # (решение 29.09); до того — WARNING и ошибка в пульсе каждый цикл.
@@ -203,8 +212,11 @@ class Reconciler:
         settings: Settings,
         cipher: SecretCipher,
         redis: Any = None,
+        *,
+        input_gate: InputGate | None = None,
     ) -> None:
         self._bot = bot
+        self._input_gate = input_gate
         self._db = db
         self._settings = settings
         self._cipher = cipher
@@ -310,7 +322,18 @@ class Reconciler:
 
     async def _attempt(
         self, event: ReconciliationEvent, telegram_id: int, now: datetime, text: str
-    ) -> Delivery:
+    ) -> Delivery | None:
+        """None — отложено (03.10): пользователь вводит число, событие
+        некритичное. Попытка не засчитывается, событие ждёт переотправки."""
+        if (
+            deferrable(event) and self._input_gate is not None
+            and await self._input_gate.entering(telegram_id, now)
+        ):
+            logger.info(
+                "Уведомление сверки отложено: идёт ввод числа",
+                extra={"event_id": event.id, "kind": event.kind.value},
+            )
+            return None
         return await deliver_event(self._bot, event, telegram_id, now, text)
 
     async def _confirm_in_flight(self) -> bool:

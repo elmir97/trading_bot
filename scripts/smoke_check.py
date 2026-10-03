@@ -659,6 +659,10 @@ async def _run_position_actions(sim, tg, db, settings) -> None:  # type: ignore[
         await sim.tap("Позиции")
         await sim.tap("⚙️ XRP LONG")
         await sim.tap("Изменить стоп")
+        # 03.10: вопрос о цене — отдельным сообщением с ForceReply и подсказкой.
+        placeholder = tg.force_reply.input_field_placeholder if tg.force_reply else ""
+        check("вопрос о цене с ForceReply и примером",
+              placeholder.startswith("Цена стопа, например"), repr(placeholder))
         text = await sim.send("1.40")
         check("карточка роста риска", has(text, "риск увеличится"), text[:300])
         buttons = list(sim.available_buttons())

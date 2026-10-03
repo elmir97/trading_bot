@@ -26,6 +26,7 @@ from typing import Any
 from aiogram import Bot
 from aiogram.methods import (
     AnswerCallbackQuery,
+    DeleteMessage,
     EditMessageReplyMarkup,
     EditMessageText,
     SendMessage,
@@ -33,6 +34,7 @@ from aiogram.methods import (
 from aiogram.types import (
     CallbackQuery,
     Chat,
+    ForceReply,
     InlineKeyboardMarkup,
     Message,
     Update,
@@ -65,8 +67,23 @@ class FakeTelegram:
         self.last_message_id: int = 0
         self.log: list[tuple[str, str]] = []
         self._next_msg_id = 0
+        # 03.10: числовой вопрос с ForceReply (app/bot/prompts.ask_number) —
+        # отдельное сообщение; «последним» для кнопок и текста шага не
+        # считается, иначе inline-кнопки шага пропадали бы из tap().
+        self.force_reply: ForceReply | None = None
+        self.asks: list[str] = []
+        self.deleted: list[int] = []
 
     async def __call__(self, bot: Bot, method: Any, request_timeout: Any = None) -> Any:
+        if isinstance(method, SendMessage) and isinstance(method.reply_markup, ForceReply):
+            self._next_msg_id += 1
+            self.force_reply = method.reply_markup
+            self.asks.append(method.text)
+            self.log.append(("ask", method.text))
+            return self._message(method.chat_id, method.text, self._next_msg_id)
+        if isinstance(method, DeleteMessage):
+            self.deleted.append(method.message_id)
+            return True
         if isinstance(method, SendMessage):
             # sendMessage создаёт НОВОЕ сообщение — новый id.
             self._next_msg_id += 1

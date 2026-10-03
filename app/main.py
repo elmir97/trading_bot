@@ -42,7 +42,9 @@ from app.bot.middlewares.access import AccessMiddleware
 from app.bot.middlewares.ai_service import AIServiceMiddleware
 from app.bot.middlewares.database import DatabaseMiddleware
 from app.bot.middlewares.errors import ErrorMiddleware
+from app.bot.prompts import PromptMiddleware
 from app.core.config import Settings, get_settings
+from app.core.input_prompt import InputGate
 from app.core.logging import get_logger, setup_logging
 from app.core.security import SecretCipher
 from app.database.repositories.strategy import (
@@ -120,6 +122,9 @@ def build_dispatcher(
         observer.middleware(ErrorMiddleware())
         observer.middleware(DatabaseMiddleware(db, settings))
         observer.middleware(AIServiceMiddleware(llm_client, settings))
+        # 03.10: числовой вопрос с ForceReply — убрать, когда шаг сменился,
+        # задать снова, когда ответ не принят (app/bot/prompts.py).
+        observer.middleware(PromptMiddleware())
 
     # fsm_guard идёт первым: он перехватывает команды, введённые посреди
     # формы, сбрасывает состояние и передаёт сообщение дальше.
@@ -223,7 +228,9 @@ async def run() -> None:
     # зависят от build_dispatcher, а сам шифр не хранит состояния — второй
     # экземпляр с тем же ключом безвреден.
     background_jobs = BackgroundJobs(
-        bot, db, settings, SecretCipher(settings.encryption_key.get_secret_value()), redis
+        bot, db, settings, SecretCipher(settings.encryption_key.get_secret_value()), redis,
+        # 03.10: хранилище FSM того же процесса — «пользователь вводит число».
+        input_gate=InputGate(dp.storage, bot.id),
     )
     background_jobs.start()
 

@@ -14,6 +14,7 @@ app/execution/position_action_service.py.
 
 from __future__ import annotations
 
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from aiogram import F, Router
@@ -26,8 +27,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.bot.handlers.exchange import _describe, _market_cache
 from app.bot.keyboards.main import MenuCallback
 from app.bot.messaging import edit_or_replace
+from app.bot.prompts import ask_number
 from app.core.config import Settings
 from app.core.logging import get_logger
+from app.core.numfmt import fmt_price
 from app.core.security import SecretCipher
 from app.database.models.position_action import PositionAction
 from app.database.models.user import User
@@ -35,6 +38,8 @@ from app.database.session import Database
 from app.exchanges.base import ExchangeError
 from app.execution.callback_audit import record_callback
 from app.execution.position_action_service import PositionActionService
+from app.market.data import MarketDataService
+from app.services.exchange_factory import ExchangeFactory
 from app.trading.enums import ExecutionCallbackAction, PositionActionKind, TradeSide
 
 router = Router(name="position_actions")
@@ -66,6 +71,7 @@ class ActionCB:
     YES = "pm:y:"
     YES_RISK = "pm:r:"
     NO = "pm:n:"
+    CANCEL_INPUT = "pc:x"   # отмена ввода цены стопа/тейка (03.10)
 
 
 class PositionActionStates(StatesGroup):
@@ -104,6 +110,43 @@ def back_to_positions() -> InlineKeyboardMarkup:
     builder.button(text="◀️ В меню", callback_data=MenuCallback.MAIN)
     builder.adjust(2)
     return builder.as_markup()
+
+
+def cancel_input_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✖️ Отмена", callback_data=ActionCB.CANCEL_INPUT)
+    builder.button(text="⬅️ К позициям", callback_data=MenuCallback.OPEN_POSITIONS)
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+def example_level(mark: Decimal, side: TradeSide, is_stop: bool, precision: int) -> Decimal:
+    """Пример для подсказки ввода: стоп в 2% от цены в сторону убытка,
+    тейк — в сторону прибыли; округление до шага цены символа."""
+    below = is_stop == (side is TradeSide.LONG)
+    factor = Decimal("0.98") if below else Decimal("1.02")
+    return (mark * factor).quantize(Decimal(1).scaleb(-precision), rounding=ROUND_HALF_UP)
+
+
+async def _placeholder(
+    settings: Settings, cipher: SecretCipher, symbol: str, side: TradeSide, is_stop: bool
+) -> str:
+    what = "Цена стопа" if is_stop else "Цена тейка"
+    try:
+        client = ExchangeFactory(settings, cipher).public_client()
+        try:
+            market = MarketDataService(client, _market_cache)
+            mark = (await market.get_mark_prices([symbol])).get(symbol)
+            info = next((i for i in await market.get_symbols() if i.symbol == symbol), None)
+        finally:
+            await client.close()
+    except Exception:
+        logger.warning("Подсказка ввода: цена не получена", extra={"symbol": symbol})
+        return f"{what} числом"
+    if mark is None or info is None:
+        return f"{what} числом"
+    example = example_level(mark, side, is_stop, info.price_precision)
+    return f"{what}, например {fmt_price(example, info.price_precision)}"
 
 
 def _parse_open(data: str) -> tuple[str, str, TradeSide] | None:
@@ -186,12 +229,18 @@ async def open_action(
         await state.set_state(PositionActionStates.price)
         await state.update_data(kind=kind.value, symbol=symbol, side=side.value)
         await callback.answer()
+        # 03.10: вопрос — отдельным сообщением с ForceReply (app/bot/prompts):
+        # фоновые уведомления не уводят его из-под ответа.
         await edit_or_replace(
             callback.message,
-            f"Введи цену {what} для <b>{symbol} {side.value}</b> числом "
-            "(стоп и тейк ставятся на всю позицию):",
-            back_to_positions(),
+            f"⏳ Жду цену {what} для <b>{symbol} {side.value}</b> — ответь числом на "
+            "сообщение ниже (стоп и тейк ставятся на всю позицию).",
+            cancel_input_keyboard(),
         )
+        placeholder = await _placeholder(
+            settings, cipher, symbol, side, kind is PositionActionKind.MOVE_STOP
+        )
+        await ask_number(callback, state, placeholder)
         return
     if code not in _DIRECT:
         await callback.answer("Неизвестное действие.", show_alert=True)
@@ -202,6 +251,18 @@ async def open_action(
         callback.message, _service(session, settings, cipher, user, redis),
         kind, params, symbol, side, edit=True,
     )
+
+
+@router.callback_query(F.data == ActionCB.CANCEL_INPUT)
+async def cancel_input(callback: CallbackQuery, state: FSMContext) -> None:
+    """Отмена ввода цены: состояние снимается (вопрос с ForceReply удалит
+    PromptMiddleware), на биржу ничего не отправлено."""
+    await state.clear()
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        await edit_or_replace(
+            callback.message, "Отменено — на биржу ничего не отправлено.", back_to_positions()
+        )
 
 
 @router.message(PositionActionStates.price)
