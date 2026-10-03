@@ -16,7 +16,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.formatting import fmt_amount, fmt_num, fmt_price, fmt_qty
+from app.bot.formatting import fmt_amount, fmt_num, fmt_pct, fmt_price, fmt_qty
 from app.bot.keyboards.main import MenuCallback, back_to, back_to_main, nav_row
 from app.bot.keyboards.trade import TradeCB
 from app.bot.prompts import ask_number
@@ -36,6 +36,7 @@ from app.database.repositories.user import UserRepository
 from app.exchanges.base import ExchangeAuthError
 from app.exchanges.bingx import BingXClient
 from app.services.exchange_factory import ExchangeFactory
+from app.services.import_service import fmt_cutoff
 from app.services.permissions import refresh_permissions
 from app.trading.calculations import (
     CalculationError,
@@ -44,6 +45,7 @@ from app.trading.calculations import (
     to_decimal,
 )
 from app.trading.enums import ExchangeKeyMode, TradeSide
+from app.trading.risk import tz_offset_for
 from app.workers.notifier import NOTIFICATION_LABELS, approach_enabled
 
 router = Router(name="settings")
@@ -93,7 +95,7 @@ async def _show_balance_prompt(
     await _reply(
         event,
         "<b>Расчёт размера позиции</b>\n\n"
-        f"Риск по плану: {fmt_num(risk)}%\n\n"
+        f"Риск по плану: {fmt_pct(risk)}\n\n"
         "Введи баланс депозита в USDT:",
         back_to_main(),
     )
@@ -399,6 +401,12 @@ async def show_settings(
         ]
     if user_settings is not None:
         lines.append(f"Часовой пояс: {user_settings.timezone}")
+        if user_settings.journal_cutoff_at is not None:
+            # M4: исполнения раньше не импортируются (/import, «В журнал»).
+            cutoff = fmt_cutoff(
+                user_settings.journal_cutoff_at, tz_offset_for(user_settings.timezone)
+            )
+            lines.append(f"Журнал ведётся с {cutoff}")
 
     lines.append("")
     lines.append(f"Счёт: {active_mode.label}")

@@ -529,3 +529,77 @@ async def test_imported_trades_carry_account_mode(ctx, mode) -> None:  # type: i
     ).import_open_position(*WINDOW, symbol="XRP-USDT", side=TradeSide.LONG, quantity=D(40))
     assert open_pos.trade is not None
     assert {t.account_mode for t in await repo.list_recent(user.id)} == {mode}
+
+
+# --- M4: отсечка журнала (03.10.2026) -------------------------------------------
+# Журнал очищен 03.10 20:38 UTC; без отсечки /import за 30 дней вернул бы
+# удалённые сделки — дедуп держится на исполнениях в журнале.
+
+
+async def test_cutoff_drops_fills_before_it_and_reports(ctx) -> None:  # type: ignore[no-untyped-def]
+    user, repo, _session = ctx
+    cutoff = BASE + timedelta(minutes=50)                 # после разведки r1–r6
+    importer = HistoryImporter(
+        FakeExchange(XRP_HISTORY), repo, user.id, account_mode=DEMO,
+        journal_cutoff=cutoff, tz_offset=5,
+    )
+    result = await importer.import_period(*WINDOW)
+    # r6 (55 мин) — выход без входа после отсечки, b1 и c1/c2 — после неё.
+    assert {t.symbol for t in await repo.list_recent(user.id)} == {"BTC-USDT", "XRP-USDT"}
+    xrp_trades = [t for t in await repo.list_recent(user.id) if t.symbol == "XRP-USDT"]
+    assert [t.quantity for t in xrp_trades] == [D(40)]      # только текущая позиция
+    text = result.render(5)
+    assert text.endswith(
+        "Журнал ведётся с 02.03.2026 15:50 (UTC+5) — исполнения раньше не импортируются."
+    )
+
+
+async def test_period_entirely_before_cutoff_skips_exchange(ctx) -> None:  # type: ignore[no-untyped-def]
+    user, repo, _session = ctx
+    exchange = FakeExchange(XRP_HISTORY)
+    result = await HistoryImporter(
+        exchange, repo, user.id, account_mode=DEMO, journal_cutoff=WINDOW[1],
+    ).import_period(*WINDOW)
+    assert exchange.calls == 0
+    assert result.all_before_cutoff
+    assert result.render(0) == (
+        "Весь период раньше начала журнала (02.03.2026 13:00 (UTC)) — импортировать нечего."
+    )
+    assert await repo.list_recent(user.id) == []
+
+
+async def test_open_position_from_before_cutoff_refused(ctx) -> None:  # type: ignore[no-untyped-def]
+    user, repo, _session = ctx
+    outcome = await HistoryImporter(
+        FakeExchange(XRP_HISTORY), repo, user.id, account_mode=DEMO,
+        journal_cutoff=BASE + timedelta(minutes=90, seconds=30), tz_offset=5,
+    ).import_open_position(*WINDOW, symbol="XRP-USDT", side=TradeSide.LONG, quantity=D(40))
+    assert outcome.trade is None
+    assert outcome.refusal == (
+        "Позиция открыта до начала журнала (02.03.2026 16:30 (UTC+5)) — в журнал не заносится."
+    )
+    assert await repo.list_recent(user.id) == []
+
+
+async def test_no_cutoff_imports_everything(ctx) -> None:  # type: ignore[no-untyped-def]
+    user, repo, _session = ctx
+    result = await HistoryImporter(
+        FakeExchange(XRP_HISTORY), repo, user.id, account_mode=DEMO,
+    ).import_period(*WINDOW)
+    assert result.fills_before_cutoff == 0 and result.cutoff is None
+    assert "Журнал ведётся" not in result.render(5)
+
+
+def test_cutoff_filter_drops_boundary_fills() -> None:
+    """Окна идут с перекрытием — исполнение раньше отсечки, попавшее в первое
+    окно, отбрасывается поштучно."""
+    from app.services.import_service import ImportResult
+
+    importer = HistoryImporter(
+        FakeExchange([]), None, 1, account_mode=DEMO,  # type: ignore[arg-type]
+        journal_cutoff=BASE + timedelta(minutes=10),
+    )
+    result = ImportResult()
+    kept = importer._drop_before_cutoff(XRP_HISTORY[:4], result)
+    assert [f.external_id for f in kept] == ["r3", "r4"]
+    assert result.fills_before_cutoff == 2

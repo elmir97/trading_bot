@@ -359,11 +359,14 @@ class Reconciler:
         )
         # Явным запросом: get_by_id не грузит settings, а ленивая загрузка в
         # async-сессии падает (MissingGreenlet).
-        timezone = await session.scalar(
-            select(UserSettings.timezone).where(UserSettings.user_id == user_id)
-        )
+        row = (await session.execute(
+            select(UserSettings.timezone, UserSettings.journal_cutoff_at)
+            .where(UserSettings.user_id == user_id)
+        )).one_or_none()
+        timezone, cutoff = row if row is not None else (None, None)
         ctx = _UserCtx(
-            session, user.telegram_id, user_id, asset, now, tz_offset_for(timezone)
+            session, user.telegram_id, user_id, asset, now, tz_offset_for(timezone),
+            journal_cutoff=cutoff,
         )
         try:
             positions = await client.get_positions()
@@ -486,8 +489,9 @@ class Reconciler:
             recorded_order_ids=frozenset(
                 f.external_fill_id for f in trade.fills if f.external_fill_id
             ),
-            exits_after=(
-                None if bot or not trade.fills else max(f.executed_at for f in trade.fills)
+            exits_after=_exits_after(
+                None if bot or not trade.fills else max(f.executed_at for f in trade.fills),
+                ctx.journal_cutoff,
             ),
         )
         position = exchange_position(positions, trade.symbol, trade.side)
@@ -980,6 +984,13 @@ def _in_scope(dedup_key: str, prefix: str) -> bool:
     return dedup_key == prefix[:-1] or dedup_key.startswith(prefix)
 
 
+def _exits_after(last_fill: datetime | None, cutoff: datetime | None) -> datetime | None:
+    """Выходами считаются ордера позже последнего исполнения сделки и не
+    раньше отсечки журнала (M4)."""
+    known = [t for t in (last_fill, cutoff) if t is not None]
+    return max(known) if known else None
+
+
 class _UserCtx:
     """Состояние одного прохода по пользователю."""
 
@@ -991,8 +1002,12 @@ class _UserCtx:
         asset: str,
         now: datetime,
         tz_offset_hours: int = 5,
+        journal_cutoff: datetime | None = None,
     ) -> None:
         self.session = session
+        # M4: отсечка журнала — выходы раньше неё не записываются (страховка:
+        # сделок старше отсечки в журнале нет после очистки 03.10.2026).
+        self.journal_cutoff = journal_cutoff
         self.telegram_id = telegram_id
         self.user_id = user_id
         self.asset = asset

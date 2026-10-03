@@ -48,6 +48,7 @@ from app.market.data import MarketDataService
 from app.services.exchange_factory import ExchangeFactory
 from app.services.import_service import HistoryImporter
 from app.trading.enums import TradeSide
+from app.trading.risk import tz_offset_for
 
 router = Router(name="positions")
 logger = get_logger(__name__)
@@ -297,6 +298,8 @@ async def import_position(
             outcome = await HistoryImporter(
                 client, TradeRepository(session), user.id,
                 account_mode=user.settings.active_exchange_mode,
+                journal_cutoff=user.settings.journal_cutoff_at,
+                tz_offset=tz_offset_for(user.settings.timezone),
             ).import_open_position(
                 end - timedelta(days=IMPORT_DAYS), end,
                 symbol=symbol, side=side, quantity=position.quantity,

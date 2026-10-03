@@ -35,6 +35,7 @@ from app.market.cache import TTLCache
 from app.market.data import MarketDataService
 from app.services.exchange_factory import ExchangeFactory
 from app.services.import_service import HistoryImporter, default_import_range
+from app.trading.risk import tz_offset_for
 
 router = Router(name="exchange")
 logger = get_logger(__name__)
@@ -367,6 +368,8 @@ async def run_import(
         importer = HistoryImporter(
             client, TradeRepository(session), user.id,
             account_mode=user.settings.active_exchange_mode,
+            journal_cutoff=user.settings.journal_cutoff_at,
+            tz_offset=tz_offset_for(user.settings.timezone),
         )
         result = await importer.import_period(start, end, account_balance=balance)
     except ExchangeError as exc:
@@ -376,7 +379,7 @@ async def run_import(
     finally:
         await client.close()
 
-    text = f"<b>Импорт за {days} дн.</b>\n\n{result.render()}"
+    text = f"<b>Импорт за {days} дн.</b>\n\n{result.render(tz_offset_for(user.settings.timezone))}"
     if result.trades_created:
         text += (
             "\n\n📌 Импортированные сделки не размечены. "

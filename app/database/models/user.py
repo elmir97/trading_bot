@@ -7,10 +7,19 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import BigInteger, Boolean, Date, Enum, ForeignKey, SmallInteger, String
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Date,
+    DateTime,
+    Enum,
+    ForeignKey,
+    SmallInteger,
+    String,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -108,6 +117,13 @@ class UserSettings(IntPKMixin, TimestampMixin, Base):
     # tp_approaching в notifications (без ключа — старый tp_sl_approaching).
     sl_alert_percent: Mapped[int | None] = mapped_column(SmallInteger)
     tp_alert_percent: Mapped[int | None] = mapped_column(SmallInteger)
+
+    # --- Отсечка журнала (M4, 03.10.2026) -------------------------------------
+    # Момент, с которого ведётся журнал (после полной очистки): исполнения
+    # раньше него /import, «В журнал» и reconciler в журнал не заводят. NULL —
+    # отсечки нет. Без неё дедуп импорта держится на исполнениях в журнале, и
+    # после очистки /import за 30 дней вернул бы удалённые сделки.
+    journal_cutoff_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     user: Mapped[User] = relationship(back_populates="settings")
 

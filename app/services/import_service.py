@@ -54,10 +54,29 @@ class ImportResult:
     trades_created: int = 0
     trades_updated: int = 0
     errors: list[str] = field(default_factory=list)
+    # M4: отсечка журнала. Окна раньше неё не запрашиваются, поэтому число
+    # пропущенных исполнений не известно; fills_before_cutoff — только
+    # отброшенные на границе (перекрытие окон).
+    cutoff: datetime | None = None
+    fills_before_cutoff: int = 0
+    all_before_cutoff: bool = False
 
-    def render(self) -> str:
+    def render(self, tz_offset: int = 0) -> str:
+        cutoff_line = (
+            f"Журнал ведётся с {fmt_cutoff(self.cutoff, tz_offset)} — исполнения раньше "
+            "не импортируются."
+            if self.cutoff is not None else None
+        )
+        if self.all_before_cutoff and self.cutoff is not None:
+            return (
+                f"Весь период раньше начала журнала ({fmt_cutoff(self.cutoff, tz_offset)}) — "
+                "импортировать нечего."
+            )
         if self.errors and not self.fills_new:
-            return "Импорт не удался:\n" + "\n".join(f"• {e}" for e in self.errors)
+            lines = ["Импорт не удался:", *(f"• {e}" for e in self.errors)]
+            if cutoff_line:
+                lines += ["", cutoff_line]
+            return "\n".join(lines)
 
         lines = [
             f"Получено исполнений: {self.fills_received}",
@@ -70,7 +89,17 @@ class ImportResult:
             lines.append(f"Дополнено сделок: {self.trades_updated}")
         if self.errors:
             lines.append(f"\nЧастичные ошибки: {len(self.errors)}")
+        if cutoff_line:
+            lines += ["", cutoff_line]
         return "\n".join(lines)
+
+
+def fmt_cutoff(cutoff: datetime, tz_offset: int = 0) -> str:
+    """Отсечка журнала в местном времени пользователя с явной меткой пояса:
+    «03.10.2026 23:38 (UTC+5)»."""
+    local = cutoff + timedelta(hours=tz_offset)
+    zone = f"UTC{tz_offset:+d}" if tz_offset else "UTC"
+    return f"{local:%d.%m.%Y %H:%M} ({zone})"
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,14 +176,21 @@ class HistoryImporter:
         user_id: int,
         *,
         account_mode: ExchangeKeyMode,
+        journal_cutoff: datetime | None = None,
+        tz_offset: int = 0,
     ) -> None:
         """account_mode — счёт клиента (DEMO/LIVE): пишется в каждую сделку
         импорта, лимиты убытка считаются по нему (03.10.2026). Обязателен —
-        счёт по умолчанию был бы молчаливой подстановкой."""
+        счёт по умолчанию был бы молчаливой подстановкой.
+
+        journal_cutoff — user_settings.journal_cutoff_at (M4): исполнения
+        раньше него в журнал не заводятся. None — отсечки нет."""
         self._client = client
         self._trades = trades
         self._user_id = user_id
         self._account_mode = account_mode
+        self._cutoff = journal_cutoff
+        self._tz_offset = tz_offset
 
     async def fetch_fills(
         self, start: datetime, end: datetime
@@ -198,9 +234,17 @@ class HistoryImporter:
         end: datetime,
         account_balance: Decimal | None = None,
     ) -> ImportResult:
-        result = ImportResult()
+        result = ImportResult(cutoff=self._cutoff)
+        if self._cutoff is not None:
+            if end <= self._cutoff:
+                # Весь период раньше начала журнала — к бирже не ходим.
+                result.all_before_cutoff = True
+                return result
+            # Окна раньше отсечки не запрашиваются вовсе.
+            start = max(start, self._cutoff)
 
         fills, errors = await self.fetch_fills(start, end)
+        fills = self._drop_before_cutoff(fills, result)
         result.fills_received = len(fills)
         result.errors = errors
 
@@ -251,6 +295,15 @@ class HistoryImporter:
         )
         return result
 
+    def _drop_before_cutoff(self, fills: list[Fill], result: ImportResult) -> list[Fill]:
+        """Окна идут с перекрытием, первое начинается на самой отсечке —
+        исполнения раньше неё отбрасываются поштучно и считаются в ответе."""
+        if self._cutoff is None:
+            return fills
+        kept = [f for f in fills if f.executed_at >= self._cutoff]
+        result.fills_before_cutoff += len(fills) - len(kept)
+        return kept
+
     async def _live_positions(self) -> list[Position]:
         try:
             return list(await self._client.get_positions() or [])
@@ -280,6 +333,17 @@ class HistoryImporter:
         if not active:
             return OpenPositionImport(None, "Исполнений входа текущей позиции не найдено.")
         pending = active[-1]
+        if self._cutoff is not None and any(
+            f.executed_at < self._cutoff for f in pending.fills
+        ):
+            # Позиция открыта до очистки журнала: её вход — «до начала
+            # журнала», заносить половину позиции нельзя, а всю — значит
+            # вернуть в журнал удалённое.
+            return OpenPositionImport(
+                None,
+                "Позиция открыта до начала журнала "
+                f"({fmt_cutoff(self._cutoff, self._tz_offset)}) — в журнал не заносится.",
+            )
         if pending.open_quantity != quantity:
             return OpenPositionImport(
                 None,

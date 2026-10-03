@@ -85,7 +85,7 @@ class _Client:
 @pytest.fixture
 def env(monkeypatch):  # type: ignore[no-untyped-def]
     state = SimpleNamespace(
-        client=None, auth_error=False, trades=[], imports=[], import_modes=[],
+        client=None, auth_error=False, trades=[], imports=[], import_modes=[], import_cutoffs=[],
         import_outcome=SimpleNamespace(trade=SimpleNamespace(id=21), refusal=None),
     )
 
@@ -99,8 +99,10 @@ def env(monkeypatch):  # type: ignore[no-untyped-def]
             return state.client
 
     class Importer:
-        def __init__(self, client, trades, user_id, *, account_mode) -> None:  # type: ignore[no-untyped-def]
+        def __init__(self, client, trades, user_id, *, account_mode,  # type: ignore[no-untyped-def]
+                     journal_cutoff=None, tz_offset=0) -> None:
             state.import_modes.append(account_mode)
+            state.import_cutoffs.append((journal_cutoff, tz_offset))
 
         async def import_open_position(self, start, end, *, symbol, side, quantity,  # type: ignore[no-untyped-def]
                                        position_id=None):
@@ -134,8 +136,14 @@ def _callback(data: str = MenuCallback.OPEN_POSITIONS) -> MagicMock:
 
 
 def _user() -> SimpleNamespace:
-    settings = SimpleNamespace(active_exchange_mode=ExchangeKeyMode.DEMO)
+    settings = SimpleNamespace(
+        active_exchange_mode=ExchangeKeyMode.DEMO, journal_cutoff_at=CUTOFF,
+        timezone="Asia/Yekaterinburg",
+    )
     return SimpleNamespace(id=7, settings=settings)
+
+
+CUTOFF = datetime(2026, 10, 3, 20, 38, 34, tzinfo=UTC)
 
 
 async def _open(env, data: str = MenuCallback.OPEN_POSITIONS):  # type: ignore[no-untyped-def]
@@ -251,6 +259,8 @@ async def test_import_button_imports_current_position_only(env) -> None:  # type
     assert "📥 XRP-USDT LONG: в журнале — сделка #21." in text
     # 03.10.2026: счёт из настроек пишется в сделку — лимиты по своему счёту.
     assert env.import_modes == [ExchangeKeyMode.DEMO]
+    # M4: отсечка журнала и пояс пользователя передаются импортёру.
+    assert env.import_cutoffs == [(CUTOFF, 5)]
 
 
 async def test_import_refusal_points_to_full_import(env) -> None:  # type: ignore[no-untyped-def]

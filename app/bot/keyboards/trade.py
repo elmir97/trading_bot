@@ -5,7 +5,7 @@ from __future__ import annotations
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app.bot.formatting import fmt_money, fmt_percent, fmt_price, fmt_qty, fmt_ratio
+from app.bot.formatting import fmt_money, fmt_pct, fmt_percent, fmt_price, fmt_qty, fmt_ratio
 from app.database.models.mistake import MistakeType
 from app.database.models.strategy import Strategy
 from app.database.models.trade import Trade
@@ -186,7 +186,7 @@ def trade_card(trade: Trade) -> str:
         lines.append("")
         lines.append("Статус: открыта")
         if trade.risk_percent is not None:
-            lines.append(f"Риск: {fmt_ratio(trade.risk_percent)}%")
+            lines.append(f"Риск: {fmt_pct(trade.risk_percent)}")
         if trade.risk_reward is not None:
             lines.append(f"Плановый RR: 1:{fmt_ratio(trade.risk_reward)}")
 

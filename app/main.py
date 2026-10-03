@@ -43,6 +43,7 @@ from app.bot.middlewares.ai_service import AIServiceMiddleware
 from app.bot.middlewares.database import DatabaseMiddleware
 from app.bot.middlewares.errors import ErrorMiddleware
 from app.bot.prompts import PromptMiddleware
+from app.bot.wizard_trail import WizardTrailMiddleware
 from app.core.config import Settings, get_settings
 from app.core.input_prompt import InputGate
 from app.core.logging import get_logger, setup_logging
@@ -125,6 +126,9 @@ def build_dispatcher(
         # 03.10: числовой вопрос с ForceReply — убрать, когда шаг сменился,
         # задать снова, когда ответ не принят (app/bot/prompts.py).
         observer.middleware(PromptMiddleware())
+        # 03.10: переписка мастера «Добавить сделку» убирается после записи
+        # или отмены (app/bot/wizard_trail.py).
+        observer.middleware(WizardTrailMiddleware())
 
     # fsm_guard идёт первым: он перехватывает команды, введённые посреди
     # формы, сбрасывает состояние и передаёт сообщение дальше.

@@ -73,10 +73,19 @@ class FakeTelegram:
         self.force_reply: ForceReply | None = None
         self.asks: list[str] = []
         self.deleted: list[int] = []
+        # 03.10.2026: id всех созданных сообщений (бота и пользователя) — одна
+        # нумерация на чат, как в Telegram; smoke проверяет по нему, что
+        # переписка мастера удалена после записи сделки.
+        self.created: list[int] = []
+
+    def new_message_id(self) -> int:
+        self._next_msg_id += 1
+        self.created.append(self._next_msg_id)
+        return self._next_msg_id
 
     async def __call__(self, bot: Bot, method: Any, request_timeout: Any = None) -> Any:
         if isinstance(method, SendMessage) and isinstance(method.reply_markup, ForceReply):
-            self._next_msg_id += 1
+            self.new_message_id()
             self.force_reply = method.reply_markup
             self.asks.append(method.text)
             self.log.append(("ask", method.text))
@@ -86,8 +95,7 @@ class FakeTelegram:
             return True
         if isinstance(method, SendMessage):
             # sendMessage создаёт НОВОЕ сообщение — новый id.
-            self._next_msg_id += 1
-            self.last_message_id = self._next_msg_id
+            self.last_message_id = self.new_message_id()
             self.last_text = method.text
             self.last_markup = method.reply_markup
             self.log.append(("send", method.text))
@@ -150,7 +158,8 @@ class Simulator:
 
     def _message(self, text: str) -> Message:
         return Message(
-            message_id=self._next_id(),
+            # Сообщение пользователя — в общей нумерации чата (03.10.2026).
+            message_id=self._tg.new_message_id(),
             date=datetime.now(UTC),
             chat=Chat(id=CHAT_ID, type="private"),
             from_user=TgUser(id=USER_ID, is_bot=False, first_name="Эльмир"),

@@ -176,6 +176,14 @@ def has(text: str, *fragments: str) -> bool:
     return all(f.lower() in text.lower() for f in fragments)
 
 
+async def _set_journal_cutoff(db, value: datetime | None) -> None:  # type: ignore[no-untyped-def]
+    async with db.session() as session:
+        user = await UserRepository(session).get_by_telegram_id(USER_ID)
+        settings_row = await UserRepository(session).get_settings(user.id)
+        settings_row.journal_cutoff_at = value
+        await session.commit()
+
+
 async def add_trade(sim, symbol, side, entry, sl, tp, balance="10000"):  # type: ignore[no-untyped-def]
     await sim.send("/start")
     await sim.tap("Добавить сделку")
@@ -295,10 +303,25 @@ async def _run_scenarios(sim, tg, db, redis, settings) -> None:  # type: ignore[
     check("«/mistakes» на пустой базе", len(text) > 10, "пустой ответ")
 
     print("\n[3] Добавление сделки")
+    first = len(tg.created)
     text = await add_trade(sim, "BTC", "LONG", "100500", "99500", "102500")
     check("сделка сохраняется", has(text, "сделка записана"), text[:80])
     check("объём рассчитан", has(text, "объём: 0.2"), text[:200])
-    check("риск верный", has(text, "риск: 2%"), text[:200])
+    check("риск верный", has(text, "риск: 2.00%"), text[:200])
+    # 03.10.2026: переписка мастера удалена; остались «/start» пользователя
+    # (до формы) и карточка сделки.
+    wizard = set(tg.created[first + 1:]) - {tg.last_message_id}
+    left = sorted(wizard - set(tg.deleted))
+    check("переписка мастера удалена", not left and tg.last_message_id not in tg.deleted,
+          f"не удалены: {left}")
+
+    # M4: отсечка журнала видна в «Настройках» (местное время, метка пояса).
+    await _set_journal_cutoff(db, datetime(2026, 10, 3, 20, 38, 34, tzinfo=UTC))
+    await sim.send("/start")
+    text = await sim.tap("Настройки")
+    check("отсечка журнала в настройках",
+          has(text, "журнал ведётся с 04.10.2026 01:38 (utc+5)"), text[:400])
+    await _set_journal_cutoff(db, None)
     check("плановый RR", has(text, "1:2"), text[:200])
 
     print("\n[4] Закрытие и разметка ошибок")

@@ -112,6 +112,6 @@ async def test_trade_card_renders_right_after_creation(journal_ctx) -> None:  # 
 
     card = trade_card(trade)
     assert "BTC-USDT" in card
-    assert "Риск: 2%" in card          # формат без хвоста нулей
+    assert "Риск: 2.00%" in card       # 03.10.2026: проценты — два знака (fmt_pct)
     assert "Плановый RR: 1:2" in card
     assert "Объём: 0.1" in card

@@ -14,7 +14,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.formatting import fmt_num
+from app.bot.formatting import fmt_num, fmt_pct
 from app.bot.keyboards.main import (
     MenuCallback,
     back_to,
@@ -39,6 +39,7 @@ from app.bot.keyboards.trade import (
 from app.bot.prompts import ask_number
 from app.bot.sizing_view import lot_step, sizing_lines
 from app.bot.states.trade import AddTradeStates, CloseTradeStates
+from app.bot.wizard_trail import remember
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.database.models.user import User
@@ -62,17 +63,28 @@ router = Router(name="trades")
 logger = get_logger(__name__)
 
 
-async def _parse_decimal(message: Message, field: str) -> Decimal | None:
-    """Разбирает числовой ввод, сообщая пользователю о проблеме понятно."""
+async def _parse_decimal(
+    message: Message, field: str, state: FSMContext | None = None
+) -> Decimal | None:
+    """Разбирает числовой ввод, сообщая пользователю о проблеме понятно.
+
+    state — шаг мастера: ответ об ошибке входит в его переписку и удаляется
+    после записи или отмены (app/bot/wizard_trail.py)."""
     try:
         value = to_decimal(message.text or "", field)
     except CalculationError:
-        await message.answer(f"Не понял {field}. Введи число, например 100.5")
+        await _say(message, state, f"Не понял {field}. Введи число, например 100.5")
         return None
     if value <= 0:
-        await message.answer(f"{field.capitalize()} должно быть больше нуля.")
+        await _say(message, state, f"{field.capitalize()} должно быть больше нуля.")
         return None
     return value
+
+
+async def _say(message: Message, state: FSMContext | None, text: str) -> None:
+    sent = await message.answer(text)
+    if state is not None:
+        await remember(state, sent.message_id)
 
 
 # ---------------------------------------------------------------------------
@@ -80,14 +92,19 @@ async def _parse_decimal(message: Message, field: str) -> Decimal | None:
 # ---------------------------------------------------------------------------
 
 
-async def _send(event: Message | CallbackQuery, text: str, keyboard) -> None:  # type: ignore[no-untyped-def]
-    """Отправляет шаг формы: edit для колбэка, новое сообщение для текста."""
+async def _send(  # type: ignore[no-untyped-def]
+    event: Message | CallbackQuery, text: str, keyboard, state: FSMContext
+) -> None:
+    """Отправляет шаг формы: edit для колбэка, новое сообщение для текста.
+    Сообщение шага — переписка мастера (удаляется после записи/отмены)."""
     if isinstance(event, CallbackQuery):
         if isinstance(event.message, Message):
             await event.message.edit_text(text, reply_markup=keyboard)
+            await remember(state, event.message.message_id)
         await event.answer()
     else:
-        await event.answer(text, reply_markup=keyboard)
+        sent = await event.answer(text, reply_markup=keyboard)
+        await remember(state, sent.message_id)
 
 
 async def _show_symbol_prompt(
@@ -101,6 +118,7 @@ async def _show_symbol_prompt(
         event,
         "<b>Новая сделка</b>\n\nВыбери инструмент или введи символ вручную:",
         with_menu_row(symbols_keyboard(symbols)),
+        state=state,
     )
 
 
@@ -111,12 +129,13 @@ async def _show_side_prompt(event: Message | CallbackQuery, state: FSMContext) -
         event,
         f"<b>{data['symbol']}</b>\n\nНаправление:",
         with_nav(side_keyboard(), parent_data=TradeCB.BACK),
+        state=state,
     )
 
 
 async def _show_entry_price_prompt(event: Message | CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AddTradeStates.entry_price)
-    await _send(event, "Цена входа:", back_to(TradeCB.BACK, with_menu=True))
+    await _send(event, "Цена входа:", back_to(TradeCB.BACK, with_menu=True), state=state)
     await ask_number(event, state, "Цена входа числом")
 
 
@@ -131,6 +150,7 @@ async def _show_stop_loss_prompt(event: Message | CallbackQuery, state: FSMConte
         f"<i>Методология не допускает сделок без стопа, но записать такую "
         f"сделку в журнал можно — она будет отмечена как нарушение.</i>",
         with_nav(skip_keyboard(), parent_data=TradeCB.BACK, with_menu=True),
+        state=state,
     )
     await ask_number(event, state, f"Цена стопа ({hint} входа)")
 
@@ -143,7 +163,7 @@ async def _show_take_profit_prompt(event: Message | CallbackQuery, state: FSMCon
         text = "⚠️ Сделка без стоп-лосса будет помечена как нарушение плана.\n\nTake-profit:"
     await _send(
         event, text, with_nav(skip_keyboard(), parent_data=TradeCB.BACK, with_menu=True)
-    )
+    , state=state)
     await ask_number(event, state, "Цена тейка числом")
 
 
@@ -157,7 +177,7 @@ async def _ask_quantity_mode(
         text = "Объём позиции (без стопа расчёт от риска недоступен):"
     await _send(
         event, text, with_nav(quantity_mode_keyboard(), parent_data=TradeCB.BACK, with_menu=True)
-    )
+    , state=state)
 
 
 async def _show_quantity_prompt(
@@ -172,12 +192,13 @@ async def _show_quantity_prompt(
         await _send(
             event,
             f"Введи баланс депозита в USDT.\n\n"
-            f"Объём рассчитаю от риска {fmt_num(risk)}% по твоему плану.",
+            f"Объём рассчитаю от риска {fmt_pct(risk)} по твоему плану.",
             keyboard,
+            state=state,
         )
         await ask_number(event, state, "Баланс в USDT, например 1000")
     else:
-        await _send(event, "Объём в базовом активе (например 0.1):", keyboard)
+        await _send(event, "Объём в базовом активе (например 0.1):", keyboard, state=state)
         await ask_number(event, state, "Объём, например 0.1")
 
 
@@ -187,6 +208,7 @@ async def _show_leverage_prompt(event: Message | CallbackQuery, state: FSMContex
         event,
         "Плечо (число, например 10):",
         with_nav(skip_keyboard(), parent_data=TradeCB.BACK, with_menu=True),
+        state=state,
     )
     await ask_number(event, state, "Плечо, например 10")
 
@@ -200,7 +222,7 @@ async def _ask_strategy(
     await state.set_state(AddTradeStates.strategy)
     strategies = await StrategyRepository(session).list_active(user.id)
     keyboard = with_nav(strategies_keyboard(strategies), parent_data=TradeCB.BACK, with_menu=True)
-    await _send(event, "Стратегия:", keyboard)
+    await _send(event, "Стратегия:", keyboard, state=state)
 
 
 async def _show_timeframe_prompt(
@@ -212,7 +234,7 @@ async def _show_timeframe_prompt(
     keyboard = with_nav(
         timeframe_keyboard(timeframes), parent_data=TradeCB.BACK, with_menu=True
     )
-    await _send(event, "Таймфрейм:", keyboard)
+    await _send(event, "Таймфрейм:", keyboard, state=state)
 
 
 async def _show_entry_reason_prompt(event: Message | CallbackQuery, state: FSMContext) -> None:
@@ -221,6 +243,7 @@ async def _show_entry_reason_prompt(event: Message | CallbackQuery, state: FSMCo
         event,
         "Причина входа — что именно ты увидел на графике:",
         with_nav(skip_keyboard(), parent_data=TradeCB.BACK, with_menu=True),
+        state=state,
     )
 
 
@@ -247,7 +270,7 @@ async def pick_symbol(callback: CallbackQuery, state: FSMContext) -> None:
 async def type_symbol(message: Message, state: FSMContext) -> None:
     symbol = (message.text or "").strip().upper()
     if len(symbol) < 3:
-        await message.answer("Введи символ, например BTC-USDT")
+        await _say(message, state, "Введи символ, например BTC-USDT")
         return
     await state.update_data(symbol=symbol)
     await _show_side_prompt(message, state)
@@ -274,7 +297,7 @@ async def entry_price_back(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(AddTradeStates.entry_price)
 async def set_entry_price(message: Message, state: FSMContext) -> None:
-    value = await _parse_decimal(message, "цену входа")
+    value = await _parse_decimal(message, "цену входа", state)
     if value is None:
         return
     await state.update_data(entry_price=str(value))
@@ -294,7 +317,7 @@ async def skip_stop_loss(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(AddTradeStates.stop_loss)
 async def set_stop_loss(message: Message, state: FSMContext) -> None:
-    value = await _parse_decimal(message, "стоп-лосс")
+    value = await _parse_decimal(message, "стоп-лосс", state)
     if value is None:
         return
 
@@ -309,7 +332,7 @@ async def set_stop_loss(message: Message, state: FSMContext) -> None:
     try:
         stop_distance(entry_price=entry, stop_loss=value, side=side)
     except CalculationError as exc:
-        await message.answer(f"⚠️ {exc}")
+        await _say(message, state, f"⚠️ {exc}")
         return
 
     await state.update_data(stop_loss=str(value))
@@ -329,7 +352,7 @@ async def skip_take_profit(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(AddTradeStates.take_profit)
 async def set_take_profit(message: Message, state: FSMContext) -> None:
-    value = await _parse_decimal(message, "take-profit")
+    value = await _parse_decimal(message, "take-profit", state)
     if value is None:
         return
 
@@ -346,9 +369,9 @@ async def set_take_profit(message: Message, state: FSMContext) -> None:
                 side=side,
             )
         except CalculationError as exc:
-            await message.answer(f"⚠️ {exc}")
+            await _say(message, state, f"⚠️ {exc}")
             return
-        await message.answer(f"Плановый RR: 1:{fmt_num(rr)}")
+        await _say(message, state, f"Плановый RR: 1:{fmt_num(rr)}")
 
     await state.update_data(take_profit=str(value))
     await _ask_quantity_mode(message, state)
@@ -392,7 +415,7 @@ async def set_quantity(
     data = await state.get_data()
 
     if data.get("quantity_mode") == "auto":
-        balance = await _parse_decimal(message, "баланс")
+        balance = await _parse_decimal(message, "баланс", state)
         if balance is None:
             return
 
@@ -409,17 +432,17 @@ async def set_quantity(
                 quantity_step=await lot_step(settings, data["symbol"]),
             )
         except CalculationError as exc:
-            await message.answer(f"⚠️ {exc}")
+            await _say(message, state, f"⚠️ {exc}")
             return
 
         await state.update_data(
             quantity=str(sizing.quantity), account_balance=str(balance)
         )
-        await message.answer(
-            "<b>Расчёт позиции</b>\n\n" + "\n".join(sizing_lines(sizing, balance))
+        await _say(
+            message, state, "<b>Расчёт позиции</b>\n\n" + "\n".join(sizing_lines(sizing, balance))
         )
     else:
-        quantity = await _parse_decimal(message, "объём")
+        quantity = await _parse_decimal(message, "объём", state)
         if quantity is None:
             return
         await state.update_data(quantity=str(quantity))
@@ -449,10 +472,10 @@ async def set_leverage(
     try:
         leverage = int((message.text or "").strip().rstrip("xX"))
     except ValueError:
-        await message.answer("Введи целое число, например 10")
+        await _say(message, state, "Введи целое число, например 10")
         return
     if leverage < 1:
-        await message.answer("Плечо не может быть меньше 1")
+        await _say(message, state, "Плечо не может быть меньше 1")
         return
 
     await state.update_data(leverage=leverage)

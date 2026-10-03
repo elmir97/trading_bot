@@ -51,7 +51,7 @@ def sizing_lines(sizing: PositionSizing, balance: Decimal) -> list[str]:
         how = f"вниз до шага лота BingX {fmt_num(sizing.quantity_step)}"
     return [
         f"Сумма риска по плану: {fmt_amount(sizing.risk_amount)} USDT",
-        f"Дистанция до стопа: {fmt_num(sizing.stop_distance_percent)}%",
+        f"Дистанция до стопа: {fmt_pct(sizing.stop_distance_percent)}",
         f"Объём: {fmt_qty(sizing.quantity, _digits(step))} ({how})",
         f"Риск по объёму: {fmt_amount(sizing.risk_actual)} USDT "
         f"({fmt_pct(sizing.risk_actual / balance * 100)})",
