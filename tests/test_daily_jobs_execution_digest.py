@@ -16,7 +16,6 @@ import pytest
 import pytest_asyncio
 
 from app.core.config import Settings
-from app.core.security import SecretCipher
 from app.database.models.reconciliation_event import ReconciliationEvent
 from app.database.repositories.strategy import MistakeTypeRepository, StrategyRepository
 from app.database.repositories.user import UserRepository
@@ -49,8 +48,7 @@ async def ctx(unique_telegram_id):  # type: ignore[no-untyped-def]
         )
         user = await user_service.get_or_create(telegram_id=unique_telegram_id())
         bot = FakeBot()
-        cipher = SecretCipher(settings.encryption_key.get_secret_value())
-        daily = DailyJobs(bot, db, settings, cipher)
+        daily = DailyJobs(bot, db, settings)
         yield daily, session, user, bot, settings
         await cleanup_user(session, user)
     await db.dispose()

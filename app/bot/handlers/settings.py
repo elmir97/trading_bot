@@ -20,6 +20,7 @@ from app.bot.formatting import fmt_amount, fmt_num, fmt_price, fmt_qty
 from app.bot.keyboards.main import MenuCallback, back_to, back_to_main, nav_row
 from app.bot.keyboards.trade import TradeCB
 from app.bot.prompts import ask_number
+from app.bot.sizing_view import sizing_lines
 from app.bot.states.trade import RiskCalculatorStates, SettingsStates
 from app.core.config import Settings
 from app.core.security import SecretCipher, mask_secret
@@ -248,11 +249,8 @@ async def calc_stop(message: Message, state: FSMContext) -> None:
 
     await message.answer(
         f"<b>{side.label}</b>\n\n"
-        f"Сумма риска: {fmt_amount(sizing.risk_amount)} USDT\n"
-        f"Дистанция до стопа: {fmt_num(sizing.stop_distance_percent)}%\n\n"
-        f"<b>Объём: {fmt_qty(sizing.quantity)}</b>\n"
-        f"Размер позиции: {fmt_amount(sizing.position_value)} USDT\n\n"
-        f"Маржа при плече:\n"
+        + "\n".join(sizing_lines(sizing, Decimal(data["balance"])))
+        + "\n\nМаржа при плече:\n"
         f"1x — {fmt_amount(sizing.required_margin(1))}\n"
         f"5x — {fmt_amount(sizing.required_margin(5))}\n"
         f"10x — {fmt_amount(sizing.required_margin(10))}\n"
@@ -307,7 +305,7 @@ async def calc_target(message: Message, state: FSMContext) -> None:
         await message.answer(f"⚠️ {exc}", reply_markup=back_to_main())
         return
 
-    potential_profit = sizing.risk_amount * rr
+    potential_profit = sizing.risk_actual * rr
     verdict = (
         "✅ RR соответствует методологии (минимум 1:2)."
         if rr >= 2
@@ -321,7 +319,7 @@ async def calc_target(message: Message, state: FSMContext) -> None:
         f"Стоп: {fmt_price(stop)}\n"
         f"Цель: {fmt_price(target)}\n\n"
         f"Объём: {fmt_qty(sizing.quantity)}\n"
-        f"Риск: −{fmt_num(sizing.risk_amount)} USDT\n"
+        f"Риск: −{fmt_amount(sizing.risk_actual)} USDT\n"
         f"Потенциал: +{fmt_num(potential_profit.quantize(Decimal('0.01')))} USDT\n"
         f"<b>RR: 1:{fmt_num(rr)}</b>\n\n"
         f"{verdict}",

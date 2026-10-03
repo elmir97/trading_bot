@@ -36,6 +36,15 @@ def fmt_num(value: Decimal | None) -> str:
     return f"{normalized:f}"
 
 
+def fmt_pct(value: Decimal) -> str:
+    """Процент в тексте: всегда два знака, без знака «+», с «%» (03.10.2026).
+
+    Лимит плана из базы (Decimal("2.0000")) и посчитанный риск выводятся
+    одинаково: «Риск 2.00%, допустимый — 2.00%». Раньше рядом стояли
+    «2.00%» (:.2f) и «2.0000%» (:g у Decimal хвост нулей не убирает)."""
+    return f"{value.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP):f}%"
+
+
 def _fallback_price_precision(value: Decimal) -> int:
     """Знаков после запятой, когда price_precision символа недоступен.
 

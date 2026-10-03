@@ -40,6 +40,7 @@ from app.exchanges.base import (
 from app.services.import_service import HistoryImporter
 from app.services.user_service import UserService
 from app.trading.enums import (
+    ExchangeKeyMode,
     FillSide,
     OrderRole,
     OrderSide,
@@ -56,6 +57,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 D = Decimal
+DEMO = ExchangeKeyMode.DEMO
 BASE = datetime(2026, 3, 2, 10, 0, tzinfo=UTC)
 
 
@@ -137,7 +139,7 @@ async def test_import_creates_closed_trade_with_pnl(ctx) -> None:  # type: ignor
         fill("f2", 60, entry=False, price="102000"),
     ])
 
-    importer = HistoryImporter(exchange, repo, user.id)
+    importer = HistoryImporter(exchange, repo, user.id, account_mode=DEMO)
     result = await importer.import_period(
         BASE - timedelta(hours=1),
         BASE + timedelta(hours=2),
@@ -166,7 +168,7 @@ async def test_repeated_import_does_not_duplicate(ctx) -> None:  # type: ignore[
         fill("d1", 0, entry=True, price="100000"),
         fill("d2", 60, entry=False, price="102000"),
     ])
-    importer = HistoryImporter(exchange, repo, user.id)
+    importer = HistoryImporter(exchange, repo, user.id, account_mode=DEMO)
     window = (BASE - timedelta(hours=1), BASE + timedelta(hours=2))
 
     first = await importer.import_period(*window)
@@ -184,7 +186,7 @@ async def test_open_position_imported_as_open_trade(ctx) -> None:  # type: ignor
     user, repo, session = ctx
     exchange = FakeExchange([fill("o1", 0, entry=True, price="100000")])
 
-    await HistoryImporter(exchange, repo, user.id).import_period(
+    await HistoryImporter(exchange, repo, user.id, account_mode=DEMO).import_period(
         BASE - timedelta(hours=1), BASE + timedelta(hours=2)
     )
 
@@ -199,7 +201,7 @@ async def test_long_period_is_split_into_windows(ctx) -> None:  # type: ignore[n
     user, repo, _ = ctx
     exchange = FakeExchange([])
 
-    await HistoryImporter(exchange, repo, user.id).import_period(
+    await HistoryImporter(exchange, repo, user.id, account_mode=DEMO).import_period(
         BASE - timedelta(days=365), BASE
     )
 
@@ -231,7 +233,7 @@ async def test_partial_failure_reports_but_keeps_data(ctx) -> None:  # type: ign
         fill("p2", 60, entry=False, price="102000"),
     ])
 
-    result = await HistoryImporter(exchange, repo, user.id).import_period(
+    result = await HistoryImporter(exchange, repo, user.id, account_mode=DEMO).import_period(
         BASE - timedelta(hours=1), BASE + timedelta(days=10)
     )
 
@@ -267,7 +269,7 @@ async def test_bot_order_fills_are_skipped(ctx) -> None:  # type: ignore[no-unty
         fill("m1", 60, entry=True, price="61000", order_id="MANUAL-1"),
         fill("m2", 90, entry=False, price="62000", order_id="MANUAL-2"),
     ])
-    importer = HistoryImporter(exchange, repo, user.id)
+    importer = HistoryImporter(exchange, repo, user.id, account_mode=DEMO)
 
     result = await importer.import_period(BASE - timedelta(days=1), BASE + timedelta(days=1))
 
@@ -287,7 +289,7 @@ async def test_manual_exit_of_bot_position_makes_no_half_trade(ctx) -> None:  # 
         fill("b1", 0, entry=True, price="60000", order_id="BOT-ENTRY"),
         fill("x1", 30, entry=False, price="59000", order_id="MANUAL-EXIT"),
     ])
-    importer = HistoryImporter(exchange, repo, user.id)
+    importer = HistoryImporter(exchange, repo, user.id, account_mode=DEMO)
 
     result = await importer.import_period(BASE - timedelta(days=1), BASE + timedelta(days=1))
 
@@ -303,7 +305,7 @@ async def test_fill_without_order_id_is_imported_with_warning(ctx, caplog) -> No
     exchange = FakeExchange([
         fill("n1", 0, entry=True, price="60000", order_id=None),
     ])
-    importer = HistoryImporter(exchange, repo, user.id)
+    importer = HistoryImporter(exchange, repo, user.id, account_mode=DEMO)
 
     with caplog.at_level("WARNING", logger="app.services.import_service"):
         result = await importer.import_period(BASE - timedelta(days=1), BASE + timedelta(days=1))
@@ -324,7 +326,7 @@ async def test_stop_exit_child_order_skipped_by_trigger_id(ctx) -> None:  # type
         fill("b2", 30, entry=False, price="59000", order_id="CHILD-OF-STOP",
              trigger_order_id="BOT-STOP"),
     ])
-    importer = HistoryImporter(exchange, repo, user.id)
+    importer = HistoryImporter(exchange, repo, user.id, account_mode=DEMO)
 
     result = await importer.import_period(BASE - timedelta(days=1), BASE + timedelta(days=1))
 
@@ -353,7 +355,7 @@ async def test_exit_recorded_on_bot_trade_is_skipped(ctx) -> None:  # type: igno
     exchange = FakeExchange([
         fill("x1", 20, entry=False, price="59500", order_id="MANUAL-CLOSE-OF-BOT"),
     ])
-    importer = HistoryImporter(exchange, repo, user.id)
+    importer = HistoryImporter(exchange, repo, user.id, account_mode=DEMO)
 
     result = await importer.import_period(BASE - timedelta(days=1), BASE + timedelta(days=1))
 
@@ -385,7 +387,7 @@ async def test_live_fill_with_empty_number_is_window_error_not_trade(ctx, field:
         client=httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://t"),
     )
     try:
-        result = await HistoryImporter(client, repo, user.id).import_period(
+        result = await HistoryImporter(client, repo, user.id, account_mode=DEMO).import_period(
             datetime(2026, 9, 27, tzinfo=UTC), datetime(2026, 9, 28, tzinfo=UTC)
         )
     finally:
@@ -419,7 +421,8 @@ WINDOW = (BASE - timedelta(hours=1), BASE + timedelta(hours=3))
 
 async def test_open_position_button_imports_only_current_position(ctx) -> None:  # type: ignore[no-untyped-def]
     user, repo, session = ctx
-    outcome = await HistoryImporter(FakeExchange(XRP_HISTORY), repo, user.id).import_open_position(
+    importer = HistoryImporter(FakeExchange(XRP_HISTORY), repo, user.id, account_mode=DEMO)
+    outcome = await importer.import_open_position(
         *WINDOW, symbol="XRP-USDT", side=TradeSide.LONG, quantity=D(40),
         position_id="2106063262781022210",
     )
@@ -438,7 +441,8 @@ async def test_open_position_quantity_mismatch_writes_nothing(ctx) -> None:  # t
     """Вход старше периода: открытый объём по исполнениям ≠ позиции —
     отказ, без сделки с неверной ценой входа."""
     user, repo, _ = ctx
-    outcome = await HistoryImporter(FakeExchange(XRP_HISTORY), repo, user.id).import_open_position(
+    importer = HistoryImporter(FakeExchange(XRP_HISTORY), repo, user.id, account_mode=DEMO)
+    outcome = await importer.import_open_position(
         *WINDOW, symbol="XRP-USDT", side=TradeSide.LONG, quantity=D(55)
     )
 
@@ -449,7 +453,7 @@ async def test_open_position_quantity_mismatch_writes_nothing(ctx) -> None:  # t
 async def test_open_position_without_entries_refused(ctx) -> None:  # type: ignore[no-untyped-def]
     user, repo, _ = ctx
     outcome = await HistoryImporter(
-        FakeExchange(XRP_HISTORY[:6]), repo, user.id
+        FakeExchange(XRP_HISTORY[:6]), repo, user.id, account_mode=DEMO
     ).import_open_position(*WINDOW, symbol="XRP-USDT", side=TradeSide.LONG, quantity=D(40))
 
     assert outcome.trade is None and "не найдено" in str(outcome.refusal)
@@ -458,7 +462,7 @@ async def test_open_position_without_entries_refused(ctx) -> None:  # type: igno
 
 async def test_open_position_already_in_journal_refused(ctx) -> None:  # type: ignore[no-untyped-def]
     user, repo, session = ctx
-    importer = HistoryImporter(FakeExchange(XRP_HISTORY), repo, user.id)
+    importer = HistoryImporter(FakeExchange(XRP_HISTORY), repo, user.id, account_mode=DEMO)
     args = {"symbol": "XRP-USDT", "side": TradeSide.LONG, "quantity": D(40)}
     first = await importer.import_open_position(*WINDOW, **args)
     await session.flush()
@@ -481,7 +485,7 @@ async def test_history_import_links_open_trade_to_live_position(ctx) -> None:  #
     )
     exchange = FakeExchange(XRP_HISTORY)
     exchange.get_positions = lambda **_: _async([live])  # type: ignore[method-assign]
-    await HistoryImporter(exchange, repo, user.id).import_period(*WINDOW)
+    await HistoryImporter(exchange, repo, user.id, account_mode=DEMO).import_period(*WINDOW)
 
     trades = {t.status: t for t in await repo.list_recent(user.id) if t.symbol == "XRP-USDT"}
     assert trades[TradeStatus.OPEN].external_position_id == "2106063262781022210"
@@ -499,10 +503,29 @@ async def test_history_import_quantity_mismatch_no_link(ctx) -> None:  # type: i
     )
     exchange = FakeExchange(XRP_HISTORY)
     exchange.get_positions = lambda **_: _async([live])  # type: ignore[method-assign]
-    await HistoryImporter(exchange, repo, user.id).import_period(*WINDOW)
+    await HistoryImporter(exchange, repo, user.id, account_mode=DEMO).import_period(*WINDOW)
     [open_trade] = [t for t in await repo.list_open(user.id) if t.symbol == "XRP-USDT"]
     assert open_trade.external_position_id is None
 
 
 async def _async(value):  # type: ignore[no-untyped-def]
     return value
+
+
+@pytest.mark.parametrize("mode", [ExchangeKeyMode.DEMO, ExchangeKeyMode.LIVE])
+async def test_imported_trades_carry_account_mode(ctx, mode) -> None:  # type: ignore[no-untyped-def]
+    """03.10.2026: счёт клиента импорта пишется в сделку — лимиты убытка
+    считаются по сделкам своего счёта."""
+    user, repo, _session = ctx
+    exchange = FakeExchange([
+        fill("f1", 0, entry=True, price="100000"),
+        fill("f2", 60, entry=False, price="102000"),
+    ])
+    await HistoryImporter(exchange, repo, user.id, account_mode=mode).import_period(
+        BASE - timedelta(hours=1), BASE + timedelta(hours=2)
+    )
+    open_pos = await HistoryImporter(
+        FakeExchange(XRP_HISTORY), repo, user.id, account_mode=mode
+    ).import_open_position(*WINDOW, symbol="XRP-USDT", side=TradeSide.LONG, quantity=D(40))
+    assert open_pos.trade is not None
+    assert {t.account_mode for t in await repo.list_recent(user.id)} == {mode}

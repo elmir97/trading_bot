@@ -211,7 +211,7 @@ async def test_daily_trade_count(ctx) -> None:  # type: ignore[no-untyped-def]
             entry_price=D("100000"), quantity=D("0.01"), opened_at=now,
         )
     count = await repo.count_opened_between(
-        user.id, now - timedelta(hours=1), now + timedelta(hours=1)
+        user.id, now - timedelta(hours=1), now + timedelta(hours=1), account_mode=None
     )
     assert count == 3
 

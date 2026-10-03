@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_DOWN, Decimal, InvalidOperation
 
 from app.trading.enums import FillSide, TradeSide
 
@@ -32,6 +32,12 @@ from app.trading.enums import FillSide, TradeSide
 # округление на каждом шаге накапливает смещение.
 MONEY_PRECISION = Decimal("0.00000001")
 PERCENT_PRECISION = Decimal("0.0001")
+# Хранимая точность объёма: QuantityNumeric — 12 знаков после запятой.
+QUANTITY_PRECISION = Decimal("0.000000000001")
+# Шаг объёма от риска, когда шаг лота биржи неизвестен: точность показа
+# fmt_qty (8 знаков) — на экране то же число, что в журнале, без округления
+# показа вверх (03.10: 0.033898305085 показывалось как 0.03389831).
+DEFAULT_QUANTITY_STEP = Decimal("0.00000001")
 RR_PRECISION = Decimal("0.01")
 
 ZERO = Decimal(0)
@@ -228,41 +234,62 @@ def calculate_position_size(
     entry_price: Decimal,
     stop_loss: Decimal,
     side: TradeSide,
+    quantity_step: Decimal | None = None,
 ) -> PositionSizing:
     """Размер позиции от риска, а не от «сколько хочется взять».
 
     Цепочка: баланс → риск % → сумма риска → дистанция до стопа → объём.
     Именно короткий стоп на ретесте позволяет взять больший объём при том
     же риске в процентах — это ядро методологии.
+
+    Объём округляется только ВНИЗ (03.10.2026): до шага лота биржи, если он
+    известен (quantity_step), иначе до 8 знаков (DEFAULT_QUANTITY_STEP). Раньше
+    квантование по умолчанию (ROUND_HALF_EVEN) могло уйти вверх:
+    20 / 590 = 0.03389830508474… → 0.033898305085, риск 20.00000000015 —
+    и проверка плана засчитывала «Риск 2.00%, допустимый — 2%» нарушением.
+    risk_actual — риск округлённого объёма, он не больше risk_amount.
     """
     if account_balance <= ZERO:
         raise CalculationError("Баланс должен быть положительным")
     if risk_percent <= ZERO or risk_percent > Decimal(100):
         raise CalculationError("Риск должен быть в диапазоне (0; 100]")
+    if quantity_step is not None and quantity_step <= ZERO:
+        raise CalculationError("Шаг лота должен быть положительным")
 
     risk_amount = account_balance * risk_percent / Decimal(100)
     distance = stop_distance(entry_price=entry_price, stop_loss=stop_loss, side=side)
-    quantity = risk_amount / distance
+    step = quantity_step if quantity_step is not None else DEFAULT_QUANTITY_STEP
+    quantity = (risk_amount / distance / step).to_integral_value(rounding=ROUND_DOWN) * step
+    if quantity <= ZERO:
+        raise CalculationError(
+            f"Объём от риска меньше шага лота {step.normalize():f} — "
+            "увеличь риск или отодвинь стоп"
+        )
+    quantity = quantity.quantize(QUANTITY_PRECISION, rounding=ROUND_DOWN)
     position_value = quantity * entry_price
 
     return PositionSizing(
-        quantity=_quantize(quantity, Decimal("0.000000000001")),
+        quantity=quantity,
         risk_amount=_quantize(risk_amount, MONEY_PRECISION),
+        risk_actual=_quantize(quantity * distance, MONEY_PRECISION),
         stop_distance=distance,
         stop_distance_percent=_quantize(
             distance / entry_price * Decimal(100), PERCENT_PRECISION
         ),
         position_value=_quantize(position_value, MONEY_PRECISION),
+        quantity_step=quantity_step,
     )
 
 
 @dataclass(frozen=True, slots=True)
 class PositionSizing:
     quantity: Decimal
-    risk_amount: Decimal
+    risk_amount: Decimal      # риск по плану: баланс × риск %
+    risk_actual: Decimal      # риск округлённого вниз объёма, ≤ risk_amount
     stop_distance: Decimal
     stop_distance_percent: Decimal
     position_value: Decimal
+    quantity_step: Decimal | None  # шаг лота биржи; None — неизвестен
 
     def required_margin(self, leverage: int) -> Decimal:
         if leverage < 1:

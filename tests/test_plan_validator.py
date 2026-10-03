@@ -77,6 +77,7 @@ async def _check(validator, **overrides):  # type: ignore[no-untyped-def]
         "leverage": 10,
         "timeframe": "1h",
         "account_balance": D("10000"),
+        "account_mode": None,
     }
     params.update(overrides)
     return await v.check(**params)
@@ -99,8 +100,7 @@ async def test_excessive_risk_flagged(validator) -> None:  # type: ignore[no-unt
     codes = {v.code for v in result.violations}
     assert ViolationCode.RISK_TOO_HIGH in codes
     message = next(v.message for v in result.violations if v.code is ViolationCode.RISK_TOO_HIGH)
-    assert "6.00%" in message
-    assert "2%" in message
+    assert message == "Риск 6.00%, допустимый — 2.00%."
 
 
 async def test_low_rr_flagged(validator) -> None:  # type: ignore[no-untyped-def]

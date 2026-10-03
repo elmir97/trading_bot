@@ -364,7 +364,10 @@ async def run_import(
             logger.warning("Баланс недоступен, импорт без процентов")
 
         start, end = default_import_range(days)
-        importer = HistoryImporter(client, TradeRepository(session), user.id)
+        importer = HistoryImporter(
+            client, TradeRepository(session), user.id,
+            account_mode=user.settings.active_exchange_mode,
+        )
         result = await importer.import_period(start, end, account_balance=balance)
     except ExchangeError as exc:
         logger.exception("Импорт не удался", extra={"user_id": user.id})

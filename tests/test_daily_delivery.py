@@ -19,12 +19,12 @@ import pytest_asyncio
 from aiogram.exceptions import TelegramForbiddenError, TelegramNetworkError
 
 from app.core.config import Settings
-from app.core.security import SecretCipher
 from app.database.repositories.strategy import MistakeTypeRepository, StrategyRepository
-from app.database.repositories.trade import TradeRepository
+from app.database.repositories.trade import PeriodPnl, TradeRepository
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
 from app.services.user_service import UserService
+from app.trading.enums import ExchangeKeyMode
 from app.trading.risk import tz_offset_for
 from app.workers.daily import DailyJobs
 from tests.conftest import cleanup_user
@@ -51,18 +51,6 @@ class ForbiddenBot(OkBot):
         raise TelegramForbiddenError(method=None, message="forbidden")  # type: ignore[arg-type]
 
 
-class _Balance:
-    equity = Decimal("1000")
-
-
-class _Client:
-    async def get_balance(self) -> _Balance:
-        return _Balance()
-
-    async def close(self) -> None:
-        return None
-
-
 @pytest_asyncio.fixture
 async def ctx(unique_telegram_id):  # type: ignore[no-untyped-def]
     settings = Settings()  # type: ignore[call-arg]
@@ -73,8 +61,7 @@ async def ctx(unique_telegram_id):  # type: ignore[no-untyped-def]
             MistakeTypeRepository(session), settings,
         )
         user = await user_service.get_or_create(telegram_id=unique_telegram_id())
-        cipher = SecretCipher(settings.encryption_key.get_secret_value())
-        daily = DailyJobs(OkBot(), db, settings, cipher)  # type: ignore[arg-type]
+        daily = DailyJobs(OkBot(), db, settings)  # type: ignore[arg-type]
         yield daily, session, user, settings
         await cleanup_user(session, user)
     await db.dispose()
@@ -130,14 +117,10 @@ async def test_daily_summary_network_failure_keeps_date_and_retries(ctx) -> None
 async def test_loss_alert_network_failure_keeps_date_and_retries(ctx, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     daily, session, user, _settings = ctx
 
-    async def for_user(*args, **kwargs):  # type: ignore[no-untyped-def]
-        return _Client()
+    async def day_pnl(self, user_id, start, end, *, account_mode):  # type: ignore[no-untyped-def]
+        return PeriodPnl(percent=Decimal("-10"), counted=1, uncounted=0)  # выше лимита 6%
 
-    async def day_pnl(self, user_id, start, end):  # type: ignore[no-untyped-def]
-        return Decimal("-100")  # 10% от 1000 — выше дневного лимита плана
-
-    monkeypatch.setattr(daily._exchange_factory, "for_user", for_user)
-    monkeypatch.setattr(TradeRepository, "sum_pnl_between", day_pnl)
+    monkeypatch.setattr(TradeRepository, "pnl_percent_between", day_pnl)
     now, tz, today = _today(user)
 
     daily._bot = NetworkFailBot()
@@ -188,3 +171,25 @@ async def test_successful_send_logs_info(ctx, caplog) -> None:  # type: ignore[n
         await _digest(daily, session, user, settings)
 
     assert [r for r in caplog.records if r.getMessage() == "Рассылка отправлена: execution_digest"]
+
+
+async def test_loss_alert_same_account_percent_of_entry_balance(ctx) -> None:  # type: ignore[no-untyped-def]
+    """03.10.2026: дневной алерт — только сделки счёта из настроек, процент от
+    баланса на входе каждой сделки; без баланса — «Не учтены: N»."""
+    from tests.test_risk_limits_account import _closed
+
+    daily, session, user, _settings = ctx
+    now, tz, today = _today(user)
+    mode = user.settings.active_exchange_mode
+    other = ExchangeKeyMode.LIVE if mode is ExchangeKeyMode.DEMO else ExchangeKeyMode.DEMO
+    await _closed(session, user, "-700", "10000", mode, closed_at=now)      # −7%
+    await _closed(session, user, "-1.30", None, mode, closed_at=now)        # без баланса
+    await _closed(session, user, "-5000", "1000", None, closed_at=now)      # ручная
+    await _closed(session, user, "-5000", "1000", other, closed_at=now)     # другой счёт
+
+    ok = OkBot()
+    daily._bot = ok
+    await daily._maybe_send_loss_alert(session, user, user.settings, now, tz, today)
+    [text] = ok.sent
+    assert "Убыток за день: −7.00% при лимите 6.00%." in text
+    assert "Не учтены: 1 (сделки без баланса на входе)." in text

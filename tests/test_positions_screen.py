@@ -85,7 +85,7 @@ class _Client:
 @pytest.fixture
 def env(monkeypatch):  # type: ignore[no-untyped-def]
     state = SimpleNamespace(
-        client=None, auth_error=False, trades=[], imports=[],
+        client=None, auth_error=False, trades=[], imports=[], import_modes=[],
         import_outcome=SimpleNamespace(trade=SimpleNamespace(id=21), refusal=None),
     )
 
@@ -99,8 +99,8 @@ def env(monkeypatch):  # type: ignore[no-untyped-def]
             return state.client
 
     class Importer:
-        def __init__(self, client, trades, user_id) -> None:  # type: ignore[no-untyped-def]
-            pass
+        def __init__(self, client, trades, user_id, *, account_mode) -> None:  # type: ignore[no-untyped-def]
+            state.import_modes.append(account_mode)
 
         async def import_open_position(self, start, end, *, symbol, side, quantity,  # type: ignore[no-untyped-def]
                                        position_id=None):
@@ -249,6 +249,8 @@ async def test_import_button_imports_current_position_only(env) -> None:  # type
          "2105907655281221634")
     ]
     assert "📥 XRP-USDT LONG: в журнале — сделка #21." in text
+    # 03.10.2026: счёт из настроек пишется в сделку — лимиты по своему счёту.
+    assert env.import_modes == [ExchangeKeyMode.DEMO]
 
 
 async def test_import_refusal_points_to_full_import(env) -> None:  # type: ignore[no-untyped-def]

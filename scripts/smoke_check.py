@@ -213,6 +213,9 @@ async def main() -> None:
     _install_network_guard()
 
     sim, tg, db, redis = await build()
+    # 03.10.2026: мастер сделки берёт шаг лота из публичного списка контрактов
+    # (объём от риска вниз до шага) — заглушка на весь прогон.
+    BingXClient.get_symbols = _fake_contracts  # type: ignore[method-assign]
 
     if await _find_leftover_user(db):
         print(
@@ -318,7 +321,10 @@ async def _run_scenarios(sim, tg, db, redis, settings) -> None:  # type: ignore[
         check(f"срез «{label}»", len(text) > 30, "пустой срез")
 
     print("\n[6] Убыточная сделка и метрики")
-    await add_trade(sim, "ETH", "LONG", "3000", "2940", "3120")
+    text = await add_trade(sim, "ETH", "LONG", "3000", "2940", "3120")
+    # 200 / 60 = 3.333… → вниз до шага лота ETH 0.01, не 3.33333333.
+    check("объём от риска вниз до шага лота", has(text, "объём: 3.33")
+          and "3.3333" not in text, text[:200])
     await close_trade(sim, "ETH", "2940", fee="5", mistakes=("FOMO",))
 
     await sim.send("/start")
@@ -584,6 +590,11 @@ async def _fake_mark(self, symbol: str) -> D:  # type: ignore[no-untyped-def]
 
 async def _fake_symbols(self, *, max_retries=None) -> list[SymbolInfo]:  # type: ignore[no-untyped-def]
     return [_XRP]
+
+
+async def _fake_contracts(self, *, max_retries=None) -> list[SymbolInfo]:  # type: ignore[no-untyped-def]
+    return [_XRP, SymbolInfo("BTC-USDT", 1, 4, D("0.0001"), D(2)),
+            SymbolInfo("ETH-USDT", 2, 2, D("0.01"), D(2))]
 
 
 async def _fake_balance(self, *, max_retries=None) -> Balance:  # type: ignore[no-untyped-def]

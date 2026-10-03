@@ -47,7 +47,7 @@ class BackgroundJobs:
         # откладываются (app/core/input_prompt.py).
         self._reconciler = Reconciler(bot, db, settings, cipher, redis, input_gate=input_gate)
         self._daily = DailyJobs(
-            bot, db, settings, cipher, reconciler=self._reconciler, input_gate=input_gate
+            bot, db, settings, reconciler=self._reconciler, input_gate=input_gate
         )
 
     def start(self) -> None:

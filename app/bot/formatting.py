@@ -21,6 +21,7 @@ from app.core.numfmt import (
     fmt_amount,
     fmt_money,
     fmt_num,
+    fmt_pct,
     fmt_price,
     fmt_qty,
 )
@@ -30,6 +31,7 @@ __all__ = [
     "fmt_amount",
     "fmt_money",
     "fmt_num",
+    "fmt_pct",
     "fmt_percent",
     "fmt_price",
     "fmt_qty",

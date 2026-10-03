@@ -47,7 +47,7 @@ from app.database.base import (
     QuantityNumeric,
     TimestampMixin,
 )
-from app.trading.enums import FillSide, TradeSide, TradeSource, TradeStatus
+from app.trading.enums import ExchangeKeyMode, FillSide, TradeSide, TradeSource, TradeStatus
 
 if TYPE_CHECKING:
     from app.database.models.mistake import TradeMistake
@@ -83,6 +83,10 @@ class Trade(IntPKMixin, TimestampMixin, Base):
         CheckConstraint(
             "(status != 'CLOSED') OR (closed_at IS NOT NULL)",
             name="closed_trade_has_closed_at",
+        ),
+        CheckConstraint(
+            "account_mode IS NULL OR account_mode IN ('LIVE', 'DEMO')",
+            name="account_mode_known",
         ),
     )
 
@@ -172,6 +176,14 @@ class Trade(IntPKMixin, TimestampMixin, Base):
         Boolean, default=False, nullable=False
     )
     external_position_id: Mapped[str | None] = mapped_column(String(64))
+    # Счёт биржи, на котором прошла сделка (03.10.2026, миграция с этим
+    # полем): DEMO/LIVE — у сделок с биржи (импорт, «В журнал», вход бота),
+    # NULL — ручная запись журнала без счёта. Лимиты убытка и сделок в день
+    # считаются только по сделкам того же счёта: демо-убыток в VST не
+    # должен «исчерпывать» лимит ручного журнала или боевого счёта.
+    account_mode: Mapped[ExchangeKeyMode | None] = mapped_column(
+        Enum(ExchangeKeyMode, native_enum=False, length=8)
+    )
     # Шаг 15.5.4: False — сделка бота записана без подтверждённого
     # исполнения (read-back не прочитал цену, UNKNOWN): цена плановая,
     # запись предварительная, сверит reconciler 15.6. Ручные и

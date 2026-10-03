@@ -295,7 +295,8 @@ async def import_position(
             note = f"📥 {label}: позиции на бирже уже нет — в журнал ничего не занесено."
         else:
             outcome = await HistoryImporter(
-                client, TradeRepository(session), user.id
+                client, TradeRepository(session), user.id,
+                account_mode=user.settings.active_exchange_mode,
             ).import_open_position(
                 end - timedelta(days=IMPORT_DAYS), end,
                 symbol=symbol, side=side, quantity=position.quantity,

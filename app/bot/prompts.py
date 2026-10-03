@@ -14,12 +14,14 @@ PromptMiddleware убирает вопрос, когда он больше не 
 - ответ не принят (то же состояние, тот же вопрос) — вопрос задаётся заново:
   после ответа клиент снимает «ответ на», и без повтора ошибка ввода снова
   уводит пользователя гадать, куда писать;
-- новый вопрос (ask_number в хендлере) — старый удалил сам ask_number.
+- новый вопрос (ask_number в хендлере) — старый удалил сам ask_number, а если
+  хендлер перед этим сбросил состояние (id старого потерян) — middleware.
 """
 
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any
 
@@ -43,12 +45,27 @@ ASK_TEXT = "✍️ Ответь числом на это сообщение."
 REPEAT_TEXT = "✍️ Не принял — ответь числом ещё раз на это сообщение."
 
 
+# Вопросы, удаление которых уже пробовали в этом апдейте: middleware не
+# удаляет второй раз то, что убрал ask_number (лишний «не удалён» в логе).
+_attempted: ContextVar[set[int] | None] = ContextVar("prompt_delete_attempted", default=None)
+
+
 async def _delete(bot: Bot, chat_id: int, message_id: int) -> None:
+    attempted = _attempted.get()
+    if attempted is not None:
+        attempted.add(message_id)
+    # 03.10.2026: исход удаления — в лог. Без него по логу не понять, ушёл ли
+    # вопрос из чата (разбор проверки владельца 03.10, повтор после «Абв»).
     try:
         await bot.delete_message(chat_id, message_id)
-    except TelegramAPIError:
-        # Уже удалён пользователем или старше 48 часов — не важно.
-        pass
+    except TelegramAPIError as exc:
+        # Уже удалён пользователем или старше 48 часов — работе не мешает.
+        logger.info(
+            "Вопрос с ForceReply не удалён",
+            extra={"message_id": message_id, "error": type(exc).__name__},
+        )
+        return
+    logger.info("Вопрос с ForceReply удалён", extra={"message_id": message_id})
 
 
 def _target(event: Message | CallbackQuery) -> Message | None:
@@ -112,7 +129,12 @@ class PromptMiddleware(BaseMiddleware):
         before = await state.get_data()
         before_id = before.get(PROMPT_ID_KEY)
         before_state = await state.get_state()
-        result = await handler(event, data)
+        attempted: set[int] = set()
+        token = _attempted.set(attempted)
+        try:
+            result = await handler(event, data)
+        finally:
+            _attempted.reset(token)
         if not before_id:
             return result
         message = _target(event)
@@ -121,13 +143,19 @@ class PromptMiddleware(BaseMiddleware):
         after = await state.get_data()
         after_id = after.get(PROMPT_ID_KEY)
         if after_id != before_id:
-            if not after_id:
-                # Состояние сброшено — вопрос больше не нужен.
+            # Состояние сброшено или задан новый вопрос — старый не нужен.
+            # Новый вопрос после state.clear() (старт /risk, мастера) старый
+            # id уже не видит, и до 03.10 вопрос оставался висеть в чате.
+            if before_id not in attempted:
                 await _delete(message.bot, message.chat.id, before_id)
             return result
         if await state.get_state() != before_state:
             await drop_prompt(message.bot, message.chat.id, state)
         elif isinstance(event, Message):
+            logger.info(
+                "Ввод не принят",
+                extra={"state": before_state, "text": (getattr(event, "text", None) or "")[:16]},
+            )
             await ask_number(
                 event, state, after.get(PROMPT_PLACEHOLDER_KEY) or "Число", text=REPEAT_TEXT
             )

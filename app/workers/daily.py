@@ -30,7 +30,7 @@ reconciliation_events (см. app/workers/execution_digest.py), поэтому
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from aiogram import Bot
 from sqlalchemy import select
@@ -38,15 +38,13 @@ from sqlalchemy import select
 from app.core.config import Settings
 from app.core.input_prompt import InputGate
 from app.core.logging import get_logger
-from app.core.security import SecretCipher
+from app.core.numfmt import fmt_pct
 from app.database.models.position_action import PositionAction
 from app.database.models.user import User, UserSettings
 from app.database.repositories.reconciliation_event import ReconciliationEventRepository
 from app.database.repositories.trade import TradeRepository
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
-from app.exchanges.base import ExchangeAuthError, ExchangeError
-from app.services.exchange_factory import ExchangeFactory
 from app.services.statistics_service import StatisticsService
 from app.trading.risk import day_bounds, tz_offset_for
 from app.trading.statistics import Statistics, calculate_statistics
@@ -87,7 +85,6 @@ class DailyJobs:
         bot: Bot,
         db: Database,
         settings: Settings,
-        cipher: SecretCipher,
         *,
         reconciler: Reconciler | None = None,
         input_gate: InputGate | None = None,
@@ -96,7 +93,6 @@ class DailyJobs:
         self._input_gate = input_gate
         self._db = db
         self._settings = settings
-        self._exchange_factory = ExchangeFactory(settings, cipher)
         # 28.09: пульс reconciler для строки «Сверка:» сводки исполнения.
         self._reconciler = reconciler
         # 28.09: рассылки, не доставленные из-за сбоя Telegram, — (user_id,
@@ -219,42 +215,29 @@ class DailyJobs:
             return
 
         plan = user.trading_plan
-        try:
-            # Этап 15.4в: баланс для этого алерта — то же самое "читает и
-            # показывает", что и остальной интерфейс, поэтому берётся для
-            # счёта, выбранного в настройках, а не для счёта исполнения.
-            client = await self._exchange_factory.for_user(
-                session, user.id, mode=settings_row.active_exchange_mode
-            )
-        except ExchangeAuthError:
-            return  # ключи не подключены — процент риска не посчитать
-
-        try:
-            balance = (await client.get_balance()).equity
-        except ExchangeError:
-            logger.warning("Баланс недоступен для дневного алерта", extra={"user_id": user.id})
-            return
-        finally:
-            await client.close()
-
-        if balance <= ZERO:
-            return
-
+        # 03.10.2026: счёт — выбранный в настройках, сделки только этого счёта,
+        # убыток в процентах — от баланса на входе каждой сделки (как проверка
+        # плана в журнале). Раньше сумма PnL всех сделок делилась на equity
+        # выбранного счёта: демо-сделки и ручные записи смешивались.
         day_start, day_end = day_bounds(now, tz_offset)
-        day_pnl = await TradeRepository(session).sum_pnl_between(user.id, day_start, day_end)
-        if day_pnl is None:
+        day = await TradeRepository(session).pnl_percent_between(
+            user.id, day_start, day_end, account_mode=settings_row.active_exchange_mode
+        )
+        if day.percent is None:
             return
 
-        day_loss_pct = -day_pnl / balance * Decimal(100)
-        if day_loss_pct < plan.max_daily_loss_percent:
+        day_loss = (-day.percent).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        if day_loss < plan.max_daily_loss_percent:
             return
 
         text = (
             f"🛑 <b>Дневной лимит убытка достигнут</b>\n\n"
-            f"Убыток за день: −{fmt_decimal(day_loss_pct)}% при лимите "
-            f"{fmt_decimal(plan.max_daily_loss_percent)}%.\n\n"
-            f"Методология рекомендует закрыть торговый день."
+            f"Убыток за день: −{fmt_pct(-day.percent)} при лимите "
+            f"{fmt_pct(plan.max_daily_loss_percent)}.\n"
         )
+        if day.uncounted:
+            text += f"Не учтены: {day.uncounted} (сделки без баланса на входе).\n"
+        text += "\nМетодология рекомендует закрыть торговый день."
         if await self._deliver(user, "daily_limit_reached", text, today_local):
             settings_row.daily_loss_alert_last_sent_date = today_local
 

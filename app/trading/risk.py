@@ -10,19 +10,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
 
+from app.core.numfmt import fmt_pct
 from app.database.models.trading_plan import TradingPlan
-from app.database.repositories.trade import TradeRepository
+from app.database.repositories.trade import PeriodPnl, TradeRepository
 from app.trading.calculations import (
     CalculationError,
     calculate_risk_reward,
     stop_distance,
 )
-from app.trading.enums import TradeSide
+from app.trading.enums import ExchangeKeyMode, TradeSide
 
 ZERO = Decimal(0)
+CENT = Decimal("0.01")
 
 
 class ViolationCode(StrEnum):
@@ -47,6 +49,8 @@ class Violation:
 @dataclass(slots=True)
 class PlanCheck:
     violations: list[Violation] = field(default_factory=list)
+    # Пояснения без нарушения: сделки периода, не вошедшие в процент убытка.
+    notes: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -64,9 +68,13 @@ class PlanCheck:
 
     def render(self) -> str:
         if self.ok:
-            return "✅ Сделка соответствует торговому плану."
-        lines = ["⚠️ <b>Сделка нарушает торговый план</b>", ""]
-        lines.extend(f"• {v.message}" for v in self.violations)
+            lines = ["✅ Сделка соответствует торговому плану."]
+        else:
+            lines = ["⚠️ <b>Сделка нарушает торговый план</b>", ""]
+            lines.extend(f"• {v.message}" for v in self.violations)
+        if self.notes:
+            lines.append("")
+            lines.extend(f"ℹ️ {n}" for n in self.notes)
         return "\n".join(lines)
 
 
@@ -133,8 +141,11 @@ class PlanValidator:
         leverage: int,
         timeframe: str | None,
         account_balance: Decimal | None,
+        account_mode: ExchangeKeyMode | None,
         now: datetime | None = None,
     ) -> PlanCheck:
+        """account_mode — счёт новой сделки (NULL — ручной журнал): лимиты
+        дня и недели считаются только по сделкам того же счёта."""
         result = PlanCheck()
         moment = now or datetime.now(UTC)
 
@@ -154,12 +165,15 @@ class PlanValidator:
                     entry_price=entry_price, stop_loss=stop_loss, side=side
                 )
                 risk_percent = distance * quantity / account_balance * Decimal(100)
-                if risk_percent > plan.risk_per_trade_percent:
+                # Сравнение — с точностью показа (0.01%), как в тексте:
+                # хвост округления объёма не должен давать «Риск 2.00%,
+                # допустимый — 2.00%» нарушением.
+                if _pct(risk_percent) > _pct(plan.risk_per_trade_percent):
                     result.violations.append(
                         Violation(
                             ViolationCode.RISK_TOO_HIGH,
-                            f"Риск {risk_percent:.2f}%, допустимый — "
-                            f"{plan.risk_per_trade_percent:g}%.",
+                            f"Риск {fmt_pct(risk_percent)}, допустимый — "
+                            f"{fmt_pct(plan.risk_per_trade_percent)}.",
                         )
                     )
             except CalculationError:
@@ -217,9 +231,11 @@ class PlanValidator:
             )
 
         # --- Лимиты дня и недели -------------------------------------------
+        # Только сделки того же счёта (03.10.2026); убыток в процентах — от
+        # баланса на входе каждой сделки, а не от баланса, введённого сейчас.
         day_start, day_end = day_bounds(moment, self._tz_offset)
         trades_today = await self._trades.count_opened_between(
-            user_id, day_start, day_end
+            user_id, day_start, day_end, account_mode=account_mode
         )
         if trades_today >= plan.max_trades_per_day:
             result.violations.append(
@@ -230,37 +246,44 @@ class PlanValidator:
                 )
             )
 
-        if account_balance and account_balance > ZERO:
-            day_pnl = await self._trades.sum_pnl_between(user_id, day_start, day_end)
-            if day_pnl is not None:
-                day_loss_pct = -day_pnl / account_balance * Decimal(100)
-                if day_loss_pct >= plan.max_daily_loss_percent:
-                    result.violations.append(
-                        Violation(
-                            ViolationCode.DAILY_LOSS_LIMIT,
-                            f"Дневной лимит убытка достигнут: "
-                            f"−{day_loss_pct:.2f}% при лимите "
-                            f"{plan.max_daily_loss_percent:g}%. "
-                            f"Торговый день стоит закрыть.",
-                            is_blocking=True,
-                        )
-                    )
-
-            week_start, week_end = week_bounds(moment, self._tz_offset)
-            week_pnl = await self._trades.sum_pnl_between(
-                user_id, week_start, week_end
-            )
-            if week_pnl is not None:
-                week_loss_pct = -week_pnl / account_balance * Decimal(100)
-                if week_loss_pct >= plan.max_weekly_loss_percent:
-                    result.violations.append(
-                        Violation(
-                            ViolationCode.WEEKLY_LOSS_LIMIT,
-                            f"Недельный лимит убытка достигнут: "
-                            f"−{week_loss_pct:.2f}% при лимите "
-                            f"{plan.max_weekly_loss_percent:g}%.",
-                            is_blocking=True,
-                        )
-                    )
+        day = await self._trades.pnl_percent_between(
+            user_id, day_start, day_end, account_mode=account_mode
+        )
+        self._loss_limit(
+            result, day, plan.max_daily_loss_percent, ViolationCode.DAILY_LOSS_LIMIT,
+            "Дневной лимит убытка достигнут", " Торговый день стоит закрыть.", "дня",
+        )
+        week_start, week_end = week_bounds(moment, self._tz_offset)
+        week = await self._trades.pnl_percent_between(
+            user_id, week_start, week_end, account_mode=account_mode
+        )
+        self._loss_limit(
+            result, week, plan.max_weekly_loss_percent, ViolationCode.WEEKLY_LOSS_LIMIT,
+            "Недельный лимит убытка достигнут", "", "недели",
+        )
 
         return result
+
+    @staticmethod
+    def _loss_limit(
+        result: PlanCheck, period: PeriodPnl, limit: Decimal, code: ViolationCode,
+        title: str, tail: str, period_name: str,
+    ) -> None:
+        if period.percent is not None and _pct(-period.percent) >= _pct(limit):
+            result.violations.append(
+                Violation(
+                    code,
+                    f"{title}: −{fmt_pct(-period.percent)} при лимите {fmt_pct(limit)}."
+                    f"{tail}",
+                    is_blocking=True,
+                )
+            )
+        if period.uncounted:
+            result.notes.append(
+                f"Убыток {period_name}, не учтены: {period.uncounted} "
+                "(сделки без баланса на входе)."
+            )
+
+
+def _pct(value: Decimal) -> Decimal:
+    return value.quantize(CENT, rounding=ROUND_HALF_UP)

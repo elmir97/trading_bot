@@ -202,7 +202,7 @@ async def test_daily_report_deferred_loss_limit_not(monkeypatch) -> None:  # typ
 
     monkeypatch.setattr(daily_module, "send_notification", send)
     jobs = daily_module.DailyJobs(
-        MagicMock(), MagicMock(), Settings(), MagicMock(), input_gate=_Gate(True),  # type: ignore[call-arg]
+        MagicMock(), MagicMock(), Settings(), input_gate=_Gate(True),  # type: ignore[call-arg]
     )
     user = SimpleNamespace(id=1, telegram_id=TG)
     assert await jobs._deliver(user, "daily_report", "итоги", date(2026, 10, 3)) is False
@@ -368,3 +368,42 @@ async def test_wizard_entry_price_invalid_asks_again() -> None:
     await run("1.5054")
     assert await state.get_state() == AddTradeStates.stop_loss.state
     assert bot.sent[-1][1].input_field_placeholder.startswith("Цена стопа")
+
+
+async def test_question_after_cleared_state_removes_previous_once() -> None:
+    """03.10.2026: хендлер сбросил состояние и задал новый вопрос в том же
+    апдейте (старт /risk посреди мастера) — старый вопрос не висит в чате и
+    не удаляется дважды."""
+    bot, storage = FakeBot(), MemoryStorage()
+    state = _state(storage)
+    await state.set_state("form:entry")
+    await ask_number(_message(bot), state, "Цена входа числом")
+
+    async def restart(event, data):  # type: ignore[no-untyped-def]
+        await state.clear()
+        await state.set_state("calc:balance")
+        await ask_number(event, state, "Баланс в USDT, например 1000")
+
+    await _through_middleware(state, _message(bot), restart)
+    assert bot.deleted == [101]
+    assert (await state.get_data())[PROMPT_ID_KEY] == 102
+
+
+async def test_rejected_input_and_deletion_logged(caplog) -> None:  # type: ignore[no-untyped-def]
+    bot, storage = FakeBot(), MemoryStorage()
+    state = _state(storage)
+    await state.set_state("form:entry")
+    await ask_number(_message(bot), state, "Цена входа числом")
+
+    async def reject(event, data):  # type: ignore[no-untyped-def]
+        await event.answer("Не понял, введи число")
+
+    message = _message(bot)
+    message.text = "84 590 — вход по рынку"
+    with caplog.at_level("INFO", logger="app.bot.prompts"):
+        await _through_middleware(state, message, reject)
+    rejected = [r for r in caplog.records if r.getMessage() == "Ввод не принят"]
+    assert len(rejected) == 1
+    assert rejected[0].text == "84 590 — вход по" and rejected[0].state == "form:entry"
+    deleted = [r for r in caplog.records if r.getMessage() == "Вопрос с ForceReply удалён"]
+    assert [r.message_id for r in deleted] == [101]

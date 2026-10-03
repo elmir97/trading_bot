@@ -7,15 +7,36 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.database.models.trade import Trade, TradeFill
 from app.database.models.user import User
-from app.trading.enums import TradeSource, TradeStatus
+from app.trading.enums import ExchangeKeyMode, TradeSource, TradeStatus
+
+
+@dataclass(frozen=True, slots=True)
+class PeriodPnl:
+    """Итог периода по способу «процент от баланса на входе каждой сделки».
+
+    percent — сумма процентов со знаком (убыток отрицательный), None — нет
+    ни одной сделки с балансом на входе; uncounted — закрытых сделок без
+    баланса на входе, в percent не вошли."""
+
+    percent: Decimal | None
+    counted: int
+    uncounted: int
+
+
+def _same_account(account_mode: ExchangeKeyMode | None) -> ColumnElement[bool]:
+    if account_mode is None:
+        return Trade.account_mode.is_(None)
+    return Trade.account_mode == account_mode
 
 
 class TradeRepository:
@@ -119,9 +140,11 @@ class TradeRepository:
         return list(await self.session.scalars(stmt))
 
     async def count_opened_between(
-        self, user_id: int, start: datetime, end: datetime
+        self, user_id: int, start: datetime, end: datetime,
+        *, account_mode: ExchangeKeyMode | None,
     ) -> int:
-        """Для проверки лимита сделок в день."""
+        """Для проверки лимита сделок в день — только сделки того же счёта
+        (NULL — ручной журнал)."""
         stmt = (
             select(func.count())
             .select_from(Trade)
@@ -130,24 +153,43 @@ class TradeRepository:
                 Trade.opened_at >= start,
                 Trade.opened_at < end,
                 Trade.status != TradeStatus.CANCELLED,
+                _same_account(account_mode),
             )
         )
         return await self.session.scalar(stmt) or 0
 
-    async def sum_pnl_between(
-        self, user_id: int, start: datetime, end: datetime
-    ) -> float | None:
-        """Сумма PnL за период. Возвращает None, если сделок нет."""
-        from decimal import Decimal
+    async def pnl_percent_between(
+        self, user_id: int, start: datetime, end: datetime,
+        *, account_mode: ExchangeKeyMode | None,
+    ) -> PeriodPnl:
+        """PnL закрытых за период сделок одного счёта в процентах (03.10.2026).
 
-        stmt = select(func.sum(Trade.pnl)).where(
+        Процент каждой сделки — от её собственного баланса на входе
+        (account_balance_at_entry), проценты складываются. Раньше сумма PnL
+        в деньгах делилась на один баланс, введённый сейчас: демо-убыток
+        2245 VST счёта ~85 000 против введённых 1000 давал «−224.54%».
+        Сделка без баланса на входе в процент не входит — считается в
+        uncounted, вызывающий показывает её отдельной строкой.
+        """
+        has_balance = Trade.account_balance_at_entry > 0
+        stmt = select(
+            func.sum(Trade.pnl / Trade.account_balance_at_entry * 100).filter(has_balance),
+            func.count().filter(has_balance),
+            func.count().filter(~has_balance | Trade.account_balance_at_entry.is_(None)),
+        ).where(
             Trade.user_id == user_id,
             Trade.status == TradeStatus.CLOSED,
             Trade.closed_at >= start,
             Trade.closed_at < end,
+            Trade.pnl.is_not(None),
+            _same_account(account_mode),
         )
-        result: Decimal | None = await self.session.scalar(stmt)
-        return result  # type: ignore[return-value]
+        total, counted, uncounted = (await self.session.execute(stmt)).one()
+        return PeriodPnl(
+            percent=Decimal(total) if counted else None,
+            counted=int(counted),
+            uncounted=int(uncounted),
+        )
 
     async def find_by_external_position(
         self, user_id: int, exchange: str, external_position_id: str

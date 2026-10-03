@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from app.core.logging import get_logger
 from app.database.models.mistake import TradeMistake
@@ -25,7 +25,7 @@ from app.trading.calculations import (
     calculate_risk_reward,
     stop_distance,
 )
-from app.trading.enums import FillSide, TradeSide, TradeSource, TradeStatus
+from app.trading.enums import ExchangeKeyMode, FillSide, TradeSide, TradeSource, TradeStatus
 
 logger = get_logger(__name__)
 
@@ -67,6 +67,7 @@ class TradeJournal:
         notification_id: int | None = None,
         fill_confirmed: bool = True,
         external_fill_id: str | None = None,
+        account_mode: ExchangeKeyMode | None = None,
     ) -> Trade:
         """Создаёт сделку вместе с первым исполнением.
 
@@ -103,7 +104,7 @@ class TradeJournal:
                 * quantity
             )
             risk_percent = (risk_amount / account_balance * Decimal(100)).quantize(
-                Decimal("0.0001")
+                Decimal("0.0001"), rounding=ROUND_HALF_UP
             )
 
         moment = opened_at or datetime.now(UTC)
@@ -128,6 +129,7 @@ class TradeJournal:
             notes=notes,
             status=TradeStatus.OPEN,
             source=source,
+            account_mode=account_mode,
             is_annotated=source is TradeSource.MANUAL,
             external_position_id=external_position_id,
             # Шаг 15.5.4: сделка бота — ставятся до flush, иначе частичный

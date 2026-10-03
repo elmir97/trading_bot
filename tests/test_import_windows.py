@@ -16,7 +16,7 @@ import pytest
 
 from app.exchanges.base import Fill
 from app.services.import_service import OVERLAP, WINDOW, HistoryImporter
-from app.trading.enums import TradeSide
+from app.trading.enums import ExchangeKeyMode, TradeSide
 
 BASE = datetime(2026, 3, 2, 10, 0, tzinfo=UTC)
 
@@ -51,7 +51,7 @@ class CountingExchange:
 )
 async def test_window_split_terminates(period: timedelta) -> None:
     exchange = CountingExchange()
-    importer = HistoryImporter(exchange, trades=None, user_id=1)  # type: ignore[arg-type]
+    importer = HistoryImporter(exchange, trades=None, user_id=1, account_mode=ExchangeKeyMode.DEMO)  # type: ignore[arg-type]
 
     fills, errors = await asyncio.wait_for(
         importer.fetch_fills(BASE, BASE + period), timeout=5
@@ -69,7 +69,7 @@ async def test_windows_overlap_to_avoid_gaps() -> None:
     """Соседние окна должны перекрываться: исполнение на границе иначе
     может не попасть ни в одно из них."""
     exchange = CountingExchange()
-    importer = HistoryImporter(exchange, trades=None, user_id=1)  # type: ignore[arg-type]
+    importer = HistoryImporter(exchange, trades=None, user_id=1, account_mode=ExchangeKeyMode.DEMO)  # type: ignore[arg-type]
 
     await importer.fetch_fills(BASE, BASE + WINDOW * 3)
 
@@ -105,7 +105,7 @@ async def test_fill_without_external_id_is_not_a_dedupe_key() -> None:
     идентификатора в выборку не попадает (WARNING пишет разбор)."""
     importer = HistoryImporter(
         FillsExchange([_fill("2104213344135159808"), _fill(None)]),  # type: ignore[arg-type]
-        trades=None, user_id=1,  # type: ignore[arg-type]
+        trades=None, user_id=1, account_mode=ExchangeKeyMode.DEMO,  # type: ignore[arg-type]
     )
 
     fills, errors = await importer.fetch_fills(BASE, BASE + timedelta(hours=1))

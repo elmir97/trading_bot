@@ -30,7 +30,7 @@ from app.trading.calculations import (
     calculate_pnl,
     calculate_pnl_percent_of_balance,
 )
-from app.trading.enums import FillSide, TradeSide, TradeSource, TradeStatus
+from app.trading.enums import ExchangeKeyMode, FillSide, TradeSide, TradeSource, TradeStatus
 
 logger = get_logger(__name__)
 
@@ -145,10 +145,16 @@ class HistoryImporter:
         client: ExchangeClient,
         trades: TradeRepository,
         user_id: int,
+        *,
+        account_mode: ExchangeKeyMode,
     ) -> None:
+        """account_mode — счёт клиента (DEMO/LIVE): пишется в каждую сделку
+        импорта, лимиты убытка считаются по нему (03.10.2026). Обязателен —
+        счёт по умолчанию был бы молчаливой подстановкой."""
         self._client = client
         self._trades = trades
         self._user_id = user_id
+        self._account_mode = account_mode
 
     async def fetch_fills(
         self, start: datetime, end: datetime
@@ -368,6 +374,7 @@ class HistoryImporter:
             fees=aggregate.total_fees,
             status=TradeStatus.CLOSED if closed else TradeStatus.OPEN,
             source=TradeSource.IMPORTED,
+            account_mode=self._account_mode,
             # Импортированная сделка не размечена: биржа не знает ни
             # стратегии, ни причины входа. До разметки она не участвует
             # в срезах по стратегиям и ошибкам.

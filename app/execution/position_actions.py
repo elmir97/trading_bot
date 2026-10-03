@@ -21,7 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_FLOOR, ROUND_HALF_UP, Decimal
 
-from app.core.numfmt import fmt_amount, fmt_money, fmt_price, fmt_qty
+from app.core.numfmt import fmt_amount, fmt_money, fmt_pct, fmt_price, fmt_qty
 from app.exchanges.base import Position, SymbolInfo
 from app.execution.models import ExecutionRefusal
 from app.execution.models import ExecutionRefusalCode as Code
@@ -189,12 +189,12 @@ def plan_action(
                     Code.BREAKEVEN_NOT_REACHED,
                     f"Безубыток {fmt_price(level, precision)}: mark "
                     f"{fmt_price(inputs.mark, precision)} ещё не ушёл за него на "
-                    f"{inputs.min_distance_percent}% — стоп сработал бы сразу.",
+                    f"{fmt_pct(inputs.min_distance_percent)} — стоп сработал бы сразу.",
                 )
             return _refuse(
                 Code.STOP_WRONG_SIDE,
                 f"Стоп {fmt_price(level, precision)} {'не ниже' if long else 'не выше'} mark "
-                f"{fmt_price(inputs.mark, precision)} − {inputs.min_distance_percent}% — "
+                f"{fmt_price(inputs.mark, precision)} − {fmt_pct(inputs.min_distance_percent)} — "
                 "сработал бы сразу.",
             )
         if current_stop == level:
@@ -229,7 +229,7 @@ def plan_action(
             return _refuse(
                 Code.TAKE_WRONG_SIDE,
                 f"Тейк {fmt_price(level, precision)} {'не выше' if long else 'не ниже'} mark "
-                f"{fmt_price(inputs.mark, precision)} + {inputs.min_distance_percent}% — "
+                f"{fmt_price(inputs.mark, precision)} + {fmt_pct(inputs.min_distance_percent)} — "
                 "сработал бы сразу.",
             )
         if current_take == level:
@@ -302,6 +302,10 @@ def _parse_level(params: dict[str, object]) -> Decimal | None:
     return level
 
 
+def _cents(value: Decimal) -> Decimal:
+    return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
 def _check_cap(inputs: ActionInputs, risk_after: Decimal) -> ExecutionRefusal | None:
     """Жёсткий потолок: риск растёт — не выше risk_per_trade_percent плана от
     equity. Даже после «Да, увеличить риск». Нет плана или equity — отказ."""
@@ -311,11 +315,14 @@ def _check_cap(inputs: ActionInputs, risk_after: Decimal) -> ExecutionRefusal | 
             "Риск растёт, а потолок плана не проверить (нет торгового плана или баланса).",
         )
     cap = inputs.equity * inputs.risk_cap_percent / HUNDRED
-    if risk_after > cap:
+    # 03.10.2026: сравниваются суммы в центах, как в тексте отказа — иначе
+    # хвост деления давал отказ «20.00 USDT больше потолка 20.00 USDT».
+    # Допуск не больше 0.005 USDT; потолок остаётся жёстким.
+    if _cents(risk_after) > _cents(cap):
         return _refuse(
             Code.RISK_CAP_EXCEEDED,
             f"Новый риск {fmt_amount(risk_after)} USDT больше потолка плана "
-            f"{inputs.risk_cap_percent}% = {fmt_amount(cap)} USDT.",
+            f"{fmt_pct(inputs.risk_cap_percent)} = {fmt_amount(cap)} USDT.",
         )
     return None
 

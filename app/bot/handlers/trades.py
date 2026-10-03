@@ -14,7 +14,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.formatting import fmt_amount, fmt_num, fmt_qty
+from app.bot.formatting import fmt_num
 from app.bot.keyboards.main import (
     MenuCallback,
     back_to,
@@ -37,6 +37,7 @@ from app.bot.keyboards.trade import (
     trade_line,
 )
 from app.bot.prompts import ask_number
+from app.bot.sizing_view import lot_step, sizing_lines
 from app.bot.states.trade import AddTradeStates, CloseTradeStates
 from app.core.config import Settings
 from app.core.logging import get_logger
@@ -385,7 +386,8 @@ async def quantity_back(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(AddTradeStates.quantity)
 async def set_quantity(
-    message: Message, state: FSMContext, user: User, session: AsyncSession
+    message: Message, state: FSMContext, user: User, session: AsyncSession,
+    settings: Settings,
 ) -> None:
     data = await state.get_data()
 
@@ -404,6 +406,7 @@ async def set_quantity(
                 entry_price=Decimal(data["entry_price"]),
                 stop_loss=Decimal(data["stop_loss"]),
                 side=TradeSide(data["side"]),
+                quantity_step=await lot_step(settings, data["symbol"]),
             )
         except CalculationError as exc:
             await message.answer(f"⚠️ {exc}")
@@ -413,11 +416,7 @@ async def set_quantity(
             quantity=str(sizing.quantity), account_balance=str(balance)
         )
         await message.answer(
-            f"<b>Расчёт позиции</b>\n\n"
-            f"Сумма риска: {fmt_amount(sizing.risk_amount)} USDT\n"
-            f"Дистанция до стопа: {fmt_num(sizing.stop_distance_percent)}%\n"
-            f"Объём: {fmt_qty(sizing.quantity)}\n"
-            f"Размер позиции: {fmt_amount(sizing.position_value)} USDT"
+            "<b>Расчёт позиции</b>\n\n" + "\n".join(sizing_lines(sizing, balance))
         )
     else:
         quantity = await _parse_decimal(message, "объём")
@@ -553,8 +552,10 @@ async def _save_trade(
             leverage=int(data.get("leverage", 1)),
             timeframe=data.get("timeframe"),
             account_balance=balance,
+            # Ручная запись журнала — без счёта биржи: лимиты по таким же.
+            account_mode=None,
         )
-        if not check.ok:
+        if not check.ok or check.notes:
             warning = "\n\n" + check.render()
 
     try:
