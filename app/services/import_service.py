@@ -231,7 +231,8 @@ class HistoryImporter:
         return result
 
     async def import_open_position(
-        self, start: datetime, end: datetime, *, symbol: str, side: TradeSide, quantity: Decimal
+        self, start: datetime, end: datetime, *, symbol: str, side: TradeSide, quantity: Decimal,
+        position_id: str | None = None,
     ) -> OpenPositionImport:
         """Кнопка «📥 В журнал» (экран «Позиции»): только ТЕКУЩАЯ открытая
         позиция — исполнения её входа (и частичных выходов, если были).
@@ -264,6 +265,11 @@ class HistoryImporter:
         if known or len(kept) != len(pending.fills):
             return OpenPositionImport(None, "Исполнения этой позиции уже есть в журнале.")
         trade = self._build_trade(pending, None)
+        # positionId позиции с биржи (в истории исполнений BingX его нет):
+        # связь для reconciler, когда позиция закроется (02.10, #12: без неё
+        # сделка осталась OPEN после стопа).
+        if position_id:
+            trade.external_position_id = position_id
         self._trades.add(trade)
         await self._trades.flush()
         logger.info(

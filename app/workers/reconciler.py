@@ -356,8 +356,23 @@ class Reconciler:
                     await self._reconcile_trade(ctx, client, trade, positions, check_stops)
                 elif tracks_exchange(
                     trade, _open_quantity(trade),
-                    exchange_position(positions, trade.symbol, trade.side),
+                    live := exchange_position(positions, trade.symbol, trade.side),
                 ):
+                    # Связь по символу и стороне — пока позиция жива; positionId
+                    # держит её и после закрытия позиции (02.10, #12: импорт без
+                    # positionId, стоп сработал — сделка осталась OPEN).
+                    if (
+                        trade.external_position_id is None
+                        and live is not None and live.position_id
+                    ):
+                        trade.external_position_id = live.position_id
+                        # flush сразу: list_open_for_reconcile ниже идёт с
+                        # populate_existing и затёр бы несохранённое значение.
+                        await session.flush()
+                        logger.info(
+                            "Связь сделки с позицией биржи записана",
+                            extra={"trade_id": trade.id, "position_id": live.position_id},
+                        )
                     # Этап 3: импортированная/ручная сделка, связанная с
                     # позицией на бирже, — закрытия фактом биржи. Тревоги
                     # «позиция без стопа» по ним нет: ручную торговлю без

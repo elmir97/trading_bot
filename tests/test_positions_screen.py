@@ -102,8 +102,9 @@ def env(monkeypatch):  # type: ignore[no-untyped-def]
         def __init__(self, client, trades, user_id) -> None:  # type: ignore[no-untyped-def]
             pass
 
-        async def import_open_position(self, start, end, *, symbol, side, quantity):  # type: ignore[no-untyped-def]
-            state.imports.append((end - start, symbol, side, quantity))
+        async def import_open_position(self, start, end, *, symbol, side, quantity,  # type: ignore[no-untyped-def]
+                                       position_id=None):
+            state.imports.append((end - start, symbol, side, quantity, position_id))
             return state.import_outcome
 
     async def list_open(self, user_id, limit=50):  # type: ignore[no-untyped-def]
@@ -242,8 +243,10 @@ async def test_actions_screen_position_gone_back_to_list(env) -> None:  # type: 
 async def test_import_button_imports_current_position_only(env) -> None:  # type: ignore[no-untyped-def]
     env.client = _Client([_position()], [])
     text, _ = await _open(env, f"{PositionsCB.IMPORT}XRP-USDT:L")
+    # positionId живой позиции — связь для reconciler после её закрытия (02.10, #12).
     assert env.imports == [
-        (timedelta(days=screen.IMPORT_DAYS), "XRP-USDT", TradeSide.LONG, D(30))
+        (timedelta(days=screen.IMPORT_DAYS), "XRP-USDT", TradeSide.LONG, D(30),
+         "2105907655281221634")
     ]
     assert "📥 XRP-USDT LONG: в журнале — сделка #21." in text
 

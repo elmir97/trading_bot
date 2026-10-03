@@ -420,8 +420,11 @@ WINDOW = (BASE - timedelta(hours=1), BASE + timedelta(hours=3))
 async def test_open_position_button_imports_only_current_position(ctx) -> None:  # type: ignore[no-untyped-def]
     user, repo, session = ctx
     outcome = await HistoryImporter(FakeExchange(XRP_HISTORY), repo, user.id).import_open_position(
-        *WINDOW, symbol="XRP-USDT", side=TradeSide.LONG, quantity=D(40)
+        *WINDOW, symbol="XRP-USDT", side=TradeSide.LONG, quantity=D(40),
+        position_id="2106063262781022210",
     )
+    # positionId с биржи — в истории исполнений BingX его нет (02.10, #12).
+    assert outcome.trade.external_position_id == "2106063262781022210"
 
     assert outcome.refusal is None
     [trade] = await repo.list_recent(user.id)

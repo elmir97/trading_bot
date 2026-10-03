@@ -137,3 +137,56 @@ async def test_moved_stop_keeps_initial_for_r(ctx) -> None:  # type: ignore[no-u
     trade = await _trade(db, link.id)
     assert trade.stop_loss == D("14.4")
     assert trade.initial_stop_loss == D("13.526") and trade.risk_stop == D("13.526")
+
+
+async def test_live_link_records_position_id_then_stop_closes_trade(ctx) -> None:  # type: ignore[no-untyped-def]
+    """02.10, #12: сделка из «В журнал» без positionId (в allFillOrders его
+    нет). Пока позиция жива, reconciler записывает её positionId; стоп
+    сработал, позиции нет — сделка закрывается фактом биржи одним выходом.
+    На старом коде связь терялась с позицией, сделка оставалась OPEN."""
+    settings, db, session, user, demo = ctx
+    link = await _imported_link(session, user.id, position_id=None)
+
+    await _run_reconciler(settings, db, FakeBot())          # позиция LINK жива
+    trade = await _trade(db, link.id)
+    assert trade.status is TradeStatus.OPEN
+    assert trade.external_position_id == LINK_POSITION_ID
+
+    demo.positions = live_items("positions LINK (фильтр по символу на клиенте)", LINK_MANUAL_STOP)
+    demo.all_orders = {"LINK-USDT": live_items("allOrders LINK", LINK_MANUAL_STOP)}
+    bot = FakeBot()
+    await _run_reconciler(settings, db, bot)                 # стоп сработал
+
+    trade = await _trade(db, link.id)
+    assert trade.status is TradeStatus.CLOSED and trade.exit_price == D("14.776")
+    assert [f.fill_side.value for f in trade.fills] == ["ENTRY", "EXIT"]
+    assert len(bot.sent) == 1
+
+
+async def test_button_import_closed_before_first_cycle_is_closed(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Вопрос владельца 02.10: позиция закрылась до первого цикла reconciler
+    после импорта (связь по символу и стороне ни разу не увидена). Импорт
+    кнопкой «В журнал» пишет positionId сразу — сделка закрывается."""
+    settings, db, session, user, demo = ctx
+    demo.positions = live_items("positions LINK (фильтр по символу на клиенте)", LINK_MANUAL_STOP)
+    demo.all_orders = {"LINK-USDT": live_items("allOrders LINK", LINK_MANUAL_STOP)}
+    link = await _imported_link(session, user.id, position_id=LINK_POSITION_ID)
+
+    await _run_reconciler(settings, db, FakeBot())
+
+    assert (await _trade(db, link.id)).status is TradeStatus.CLOSED
+
+
+async def test_history_import_without_position_id_closed_before_cycle_stays_open(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Остаток после правки: открытая сделка из /import (история, positionId
+    нет), позиция закрылась до первого цикла reconciler — связи нет, сделка
+    остаётся OPEN. Фиксирует текущее поведение; как не терять такие случаи —
+    отдельное решение владельца (handoff, этап 5)."""
+    settings, db, session, user, demo = ctx
+    demo.positions = live_items("positions LINK (фильтр по символу на клиенте)", LINK_MANUAL_STOP)
+    demo.all_orders = {"LINK-USDT": live_items("allOrders LINK", LINK_MANUAL_STOP)}
+    link = await _imported_link(session, user.id, position_id=None)
+
+    await _run_reconciler(settings, db, FakeBot())
+
+    assert (await _trade(db, link.id)).status is TradeStatus.OPEN

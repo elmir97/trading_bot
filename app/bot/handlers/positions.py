@@ -299,6 +299,7 @@ async def import_position(
             ).import_open_position(
                 end - timedelta(days=IMPORT_DAYS), end,
                 symbol=symbol, side=side, quantity=position.quantity,
+                position_id=position.position_id,
             )
             if outcome.trade is not None:
                 note = f"📥 {label}: в журнале — сделка #{outcome.trade.id}."
