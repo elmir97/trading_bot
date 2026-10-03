@@ -22,9 +22,10 @@ from app.execution.position_view import (
     render_position,
     tracks_exchange,
 )
-from app.trading.enums import TradeSide, TradeSource, TradeStatus
+from app.trading.enums import ExchangeKeyMode, TradeSide, TradeSource, TradeStatus
 
 D = Decimal
+DEMO = ExchangeKeyMode.DEMO
 NOW = datetime(2026, 10, 2, 6, 30, tzinfo=UTC)
 
 
@@ -55,7 +56,7 @@ def _trade(**overrides: object) -> Trade:
         id=12, user_id=1, symbol="XRP-USDT", side=TradeSide.LONG, entry_price=D("1.5253"),
         quantity=D(40), status=TradeStatus.OPEN, source=TradeSource.IMPORTED,
         opened_at=NOW - timedelta(hours=1), stop_loss=None, take_profit=None,
-        initial_stop_loss=None, external_position_id=None,
+        initial_stop_loss=None, external_position_id=None, account_mode=DEMO,
     )
     fields.update(overrides)
     return Trade(**fields)  # type: ignore[arg-type]
@@ -109,7 +110,7 @@ class TestProtectiveOrders:
 class TestRender:
     def test_close_position_shown_as_whole_position(self) -> None:
         orders = [_order("STOP_MARKET", "1.5241"), _order("TAKE_PROFIT_MARKET", "1.5287")]
-        (view,) = build_views([_position()], orders, [])
+        (view,) = build_views([_position()], orders, [], account_mode=DEMO)
         text = render_position(view, 4)
         assert "Стоп: 1.5241 (на всю позицию)" in text
         assert "Тейк: 1.5287 (на всю позицию)" in text
@@ -118,39 +119,39 @@ class TestRender:
 
     def test_quantity_order_shows_volume(self) -> None:
         order = _order("STOP_MARKET", "1.47", close_position=False)
-        (view,) = build_views([_position()], [order], [])
+        (view,) = build_views([_position()], [order], [], account_mode=DEMO)
         assert "Стоп: 1.47 (40)" in render_position(view, 4)
 
     def test_no_orders_and_ladder(self) -> None:
         orders = [_order("STOP_MARKET", "1.50", order_id="a"),
                   _order("STOP_MARKET", "1.45", order_id="b", close_position=False)]
-        (view,) = build_views([_position()], orders, [])
+        (view,) = build_views([_position()], orders, [], account_mode=DEMO)
         text = render_position(view, 4)
         assert "Стоп: 2 ордера: 1.5 (на всю позицию); 1.45 (40)" in text
         assert "Тейк: нет" in text
         assert view.stop is None  # лестница — нет «единственного» стопа
 
     def test_linked_trade_is_named(self) -> None:
-        (view,) = build_views([_position()], [], [_trade()])
+        (view,) = build_views([_position()], [], [_trade()], account_mode=DEMO)
         assert "📒 В журнале: сделка #12" in render_position(view, 4)
 
 
 class TestLinkTrade:
     def test_by_symbol_and_side(self) -> None:
-        assert link_trade(_position(), [_trade(side=TradeSide.SHORT)]) is None
-        assert link_trade(_position(), [_trade(symbol="DOGE-USDT")]) is None
-        assert link_trade(_position(), [_trade()]).id == 12  # type: ignore[union-attr]
+        assert link_trade(_position(), [_trade(side=TradeSide.SHORT)], account_mode=DEMO) is None
+        assert link_trade(_position(), [_trade(symbol="DOGE-USDT")], account_mode=DEMO) is None
+        assert link_trade(_position(), [_trade()], account_mode=DEMO).id == 12  # type: ignore[union-attr]
 
     def test_position_id_wins_over_newest(self) -> None:
         old = _trade(id=1, external_position_id="2105907655281221634",
                      opened_at=NOW - timedelta(days=3))
         new = _trade(id=2, opened_at=NOW)
-        assert link_trade(_position(), [old, new]).id == 1  # type: ignore[union-attr]
-        assert link_trade(_position(position_id=None), [old, new]).id == 2  # type: ignore[union-attr]
+        assert link_trade(_position(), [old, new], account_mode=DEMO).id == 1  # type: ignore[union-attr]
+        assert link_trade(_position(position_id=None), [old, new], account_mode=DEMO).id == 2  # type: ignore[union-attr]
 
     def test_journal_only_excludes_linked(self) -> None:
         linked, manual = _trade(id=1), _trade(id=2, symbol="ETH-USDT")
-        views = build_views([_position()], [], [linked, manual])
+        views = build_views([_position()], [], [linked, manual], account_mode=DEMO)
         assert journal_only([linked, manual], views) == [manual]
 
 
@@ -212,3 +213,20 @@ def test_risk_stop_prefers_initial(initial: str | None, stop: str | None, expect
         initial_stop_loss=D(initial) if initial else None, stop_loss=D(stop) if stop else None
     )
     assert trade.risk_stop == expected
+
+
+class TestLinkTradeAccount:
+    """03.10.2026, блокер live Б2: связь только со сделкой того же счёта."""
+
+    def test_manual_trade_without_account_not_linked(self) -> None:
+        manual = _trade(source=TradeSource.MANUAL, account_mode=None)
+        assert link_trade(_position(), [manual], account_mode=DEMO) is None
+        assert link_trade(_position(), [manual], account_mode=ExchangeKeyMode.LIVE) is None
+
+    def test_other_account_not_linked_same_account_wins(self) -> None:
+        demo = _trade(id=1, opened_at=NOW)
+        live = _trade(id=2, account_mode=ExchangeKeyMode.LIVE, opened_at=NOW - timedelta(days=1))
+        assert link_trade(_position(), [demo, live], account_mode=ExchangeKeyMode.LIVE).id == 2  # type: ignore[union-attr]
+        (view,) = build_views([_position()], [], [live], account_mode=DEMO)
+        assert view.trade is None
+        assert "⚠️ Не в журнале" in render_position(view, 4)

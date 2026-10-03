@@ -20,6 +20,7 @@ from app.bot.keyboards.trade import TradeCB
 from app.database.models.trade import Trade
 from app.database.repositories.trade import TradeRepository
 from app.exchanges.base import (
+    Balance,
     ExchangeAuthError,
     ExchangeUnavailableError,
     OpenOrder,
@@ -50,11 +51,14 @@ def _stop() -> OpenOrder:
     )
 
 
-def _trade(trade_id: int, symbol: str) -> Trade:
+def _trade(
+    trade_id: int, symbol: str, account_mode: ExchangeKeyMode | None = ExchangeKeyMode.DEMO,
+) -> Trade:
     return Trade(
         id=trade_id, user_id=7, symbol=symbol, side=TradeSide.LONG, entry_price=D(100),
-        quantity=D(1), status=TradeStatus.OPEN, source=TradeSource.MANUAL,
-        opened_at=NOW - timedelta(days=1),
+        quantity=D(1), status=TradeStatus.OPEN,
+        source=TradeSource.MANUAL if account_mode is None else TradeSource.IMPORTED,
+        account_mode=account_mode, opened_at=NOW - timedelta(days=1),
     )
 
 
@@ -63,6 +67,7 @@ class _Client:
                  error: Exception | None = None) -> None:
         self._positions, self._orders, self._error = positions, orders, error
         self.closed = False
+        self.balance_error: Exception | None = None
         self.open_orders_symbols: list[str | None] = []
         self.name = "bingx"
 
@@ -78,6 +83,11 @@ class _Client:
     async def get_symbols(self, *, max_retries=None) -> list[SymbolInfo]:  # type: ignore[no-untyped-def]
         return [SymbolInfo("XRP-USDT", 4, 0, D(2), D(2))]
 
+    async def get_balance(self, *, max_retries=None) -> Balance:  # type: ignore[no-untyped-def]
+        if self.balance_error is not None:
+            raise self.balance_error
+        return Balance("USDT", D(9000), D(100), D(5), D(10000))
+
     async def close(self) -> None:
         self.closed = True
 
@@ -85,7 +95,8 @@ class _Client:
 @pytest.fixture
 def env(monkeypatch):  # type: ignore[no-untyped-def]
     state = SimpleNamespace(
-        client=None, auth_error=False, trades=[], imports=[], import_modes=[], import_cutoffs=[],
+        client=None, auth_error=False, trades=[], imports=[], import_modes=[],
+        import_cutoffs=[], import_balances=[],
         import_outcome=SimpleNamespace(trade=SimpleNamespace(id=21), refusal=None),
     )
 
@@ -105,8 +116,9 @@ def env(monkeypatch):  # type: ignore[no-untyped-def]
             state.import_cutoffs.append((journal_cutoff, tz_offset))
 
         async def import_open_position(self, start, end, *, symbol, side, quantity,  # type: ignore[no-untyped-def]
-                                       position_id=None):
+                                       position_id=None, account_balance=None):
             state.imports.append((end - start, symbol, side, quantity, position_id))
+            state.import_balances.append(account_balance)
             return state.import_outcome
 
     async def list_open(self, user_id, limit=50):  # type: ignore[no-untyped-def]
@@ -283,3 +295,33 @@ async def test_exchange_menu_button_opens_same_screen(env) -> None:  # type: ign
     env.client = _Client([], [])
     text, _ = await _open(env, ExchangeCB.POSITIONS)
     assert "<b>💼 Позиции · " in text
+
+
+async def test_manual_trade_without_account_not_linked(env) -> None:  # type: ignore[no-untyped-def]
+    """03.10.2026, блокер live Б2: ручная запись без счёта по символу позиции
+    не становится «В журнале» — позиция «Не в журнале», запись — в «Только в
+    журнале»."""
+    env.client = _Client([_position()], [])
+    env.trades = [_trade(14, "XRP-USDT", account_mode=None)]
+    text, buttons = await _open(env)
+    assert "⚠️ Не в журнале" in text
+    assert "📒 #14 XRP-USDT LONG" in text and buttons["XRP-USDT LONG #14"] == f"{TradeCB.CLOSE}14"
+
+
+async def test_import_writes_entry_balance_without_unrealized_pnl(env) -> None:  # type: ignore[no-untyped-def]
+    """03.10.2026, блокер live Б1: баланс на входе = equity 10000 − PnL этой
+    позиции 0.03."""
+    env.client = _Client([_position()], [])
+    text, _ = await _open(env, f"{PositionsCB.IMPORT}XRP-USDT:L")
+    assert env.import_balances == [D("9999.97")]
+    assert "Баланс счёта не получен" not in text
+
+
+async def test_import_without_balance_marked_and_warned(env, caplog) -> None:  # type: ignore[no-untyped-def]
+    env.client = _Client([_position()], [])
+    env.client.balance_error = ExchangeUnavailableError("down")
+    with caplog.at_level("WARNING"):
+        text, _ = await _open(env, f"{PositionsCB.IMPORT}XRP-USDT:L")
+    assert env.import_balances == [None]
+    assert "в журнале — сделка #21. ⚠️ Баланс счёта не получен" in text
+    assert any("баланс счёта не получен" in r.getMessage() for r in caplog.records)

@@ -201,8 +201,12 @@ class PositionActionService:
             logger.warning("Баланс для потолка риска не получен", extra={"user_id": self._user.id})
             equity = None
         plan = await UserRepository(self._session).get_trading_plan(self._user.id)
-        trades = await TradeRepository(self._session).list_open_for_reconcile(self._user.id)
-        trade = link_trade(position, trades)
+        trades = await TradeRepository(self._session).list_open_for_reconcile(
+            self._user.id, account_mode=self._settings.bingx_allowed_exchange_mode
+        )
+        trade = link_trade(
+            position, trades, account_mode=self._settings.bingx_allowed_exchange_mode
+        )
         fee_unit: Decimal | None = None
         one_r: Decimal | None = None
         if trade is not None:

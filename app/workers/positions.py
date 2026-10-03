@@ -311,7 +311,9 @@ class PositionMonitor:
                 finally:
                     await client.close()
                 trades = await TradeRepository(session).list_open(user.id)
-                views = build_views(positions, orders, trades)
+                views = build_views(
+                    positions, orders, trades, account_mode=st.active_exchange_mode
+                )
                 r_unit: dict[tuple[str, TradeSide], Decimal | None] = {}
                 for view in views:
                     stop = view.trade.risk_stop if view.trade is not None else None

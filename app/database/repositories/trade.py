@@ -233,13 +233,23 @@ class TradeRepository:
         self.session.add(fill)
         return fill
 
-    async def list_open_for_reconcile(self, user_id: int) -> list[Trade]:
-        """Шаг 15.6: все открытые сделки пользователя с исполнениями —
-        reconciler сверяет с биржей сделки бота, а открытые сделки любого
-        источника нужны, чтобы не назвать чужую позицию «без сделки»."""
+    async def list_open_for_reconcile(
+        self, user_id: int, *, account_mode: ExchangeKeyMode
+    ) -> list[Trade]:
+        """Шаг 15.6: открытые сделки пользователя с исполнениями — reconciler
+        сверяет с биржей сделки бота, а открытые сделки любого источника нужны,
+        чтобы не назвать чужую позицию «без сделки».
+
+        Только сделки счёта сверки (03.10.2026, блокер live Б2): ручная запись
+        без счёта (NULL) или сделка другого счёта по тому же символу и стороне
+        иначе связалась бы с живой позицией и закрылась её фактом."""
         stmt = (
             select(Trade)
-            .where(Trade.user_id == user_id, Trade.status == TradeStatus.OPEN)
+            .where(
+                Trade.user_id == user_id,
+                Trade.status == TradeStatus.OPEN,
+                Trade.account_mode == account_mode,
+            )
             .options(selectinload(Trade.fills))
             .execution_options(populate_existing=True)
         )

@@ -215,29 +215,44 @@ class DailyJobs:
             return
 
         plan = user.trading_plan
-        # 03.10.2026: счёт — выбранный в настройках, сделки только этого счёта,
-        # убыток в процентах — от баланса на входе каждой сделки (как проверка
-        # плана в журнале). Раньше сумма PnL всех сделок делилась на equity
-        # выбранного счёта: демо-сделки и ручные записи смешивались.
+        # 03.10.2026: убыток в процентах — от баланса на входе каждой сделки
+        # (как проверка плана в журнале), отдельно по двум группам, каждая
+        # против своего лимита (блокер live Б3, вариант «а» владельца):
+        # счёт, выбранный в настройках, и ручные записи без счёта (NULL).
+        # Раньше ручные записи алерт не видел вовсе, а до M3 сумма PnL всех
+        # сделок делилась на equity выбранного счёта.
         day_start, day_end = day_bounds(now, tz_offset)
-        day = await TradeRepository(session).pnl_percent_between(
-            user.id, day_start, day_end, account_mode=settings_row.active_exchange_mode
+        repo = TradeRepository(session)
+        groups = (
+            (f"Счёт {settings_row.active_exchange_mode.label}",
+             settings_row.active_exchange_mode),
+            ("Ручные записи (без счёта)", None),
         )
-        if day.percent is None:
-            return
-
-        day_loss = (-day.percent).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        if day_loss < plan.max_daily_loss_percent:
+        lines: list[str] = []
+        for title, account_mode in groups:
+            day = await repo.pnl_percent_between(
+                user.id, day_start, day_end, account_mode=account_mode
+            )
+            if day.percent is None:
+                continue
+            day_loss = (-day.percent).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            if day_loss < plan.max_daily_loss_percent:
+                continue
+            line = (
+                f"{title}: −{fmt_pct(-day.percent)} при лимите "
+                f"{fmt_pct(plan.max_daily_loss_percent)}."
+            )
+            if day.uncounted:
+                line += f" Не учтены: {day.uncounted} (сделки без баланса на входе)."
+            lines.append(line)
+        if not lines:
             return
 
         text = (
-            f"🛑 <b>Дневной лимит убытка достигнут</b>\n\n"
-            f"Убыток за день: −{fmt_pct(-day.percent)} при лимите "
-            f"{fmt_pct(plan.max_daily_loss_percent)}.\n"
+            "🛑 <b>Дневной лимит убытка достигнут</b>\n\n"
+            + "\n".join(lines)
+            + "\n\nМетодология рекомендует закрыть торговый день."
         )
-        if day.uncounted:
-            text += f"Не учтены: {day.uncounted} (сделки без баланса на входе).\n"
-        text += "\nМетодология рекомендует закрыть торговый день."
         if await self._deliver(user, "daily_limit_reached", text, today_local):
             settings_row.daily_loss_alert_last_sent_date = today_local
 

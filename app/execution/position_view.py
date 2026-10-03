@@ -20,7 +20,7 @@ from decimal import Decimal
 from app.core.numfmt import fmt_money, fmt_price, fmt_qty
 from app.database.models.trade import Trade
 from app.exchanges.base import OpenOrder, Position
-from app.trading.enums import TradeSide
+from app.trading.enums import ExchangeKeyMode, TradeSide
 
 STOP_TYPES = frozenset({"STOP_MARKET", "STOP"})
 TAKE_TYPES = frozenset({"TAKE_PROFIT_MARKET", "TAKE_PROFIT"})
@@ -89,11 +89,18 @@ def protective_orders(
     )
 
 
-def link_trade(position: Position, open_trades: list[Trade]) -> Trade | None:
-    """Открытая сделка журнала для позиции: по символу и стороне; при
-    нескольких — с тем же positionId, иначе самая поздняя."""
+def link_trade(
+    position: Position, open_trades: list[Trade], *, account_mode: ExchangeKeyMode
+) -> Trade | None:
+    """Открытая сделка журнала для позиции: того же счёта, по символу и
+    стороне; при нескольких — с тем же positionId, иначе самая поздняя.
+
+    Счёт обязателен (03.10.2026, блокер live Б2): ручная запись без счёта
+    (NULL) или демо-сделка не связываются с позицией боевого счёта."""
     candidates = [
-        t for t in open_trades if t.symbol == position.symbol and t.side is position.side
+        t for t in open_trades
+        if t.account_mode == account_mode
+        and t.symbol == position.symbol and t.side is position.side
     ]
     if not candidates:
         return None
@@ -105,12 +112,14 @@ def link_trade(position: Position, open_trades: list[Trade]) -> Trade | None:
 
 
 def build_views(
-    positions: list[Position], open_orders: list[OpenOrder], open_trades: list[Trade]
+    positions: list[Position], open_orders: list[OpenOrder], open_trades: list[Trade],
+    *, account_mode: ExchangeKeyMode,
 ) -> list[PositionView]:
     views = []
     for position in sorted(positions, key=lambda p: (p.symbol, p.side.value)):
         stops, takes = protective_orders(position, open_orders)
-        views.append(PositionView(position, stops, takes, link_trade(position, open_trades)))
+        trade = link_trade(position, open_trades, account_mode=account_mode)
+        views.append(PositionView(position, stops, takes, trade))
     return views
 
 

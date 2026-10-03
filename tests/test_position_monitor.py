@@ -174,6 +174,7 @@ async def test_r_from_journal_initial_stop(ctx) -> None:  # type: ignore[no-unty
         await TradeJournal(TradeRepository(session)).open_trade(
             user_id=ctx.uid, symbol="SOL-USDT", side=TradeSide.LONG, entry_price=ENTRY,
             quantity=D(2), stop_loss=D(90), source=TradeSource.IMPORTED,
+            account_mode=ExchangeKeyMode.DEMO,
             external_position_id="p1", external_fill_id="f1", fee=D("0.1"),
         )
     [text] = await ctx.step("92")
@@ -287,6 +288,7 @@ async def test_long_stop_above_entry_uses_r(ctx) -> None:  # type: ignore[no-unt
         trade = await TradeJournal(TradeRepository(session)).open_trade(
             user_id=ctx.uid, symbol="SOL-USDT", side=TradeSide.LONG, entry_price=ENTRY,
             quantity=D(2), stop_loss=D(90), source=TradeSource.IMPORTED,
+            account_mode=ExchangeKeyMode.DEMO,
             external_position_id="p1", external_fill_id="f1", fee=D("0.1"),
         )
         trade.initial_stop_loss = D(90)

@@ -174,8 +174,10 @@ async def test_successful_send_logs_info(ctx, caplog) -> None:  # type: ignore[n
 
 
 async def test_loss_alert_same_account_percent_of_entry_balance(ctx) -> None:  # type: ignore[no-untyped-def]
-    """03.10.2026: дневной алерт — только сделки счёта из настроек, процент от
-    баланса на входе каждой сделки; без баланса — «Не учтены: N»."""
+    """03.10.2026: дневной алерт — процент от баланса на входе каждой сделки,
+    отдельно по счёту из настроек и по ручным записям (вариант «а», блокер
+    live Б3), каждая группа против своего лимита; другой счёт не учитывается;
+    без баланса — «Не учтены: N»."""
     from tests.test_risk_limits_account import _closed
 
     daily, session, user, _settings = ctx
@@ -191,5 +193,27 @@ async def test_loss_alert_same_account_percent_of_entry_balance(ctx) -> None:  #
     daily._bot = ok
     await daily._maybe_send_loss_alert(session, user, user.settings, now, tz, today)
     [text] = ok.sent
-    assert "Убыток за день: −7.00% при лимите 6.00%." in text
-    assert "Не учтены: 1 (сделки без баланса на входе)." in text
+    assert (
+        f"Счёт {mode.label}: −7.00% при лимите 6.00%. "
+        "Не учтены: 1 (сделки без баланса на входе)."
+    ) in text
+    assert "Ручные записи (без счёта): −500.00% при лимите 6.00%." in text
+    assert text.count("при лимите") == 2                   # другой счёт не учтён
+
+
+async def test_loss_alert_manual_trades_alone(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Ручные записи без счёта достигли лимита, счёт из настроек — нет:
+    алерт уходит одной строкой по ручным."""
+    from tests.test_risk_limits_account import _closed
+
+    daily, session, user, _settings = ctx
+    now, tz, today = _today(user)
+    await _closed(session, user, "-70", "1000", None, closed_at=now)                 # −7%
+    await _closed(session, user, "-10", "10000", user.settings.active_exchange_mode,
+                  closed_at=now)                                                     # −0.1%
+    ok = OkBot()
+    daily._bot = ok
+    await daily._maybe_send_loss_alert(session, user, user.settings, now, tz, today)
+    [text] = ok.sent
+    assert "Ручные записи (без счёта): −7.00% при лимите 6.00%." in text
+    assert "Счёт" not in text

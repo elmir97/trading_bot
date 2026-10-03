@@ -372,7 +372,7 @@ class Reconciler:
             positions = await client.get_positions()
             trades_repo = TradeRepository(session)
             orders_repo = ExecutionOrderRepository(session)
-            open_trades = await trades_repo.list_open_for_reconcile(user_id)
+            open_trades = await trades_repo.list_open_for_reconcile(user_id, account_mode=mode)
             unresolved = await orders_repo.list_unresolved_entries(user_id)
             journal_open_keys: set[str] = set()
 
@@ -436,7 +436,7 @@ class Reconciler:
             }
             journal_open = {
                 (t.symbol, t.side)
-                for t in await trades_repo.list_open_for_reconcile(user_id)
+                for t in await trades_repo.list_open_for_reconcile(user_id, account_mode=mode)
             }
             orphans = orphan_positions(positions, journal_open, in_flight)
             for found in orphans:
@@ -450,9 +450,10 @@ class Reconciler:
             if check_stops:
                 # Последним перед commit: list_open_for_reconcile выше идёт с
                 # populate_existing и перечитал бы несохранённые уровни.
-                await self._sync_levels(
-                    ctx, client, await trades_repo.list_open_for_reconcile(user_id), positions
+                levels_trades = await trades_repo.list_open_for_reconcile(
+                    user_id, account_mode=mode
                 )
+                await self._sync_levels(ctx, client, levels_trades, positions)
             await session.commit()
         finally:
             await client.close()

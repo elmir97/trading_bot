@@ -34,6 +34,7 @@ from app.database.session import Database
 from app.exchanges.bingx import BingXClient
 from app.services.user_service import UserService
 from app.trading.enums import (
+    ExchangeKeyMode,
     OrderRole,
     OrderSide,
     OrderStatus,
@@ -202,6 +203,7 @@ async def _bot_trade(  # type: ignore[no-untyped-def]
     trade = await TradeJournal(TradeRepository(session)).open_trade(
         user_id=user_id, symbol=symbol, side=TradeSide.LONG, entry_price=D(entry),
         quantity=D(qty), leverage=10, opened_at=opened_at, source=TradeSource.SIGNAL_EXECUTION,
+        account_mode=ExchangeKeyMode.DEMO,
         notification_id=n.id, external_fill_id=entry_id, fee=D(fee),
     )
     session.add_all([
@@ -378,6 +380,7 @@ async def test_unknown_entry_not_found_after_window_is_not_placed(ctx) -> None: 
     trade = await TradeJournal(TradeRepository(session)).open_trade(
         user_id=user.id, symbol="ADA-USDT", side=TradeSide.LONG, entry_price=D("1"),
         quantity=D("10"), source=TradeSource.SIGNAL_EXECUTION, notification_id=n.id,
+        account_mode=ExchangeKeyMode.DEMO,
         fill_confirmed=False,
     )
     entry = _row(user.id, n.id, "ADA-USDT", OrderRole.ENTRY, OrderStatus.UNKNOWN, None,
@@ -932,6 +935,7 @@ async def _unresolved_link(  # type: ignore[no-untyped-def]
             user_id=user_id, symbol="LINK-USDT", side=TradeSide.LONG, entry_price=D("14.398"),
             quantity=D("2037.8"), leverage=10, stop_loss=D("13.526"), take_profit=D("16.263"),
             opened_at=placed, source=TradeSource.SIGNAL_EXECUTION, notification_id=n.id,
+            account_mode=ExchangeKeyMode.DEMO,
             fill_confirmed=fill_confirmed,
         )
     entry = _row(user_id, n.id, "LINK-USDT", OrderRole.ENTRY, status, exchange_id,
@@ -1028,6 +1032,7 @@ async def test_confirm_entry_trade_without_entry_fill_is_ambiguous(ctx) -> None:
         user_id=user.id, symbol="LINK-USDT", side=TradeSide.LONG, entry_price=D("14.398"),
         quantity=D("2037.8"), leverage=10, opened_at=entry.created_at,
         source=TradeSource.SIGNAL_EXECUTION, status=TradeStatus.OPEN, fill_confirmed=False,
+        account_mode=ExchangeKeyMode.DEMO,
     )
     session.add(orphan_trade)
     await session.flush()
@@ -1223,6 +1228,7 @@ async def test_not_placed_with_cancelled_trade_does_not_cancel_again(ctx) -> Non
     trade = await TradeJournal(TradeRepository(session)).open_trade(
         user_id=user.id, symbol="ADA-USDT", side=TradeSide.LONG, entry_price=D("1"),
         quantity=D("10"), source=TradeSource.SIGNAL_EXECUTION, notification_id=n.id,
+        account_mode=ExchangeKeyMode.DEMO,
         fill_confirmed=False,
     )
     trade.status = TradeStatus.CANCELLED

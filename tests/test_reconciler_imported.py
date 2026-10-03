@@ -15,7 +15,13 @@ import pytest
 
 from app.database.models.trade import Trade
 from app.database.repositories.trade import TradeRepository
-from app.trading.enums import ReconciliationKind, TradeSide, TradeSource, TradeStatus
+from app.trading.enums import (
+    ExchangeKeyMode,
+    ReconciliationKind,
+    TradeSide,
+    TradeSource,
+    TradeStatus,
+)
 from app.trading.journal import TradeJournal
 from tests import test_reconciler_worker as harness
 from tests.bingx_fixtures import LINK_MANUAL_STOP, live_items
@@ -49,6 +55,8 @@ async def _imported_link(  # type: ignore[no-untyped-def]
         quantity=D("2037.8"), leverage=10, opened_at=fill_at, source=source,
         external_fill_id="fill-tradeid-1", fee=D("14.672461"),
         external_position_id=position_id,
+        # Как в проде после M3: сделка с биржи — счёт DEMO, ручная — без счёта.
+        account_mode=None if source is TradeSource.MANUAL else ExchangeKeyMode.DEMO,
     )
     await session.commit()
     return trade
@@ -206,3 +214,22 @@ async def test_history_import_without_link_notifies_once(ctx) -> None:  # type: 
     [notice] = [e for e in await _trade_events(db, link.id)
                 if e.dedup_key == f"journal_open:{link.id}"]
     assert notice.resolved_at is not None
+
+
+async def test_manual_trade_without_account_not_linked_to_live_position(ctx) -> None:  # type: ignore[no-untyped-def]
+    """03.10.2026, блокер live Б2: ручная запись мастера (счёт NULL) по символу
+    и стороне живой позиции не связывается с ней — positionId не пишется,
+    уровни не синхронизируются, сделка не закрывается фактом биржи; позиция —
+    «не в журнале» (уведомление ORPHAN_POSITION)."""
+    settings, db, session, user, demo = ctx
+    manual = await _imported_link(session, user.id, source=TradeSource.MANUAL, position_id=None)
+
+    await _run_reconciler(settings, db, FakeBot())
+
+    trade = await _trade(db, manual.id)
+    assert trade.status is TradeStatus.OPEN and len(trade.fills) == 1
+    assert trade.external_position_id is None
+    assert trade.stop_loss is None and trade.take_profit is None
+    assert await _trade_events(db, manual.id) == []
+    kinds = {e.kind for e in await harness._events(db, user.id)}
+    assert ReconciliationKind.ORPHAN_POSITION in kinds

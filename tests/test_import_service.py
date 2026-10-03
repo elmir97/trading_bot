@@ -603,3 +603,17 @@ def test_cutoff_filter_drops_boundary_fills() -> None:
     kept = importer._drop_before_cutoff(XRP_HISTORY[:4], result)
     assert [f.external_id for f in kept] == ["r3", "r4"]
     assert result.fills_before_cutoff == 2
+
+
+async def test_open_position_import_writes_entry_balance(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Блокер live Б1: «В журнал» передаёт баланс на входе — сделка входит в
+    процент лимитов убытка."""
+    user, repo, _session = ctx
+    outcome = await HistoryImporter(
+        FakeExchange(XRP_HISTORY), repo, user.id, account_mode=DEMO,
+    ).import_open_position(
+        *WINDOW, symbol="XRP-USDT", side=TradeSide.LONG, quantity=D(40),
+        account_balance=D("9999.97"),
+    )
+    assert outcome.trade is not None
+    assert outcome.trade.account_balance_at_entry == D("9999.97")

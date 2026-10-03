@@ -389,6 +389,7 @@ async def test_step3_final_rejected_bridge_holds(ctx) -> None:  # type: ignore[n
     trade = await TradeJournal(TradeRepository(ctx.session)).open_trade(
         user_id=ctx.uid, symbol="XRP-USDT", side=TradeSide.LONG, entry_price=ENTRY,
         quantity=D(30), stop_loss=D("1.4795"), source=TradeSource.IMPORTED,
+        account_mode=ExchangeKeyMode.DEMO,
         external_position_id=PID, external_fill_id="f1", fee=D("0.0229"),
     )
     await ctx.session.commit()
@@ -428,6 +429,7 @@ async def test_move_stop_updates_linked_journal_trade(ctx) -> None:  # type: ign
     trade = await TradeJournal(TradeRepository(ctx.session)).open_trade(
         user_id=ctx.uid, symbol="XRP-USDT", side=TradeSide.LONG, entry_price=ENTRY,
         quantity=D(30), stop_loss=D("1.4795"), source=TradeSource.IMPORTED,
+        account_mode=ExchangeKeyMode.DEMO,
         external_position_id=PID, external_fill_id="f1", fee=D("0.0229"),
     )
     await ctx.session.commit()
@@ -520,6 +522,7 @@ async def test_partial_close_market_and_journal(ctx) -> None:  # type: ignore[no
     trade = await TradeJournal(TradeRepository(ctx.session)).open_trade(
         user_id=ctx.uid, symbol="XRP-USDT", side=TradeSide.LONG, entry_price=ENTRY,
         quantity=D(30), stop_loss=D("1.4795"), source=TradeSource.IMPORTED,
+        account_mode=ExchangeKeyMode.DEMO,
         external_position_id=PID, external_fill_id="f1", fee=D("0.0229"),
     )
     await ctx.session.commit()

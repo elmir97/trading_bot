@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -36,7 +37,7 @@ from app.core.security import SecretCipher
 from app.database.models.trade import Trade
 from app.database.models.user import User
 from app.database.repositories.trade import TradeRepository
-from app.exchanges.base import ExchangeAuthError, ExchangeError
+from app.exchanges.base import ExchangeAuthError, ExchangeClient, ExchangeError, Position
 from app.execution.position_view import (
     PositionView,
     build_views,
@@ -159,6 +160,25 @@ def render_screen(
     return "\n".join(lines)
 
 
+async def _entry_balance(
+    client: ExchangeClient, position: Position, user_id: int
+) -> Decimal | None:
+    """Баланс на входе для «📥 В журнал» (03.10.2026, блокер live Б1): equity
+    счёта минус нереализованный PnL этой позиции — баланс, каким он был без
+    неё. Без баланса сделка не входит в процент лимитов убытка (способ
+    «от баланса на входе каждой сделки»). Не получен — None и WARNING;
+    сделку всё равно заносим, с пометкой в ответе."""
+    try:
+        equity = (await client.get_balance()).equity
+    except ExchangeError:
+        logger.warning(
+            "В журнал: баланс счёта не получен — сделка без баланса на входе",
+            extra={"user_id": user_id, "symbol": position.symbol},
+        )
+        return None
+    return equity - position.unrealized_pnl
+
+
 async def _load(
     session: AsyncSession, user: User, settings: Settings, cipher: SecretCipher
 ) -> tuple[list[PositionView] | None, str | None, list[Trade], dict[str, int]]:
@@ -182,7 +202,9 @@ async def _load(
         return None, _describe(exc), open_trades, {}
     finally:
         await client.close()
-    views = build_views(positions, orders, open_trades)
+    views = build_views(
+        positions, orders, open_trades, account_mode=user.settings.active_exchange_mode
+    )
     return views, None, journal_only(open_trades, views), precision
 
 
@@ -295,6 +317,7 @@ async def import_position(
         if position is None:
             note = f"📥 {label}: позиции на бирже уже нет — в журнал ничего не занесено."
         else:
+            balance = await _entry_balance(client, position, user.id)
             outcome = await HistoryImporter(
                 client, TradeRepository(session), user.id,
                 account_mode=user.settings.active_exchange_mode,
@@ -303,10 +326,15 @@ async def import_position(
             ).import_open_position(
                 end - timedelta(days=IMPORT_DAYS), end,
                 symbol=symbol, side=side, quantity=position.quantity,
-                position_id=position.position_id,
+                position_id=position.position_id, account_balance=balance,
             )
             if outcome.trade is not None:
                 note = f"📥 {label}: в журнале — сделка #{outcome.trade.id}."
+                if balance is None:
+                    note += (
+                        " ⚠️ Баланс счёта не получен — сделка не войдёт в процент "
+                        "лимитов убытка."
+                    )
             else:
                 note = f"📥 {label}: {outcome.refusal} Историю целиком — /import."
     except ExchangeError as exc:
