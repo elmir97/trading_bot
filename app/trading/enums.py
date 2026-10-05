@@ -164,6 +164,8 @@ class OrderSide(StrEnum):
 
 class OrderType(StrEnum):
     MARKET = "MARKET"
+    # Открытие сделки из бота (05.10.2026): лимитный вход, GTC — срок держит бот.
+    LIMIT = "LIMIT"
     TAKE_PROFIT_MARKET = "TAKE_PROFIT_MARKET"
     STOP_MARKET = "STOP_MARKET"
 

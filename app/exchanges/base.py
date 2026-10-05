@@ -349,6 +349,20 @@ class OpenOrder:
     updated_at: datetime
     take_profit: AttachedTpSl | None
     stop_loss: AttachedTpSl | None
+    # positionID позиции, к которой относится ордер (разведка Р3/Р6, 05.10):
+    # у вложенных в вход стопа/тейка clientOrderId пустой, связь с нашим входом
+    # — только через него. None — 0 у ордера без позиции (лимит до исполнения).
+    position_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CommissionRate:
+    """Ставки комиссии аккаунта — GET /openApi/swap/v2/user/commissionRate
+    (живьём 05.10, демо: data.commission.takerCommissionRate 0.0005, maker
+    0.0002 — числами). Доли, не проценты."""
+
+    taker: Decimal
+    maker: Decimal
 
 
 @dataclass(frozen=True, slots=True)
@@ -458,6 +472,9 @@ class OrderFill:
     # нет в ответе → None, журнал берёт момент чтения. Живьём (GET #37,
     # 27.09) updateTime — мс исполнения, time — целые секунды постановки.
     filled_at: datetime | None = None
+    # positionID позиции, которую открыл/изменил ордер (живьём 05.10: GET
+    # входа по clientOrderId). None — 0 у неисполненного ордера.
+    position_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -659,6 +676,39 @@ class ExchangeClient(ABC):
         (orderId, status, avgPrice, origQty, executedQty, commission) →
         ReadbackIncomplete, а не ноль."""
         ...
+
+    # --- Открытие сделки из бота (05.10.2026, разведка Р1–Р8) --------------
+    # Не абстрактные: фейкам тестов, которым открытие не нужно, не обязательны.
+
+    async def set_margin_type(self, symbol: str, margin_type: MarginType) -> MarginType:
+        """Режим маржи символа (POST). Ответ — не доказательство: сверять
+        get_margin_type. При позиции или ордерах по символу биржа отказывает
+        (104103, Р3а)."""
+        raise NotImplementedError
+
+    async def place_limit_order(
+        self,
+        *,
+        symbol: str,
+        side: OrderSide,
+        position_side: str,
+        quantity: Decimal,
+        price: Decimal,
+        client_order_id: str,
+        take_profit: TpSlSpec | None = None,
+        stop_loss: TpSlSpec | None = None,
+    ) -> OrderResult:
+        """Лимитный вход GTC с вложенными стопом/тейком (Р5/Р6): до
+        исполнения они живут внутри ордера, после — отдельными ордерами с
+        positionID. Статус постановки у BingX — PENDING."""
+        raise NotImplementedError
+
+    async def cancel_order_by_client_id(self, symbol: str, client_order_id: str) -> CancelResult:
+        """Отмена по clientOrderId (Р5). OrderNotFoundError — ордера уже нет."""
+        raise NotImplementedError
+
+    async def get_commission_rate(self) -> CommissionRate:
+        raise NotImplementedError
 
     async def get_mark_price(self, symbol: str) -> Decimal:
         """Mark price символа — по нему срабатывают стопы и тейки бота

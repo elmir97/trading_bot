@@ -33,6 +33,7 @@ from app.exchanges.base import (
     AttachedTpSl,
     Balance,
     CancelResult,
+    CommissionRate,
     ExchangeAuthError,
     ExchangeClient,
     ExchangeRateLimitError,
@@ -97,6 +98,9 @@ POSITION_SIDE_DUAL = "/openApi/swap/v1/positionSide/dual"
 # Режим маржи символа: data = {"marginType": "ISOLATED", "symbol": ...}
 # (28.09, живой GET на демо-хосте для LINK-USDT и SOL-USDT).
 TRADE_MARGIN_TYPE = "/openApi/swap/v2/trade/marginType"
+# Ставки комиссии аккаунта (живьём 05.10, демо): data.commission =
+# {"takerCommissionRate": 0.0005, "makerCommissionRate": 0.0002} — числами.
+USER_COMMISSION_RATE = "/openApi/swap/v2/user/commissionRate"
 
 # Валюта маржи зависит от контура: LIVE торгует настоящими USDT, DEMO —
 # виртуальными VST (см. app/bot/handlers/settings.py:626). get_balance()
@@ -1190,16 +1194,99 @@ class BingXClient(ExchangeClient):
         order = data.get("order", data) if isinstance(data, dict) else {}
         return self._parse_order(order)
 
+    async def set_margin_type(self, symbol: str, margin_type: MarginType) -> MarginType:
+        """POST TRADE_MARGIN_TYPE (Р1, живьём 05.10): code 0, data = {symbol,
+        marginType} — новый режим; повтор того же режима — тоже code 0. При
+        позиции/ордерах по символу — 104103 (Р3а), ExchangeResponseError с
+        кодом. max_retries=1 — меняет состояние счёта перед входом. Ответ не
+        доказательство: вызывающий сверяет get_margin_type."""
+        data = await self._request(
+            TRADE_MARGIN_TYPE, {"symbol": symbol, "marginType": margin_type.value},
+            signed=True, method="POST", max_retries=1,
+        )
+        raw = data.get("marginType") if isinstance(data, dict) else None
+        if raw not in tuple(MarginType):
+            raise ExchangeResponseError(
+                f"В ответе POST {TRADE_MARGIN_TYPE} нет понятного marginType"
+            )
+        return MarginType(raw)
+
+    async def place_limit_order(
+        self,
+        *,
+        symbol: str,
+        side: OrderSide,
+        position_side: str,
+        quantity: Decimal,
+        price: Decimal,
+        client_order_id: str,
+        take_profit: TpSlSpec | None = None,
+        stop_loss: TpSlSpec | None = None,
+    ) -> OrderResult:
+        """Лимитный вход GTC (Р5/Р6, живьём 05.10): тот же путь, что у
+        маркета; вложенные stopLoss/takeProfit — той же JSON-строкой.
+        Постановка — status PENDING; пересекающий рынок лимит исполняется
+        сразу (FILLED). Срок жизни ордера держит бот — у BingX его нет.
+        max_retries=1: повтор после обрыва мог бы выставить второй ордер."""
+        if not 1 <= len(client_order_id) <= 40:
+            raise ValueError(
+                "clientOrderID у BingX — 1-40 символов, получено "
+                f"{len(client_order_id)}: {client_order_id!r}"
+            )
+        if price <= 0:
+            raise ValueError(f"Цена лимита должна быть > 0: {price}")
+        params: dict[str, Any] = {
+            "symbol": symbol,
+            "side": side.value,
+            "positionSide": position_side,
+            "type": OrderType.LIMIT.value,
+            "price": _decimal_literal(price),
+            "quantity": _decimal_literal(quantity),
+            "timeInForce": "GTC",
+            "clientOrderID": client_order_id,
+        }
+        if take_profit is not None:
+            params["takeProfit"] = _build_tp_sl(OrderType.TAKE_PROFIT_MARKET, take_profit)
+        if stop_loss is not None:
+            params["stopLoss"] = _build_tp_sl(OrderType.STOP_MARKET, stop_loss)
+        data = await self._request(
+            TRADE_ORDER, params, signed=True, method="POST", max_retries=1
+        )
+        order = data.get("order", data) if isinstance(data, dict) else {}
+        return self._parse_order(order)
+
+    async def cancel_order_by_client_id(self, symbol: str, client_order_id: str) -> CancelResult:
+        """DELETE по clientOrderId (Р5, живьём 05.10): code 0, data.order со
+        status "CANCELLED". Ордера нет — OrderNotFoundError (как cancel_order)."""
+        return await self._cancel({"symbol": symbol, "clientOrderId": client_order_id}, "")
+
+    async def get_commission_rate(self) -> CommissionRate:
+        """GET USER_COMMISSION_RATE (живьём 05.10): data.commission —
+        takerCommissionRate/makerCommissionRate числами. Нет поля — ошибка,
+        не подставленная ставка."""
+        data = await self._request(USER_COMMISSION_RATE, {}, signed=True)
+        commission = data.get("commission") if isinstance(data, dict) else None
+        if not isinstance(commission, dict):
+            raise ExchangeResponseError(
+                f"В ответе {USER_COMMISSION_RATE} нет объекта commission"
+            )
+        return CommissionRate(
+            taker=_to_decimal(_required(commission, "takerCommissionRate"), "takerCommissionRate"),
+            maker=_to_decimal(_required(commission, "makerCommissionRate"), "makerCommissionRate"),
+        )
+
     async def cancel_order(self, symbol: str, order_id: str) -> CancelResult:
         """DELETE /openApi/swap/v2/trade/order (живьём 02.10): code 0 →
         data.order со status "CANCELLED"; повторная отмена → code 109400 и
         msg «order not exist» — OrderNotFoundError (по тексту: тот же код у
         других ошибок). Ответ — не доказательство (см. CancelResult).
         max_retries=1 — как у остальных торговых вызовов."""
+        return await self._cancel({"symbol": symbol, "orderId": str(order_id)}, str(order_id))
+
+    async def _cancel(self, params: dict[str, Any], fallback_id: str) -> CancelResult:
         try:
             data = await self._request(
-                TRADE_ORDER, {"symbol": symbol, "orderId": str(order_id)},
-                signed=True, method="DELETE", max_retries=1,
+                TRADE_ORDER, params, signed=True, method="DELETE", max_retries=1,
             )
         except ExchangeResponseError as exc:
             if exc.code == ORDER_NOT_EXIST_CANCEL_CODE and "not exist" in str(exc).lower():
@@ -1209,7 +1296,7 @@ class BingXClient(ExchangeClient):
         if not isinstance(order, dict):
             raise ExchangeResponseError("Ожидался объект ордера в data.order")
         return CancelResult(
-            order_id=str(order.get("orderId") or order.get("orderID") or order_id),
+            order_id=str(order.get("orderId") or order.get("orderID") or fallback_id),
             status=str(order.get("status", "")),
             raw=order,
         )
@@ -1271,6 +1358,7 @@ class BingXClient(ExchangeClient):
             fee=abs(commission),
             raw=item,
             filled_at=_optional_ms_to_dt(item.get("updateTime") or item.get("time")),
+            position_id=_optional_id(item.get("positionID") or item.get("positionId")),
         )
 
     @staticmethod
@@ -1367,4 +1455,5 @@ class BingXClient(ExchangeClient):
             updated_at=_exchange_time(_required(item, "updateTime"), "updateTime"),
             take_profit=BingXClient._parse_attached_tp_sl(item.get("takeProfit")),
             stop_loss=BingXClient._parse_attached_tp_sl(item.get("stopLoss")),
+            position_id=_optional_id(item.get("positionID") or item.get("positionId")),
         )
