@@ -48,6 +48,10 @@ class TradeSource(StrEnum):
     # Хранится как VARCHAR(16) без native enum — "SIGNAL_EXECUTION" (16
     # символов) укладывается в текущую длину колонки, миграция не нужна.
     SIGNAL_EXECUTION = "SIGNAL_EXECUTION"
+    # 05.10.2026: сделка открыта из бота (чат-мастер или Mini App) —
+    # app/execution/opening. Как SIGNAL_EXECUTION: вход и стоп бота, сверка с
+    # «позиция без стопа», импорт не заводит её второй раз.
+    BOT = "BOT"
 
 
 class FillSide(StrEnum):
@@ -246,6 +250,9 @@ class OrderStatus(StrEnum):
     EXPIRED = "EXPIRED"
     ERROR = "ERROR"
     NOT_PLACED = "NOT_PLACED"
+    # 05.10.2026: лимитный вход открытия стоит на бирже (у BingX — PENDING;
+    # наш PENDING занят под «закоммичено до HTTP»).
+    WORKING = "WORKING"
 
 
 class ReconciliationKind(StrEnum):
@@ -305,6 +312,14 @@ class ExecutionCallbackAction(StrEnum):
     PM_YES = "pm_yes"
     PM_YES_RISK = "pm_yes_risk"
     PM_NO = "pm_no"
+    # Открытие сделки из бота (05.10.2026, M5): кнопки карточки в чате и
+    # вызовы Mini App. trade_opening_id — номер открытия.
+    TO_YES = "to_yes"            # «Открыть»
+    TO_YES_WARN = "to_yes_warn"  # «Открыть всё равно» (есть предупреждения)
+    TO_NO = "to_no"              # «Отмена» на карточке
+    TO_CANCEL = "to_cancel"      # «Отменить лимит»
+    MA_CONFIRM = "ma_confirm"    # Mini App: «Открыть»
+    MA_CANCEL = "ma_cancel"      # Mini App: «Отменить лимит»
 
 
 class PositionActionKind(StrEnum):
@@ -342,3 +357,54 @@ class ObservationStage(StrEnum):
 
     CARD = "card"
     CONFIRM = "confirm"
+
+
+# Открытие сделки из бота (05.10.2026, docs/open-trade-plan.md) -----------------
+
+
+class EntryType(StrEnum):
+    MARKET = "MARKET"
+    LIMIT = "LIMIT"
+
+
+class OpeningSource(StrEnum):
+    WIZARD = "wizard"
+    MINIAPP = "miniapp"
+
+
+class OpeningStatus(StrEnum):
+    """Состояние открытия (trade_openings.status), §4 плана.
+
+    Переходы — только условным UPDATE от ожидаемого статуса: второй
+    обработчик (двойной тап, Mini App и чат, восстановление) получает
+    rowcount 0 и ничего не отправляет."""
+
+    CARD = "CARD"                          # карточка показана, решения нет
+    DECLINED = "DECLINED"                  # «Отмена»
+    EXPIRED_CARD = "EXPIRED_CARD"          # карточка устарела без решения
+    REFUSED = "REFUSED"                    # отказ проверки до входа (error_code)
+    DRY_RUN = "DRY_RUN"                    # EXEC_OPEN_DRY_RUN: на биржу ничего
+    CONFIRMED = "CONFIRMED"                # «Открыть» принято, вход ещё не ушёл
+    SUBMITTING = "SUBMITTING"              # строка входа PENDING закоммичена, идёт HTTP
+    UNKNOWN = "UNKNOWN"                    # ответа на вход нет — поиск по cid
+    WORKING = "WORKING"                    # лимит стоит на бирже
+    FILLED = "FILLED"                      # вход исполнен, защита не подтверждена
+    PROTECTED = "PROTECTED"                # стоп подтверждён, сделка не записана
+    DONE = "DONE"                          # сделка в журнале
+    REJECTED = "REJECTED"                  # биржа отказала во входе
+    NOT_PLACED = "NOT_PLACED"              # вход не найден на бирже, позиции нет
+    CANCELLED = "CANCELLED"                # лимит отменён пользователем, исполнено 0
+    EXPIRED = "EXPIRED"                    # срок лимита вышел, исполнено 0
+    EMERGENCY_CLOSED = "EMERGENCY_CLOSED"  # стоп не встал — позиция закрыта маркетом
+    ALARM = "ALARM"                        # позиция без стопа, закрыть не удалось
+
+
+OPENING_ACTIVE = (
+    OpeningStatus.CONFIRMED,
+    OpeningStatus.SUBMITTING,
+    OpeningStatus.UNKNOWN,
+    OpeningStatus.WORKING,
+    OpeningStatus.FILLED,
+    OpeningStatus.PROTECTED,
+    OpeningStatus.ALARM,
+)

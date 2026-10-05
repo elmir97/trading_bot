@@ -208,6 +208,23 @@ class Settings(BaseSettings):
     # guards.check_live_orders_allowed.
     exec_allow_live_mode_orders: bool = False
 
+    # --- Открытие сделки из бота (05.10.2026, docs/open-trade-plan.md) ------
+    # Отдельные от EXEC_DRY_RUN выключатели: действия этапа 4 на демо живые,
+    # а открытие сначала идёт сухим прогоном. Live открытия — только явным
+    # EXEC_OPEN_ALLOW_LIVE поверх exec_allow_live_mode_orders.
+    exec_open_dry_run: bool = True
+    exec_open_allow_live: bool = False
+    # Ликвидация дальше стопа минимум в столько раз (|вход − ликв.| ≥ k·|вход − стоп|).
+    exec_open_liq_buffer: Decimal = Decimal("1.5")
+    # Поддерживающая маржа в оценке ликвидации до входа — консервативно (на
+    # Р3 факт ≈ 0.41%). После входа сверяется фактическая liquidationPrice.
+    exec_open_mmr: Decimal = Decimal("0.01")
+    # Срок лимитного входа по умолчанию и допустимые варианты, минуты.
+    exec_open_limit_expiry_minutes: int = 240
+    # Цена ушла с карточки: риск $ или объём изменились больше — отказ,
+    # новая карточка.
+    exec_open_card_drift_percent: Decimal = Decimal("10")
+
     # --- Дефолты торгового плана ------------------------------------------
     # Реальные значения хранятся в БД per-user; это лишь начальные значения
     # при создании плана, а не источник истины во время работы.

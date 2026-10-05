@@ -125,6 +125,12 @@ class UserSettings(IntPKMixin, TimestampMixin, Base):
     # после очистки /import за 30 дней вернул бы удалённые сделки.
     journal_cutoff_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # --- Открытие сделки из бота (M5, 05.10.2026) ------------------------------
+    # Режим маржи для новых сделок: 'ISOLATED' | 'CROSSED'. NULL — изолированная
+    # (решение владельца 05.10). Ставится на бирже перед входом, только когда по
+    # символу нет позиций и ордеров (104103, разведка Р3а).
+    margin_type_default: Mapped[str | None] = mapped_column(String(8))
+
     user: Mapped[User] = relationship(back_populates="settings")
 
 

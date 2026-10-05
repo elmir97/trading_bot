@@ -27,12 +27,14 @@ class ExecutionCallback(IntPKMixin, Base):
     __tablename__ = "execution_callbacks"
     __table_args__ = (
         CheckConstraint(
-            "action IN ('open', 'yes', 'no', 'pm_open', 'pm_yes', 'pm_yes_risk', 'pm_no')",
+            "action IN ('open', 'yes', 'no', 'pm_open', 'pm_yes', 'pm_yes_risk', 'pm_no', "
+            "'to_yes', 'to_yes_warn', 'to_no', 'to_cancel', 'ma_confirm', 'ma_cancel')",
             name="action_known",
         ),
         Index("ix_execution_callbacks_user_created", "user_id", "created_at"),
         Index("ix_execution_callbacks_notification", "notification_id"),
         Index("ix_execution_callbacks_position_action", "position_action_id"),
+        Index("ix_execution_callbacks_trade_opening", "trade_opening_id"),
     )
 
     created_at: Mapped[datetime] = mapped_column(
@@ -47,6 +49,8 @@ class ExecutionCallback(IntPKMixin, Base):
     # Этап 4: кнопки действий с позицией (pm_*) адресуют position_actions.id.
     # Без FK и nullable — по той же причине, что notification_id.
     position_action_id: Mapped[int | None] = mapped_column()
+    # M5: кнопки и вызовы открытия сделки (to_*, ma_*) — trade_openings.id.
+    trade_opening_id: Mapped[int | None] = mapped_column()
     chat_id: Mapped[int | None] = mapped_column(BigInteger)
     message_id: Mapped[int | None] = mapped_column(BigInteger)
     callback_query_id: Mapped[str | None] = mapped_column(String(64))

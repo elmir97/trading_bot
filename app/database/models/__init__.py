@@ -17,6 +17,7 @@ from app.database.models.signal import SignalRecord
 from app.database.models.signal_notification import SignalNotification
 from app.database.models.strategy import DEFAULT_STRATEGIES, Strategy
 from app.database.models.trade import Trade, TradeFill
+from app.database.models.trade_opening import TradeOpening
 from app.database.models.trading_plan import (
     DEFAULT_ALLOWED_SYMBOLS,
     DEFAULT_ALLOWED_TIMEFRAMES,
@@ -44,6 +45,7 @@ __all__ = [
     "Strategy",
     "Trade",
     "TradeFill",
+    "TradeOpening",
     "TradeMistake",
     "TradingPlan",
     "User",

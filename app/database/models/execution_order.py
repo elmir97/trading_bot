@@ -44,6 +44,7 @@ class ExecutionOrder(IntPKMixin, TimestampMixin, Base):
         Index("ix_execution_orders_user_status", "user_id", "status"),
         Index("ix_execution_orders_notification_id", "notification_id"),
         Index("ix_execution_orders_position_action_id", "position_action_id"),
+        Index("ix_execution_orders_trade_opening_id", "trade_opening_id"),
     )
 
     user_id: Mapped[int] = mapped_column(
@@ -70,6 +71,12 @@ class ExecutionOrder(IntPKMixin, TimestampMixin, Base):
     # по той же причине, что у signal_id: ордер — факт обращения к бирже.
     position_action_id: Mapped[int | None] = mapped_column(
         ForeignKey("position_actions.id", ondelete="SET NULL")
+    )
+    # M5 (05.10.2026): ордера открытия сделки из бота — вход, стоп, тейк,
+    # запасной стоп, аварийное закрытие. Свой разбор (app/execution/opening),
+    # reconciler'у этапа 15 эти входы не отдаются.
+    trade_opening_id: Mapped[int | None] = mapped_column(
+        ForeignKey("trade_openings.id", ondelete="SET NULL")
     )
 
     # Детерминированный ключ идемпотентности: f"tj{notification_id}u{user_id}
