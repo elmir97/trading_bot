@@ -269,7 +269,7 @@ class TradeRepository:
         return trade
 
     async def bot_fill_external_ids(self, user_id: int) -> set[str]:
-        """external_fill_id исполнений сделок бота (SIGNAL_EXECUTION): вход
+        """external_fill_id исполнений сделок бота (SIGNAL_EXECUTION и BOT): вход
         и выходы, записанные ботом и reconciler'ом. Импорт истории их не
         заводит второй раз — ручное закрытие позиции бота на бирже
         reconciler уже записал выходом этой сделки."""
@@ -278,7 +278,7 @@ class TradeRepository:
             .join(Trade, Trade.id == TradeFill.trade_id)
             .where(
                 Trade.user_id == user_id,
-                Trade.source == TradeSource.SIGNAL_EXECUTION,
+                Trade.source.in_((TradeSource.SIGNAL_EXECUTION, TradeSource.BOT)),
                 TradeFill.external_fill_id.is_not(None),
             )
         )

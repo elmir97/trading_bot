@@ -158,7 +158,10 @@ def trade_card(trade: Trade) -> str:
         f"<b>{trade.symbol} — {trade.side.label}</b>",
         "",
     ]
-    if trade.source is TradeSource.SIGNAL_EXECUTION and trade.status is TradeStatus.OPEN:
+    if (
+        trade.source in (TradeSource.SIGNAL_EXECUTION, TradeSource.BOT)
+        and trade.status is TradeStatus.OPEN
+    ):
         # Шаг 15.5.4: сделка бота блокирует повторный вход по символу
         # (гварды считают открытые позиции по журналу) — закрытая в журнале
         # раньше биржи, она откроет дорогу второй позиции. Автозакрытие по

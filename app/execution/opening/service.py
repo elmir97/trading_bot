@@ -12,14 +12,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
+from app.core.locks import LockBusyError, RedisLock, position_lock_key
 from app.core.logging import get_logger
 from app.core.security import SecretCipher
+from app.database.models.execution_order import ExecutionOrder
 from app.database.models.trade_opening import TradeOpening
 from app.database.models.user import User
 from app.database.repositories.trade import TradeRepository
@@ -38,6 +42,14 @@ from app.execution.opening.calc import (
     OpeningInputs,
     compute,
 )
+from app.execution.opening.execution import (
+    CLOSING_SIDE,
+    OPENING_SIDE,
+    Runner,
+    opening_client_order_id,
+    transition,
+)
+from app.execution.opening.flow import FlowOutcome, advance, working_text
 from app.execution.opening.render import render_card, render_refusal
 from app.market.cache import TTLCache
 from app.market.data import MarketDataService
@@ -49,6 +61,9 @@ from app.trading.enums import (
     ExchangeKeyMode,
     OpeningSource,
     OpeningStatus,
+    OrderRole,
+    OrderStatus,
+    OrderType,
 )
 from app.trading.risk import PlanValidator, tz_offset_for
 
@@ -87,6 +102,47 @@ class CardOutcome:
     @property
     def has_warnings(self) -> bool:
         return any(i.level is Level.WARN for i in self.issues)
+
+
+@dataclass(frozen=True, slots=True)
+class ConfirmOutcome:
+    """Итог «Открыть». final=False — карточку не трогать (лок занят, нужно
+    «Открыть всё равно»): кнопки остаются."""
+
+    text: str
+    status: OpeningStatus | None = None
+    trade_id: int | None = None
+    final: bool = True
+
+
+def inputs_of(opening: TradeOpening) -> OpeningInputs:
+    return OpeningInputs(
+        symbol=opening.symbol, side=opening.side, entry_type=opening.entry_type,
+        stop_loss=opening.stop_loss, risk_percent=opening.risk_percent,
+        leverage=opening.leverage, limit_price=opening.limit_price,
+        take_profit=opening.take_profit, expiry_minutes=opening.expiry_minutes,
+    )
+
+
+STATUS_TEXT = {
+    OpeningStatus.DECLINED: "Открытие отменено.",
+    OpeningStatus.EXPIRED_CARD: "Карточка устарела — пересчитай.",
+    OpeningStatus.REFUSED: "Открытие отклонено проверкой.",
+    OpeningStatus.DRY_RUN: "Сухой прогон уже выполнен.",
+    OpeningStatus.CONFIRMED: "Уже открываю…",
+    OpeningStatus.SUBMITTING: "Уже открываю…",
+    OpeningStatus.UNKNOWN: "Проверяю, открылась ли позиция…",
+    OpeningStatus.WORKING: "Лимит уже выставлен.",
+    OpeningStatus.FILLED: "Вход исполнен, ставлю защиту…",
+    OpeningStatus.PROTECTED: "Позиция под стопом, записываю сделку…",
+    OpeningStatus.DONE: "Сделка уже открыта.",
+    OpeningStatus.REJECTED: "Биржа отклонила этот вход.",
+    OpeningStatus.NOT_PLACED: "Вход не выставлен на бирже.",
+    OpeningStatus.CANCELLED: "Лимит отменён.",
+    OpeningStatus.EXPIRED: "Лимит истёк.",
+    OpeningStatus.EMERGENCY_CLOSED: "Позиция закрыта аварийно — стоп не встал.",
+    OpeningStatus.ALARM: "🚨 Позиция без стопа — закрой вручную.",
+}
 
 
 class OpeningService:
@@ -370,6 +426,257 @@ class OpeningService:
             },
         )
         return opening
+
+    # --- «Открыть» / «Отмена» --------------------------------------------------------
+
+    async def load(self, opening_id: int) -> TradeOpening | None:
+        opening: TradeOpening | None = await self._session.scalar(
+            select(TradeOpening).where(
+                TradeOpening.id == opening_id, TradeOpening.user_id == self._user.id
+            )
+        )
+        return opening
+
+    async def decline(self, opening_id: int) -> str:
+        opening = await self.load(opening_id)
+        if opening is None or opening.status is not OpeningStatus.CARD:
+            return STATUS_TEXT.get(opening.status, "") if opening else "Карточка не найдена."
+        await transition(
+            self._session, opening, (OpeningStatus.CARD,), OpeningStatus.DECLINED,
+            decided_at=datetime.now(UTC),
+        )
+        return "Отменено — на биржу ничего не отправлено."
+
+    async def confirm(
+        self,
+        opening_id: int,
+        *,
+        accept_warnings: bool,
+        message_id: int | None = None,
+        runner_factory: Any = None,
+    ) -> ConfirmOutcome:
+        """«Открыть» из чата или Mini App. Повторное нажатие, второй интерфейс
+        и параллельный вызов отсекаются условным переходом CARD → CONFIRMED и
+        локом позиции: вход отправляется один раз."""
+        opening = await self.load(opening_id)
+        if opening is None:
+            return ConfirmOutcome("Карточка не найдена — открой заново.")
+        if opening.status is not OpeningStatus.CARD:
+            # Повторное нажатие: итог покажет (или уже показал) первое — карточку
+            # не трогаем, ответ — подсказкой.
+            return ConfirmOutcome(
+                STATUS_TEXT.get(opening.status, "Карточка уже обработана."), opening.status,
+                opening.trade_id, final=False,
+            )
+        if (
+            message_id is not None and opening.card_message_id is not None
+            and message_id != opening.card_message_id
+        ):
+            return ConfirmOutcome("Это не последняя карточка — открой заново.", final=False)
+        now = datetime.now(UTC)
+        if now - opening.created_at > timedelta(seconds=self._settings.exec_confirm_ttl_seconds):
+            await transition(
+                self._session, opening, (OpeningStatus.CARD,), OpeningStatus.EXPIRED_CARD,
+                decided_at=now, error_code=Code.CARD_EXPIRED.value,
+            )
+            return ConfirmOutcome(
+                "⌛ Карточка устарела — цены могли уйти. Пересчитай.", OpeningStatus.EXPIRED_CARD
+            )
+        warnings = [v for v in opening.violations or [] if v.get("level") == Level.WARN.value]
+        if warnings and not accept_warnings:
+            return ConfirmOutcome(
+                "Есть предупреждения — нажми «Открыть всё равно».", final=False
+            )
+        if self._redis is None:
+            raise RuntimeError("OpeningService.confirm без Redis — лок позиции обязателен")
+        key = position_lock_key(self._user.id, opening.symbol, opening.side.value)
+        try:
+            async with RedisLock(self._redis, key, self._settings.confirm_lock_ttl_seconds):
+                return await self._confirm_locked(opening, bool(warnings), runner_factory)
+        except LockBusyError:
+            return ConfirmOutcome(
+                "Уже идёт действие с этой позицией — подожди пару секунд.", final=False
+            )
+
+    async def _refuse(
+        self, opening: TradeOpening, code: str, message: str
+    ) -> ConfirmOutcome:
+        await transition(
+            self._session, opening, (OpeningStatus.CONFIRMED,), OpeningStatus.REFUSED,
+            error_code=code, error_message=message,
+        )
+        logger.info(
+            "Открытие отклонено при «Открыть»",
+            extra={"user_id": self._user.id, "opening_id": opening.id, "code": code},
+        )
+        return ConfirmOutcome(render_refusal(message), OpeningStatus.REFUSED)
+
+    async def _confirm_locked(
+        self, opening: TradeOpening, warnings_accepted: bool, runner_factory: Any
+    ) -> ConfirmOutcome:
+        if not await transition(
+            self._session, opening, (OpeningStatus.CARD,), OpeningStatus.CONFIRMED,
+            decided_at=datetime.now(UTC), warnings_accepted=warnings_accepted,
+        ):
+            return ConfirmOutcome("Уже открываю…", final=False)
+        refusal = self._gate()
+        if refusal is not None:
+            return await self._refuse(opening, refusal.code.value, refusal.message)
+        client, refusal = await self.client()
+        if client is None:
+            assert refusal is not None
+            return await self._refuse(opening, refusal.code.value, refusal.message)
+        try:
+            return await self._execute(opening, client, runner_factory)
+        finally:
+            await client.close()
+
+    async def _execute(
+        self, opening: TradeOpening, client: ExchangeClient, runner_factory: Any
+    ) -> ConfirmOutcome:
+        inputs = inputs_of(opening)
+        market, refusal = await self.market_snapshot(client, inputs)
+        if market is None:
+            assert refusal is not None
+            return await self._refuse(opening, refusal.code.value, refusal.message)
+        calc, issues = await self.evaluate(inputs, market)
+        blocks = [i for i in issues if i.level is Level.BLOCK]
+        if blocks:
+            return await self._refuse(opening, blocks[0].code, blocks[0].message)
+        card_warns = {v.get("code") for v in opening.violations or []}
+        new_warns = [i for i in issues if i.level is Level.WARN and i.code not in card_warns]
+        if new_warns:
+            return await self._refuse(
+                opening, Code.CARD_STALE.value,
+                f"Появилось новое предупреждение: {new_warns[0].message} Пересчитай карточку.",
+            )
+        drift = self._drift(opening, calc)
+        if drift is not None:
+            return await self._refuse(opening, Code.CARD_STALE.value, drift)
+
+        if self._settings.exec_open_dry_run:
+            return await self._dry_run(opening, calc)
+
+        refusal_text = await self._margin_and_leverage(client, opening, market)
+        if refusal_text is not None:
+            code, message = refusal_text
+            return await self._refuse(opening, code, message)
+
+        info = market.symbol_info
+        runner = (runner_factory or Runner)(
+            self._session, self._settings, client, opening,
+            price_precision=info.price_precision, quantity_precision=info.quantity_precision,
+        )
+        entry = await runner.place_entry(calc.quantity)
+        if entry.status is OpeningStatus.REJECTED:
+            return ConfirmOutcome(
+                f"⛔ Биржа отклонила вход: {entry.message}\nПозиция не открыта.",
+                OpeningStatus.REJECTED,
+            )
+        if entry.status is OpeningStatus.WORKING:
+            expires = (
+                datetime.now(UTC) + timedelta(minutes=opening.expiry_minutes)
+                if opening.expiry_minutes else None
+            )
+            await transition(
+                self._session, opening, (OpeningStatus.SUBMITTING,), OpeningStatus.WORKING,
+                expires_at=expires,
+            )
+            return ConfirmOutcome(working_text(runner), OpeningStatus.WORKING)
+        if entry.status is OpeningStatus.UNKNOWN and opening.status is not OpeningStatus.UNKNOWN:
+            # Вход не отправлен (уже отправлялся / открытие взяли) — ничего не делаем.
+            return ConfirmOutcome(entry.message or "Уже открываю…", opening.status, final=False)
+        outcome: FlowOutcome = await advance(runner)
+        return ConfirmOutcome(outcome.text, outcome.status, outcome.trade_id)
+
+    def _drift(self, opening: TradeOpening, calc: OpeningCalc) -> str | None:
+        """Цена ушла с карточки: объём или риск $ изменились больше порога."""
+        limit = self._settings.exec_open_card_drift_percent
+        for name, before, after in (
+            ("объём", opening.quantity, calc.quantity),
+            ("риск", opening.risk_usd, calc.risk_usd),
+        ):
+            if before is None or before <= 0:
+                continue
+            change = abs(after - before) / before * Decimal(100)
+            if change > limit:
+                return (
+                    f"Цена ушла с карточки: {name} изменился на "
+                    f"{change.quantize(Decimal('0.1'))}% (порог {limit}%). Пересчитай карточку."
+                )
+        return None
+
+    async def _dry_run(self, opening: TradeOpening, calc: OpeningCalc) -> ConfirmOutcome:
+        """EXEC_OPEN_DRY_RUN: строки того, что ушло бы, — на биржу ничего."""
+        side = opening.side
+        is_limit = opening.entry_type is EntryType.LIMIT
+        rows = [
+            (OrderRole.ENTRY, OrderType.LIMIT if is_limit else OrderType.MARKET,
+             OPENING_SIDE[side], "e", opening.limit_price if is_limit else None, None),
+            (OrderRole.STOP_LOSS, OrderType.STOP_MARKET, CLOSING_SIDE[side], "s", None,
+             opening.stop_loss),
+        ]
+        if opening.take_profit is not None:
+            rows.append((OrderRole.TAKE_PROFIT, OrderType.TAKE_PROFIT_MARKET, CLOSING_SIDE[side],
+                         "t", None, opening.take_profit))
+        for role, order_type, order_side, letter, price, trigger in rows:
+            self._session.add(ExecutionOrder(
+                user_id=self._user.id, trade_opening_id=opening.id,
+                client_order_id=opening_client_order_id(opening.id, self._user.id, letter),
+                symbol=opening.symbol, side=order_side, position_side=side,
+                order_type=order_type, role=role, quantity=calc.quantity, price=price,
+                trigger_price=trigger, card_price=opening.card_price, leverage=opening.leverage,
+                status=OrderStatus.DRY_RUN, stage="confirm",
+            ))
+        await self._session.flush()
+        await transition(
+            self._session, opening, (OpeningStatus.CONFIRMED,), OpeningStatus.DRY_RUN,
+            quantity=calc.quantity,
+        )
+        kind = "лимит" if is_limit else "маркет"
+        return ConfirmOutcome(
+            f"🧪 Сухой прогон: {kind} {opening.symbol} {side.value} {calc.quantity} со стопом "
+            f"{opening.stop_loss}"
+            + (f" и тейком {opening.take_profit}" if opening.take_profit is not None else "")
+            + " ушёл бы на биржу. Ничего не отправлено.",
+            OpeningStatus.DRY_RUN,
+        )
+
+    async def _margin_and_leverage(
+        self, client: ExchangeClient, opening: TradeOpening, market: MarketSnapshot
+    ) -> tuple[str, str] | None:
+        """Режим маржи и плечо — на бирже до входа, с read-back. Расхождение —
+        отказ, вход не отправляется (разведка Р1–Р3а)."""
+        symbol, side = opening.symbol, opening.side
+        desired = market.desired_margin_type
+        try:
+            if market.margin_type is not desired:
+                await client.set_margin_type(symbol, desired)
+                actual = await client.get_margin_type(symbol, max_retries=1)
+                if actual is not desired:
+                    return (
+                        "MARGIN_MODE_FAILED",
+                        f"Режим маржи {symbol} не сменился: на бирже {actual.value}. "
+                        "Вход не отправлен.",
+                    )
+            info = await client.get_leverage(symbol, max_retries=1)
+            current = info.long_leverage if side.direction > 0 else info.short_leverage
+            if current != opening.leverage:
+                await client.set_leverage(symbol, opening.leverage, position_side=side.value)
+                info = await client.get_leverage(symbol, max_retries=1)
+                current = info.long_leverage if side.direction > 0 else info.short_leverage
+                if current != opening.leverage:
+                    return (
+                        Code.LEVERAGE_FAILED.value,
+                        f"Плечо не выставилось: {current}x вместо {opening.leverage}x. "
+                        "Вход не отправлен.",
+                    )
+        except ExchangeError as exc:
+            return (
+                Code.LEVERAGE_FAILED.value,
+                f"Режим маржи или плечо не выставлены ({exc}). Вход не отправлен.",
+            )
+        return None
 
     async def attach_message(self, opening: TradeOpening, chat_id: int, message_id: int) -> None:
         """Карточка отправлена отдельным сообщением — «Открыть» сверяет его id."""

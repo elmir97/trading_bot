@@ -20,6 +20,7 @@ from app.core.security import SecretCipher
 from app.database.session import Database
 from app.workers.base import job_wrapper
 from app.workers.daily import DailyJobs
+from app.workers.openings import OpeningsWorker
 from app.workers.positions import PositionMonitor
 from app.workers.reconciler import Reconciler
 
@@ -46,6 +47,7 @@ class BackgroundJobs:
         # 03.10: пока пользователь вводит число, некритичные уведомления
         # откладываются (app/core/input_prompt.py).
         self._reconciler = Reconciler(bot, db, settings, cipher, redis, input_gate=input_gate)
+        self.openings = OpeningsWorker(bot, db, settings, cipher, redis)
         self._daily = DailyJobs(
             bot, db, settings, reconciler=self._reconciler, input_gate=input_gate
         )
@@ -76,6 +78,14 @@ class BackgroundJobs:
             max_instances=1,
         )
         self._scheduler.add_job(
+            job_wrapper("openings", self.openings.run, quiet=True),
+            "interval",
+            seconds=self._settings.openings_interval_seconds,
+            id="openings",
+            coalesce=True,
+            max_instances=1,
+        )
+        self._scheduler.add_job(
             job_wrapper("daily_jobs", self._daily.run),
             "interval",
             minutes=self._settings.daily_jobs_interval_minutes,
@@ -90,6 +100,7 @@ class BackgroundJobs:
                 "position_monitor_seconds": self._settings.position_monitor_price_seconds,
                 "daily_jobs_minutes": self._settings.daily_jobs_interval_minutes,
                 "reconciler_seconds": self._settings.reconciler_interval_seconds,
+                "openings_seconds": self._settings.openings_interval_seconds,
             },
         )
 

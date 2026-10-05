@@ -71,6 +71,17 @@ def _position_ref(symbol: str, side: TradeSide) -> str:
     return f"{symbol}:{SIDE_CODE[side]}"
 
 
+def position_keyboard(symbol: str, side: TradeSide) -> InlineKeyboardMarkup:
+    """Кнопка «Позиция» под итогом открытия сделки из бота (05.10.2026) —
+    экран действий этой позиции (этап 4)."""
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(
+        text=f"⚙️ Позиция {_short(symbol)} {side.value}",
+        callback_data=f"{PositionsCB.ACTIONS}{_position_ref(symbol, side)}",
+    ))
+    return builder.as_markup()
+
+
 def _parse_ref(data: str, prefix: str) -> tuple[str, TradeSide] | None:
     symbol, _, code = data.removeprefix(prefix).rpartition(":")
     if not symbol or code not in SIDE_BY_CODE:

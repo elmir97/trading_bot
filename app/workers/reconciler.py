@@ -39,6 +39,7 @@ from app.core.timefmt import closed_at_line
 from app.database.models.execution_order import ExecutionOrder
 from app.database.models.reconciliation_event import ReconciliationEvent
 from app.database.models.trade import Trade
+from app.database.models.trade_opening import TradeOpening
 from app.database.models.user import User, UserSettings
 from app.database.repositories.execution_order import ExecutionOrderRepository
 from app.database.repositories.reconciliation_event import ReconciliationEventRepository
@@ -82,6 +83,7 @@ from app.execution.redelivery import (
 )
 from app.services.exchange_factory import ExchangeFactory
 from app.trading.enums import (
+    OPENING_ACTIVE,
     FillSide,
     OrderRole,
     OrderStatus,
@@ -377,7 +379,7 @@ class Reconciler:
             journal_open_keys: set[str] = set()
 
             for trade in open_trades:
-                if trade.source is TradeSource.SIGNAL_EXECUTION:
+                if trade.source in (TradeSource.SIGNAL_EXECUTION, TradeSource.BOT):
                     if not trade.fill_confirmed:
                         continue
                     await self._reconcile_trade(ctx, client, trade, positions, check_stops)
@@ -433,7 +435,7 @@ class Reconciler:
 
             in_flight = {
                 e.symbol for e in unresolved if now - e.created_at < UNRESOLVED_ENTRY_WINDOW
-            }
+            } | await _opening_symbols(session, user_id)
             journal_open = {
                 (t.symbol, t.side)
                 for t in await trades_repo.list_open_for_reconcile(user_id, account_mode=mode)
@@ -470,13 +472,16 @@ class Reconciler:
         *,
         bot: bool = True,
     ) -> None:
-        conditionals = (
-            await ExecutionOrderRepository(ctx.session).conditionals_for_notification(
+        repo = ExecutionOrderRepository(ctx.session)
+        if bot and trade.source is TradeSource.BOT:
+            # 05.10.2026: сделка, открытая из бота, — стоп/тейк по trade_id.
+            conditionals = await repo.conditionals_for_trade(ctx.user_id, trade.id)
+        elif bot and trade.notification_id is not None:
+            conditionals = await repo.conditionals_for_notification(
                 ctx.user_id, trade.notification_id
             )
-            if bot and trade.notification_id is not None
-            else []
-        )
+        else:
+            conditionals = []
         stop_row = next((c for c in conditionals if c.role is OrderRole.STOP_LOSS), None)
         take_row = next((c for c in conditionals if c.role is OrderRole.TAKE_PROFIT), None)
         snapshot = BotTradeSnapshot(
@@ -975,6 +980,18 @@ def _redelivery_text(event: ReconciliationEvent, user: User, now: datetime) -> s
         created_at=event.created_at, now=now, tz_offset_hours=tz_offset_for(timezone)
     )
     return f"{notice}\n{body}" if notice else body
+
+
+async def _opening_symbols(session: AsyncSession, user_id: int) -> set[str]:
+    """05.10.2026: символы незавершённых открытий из бота (вход в полёте, лимит
+    стоит или исполнен частично, сделка ещё не записана) — позиция по ним не
+    «чужая», тревоги ORPHAN_POSITION нет."""
+    rows = await session.scalars(
+        select(TradeOpening.symbol).where(
+            TradeOpening.user_id == user_id, TradeOpening.status.in_(OPENING_ACTIVE)
+        )
+    )
+    return set(rows)
 
 
 def _in_scope(dedup_key: str, prefix: str) -> bool:

@@ -1363,3 +1363,80 @@ async def test_history_unparsed_does_not_stop_user_reconcile(ctx) -> None:  # ty
     await _reconciler(settings, db, bot).run()
 
     assert any("BTC-USDT" in text for text in bot.sent)
+
+
+# --- 05.10.2026: сделка, открытая из бота (TradeSource.BOT) ------------------------
+
+
+async def _bot_open_trade(  # type: ignore[no-untyped-def]
+    session, user_id: int, symbol: str, *, entry: str, qty: str, entry_id: str,
+    stop_id: str, take_id: str, opened_at: datetime, fee: str,
+) -> Trade:
+    """Как _bot_trade, но открытие из бота: без уведомления сигнала, стоп и
+    тейк связаны со сделкой через trade_id (вложенные — без clientOrderId)."""
+    trade = await TradeJournal(TradeRepository(session)).open_trade(
+        user_id=user_id, symbol=symbol, side=TradeSide.LONG, entry_price=D(entry),
+        quantity=D(qty), leverage=10, opened_at=opened_at, source=TradeSource.BOT,
+        account_mode=ExchangeKeyMode.DEMO, external_fill_id=entry_id, fee=D(fee),
+    )
+
+    def row(role: OrderRole, order_type: OrderType, status: OrderStatus, oid: str,
+            cid: str | None) -> ExecutionOrder:
+        return ExecutionOrder(
+            user_id=user_id, trade_id=trade.id, client_order_id=cid, exchange_order_id=oid,
+            symbol=symbol, side=OrderSide.BUY if role is OrderRole.ENTRY else OrderSide.SELL,
+            position_side=TradeSide.LONG, order_type=order_type, role=role, status=status,
+        )
+
+    session.add_all([
+        row(OrderRole.ENTRY, OrderType.MARKET, OrderStatus.FILLED, entry_id,
+            f"to{trade.id}u{user_id}e"),
+        row(OrderRole.STOP_LOSS, OrderType.STOP_MARKET, OrderStatus.SUBMITTED, stop_id, None),
+        row(OrderRole.TAKE_PROFIT, OrderType.TAKE_PROFIT_MARKET, OrderStatus.SUBMITTED,
+            take_id, None),
+    ])
+    await session.commit()
+    return trade
+
+
+async def test_bot_opened_trade_closed_by_our_stop(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Стоп сделки BOT узнаётся по trade_id (не по уведомлению сигнала):
+    выход — «по стопу», строка стопа FILLED, тейк снят биржей."""
+    settings, db, session, user, _demo = ctx
+    sol = await _bot_open_trade(
+        session, user.id, "SOL-USDT", entry="123.021", qty="1362.07", entry_id=SOL_ENTRY,
+        stop_id=SOL_STOP, take_id=SOL_TAKE, fee="83.781520",
+        opened_at=datetime(2026, 9, 27, 14, 15, 30, 300000, tzinfo=UTC),
+    )
+    await _bot_open_trade(
+        session, user.id, "LINK-USDT", entry="14.4", qty="2037.8", entry_id=LINK_ENTRY,
+        stop_id=LINK_STOP, take_id=LINK_TAKE, fee="14.672461",
+        opened_at=datetime(2026, 9, 27, 8, 15, 32, 828000, tzinfo=UTC),
+    )
+    bot = FakeBot()
+
+    await _run_reconciler(settings, db, bot)
+
+    closed = await _trade(db, sol.id)
+    assert closed.status is TradeStatus.CLOSED
+    assert closed.exit_reason == EXIT_STOP_LOSS
+    assert {f.external_fill_id for f in closed.fills} == {SOL_ENTRY, SOL_CHILD}
+    rows = await _rows(db, "SOL-USDT")
+    assert rows[OrderRole.STOP_LOSS].status is OrderStatus.FILLED
+    assert len(bot.sent) == 1 and "закрыта по стопу" in bot.sent[0]
+
+
+async def test_bot_opened_trade_missing_stop_alarm(ctx) -> None:  # type: ignore[no-untyped-def]
+    settings, db, session, user, demo = ctx
+    settings.reconciler_stop_check_every = 1
+    await _bot_open_trade(
+        session, user.id, "LINK-USDT", entry="14.4", qty="2037.8", entry_id=LINK_ENTRY,
+        stop_id=LINK_STOP, take_id=LINK_TAKE, fee="14.672461",
+        opened_at=datetime(2026, 9, 27, 8, 15, 32, 828000, tzinfo=UTC),
+    )
+    demo.link_open_orders = []
+    bot = FakeBot()
+
+    await _run_reconciler(settings, db, bot)
+
+    assert any(t.startswith("⚠️ ПОЗИЦИЯ БЕЗ СТОПА: LINK-USDT") for t in bot.sent)

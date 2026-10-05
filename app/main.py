@@ -236,6 +236,13 @@ async def run() -> None:
         # 03.10: хранилище FSM того же процесса — «пользователь вводит число».
         input_gate=InputGate(dp.storage, bot.id),
     )
+    # Открытия сделок из бота, прерванные рестартом (вход ушёл без ответа,
+    # исполнен без подтверждённого стопа) — до поллинга и до первого цикла.
+    if settings.background_jobs_enabled:
+        try:
+            await background_jobs.openings.run()
+        except Exception:
+            logger.exception("Восстановление открытий при старте упало — повторит цикл")
     background_jobs.start()
 
     try:
