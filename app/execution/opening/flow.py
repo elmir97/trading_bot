@@ -84,7 +84,7 @@ async def advance(runner: Runner, *, now: datetime | None = None) -> FlowOutcome
 
     if o.status in (OpeningStatus.FILLED, OpeningStatus.ALARM) and o.filled_qty is not None:
         result = await runner.protect()
-        return await _after_protect(runner, result)
+        return await after_protect(runner, result)
 
     if o.status is OpeningStatus.PROTECTED:
         trade_id = await runner.record_trade()
@@ -96,7 +96,7 @@ async def advance(runner: Runner, *, now: datetime | None = None) -> FlowOutcome
     return FlowOutcome(o.status, "", notify=False)
 
 
-async def _after_protect(runner: Runner, result: ProtectResult) -> FlowOutcome:
+async def after_protect(runner: Runner, result: ProtectResult) -> FlowOutcome:
     o = runner.opening
     if result.status is OpeningStatus.PROTECTED:
         await transition(

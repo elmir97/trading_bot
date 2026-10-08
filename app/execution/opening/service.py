@@ -32,7 +32,7 @@ from app.exchanges.base import ExchangeClient, ExchangeError, MarginType
 from app.execution import guards
 from app.execution.models import ExecutionRefusal
 from app.execution.models import ExecutionRefusalCode as Code
-from app.execution.opening import checks
+from app.execution.opening import checks, limits
 from app.execution.opening.calc import (
     Issue,
     Level,
@@ -497,6 +497,44 @@ class OpeningService:
             return ConfirmOutcome(
                 "Уже идёт действие с этой позицией — подожди пару секунд.", final=False
             )
+
+    async def cancel_limit(self, opening_id: int) -> ConfirmOutcome:
+        """«Отменить лимит» из чата или Mini App — та же ветка, что истечение."""
+        opening = await self.load(opening_id)
+        if opening is None or opening.status is not OpeningStatus.WORKING:
+            status = opening.status if opening else None
+            return ConfirmOutcome(
+                STATUS_TEXT.get(status, "Лимит не найден.") if status else "Лимит не найден.",
+                status, opening.trade_id if opening else None, final=False,
+            )
+        if self._redis is None:
+            raise RuntimeError("OpeningService.cancel_limit без Redis — лок позиции обязателен")
+        key = position_lock_key(self._user.id, opening.symbol, opening.side.value)
+        try:
+            async with RedisLock(self._redis, key, self._settings.confirm_lock_ttl_seconds):
+                await self._session.refresh(opening)
+                if opening.status is not OpeningStatus.WORKING:
+                    return ConfirmOutcome(
+                        STATUS_TEXT.get(opening.status, ""), opening.status, final=False
+                    )
+                client = await self._factory.for_user(
+                    self._session, self._user.id, mode=opening.account_mode
+                )
+                try:
+                    info = await MarketDataService(client, self._cache).get_symbol_info(
+                        opening.symbol
+                    )
+                    runner = Runner(
+                        self._session, self._settings, client, opening,
+                        price_precision=info.price_precision if info else 8,
+                        quantity_precision=info.quantity_precision if info else 8,
+                    )
+                    outcome = await limits.cancel(runner, OpeningStatus.CANCELLED)
+                finally:
+                    await client.close()
+        except LockBusyError:
+            return ConfirmOutcome("Уже идёт действие с этой позицией — подожди.", final=False)
+        return ConfirmOutcome(outcome.text, outcome.status, outcome.trade_id)
 
     async def _refuse(
         self, opening: TradeOpening, code: str, message: str

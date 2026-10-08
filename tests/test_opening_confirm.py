@@ -63,6 +63,13 @@ INPUTS = OpeningInputs(
 
 @pytest_asyncio.fixture
 async def ctx(unique_telegram_id):  # type: ignore[no-untyped-def]
+    async for c in opening_context(unique_telegram_id()):
+        yield c
+
+
+async def opening_context(telegram_id: int):  # type: ignore[no-untyped-def]
+    """Окружение открытия: пользователь с планом, фейковая биржа, FakeRedis,
+    сервис и восстановление. Общий для test_opening_limits."""
     settings = Settings(  # type: ignore[call-arg]
         trading_execution_enabled=True, bingx_trading_mode="demo", exec_dry_run=False,
         exec_open_dry_run=False, exec_order_readback_delay_ms=0,
@@ -75,7 +82,7 @@ async def ctx(unique_telegram_id):  # type: ignore[no-untyped-def]
         user = await UserService(
             UserRepository(session), StrategyRepository(session),
             MistakeTypeRepository(session), settings,
-        ).get_or_create(telegram_id=unique_telegram_id())
+        ).get_or_create(telegram_id=telegram_id)
         user.settings.active_exchange_mode = ExchangeKeyMode.DEMO
         plan = await UserRepository(session).get_trading_plan(user.id)
         assert plan is not None

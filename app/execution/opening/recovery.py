@@ -8,8 +8,8 @@
 - CONFIRMED — вход не уходил (строка ENTRY появляется вместе с SUBMITTING
   одним коммитом) → REFUSED «прервано перезапуском»;
 - SUBMITTING / UNKNOWN — поиск по clientOrderId (flow.advance);
-- FILLED / ALARM — защита позиции; PROTECTED — запись сделки.
-WORKING (лимит на бирже) ведёт цикл лимитов, не этот модуль.
+- FILLED / ALARM — защита позиции; PROTECTED — запись сделки;
+- WORKING — лимит на бирже: исполнение, частичное, истечение (limits.tick).
 """
 
 from __future__ import annotations
@@ -28,11 +28,12 @@ from app.database.models.trade_opening import TradeOpening
 from app.database.models.user import User
 from app.database.session import Database
 from app.exchanges.base import ExchangeError
+from app.execution.opening import limits
 from app.execution.opening.execution import Runner, transition
 from app.execution.opening.flow import FlowOutcome, advance
 from app.market.cache import TTLCache
 from app.market.data import MarketDataService
-from app.trading.enums import OpeningStatus, TradeSide
+from app.trading.enums import OPENING_ACTIVE, OpeningStatus, TradeSide
 
 logger = get_logger(__name__)
 
@@ -46,9 +47,24 @@ RECOVERABLE = (
     OpeningStatus.FILLED,
     OpeningStatus.PROTECTED,
     OpeningStatus.ALARM,
+    OpeningStatus.WORKING,
 )
 
 _market_cache = TTLCache()
+
+
+async def opening_in_flight(
+    session: Any, user_id: int, symbol: str, side: TradeSide
+) -> bool:
+    """Незавершённое открытие из бота по этой позиции (вход в полёте, лимит
+    стоит или исполнен частично, сделка не записана)."""
+    found = await session.scalar(
+        select(TradeOpening.id).where(
+            TradeOpening.user_id == user_id, TradeOpening.symbol == symbol,
+            TradeOpening.side == side, TradeOpening.status.in_(OPENING_ACTIVE),
+        ).limit(1)
+    )
+    return found is not None
 
 
 async def recover_openings(
@@ -142,7 +158,10 @@ async def _advance(
             session, settings, client, opening,
             price_precision=info.price_precision, quantity_precision=info.quantity_precision,
         )
-        return await advance(runner, now=now or datetime.now(UTC))
+        moment = now or datetime.now(UTC)
+        if opening.status is OpeningStatus.WORKING:
+            return await limits.tick(runner, now=moment)
+        return await advance(runner, now=moment)
     except ExchangeError as exc:
         logger.warning(
             "Восстановление: биржа не ответила — повтор следующим циклом",

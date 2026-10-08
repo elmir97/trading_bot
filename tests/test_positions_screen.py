@@ -124,8 +124,13 @@ def env(monkeypatch):  # type: ignore[no-untyped-def]
     async def list_open(self, user_id, limit=50):  # type: ignore[no-untyped-def]
         return list(state.trades)
 
+    async def opening_in_flight(session, user_id, symbol, side):  # type: ignore[no-untyped-def]
+        return (symbol, side) in state.openings
+
+    state.openings = set()
     monkeypatch.setattr(screen, "ExchangeFactory", Factory)
     monkeypatch.setattr(screen, "HistoryImporter", Importer)
+    monkeypatch.setattr(screen, "opening_in_flight", opening_in_flight)
     monkeypatch.setattr(TradeRepository, "list_open", list_open)
     screen._market_cache.invalidate("symbols")
     return state
@@ -273,6 +278,18 @@ async def test_import_button_imports_current_position_only(env) -> None:  # type
     assert env.import_modes == [ExchangeKeyMode.DEMO]
     # M4: отсечка журнала и пояс пользователя передаются импортёру.
     assert env.import_cutoffs == [(CUTOFF, 5)]
+
+
+async def test_import_refused_while_opening_in_flight(env) -> None:  # type: ignore[no-untyped-def]
+    """05.10.2026: позицию открывает бот (лимит исполнен частично) — «В журнал»
+    отказывает, иначе сделка задвоится."""
+    env.client = _Client([_position()], [])
+    env.openings = {("XRP-USDT", TradeSide.LONG)}
+    callback = _callback(f"{PositionsCB.IMPORT}XRP-USDT:L")
+    await screen.import_position(callback, MagicMock(), _user(), settings=None, cipher=None)  # type: ignore[arg-type]
+    assert env.imports == []
+    args, kwargs = callback.answer.call_args
+    assert "открывается из бота" in args[0] and kwargs.get("show_alert") is True
 
 
 async def test_import_refusal_points_to_full_import(env) -> None:  # type: ignore[no-untyped-def]

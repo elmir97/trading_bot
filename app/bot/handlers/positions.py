@@ -38,6 +38,7 @@ from app.database.models.trade import Trade
 from app.database.models.user import User
 from app.database.repositories.trade import TradeRepository
 from app.exchanges.base import ExchangeAuthError, ExchangeClient, ExchangeError, Position
+from app.execution.opening.recovery import opening_in_flight
 from app.execution.position_view import (
     PositionView,
     build_views,
@@ -311,6 +312,14 @@ async def import_position(
         return
     symbol, side = ref
     label = f"{symbol} {side.value}"
+    if await opening_in_flight(session, user.id, symbol, side):
+        # 05.10.2026: позиция открывается из бота (лимит исполнен частично,
+        # идёт защита) — сделку запишет само открытие, иначе будет дубль.
+        await callback.answer(
+            f"{label} сейчас открывается из бота — сделку запишет само открытие.",
+            show_alert=True,
+        )
+        return
     await callback.answer("Заношу в журнал…")
     try:
         client = await ExchangeFactory(settings, cipher).for_user(

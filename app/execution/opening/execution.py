@@ -239,6 +239,8 @@ class Runner:
         o.entry_order_id = result.order_id or None
         await self.session.commit()
         if is_limit and result.status in ("PENDING", "NEW"):
+            row.status = OrderStatus.WORKING
+            await self.session.commit()
             return EntryResult(OpeningStatus.WORKING)
         return EntryResult(OpeningStatus.FILLED)
 
@@ -288,18 +290,22 @@ class Runner:
     def _match(
         self, orders: list[OpenOrder], order_type: OrderType, level: Decimal, position: Position
     ) -> OpenOrder | None:
+        """Наш стоп/тейк на позиции. Несколько (частичное исполнение лимита —
+        вложенный на каждую часть, плюс запасной closePosition): первым —
+        closePosition (покрывает весь остаток), иначе с наибольшим объёмом."""
         target = self._q(level)
-        for o in orders:
-            if (
-                o.symbol == self.opening.symbol and o.order_type == order_type.value
-                and o.position_side == self.side.value
-                and o.side == CLOSING_SIDE[self.side].value
-                and o.stop_price is not None and self._q(o.stop_price) == target
-                and (o.position_id is None or position.position_id is None
-                     or o.position_id == position.position_id)
-            ):
-                return o
-        return None
+        candidates = [
+            o for o in orders
+            if o.symbol == self.opening.symbol and o.order_type == order_type.value
+            and o.position_side == self.side.value
+            and o.side == CLOSING_SIDE[self.side].value
+            and o.stop_price is not None and self._q(o.stop_price) == target
+            and (o.position_id is None or position.position_id is None
+                 or o.position_id == position.position_id)
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda o: (o.close_position, o.quantity))
 
     async def position(self) -> Position | None:
         positions = await self.client.get_positions(max_retries=1)
