@@ -28,7 +28,9 @@ from app.core.logging import get_logger
 logger = get_logger(__name__)
 
 TRAIL_KEY = "wizard_trail"
-WIZARD_PREFIX = "AddTradeStates:"
+# Мастер журнала и мастер «Открыть на бирже» (05.10.2026) — одна переписка:
+# переход между группами (выбор пути в начале) её не теряет.
+WIZARD_PREFIXES = ("AddTradeStates:", "OpenTradeStates:")
 
 _added: ContextVar[set[int] | None] = ContextVar("wizard_trail_added", default=None)
 
@@ -45,7 +47,7 @@ async def remember(state: FSMContext, message_id: int) -> None:
 
 
 def _in_wizard(state_name: str | None) -> bool:
-    return bool(state_name) and str(state_name).startswith(WIZARD_PREFIX)
+    return bool(state_name) and str(state_name).startswith(WIZARD_PREFIXES)
 
 
 class WizardTrailMiddleware(BaseMiddleware):

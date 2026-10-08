@@ -30,6 +30,7 @@ from app.bot.handlers import (
     exchange_menu,
     fsm_guard,
     insights,
+    open_trade,
     pending,
     position_actions,
     positions,
@@ -137,6 +138,7 @@ def build_dispatcher(
     dp.include_router(diagnostics.router)
     dp.include_router(positions.router)
     dp.include_router(position_actions.router)
+    dp.include_router(open_trade.router)
     dp.include_router(trades.router)
     dp.include_router(analysis.router)
     dp.include_router(exchange_menu.router)

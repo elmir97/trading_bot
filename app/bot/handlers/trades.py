@@ -20,7 +20,6 @@ from app.bot.keyboards.main import (
     back_to,
     back_to_main,
     main_menu,
-    nav_row,
     with_menu_row,
     with_nav,
 )
@@ -247,16 +246,9 @@ async def _show_entry_reason_prompt(event: Message | CallbackQuery, state: FSMCo
     )
 
 
-@router.callback_query(F.data == MenuCallback.ADD_TRADE)
-@router.message(Command("trade"))
-async def start_add_trade(
-    event: Message | CallbackQuery,
-    state: FSMContext,
-    user: User,
-    session: AsyncSession,
-) -> None:
-    await state.clear()
-    await _show_symbol_prompt(event, state, user, session)
+# «➕ Добавить сделку» и /trade начинаются с выбора пути — app/bot/handlers/
+# open_trade.py (05.10.2026); «Только записать в журнал» ведёт в
+# _show_symbol_prompt ниже.
 
 
 @router.callback_query(AddTradeStates.symbol, F.data.startswith(TradeCB.SYMBOL))

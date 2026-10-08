@@ -49,6 +49,7 @@ async def record_callback(
     message_id: int | None,
     callback_query_id: str | None,
     position_action_id: int | None = None,
+    trade_opening_id: int | None = None,
 ) -> None:
     async with db.session() as session:
         await session.execute(text(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"))
@@ -58,6 +59,7 @@ async def record_callback(
                 action=action.value,
                 notification_id=notification_id,
                 position_action_id=position_action_id,
+                trade_opening_id=trade_opening_id,
                 chat_id=chat_id,
                 message_id=message_id,
                 callback_query_id=callback_query_id,

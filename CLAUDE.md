@@ -26,7 +26,7 @@ DATABASE_URL=postgresql+asyncpg://test:test@localhost:5432/trading_bot_test
 **Прогон зелёный только при нуле skipped.** Без `DATABASE_URL` молча
 пропускается ~115 интеграционных тестов, и счёт врёт.
 
-Ориентир на 03.10.2026 (`19ca48f`, блокеры live Б1–Б3): 1251 passed, 0 skipped, 0 failed; smoke 87/87.
+Ориентир на 08.10.2026 (открытие сделки из бота, шаг 5): 1376 passed, 0 skipped, 0 failed; smoke 99/99.
 
 Число тестов в этом файле — ориентир на момент записи, а не факт. Перед
 тем как называть его в плане или отчёте, прогонять пакет и брать свежую
@@ -68,7 +68,7 @@ ruff check .
 
 ## Скрипты
 
-`scripts/smoke_check.py` — 87 проверок, гоняет диспетчер. Единственный
+`scripts/smoke_check.py` — 99 проверок, гоняет диспетчер. Единственный
 харнесс для хендлеров `settings.py`.
 
 - отказывается работать против любой БД кроме `trading_bot_test`
@@ -369,7 +369,9 @@ PY
    `exec_daily_digest_hour`, `log_json`, `environment`,
    `reconciler_notify_max_age_hours`, `reconciler_pulse_every` (с `c8306f9`/`90fae6e`),
    `ai_enabled`, `ai_market_summary_enabled` (с этапа 2; по умолчанию false),
-   `position_monitor_price_seconds` / `position_monitor_snapshot_seconds` (с этапа 5; 15 / 60).
+   `position_monitor_price_seconds` / `position_monitor_snapshot_seconds` (с этапа 5; 15 / 60),
+   `exec_open_dry_run` / `exec_open_allow_live` / `openings_interval_seconds` (открытие сделки
+   из бота, M5; по умолчанию true / false / 15).
    `bingx_base_url` — только публичный клиент; ключевой клиент в режиме
    demo ходит на `bingx_demo_base_url`
 
@@ -448,6 +450,14 @@ PY
     на бирже старше пары минут — флаг. `execution_callbacks.raw_data` у новых нажатий не NULL.
     Строки постановки моста переноса (`client_order_id` `…SB`/`…TB`) — CANCELLED при снятом
     мосте; SUBMITTED — мост остался на бирже (карточка FAILED «не снялся»)
+
+16г. С миграции `56733f24581b` (M5, открытие сделки из бота): `trade_openings` с окна деплоя по
+    `status × entry_type`; ALARM — флаг (позиция без стопа), CONFIRMED/SUBMITTING/UNKNOWN/FILLED/
+    PROTECTED старше пары минут — флаг (восстановление не довело), WORKING с `expires_at` в прошлом
+    больше минуты — флаг (лимит не снят по сроку). Каждому DONE — сделка `source='BOT'` с
+    `trade_id`; строки `execution_orders` с `trade_opening_id`: при `EXEC_OPEN_DRY_RUN=true` — только
+    DRY_RUN. В логе: ERROR «Позиция открытия без стопа…», «Аварийное закрытие…», «Запасной стоп не
+    встал» — флаг; INFO «Открытие восстановлено» — восстановление сработало (после рестарта)
 
 ### F. Redis
 

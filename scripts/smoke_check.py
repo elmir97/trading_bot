@@ -29,10 +29,20 @@ from app.database.models.credentials import ExchangeCredentials
 from app.database.models.execution_callback import ExecutionCallback
 from app.database.models.execution_order import ExecutionOrder
 from app.database.models.position_action import PositionAction
+from app.database.models.trade_opening import TradeOpening
 from app.database.models.user import User
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
-from app.exchanges.base import Balance, OpenOrder, Position, SymbolInfo
+from app.exchanges.base import (
+    Balance,
+    CommissionRate,
+    LeverageInfo,
+    MarginType,
+    OpenOrder,
+    Position,
+    SymbolInfo,
+    Ticker,
+)
 from app.exchanges.bingx import BingXClient
 from app.trading.enums import ExchangeKeyMode, TradeSide
 from scripts.simulate_chat import USER_ID, build  # noqa: E402
@@ -187,6 +197,8 @@ async def _set_journal_cutoff(db, value: datetime | None) -> None:  # type: igno
 async def add_trade(sim, symbol, side, entry, sl, tp, balance="10000"):  # type: ignore[no-untyped-def]
     await sim.send("/start")
     await sim.tap("Добавить сделку")
+    # 05.10.2026: в начале — выбор пути; журнал — прежний мастер.
+    await sim.tap("Только записать в журнал")
     await sim.tap(symbol)
     await sim.tap(side)
     await sim.send(entry)
@@ -436,6 +448,7 @@ async def _run_scenarios(sim, tg, db, redis, settings) -> None:  # type: ignore[
     print("\n[10] Защита формы командой")
     await sim.send("/start")
     await sim.tap("Добавить сделку")
+    await sim.tap("Только записать в журнал")
     await sim.tap("BTC")
     text = await sim.send("/stats")
     check("команда не попадает в форму", "направление" not in text.lower(), text[:120])
@@ -446,6 +459,7 @@ async def _run_scenarios(sim, tg, db, redis, settings) -> None:  # type: ignore[
     print("\n[11] Некорректный ввод")
     await sim.send("/start")
     await sim.tap("Добавить сделку")
+    await sim.tap("Только записать в журнал")
     await sim.tap("BTC")
     await sim.tap("LONG")
     text = await sim.send("не число")
@@ -488,6 +502,9 @@ async def _run_scenarios(sim, tg, db, redis, settings) -> None:  # type: ignore[
 
     print("\n[15] Действия с позицией (этап 4)")
     await _run_position_actions(sim, tg, db, settings)
+
+    print("\n[16] Открытие сделки из бота (сухой прогон)")
+    await _run_open_trade(sim, tg, db, settings)
 
 
 # --- [14] Ключи биржи и старые кнопки сигналов --------------------------------
@@ -714,6 +731,116 @@ async def _run_position_actions(sim, tg, db, settings) -> None:  # type: ignore[
             )
         text = await sim.tap_data(f"pm:y:{last.id}")
         check("обычное «Да» при росте риска отклонено", has(text, "увеличить риск"), text[:200])
+    finally:
+        for name, method in originals.items():
+            setattr(BingXClient, name, method)
+
+
+# --- [16] Открытие сделки из бота (05.10.2026) ---------------------------------
+#
+# «Добавить сделку» → «Открыть на бирже» → поиск монеты → … → карточка →
+# «Открыть». EXEC_OPEN_DRY_RUN по умолчанию true — строки DRY_RUN, на биржу
+# ничего. Биржа — заглушки leaf-методов BingXClient; метод без заглушки упрётся
+# в запрет сети.
+
+
+async def _fake_ticker(self, symbol: str, *, max_retries=None) -> Ticker:  # type: ignore[no-untyped-def]
+    return Ticker(symbol, D("3000"), datetime.now(UTC))
+
+
+async def _fake_leverage(self, symbol: str, *, max_retries=None) -> LeverageInfo:  # type: ignore[no-untyped-def]
+    return LeverageInfo(symbol, 20, 20, 100, 100)
+
+
+async def _fake_margin_type(self, symbol: str, *, max_retries=None) -> MarginType:  # type: ignore[no-untyped-def]
+    return MarginType.ISOLATED
+
+
+async def _fake_commission(self) -> CommissionRate:  # type: ignore[no-untyped-def]
+    return CommissionRate(taker=D("0.0005"), maker=D("0.0002"))
+
+
+_OPEN_STUBS = {
+    **_STUBS,
+    "get_symbols": _fake_contracts,
+    "get_ticker": _fake_ticker,
+    "get_leverage": _fake_leverage,
+    "get_margin_type": _fake_margin_type,
+    "get_commission_rate": _fake_commission,
+}
+
+
+async def _run_open_trade(sim, tg, db, settings) -> None:  # type: ignore[no-untyped-def]
+    from app.bot.handlers.exchange import _market_cache
+
+    _market_cache.invalidate()   # [15] положил в общий кэш контракты без ETH
+    originals = {name: getattr(BingXClient, name) for name in _OPEN_STUBS}
+    for name, fake in _OPEN_STUBS.items():
+        setattr(BingXClient, name, fake)
+    try:
+        await sim.send("/start")
+        await sim.tap("Добавить сделку")
+        buttons = list(sim.available_buttons())
+        check("«Добавить сделку»: выбор пути",
+              "🟢 Открыть на бирже" in buttons and "📝 Только записать в журнал" in buttons,
+              str(buttons))
+        text = await sim.tap("Открыть на бирже")
+        check("открытие: шаг монеты", has(text, "монета"), text[:200])
+        text = await sim.send("eth")
+        check("поиск монеты: eth → ETH-USDT", has(text, "ETH-USDT", "направление"), text[:200])
+        await sim.tap("LONG")
+        await sim.tap("По рынку")
+        await sim.send("2940")
+        await sim.send("3120")
+        text = await sim.tap("По плану")
+        check("шаг плеча: максимум при стопе", has(text, "при этом стопе"), text[:300])
+        text = await sim.tap("предложено")
+        check("карточка открытия",
+              has(text, "Открыть на бирже — DEMO", "Риск:", "с комиссией", "Комиссия ≈",
+                  "Ликвидация ≈", "Сухой прогон"), text[:600])
+        text = await sim.tap("Открыть")
+        check("«Открыть» в сухом прогоне", has(text, "сухой прогон: маркет ETH-USDT LONG"),
+              text[:300])
+
+        async with db.session() as session:
+            user = await UserRepository(session).get_by_telegram_id(USER_ID)
+            openings = list(await session.scalars(
+                select(TradeOpening).where(TradeOpening.user_id == user.id)
+            ))
+            orders = list(await session.scalars(
+                select(ExecutionOrder).where(ExecutionOrder.trade_opening_id.is_not(None))
+                .where(ExecutionOrder.user_id == user.id)
+            ))
+            presses = [p.action for p in await session.scalars(
+                select(ExecutionCallback).where(ExecutionCallback.user_id == user.id)
+                .where(ExecutionCallback.trade_opening_id.is_not(None))
+            )]
+        check("открытие: DRY_RUN", [o.status.value for o in openings] == ["DRY_RUN"],
+              str([o.status for o in openings]))
+        check("ордера открытия: вход, стоп, тейк — DRY_RUN",
+              sorted(o.role.value for o in orders) == ["ENTRY", "STOP_LOSS", "TAKE_PROFIT"]
+              and {o.status.value for o in orders} == {"DRY_RUN"},
+              str([(o.role, o.status) for o in orders]))
+        check("журнал нажатий: to_yes", presses == ["to_yes"], str(presses))
+
+        # Лимит и «Отмена» на карточке.
+        await sim.send("/start")
+        await sim.tap("Добавить сделку")
+        await sim.tap("Открыть на бирже")
+        await sim.send("ETH")
+        await sim.tap("LONG")
+        await sim.tap("Лимитный")
+        await sim.send("2950")
+        check("срок лимита: 4 ч по умолчанию", "4 ч ✓" in list(sim.available_buttons()),
+              str(list(sim.available_buttons())))
+        await sim.tap("4 ч")
+        await sim.send("2900")
+        await sim.tap("Без тейка")
+        await sim.tap("По плану")
+        text = await sim.tap("предложено")
+        check("карточка лимита", has(text, "Лимит 2950 · срок 4 ч", "без тейка"), text[:300])
+        text = await sim.tap("Отмена")
+        check("«Отмена» на карточке", has(text, "ничего не отправлено"), text[:200])
     finally:
         for name, method in originals.items():
             setattr(BingXClient, name, method)

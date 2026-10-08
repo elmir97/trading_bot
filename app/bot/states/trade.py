@@ -32,6 +32,24 @@ class AddTradeStates(StatesGroup):
     confirm = State()
 
 
+class OpenTradeStates(StatesGroup):
+    """Открытие сделки на бирже из бота (05.10.2026, docs/open-trade-plan.md
+    §9). mode — выбор «Открыть на бирже» / «Только записать в журнал» в начале
+    «Добавить сделку»; confirm — карточка подтверждения."""
+
+    mode = State()
+    symbol = State()
+    side = State()
+    entry_type = State()
+    limit_price = State()
+    expiry = State()
+    stop_loss = State()
+    take_profit = State()
+    risk = State()
+    leverage = State()
+    confirm = State()
+
+
 class CloseTradeStates(StatesGroup):
     select_trade = State()
     exit_price = State()
