@@ -40,7 +40,16 @@ down_revision = "3f7a9c1e5d20"
 branch_labels = None
 depends_on = None
 
-_OLD_ACTIONS = "action IN ('open', 'yes', 'no', 'pm_open', 'pm_yes', 'pm_yes_risk', 'pm_no')"
+# Старый CHECK — ровно в той записи, в какой его хранит прод (после смены типа
+# колонки в M1 PostgreSQL переписал выражение): downgrade обязан вернуть схему
+# baseline байт в байт, иначе репетиция видит разницу (08.10.2026, первый
+# прогон: «IN (...)» разворачивается в «(ARRAY[...])::text[]»).
+_OLD_ACTIONS = (
+    "(action)::text = ANY (ARRAY[('open'::character varying)::text, "
+    "('yes'::character varying)::text, ('no'::character varying)::text, "
+    "('pm_open'::character varying)::text, ('pm_yes'::character varying)::text, "
+    "('pm_yes_risk'::character varying)::text, ('pm_no'::character varying)::text])"
+)
 _NEW_ACTIONS = (
     "action IN ('open', 'yes', 'no', 'pm_open', 'pm_yes', 'pm_yes_risk', 'pm_no', "
     "'to_yes', 'to_yes_warn', 'to_no', 'to_cancel', 'ma_confirm', 'ma_cancel')"
