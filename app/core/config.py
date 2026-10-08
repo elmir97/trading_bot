@@ -11,7 +11,7 @@ from decimal import Decimal
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.analysis.ai.pricing import is_known, pricing_for
@@ -224,6 +224,13 @@ class Settings(BaseSettings):
     # Цена ушла с карточки: риск $ или объём изменились больше — отказ,
     # новая карточка.
     exec_open_card_drift_percent: Decimal = Decimal("10")
+    # Управляемый сбой открытия для проверки аварийных веток на ДЕМО (08.10.2026,
+    # по аналогии с --fault в rehearse_migration.sh). Список через запятую из
+    # OPEN_FAULTS; каждый срабатывает только на первой попытке в открытии.
+    # По умолчанию пусто; в override прода — только на время проверки. При
+    # любом признаке live (BINGX_TRADING_MODE=live, EXEC_OPEN_ALLOW_LIVE,
+    # EXEC_ALLOW_LIVE_MODE_ORDERS) бот не стартует.
+    exec_open_fault: str = ""
 
     # --- Дефолты торгового плана ------------------------------------------
     # Реальные значения хранятся в БД per-user; это лишь начальные значения
@@ -305,6 +312,36 @@ class Settings(BaseSettings):
                 f"EXEC_TAKER_FEE_RATE должен быть в [0; 0.01) — доля, не проценты: {value}"
             )
         return value
+
+    @field_validator("exec_open_fault")
+    @classmethod
+    def _known_open_faults(cls, value: str) -> str:
+        unknown = {f for f in _split_faults(value) if f not in OPEN_FAULTS}
+        if unknown:
+            raise ValueError(
+                f"EXEC_OPEN_FAULT: неизвестные сбои {sorted(unknown)}; "
+                f"допустимы {sorted(OPEN_FAULTS)}"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _open_fault_only_on_demo(self) -> Settings:
+        """Управляемый сбой — только демо: при любом признаке live отказ на старте."""
+        if self.exec_open_faults and (
+            self.bingx_trading_mode == "live"
+            or self.exec_open_allow_live
+            or self.exec_allow_live_mode_orders
+        ):
+            raise ValueError(
+                "EXEC_OPEN_FAULT разрешён только на демо: снимите его или верните "
+                "BINGX_TRADING_MODE=demo, EXEC_OPEN_ALLOW_LIVE=false, "
+                "EXEC_ALLOW_LIVE_MODE_ORDERS=false"
+            )
+        return self
+
+    @property
+    def exec_open_faults(self) -> frozenset[str]:
+        return frozenset(_split_faults(self.exec_open_fault))
 
     @field_validator("database_url")
     @classmethod
@@ -438,6 +475,18 @@ class Settings(BaseSettings):
             return None
         value = self.telegram_proxy.get_secret_value().strip()
         return value or None
+
+
+OPEN_FAULTS = frozenset({
+    "skip_attached_stop",     # вход уходит без вложенного стопа (тейк остаётся)
+    "fail_backup_stop",       # запасной стоп не отправляется — «отклонён»
+    "fail_emergency_close",   # аварийное закрытие не отправляется — «отклонено»
+    "hide_backup_stop",       # запасной стоп отправлен, но скрыт в openOrders и по cid
+})
+
+
+def _split_faults(value: str) -> list[str]:
+    return [f.strip() for f in value.split(",") if f.strip()]
 
 
 @lru_cache(maxsize=1)

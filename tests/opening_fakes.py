@@ -78,6 +78,8 @@ class OpeningExchange:
         self.margin_readback_off = False
         self.fail_reads: set[str] = set()           # имена GET, падающих ExchangeUnavailableError
         self.liquidation_override: Decimal | None = None
+        # Стоп принят, но в openOrders не виден (по cid — виден): задержка списка.
+        self.conditional_invisible_in_list = False
 
     def names(self) -> list[str]:
         return [c[0] for c in self.calls]
@@ -135,6 +137,8 @@ class OpeningExchange:
         self, symbol: str | None = None, *, max_retries: int | None = None
     ) -> list[OpenOrder]:
         self._read("open_orders", symbol)
+        if self.conditional_invisible_in_list:
+            return [o for o in self.orders if not (o.client_order_id and o.close_position)]
         return list(self.orders)
 
     async def get_commission_rate(self) -> CommissionRate:
@@ -273,6 +277,11 @@ class OpeningExchange:
             raise ExchangeResponseError("BingX: rejected (код 109400)", code=109400)
         position = self.positions.get(kw["position_side"])
         order_id = self._next_id()
+        self.by_cid[kw["client_order_id"].lower()] = {
+            "order_id": order_id, "status": "NEW", "avg": D(0), "qty": kw["quantity"],
+            "executed": D(0), "fee": D(0), "kw": kw,
+            "position_id": position.position_id if position else None,
+        }
         self.orders.append(OpenOrder(
             order_id=order_id, client_order_id=kw["client_order_id"].lower(), symbol=SYMBOL,
             side=kw["side"].value, position_side=kw["position_side"],
@@ -341,6 +350,10 @@ class OpeningExchange:
             if left <= 0:
                 del self.positions[side]
                 pid = current.position_id
+                # Позиция закрыта — биржа снимает её стопы/тейки (closePosition тоже).
+                for o in self.orders:
+                    if o.position_id == pid and o.client_order_id in self.by_cid:
+                        self.by_cid[o.client_order_id]["status"] = "CANCELLED"
                 self.orders = [o for o in self.orders if o.position_id != pid]
             else:
                 self.positions[side] = replace(current, quantity=left)

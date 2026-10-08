@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from aiogram import Bot
@@ -20,6 +21,8 @@ from app.trading.enums import TradeSide
 from app.workers.notifier import send_notification
 
 logger = get_logger(__name__)
+
+FAULT_WARN_EVERY = 3600.0
 
 
 class OpeningsWorker:
@@ -38,6 +41,7 @@ class OpeningsWorker:
         self._settings = settings
         self._redis = redis
         self._factory = factory or ExchangeFactory(settings, cipher)
+        self._fault_warned_at: float | None = None
 
     async def notify(
         self, telegram_id: int, text: str, position: tuple[str, TradeSide] | None
@@ -46,6 +50,16 @@ class OpeningsWorker:
         await send_notification(self._bot, telegram_id, text, reply_markup=markup)
 
     async def run(self) -> None:
+        faults = self._settings.exec_open_faults
+        if faults:
+            now = time.monotonic()
+            if self._fault_warned_at is None or now - self._fault_warned_at >= FAULT_WARN_EVERY:
+                # Включённый на время проверки сбой нельзя забыть: раз в час в лог.
+                logger.warning(
+                    "EXEC_OPEN_FAULT включён: %s — только на время проверки, снять после",
+                    ",".join(sorted(faults)), extra={"faults": sorted(faults)},
+                )
+                self._fault_warned_at = now
         if self._redis is None:
             return
         await recover_openings(

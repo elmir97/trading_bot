@@ -23,7 +23,7 @@ from app.core.logging import get_logger
 from app.core.numfmt import fmt_price, fmt_qty
 from app.exchanges.base import ExchangeError, OrderFill, OrderNotFoundError
 from app.execution.opening.execution import Runner, transition
-from app.execution.opening.flow import FlowOutcome, advance, after_protect
+from app.execution.opening.flow import FlowOutcome, advance, after_protect, alarm_text
 from app.execution.opening.render import expiry_label
 from app.trading.enums import OpeningStatus, OrderStatus
 
@@ -158,10 +158,9 @@ async def _protect_partial(runner: Runner, fill: OrderFill) -> FlowOutcome | Non
         return await after_protect(runner, result)
     await transition(
         runner.session, o, (OpeningStatus.FILLED,), OpeningStatus.ALARM,
-        error_code="STOP_AND_CLOSE_FAILED", error_message=result.reason,
+        error_code="STOP_UNCONFIRMED" if result.undecided else "STOP_AND_CLOSE_FAILED",
+        error_message=result.reason,
     )
     return FlowOutcome(
-        OpeningStatus.ALARM,
-        f"🚨🚨 Частично исполненная позиция {o.symbol} {o.side.value} БЕЗ СТОПА: поставить "
-        "стоп и закрыть не удалось. Закрой её вручную! Повторяю попытки каждые 15 с.",
+        OpeningStatus.ALARM, "◐ Лимит исполнен частично. " + alarm_text(runner, result)
     )

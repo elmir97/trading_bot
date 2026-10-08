@@ -184,6 +184,13 @@ class OpeningService:
                 allowed_mode=s.bingx_allowed_exchange_mode,
             )
         )
+        if refusal is None and self.account_mode is ExchangeKeyMode.LIVE and s.exec_open_faults:
+            # Вторая защита (первая — проверка настроек на старте): управляемый
+            # сбой — только демо.
+            refusal = ExecutionRefusal(
+                Code.LIVE_ORDERS_NOT_ALLOWED,
+                "Включён управляемый сбой EXEC_OPEN_FAULT — открытие на реальном счёте запрещено.",
+            )
         if refusal is None and self.account_mode is ExchangeKeyMode.LIVE and not (
             s.exec_open_allow_live
         ):

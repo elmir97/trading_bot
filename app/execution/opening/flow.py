@@ -126,14 +126,27 @@ async def after_protect(runner: Runner, result: ProtectResult) -> FlowOutcome:
     first = o.status is not OpeningStatus.ALARM
     await transition(
         runner.session, o, (OpeningStatus.FILLED, OpeningStatus.ALARM), OpeningStatus.ALARM,
-        error_code="STOP_AND_CLOSE_FAILED", error_message=result.reason,
+        error_code="STOP_UNCONFIRMED" if result.undecided else "STOP_AND_CLOSE_FAILED",
+        error_message=result.reason,
     )
-    logger.error("Позиция открытия без стопа, закрыть не удалось", extra=runner._log())
-    return FlowOutcome(
-        OpeningStatus.ALARM,
-        f"🚨🚨 Позиция {runner.summary()} БЕЗ СТОПА: поставить стоп и закрыть маркетом не "
-        "удалось. Закрой её вручную на бирже! Повторяю попытки каждые 15 с.",
-        notify=first,
+    if result.undecided:
+        logger.warning("Стоп позиции открытия не подтверждён — перепроверка", extra=runner._log())
+    else:
+        logger.error("Позиция открытия без стопа, закрыть не удалось", extra=runner._log())
+    return FlowOutcome(OpeningStatus.ALARM, alarm_text(runner, result), notify=first)
+
+
+def alarm_text(runner: Runner, result: ProtectResult) -> str:
+    o = runner.opening
+    if result.undecided:
+        return (
+            f"⚠️ Стоп по позиции {o.symbol} {o.side.value} не подтверждён биржей — перепроверяю "
+            "каждые 15 с. Позицию закрою, только если биржа подтвердит, что стопа нет. "
+            "Проверь стоп в BingX."
+        )
+    return (
+        f"🚨🚨 Позиция {o.symbol} {o.side.value} БЕЗ СТОПА: поставить стоп и закрыть маркетом "
+        "не удалось. Закрой её вручную на бирже! Повторяю попытки каждые 15 с."
     )
 
 

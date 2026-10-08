@@ -12,6 +12,15 @@
    = объём позиции (правило разведки 02.10);
 3. запасной не встал — аварийное закрытие маркетом, сделка в журнал с выходом;
 4. закрытие не прошло — ALARM: тревога и повтор циклом восстановления.
+
+«Стоп не встал» (08.10.2026, решение владельца) — только окончательно: POST
+отклонён кодом биржи ИЛИ ордер по своему clientOrderId не найден (109421) /
+отменён. Нет в openOrders, а по cid ответа нет — «не подтверждён»: ALARM без
+закрытия, перепроверка следующим циклом. Перед новым запасным стопом в цикле
+тревоги прежние (реально отправленные) проверяются по cid.
+
+Управляемый сбой EXEC_OPEN_FAULT (только демо, config.OPEN_FAULTS) — подмена
+реакции бота на первой попытке в открытии; реальные ордера уходят как есть.
 Ликвидация по факту между входом и стопом — тоже аварийное закрытие.
 """
 
@@ -22,6 +31,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
+from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import func, select, update
@@ -65,6 +75,16 @@ CLOSING_SIDE = {TradeSide.LONG: OrderSide.SELL, TradeSide.SHORT: OrderSide.BUY}
 EXIT_REASON_EMERGENCY = "Аварийное закрытие: стоп не встал"
 EXIT_REASON_LIQUIDATION = "Аварийное закрытие: ликвидация ближе стопа"
 PROTECT_ATTEMPTS = 3
+FAULT_CODE = "FAULT"
+# Статусы ордера по clientOrderId: стоит (или уже сработал) / снят.
+_STANDING = frozenset({"NEW", "PENDING", "PARTIALLY_FILLED", "FILLED", "TRIGGERED"})
+_GONE = frozenset({"CANCELLED", "CANCELED", "EXPIRED", "REJECTED", "FAILED"})
+
+
+class StopCheck(StrEnum):
+    STANDING = "STANDING"   # стоит на бирже — подтверждено
+    ABSENT = "ABSENT"       # окончательно нет: POST отклонён / по cid не найден или снят
+    UNKNOWN = "UNKNOWN"     # не подтверждён: перепроверить следующим циклом
 
 Sleep = Callable[[float], Awaitable[None]]
 
@@ -90,6 +110,9 @@ class ProtectResult:
     warnings: tuple[str, ...] = ()
     close_fill: OrderFill | None = None
     reason: str = ""
+    # ALARM без закрытия: стоп не подтверждён (не найден в openOrders, по cid
+    # ответа нет) — перепроверка циклом, позиция не закрывается.
+    undecided: bool = False
 
 
 async def transition(
@@ -140,6 +163,10 @@ class Runner:
         self.pp = price_precision
         self.qp = quantity_precision
         self._sleep = sleep
+        self._faults = settings.exec_open_faults
+        # hide_backup_stop: cid, скрытые в openOrders и в запросе по cid в
+        # этом проходе (новый Runner в следующем цикле их уже видит).
+        self._hidden: set[str] = set()
 
     @property
     def side(self) -> TradeSide:
@@ -147,6 +174,15 @@ class Runner:
 
     def cid(self, letter: str, n: int = 0) -> str:
         return opening_client_order_id(self.opening.id, self.opening.user_id, letter, n)
+
+    def _fault(self, name: str, attempt: int = 1) -> bool:
+        """Управляемый сбой — только на первой попытке в открытии."""
+        if name not in self._faults or attempt != 1:
+            return False
+        logger.warning(
+            "Управляемый сбой: %s", name, extra={**self._log(), "fault": name}
+        )
+        return True
 
     def _row(
         self, role: OrderRole, order_type: OrderType, side: OrderSide, **kw: Any
@@ -194,7 +230,9 @@ class Runner:
             quantity=quantity,
         ):
             return EntryResult(OpeningStatus.UNKNOWN, "открытие уже обрабатывается")
-        stop = TpSlSpec(trigger_price=o.stop_loss)
+        stop: TpSlSpec | None = TpSlSpec(trigger_price=o.stop_loss)
+        if self._fault("skip_attached_stop"):
+            stop = None
         take = TpSlSpec(trigger_price=o.take_profit) if o.take_profit is not None else None
         common: dict[str, Any] = dict(
             symbol=o.symbol, side=OPENING_SIDE[self.side], position_side=self.side.value,
@@ -307,6 +345,31 @@ class Runner:
             return None
         return max(candidates, key=lambda o: (o.close_position, o.quantity))
 
+    async def _visible_orders(self) -> list[OpenOrder]:
+        orders = await self.client.get_open_orders(self.opening.symbol, max_retries=1)
+        if not self._hidden:
+            return orders
+        return [o for o in orders if o.client_order_id.casefold() not in self._hidden]
+
+    async def check_by_cid(self, cid: str) -> tuple[StopCheck, str | None]:
+        """Ордер по своему clientOrderId: стоит / окончательно нет / неизвестно."""
+        if cid.casefold() in self._hidden:
+            logger.warning(
+                "Управляемый сбой: стоп скрыт и в запросе по cid", extra={**self._log(), "cid": cid}
+            )
+            return StopCheck.ABSENT, None
+        try:
+            fill = await self.client.get_order_fill(self.opening.symbol, cid, max_retries=1)
+        except ExchangeError as exc:
+            if exc.code == ORDER_NOT_EXIST_CODE:
+                return StopCheck.ABSENT, None
+            return StopCheck.UNKNOWN, None
+        if fill.status in _STANDING:
+            return StopCheck.STANDING, fill.order_id
+        if fill.status in _GONE:
+            return StopCheck.ABSENT, fill.order_id
+        return StopCheck.UNKNOWN, fill.order_id
+
     async def position(self) -> Position | None:
         positions = await self.client.get_positions(max_retries=1)
         return next(
@@ -315,9 +378,18 @@ class Runner:
         )
 
     async def _record_conditional(self, role: OrderRole, order: OpenOrder) -> None:
-        known = {r.exchange_order_id for r in await self._rows(role)}
-        if order.order_id in known:
-            return
+        for row in await self._rows(role):
+            if row.exchange_order_id == order.order_id or (
+                order.client_order_id and row.client_order_id
+                and row.client_order_id.casefold() == order.client_order_id.casefold()
+            ):
+                # Уже записан (в т.ч. запасной, сочтённый ненайденным в прошлом
+                # проходе, — он стоит): подтверждаем строку.
+                if row.status is not OrderStatus.SUBMITTED:
+                    row.status = OrderStatus.SUBMITTED
+                    row.exchange_order_id = order.order_id
+                    await self.session.commit()
+                return
         order_type = (
             OrderType.STOP_MARKET if role is OrderRole.STOP_LOSS else OrderType.TAKE_PROFIT_MARKET
         )
@@ -345,7 +417,7 @@ class Runner:
         for attempt in range(PROTECT_ATTEMPTS):
             if attempt:
                 await self._sleep(self.settings.exec_order_readback_delay_ms / 1000)
-            orders = await self.client.get_open_orders(o.symbol, max_retries=1)
+            orders = await self._visible_orders()
             stop = self._match(orders, OrderType.STOP_MARKET, o.stop_loss, position)
             if o.take_profit is not None:
                 take = self._match(orders, OrderType.TAKE_PROFIT_MARKET, o.take_profit, position)
@@ -358,9 +430,23 @@ class Runner:
             if stop is not None:
                 await self._record_conditional(OrderRole.STOP_LOSS, stop)
             fallback = True
-            placed = await self._fallback_stop(position)
-            if not placed:
-                return await self._emergency(position, EXIT_REASON_EMERGENCY)
+            # Прежние запасные стопы, реально ушедшие на биржу, — сначала по cid:
+            # в openOrders их может ещё не быть (стоп принят, но не виден).
+            earlier = await self._earlier_backup_stop()
+            if earlier is StopCheck.UNKNOWN:
+                return ProtectResult(
+                    OpeningStatus.ALARM, undecided=True,
+                    reason="запасной стоп не подтверждён — перепроверка следующим циклом",
+                )
+            if earlier is not StopCheck.STANDING:
+                placed = await self._fallback_stop(position)
+                if placed is StopCheck.UNKNOWN:
+                    return ProtectResult(
+                        OpeningStatus.ALARM, undecided=True,
+                        reason="запасной стоп не подтверждён — перепроверка следующим циклом",
+                    )
+                if placed is StopCheck.ABSENT:
+                    return await self._emergency(position, EXIT_REASON_EMERGENCY)
         if take is not None:
             await self._record_conditional(OrderRole.TAKE_PROFIT, take)
         warnings: list[str] = []
@@ -392,7 +478,31 @@ class Runner:
         )
         return int(count or 0) + 1
 
-    async def _fallback_stop(self, position: Position) -> bool:
+    async def _earlier_backup_stop(self) -> StopCheck | None:
+        """Запасные стопы прошлых проходов, реально отправленные (не FAULT и не
+        отклонённые кодом биржи): стоит хоть один — STANDING; про какой-то нет
+        ответа — UNKNOWN; иначе None (ставить новый)."""
+        unknown = False
+        for row in reversed(await self._rows(OrderRole.STOP_LOSS)):
+            if not row.client_order_id or row.error_code == FAULT_CODE:
+                continue
+            if row.status is OrderStatus.REJECTED and row.error_code not in (None, "NOT_FOUND"):
+                continue   # отклонён биржей с кодом — не вставал
+            check, order_id = await self.check_by_cid(row.client_order_id)
+            if check is StopCheck.STANDING:
+                row.status = OrderStatus.SUBMITTED
+                row.exchange_order_id = order_id or row.exchange_order_id
+                await self.session.commit()
+                logger.info(
+                    "Запасной стоп прошлого прохода стоит — новый не ставлю",
+                    extra={**self._log(), "cid": row.client_order_id},
+                )
+                return StopCheck.STANDING
+            if check is StopCheck.UNKNOWN:
+                unknown = True
+        return StopCheck.UNKNOWN if unknown else None
+
+    async def _fallback_stop(self, position: Position) -> StopCheck:
         o = self.opening
         n = await self._attempt_no(OrderRole.STOP_LOSS)
         cid = self.cid("s", n)
@@ -404,6 +514,12 @@ class Runner:
         self.session.add(row)
         await self.session.commit()
         logger.warning("Вложенный стоп не найден — ставлю запасной", extra=self._log())
+        if self._fault("fail_backup_stop", n):
+            row.status = OrderStatus.REJECTED
+            row.error_code = FAULT_CODE
+            row.error_message = "управляемый сбой fail_backup_stop: не отправлен"
+            await self.session.commit()
+            return StopCheck.ABSENT
         try:
             result = await self.client.place_conditional_order(
                 symbol=o.symbol, side=CLOSING_SIDE[self.side], position_side=self.side.value,
@@ -411,31 +527,48 @@ class Runner:
                 quantity=position.quantity, client_order_id=cid, close_position=True,
             )
         except ExchangeError as exc:
-            row.status = (
-                OrderStatus.UNKNOWN if isinstance(exc, ExchangeUnavailableError)
-                else OrderStatus.REJECTED
-            )
-            row.error_code = str(exc.code) if exc.code is not None else type(exc).__name__
-            row.error_message = str(exc)
+            if not isinstance(exc, ExchangeUnavailableError) and exc.code is not None:
+                # POST отклонён кодом биржи — стоп окончательно не встал.
+                row.status = OrderStatus.REJECTED
+                row.error_code = str(exc.code)
+                row.error_message = str(exc)
+                await self.session.commit()
+                logger.error(
+                    "Запасной стоп отклонён биржей", extra={**self._log(), "code": exc.code}
+                )
+                return StopCheck.ABSENT
+            # Без ответа ордер мог встать — решает чтение ниже.
+            row.status = OrderStatus.UNKNOWN
+            row.error_code = type(exc).__name__
             await self.session.commit()
-            logger.error("Запасной стоп не встал", extra={**self._log(), "error": row.error_code})
-            # Без ответа ордер мог встать — проверяем чтением.
-            if not isinstance(exc, ExchangeUnavailableError):
-                return False
         else:
             row.exchange_order_id = result.order_id or None
-        orders = await self.client.get_open_orders(o.symbol, max_retries=1)
+        if self._fault("hide_backup_stop", n):
+            self._hidden.add(cid.casefold())
+        orders = await self._visible_orders()
         found = next(
             (x for x in orders if x.client_order_id.casefold() == cid.casefold()), None
         ) or self._match(orders, OrderType.STOP_MARKET, o.stop_loss, position)
-        if found is None:
-            row.status = OrderStatus.REJECTED if row.status is OrderStatus.PENDING else row.status
+        if found is not None:
+            row.status = OrderStatus.SUBMITTED
+            row.exchange_order_id = found.order_id
             await self.session.commit()
-            return False
-        row.status = OrderStatus.SUBMITTED
-        row.exchange_order_id = found.order_id
+            return StopCheck.STANDING
+        # Нет в openOrders — решение только по запросу ордера по cid.
+        check, order_id = await self.check_by_cid(cid)
+        if check is StopCheck.STANDING:
+            row.status = OrderStatus.SUBMITTED
+            row.exchange_order_id = order_id or row.exchange_order_id
+        elif check is StopCheck.ABSENT:
+            row.status = OrderStatus.REJECTED
+            row.error_code = "NOT_FOUND"
+            row.error_message = "нет в openOrders, по clientOrderId не найден или снят"
+            logger.error("Запасной стоп не встал: по cid не найден", extra=self._log())
+        else:
+            row.status = OrderStatus.UNKNOWN
+            logger.warning("Запасной стоп не подтверждён — перепроверю", extra=self._log())
         await self.session.commit()
-        return True
+        return check
 
     async def _emergency(self, position: Position, reason: str) -> ProtectResult:
         o = self.opening
@@ -448,6 +581,12 @@ class Runner:
         self.session.add(row)
         await self.session.commit()
         logger.error("Аварийное закрытие позиции открытия", extra={**self._log(), "reason": reason})
+        if self._fault("fail_emergency_close", n):
+            row.status = OrderStatus.REJECTED
+            row.error_code = FAULT_CODE
+            row.error_message = "управляемый сбой fail_emergency_close: не отправлено"
+            await self.session.commit()
+            return ProtectResult(OpeningStatus.ALARM, reason=reason)
         try:
             await self.client.place_market_order(
                 symbol=o.symbol, side=CLOSING_SIDE[self.side], position_side=self.side.value,

@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -19,6 +20,7 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, MenuButtonCommands
+from pydantic import ValidationError
 from redis.asyncio import Redis
 
 from app.analysis.ai.provider import AnthropicClient
@@ -165,7 +167,14 @@ async def bootstrap_reference_data(db: Database, settings: Settings) -> None:
 
 
 async def run() -> None:
-    settings = get_settings()
+    try:
+        settings = get_settings()
+    except ValidationError as exc:
+        # Запрещённая конфигурация (например EXEC_OPEN_FAULT при live) — отказ на
+        # старте с внятной строкой в логе, а не молчаливый перезапуск.
+        logging.basicConfig(level=logging.ERROR)
+        logging.getLogger(__name__).error("Настройки отклонены, бот не запущен: %s", exc)
+        raise SystemExit(2) from exc
 
     setup_logging(
         level=settings.log_level,

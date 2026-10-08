@@ -371,7 +371,9 @@ PY
    `ai_enabled`, `ai_market_summary_enabled` (с этапа 2; по умолчанию false),
    `position_monitor_price_seconds` / `position_monitor_snapshot_seconds` (с этапа 5; 15 / 60),
    `exec_open_dry_run` / `exec_open_allow_live` / `openings_interval_seconds` (открытие сделки
-   из бота, M5; по умолчанию true / false / 15).
+   из бота, M5; по умолчанию true / false / 15), `exec_open_fault` — **не пустой — флаг**
+   (управляемый сбой включают только на время проверки аварийных веток на демо и сразу снимают;
+   при live бот с ним не стартует, в логе раз в час WARNING «EXEC_OPEN_FAULT включён»).
    `bingx_base_url` — только публичный клиент; ключевой клиент в режиме
    demo ходит на `bingx_demo_base_url`
 
