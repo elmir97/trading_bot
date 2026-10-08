@@ -10,6 +10,7 @@ from app.database.models.credentials import ExchangeCredentials
 from app.database.models.execution_callback import ExecutionCallback
 from app.database.models.execution_order import ExecutionOrder
 from app.database.models.mistake import SYSTEM_MISTAKES, MistakeType, TradeMistake
+from app.database.models.outgoing_message import OutgoingMessage
 from app.database.models.position_action import PositionAction
 from app.database.models.position_alert import PositionAlert
 from app.database.models.reconciliation_event import ReconciliationEvent
@@ -37,6 +38,7 @@ __all__ = [
     "ExecutionCallback",
     "ExecutionOrder",
     "MistakeType",
+    "OutgoingMessage",
     "PositionAction",
     "PositionAlert",
     "ReconciliationEvent",

@@ -21,6 +21,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot import outbox
 from app.bot.handlers.exchange import _market_cache
 from app.bot.handlers.positions import position_keyboard
 from app.bot.handlers.trades import _show_symbol_prompt
@@ -32,6 +33,7 @@ from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.numfmt import fmt_pct
 from app.core.security import SecretCipher
+from app.database.models.outgoing_message import OutgoingMeta
 from app.database.models.user import User
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
@@ -584,6 +586,15 @@ def _opening_id(data: str | None, prefix: str) -> int | None:
     return int(raw) if raw.isdigit() else None
 
 
+def _meta(user: User, opening_id: int, outcome: ConfirmOutcome) -> OutgoingMeta:
+    """Итог открытия в журнал исходящих (A.2): вид — статус открытия."""
+    status = outcome.status.value if outcome.status is not None else "UNKNOWN"
+    return OutgoingMeta(
+        user_id=user.id, kind=f"OPEN_{status}", trade_opening_id=opening_id,
+        trade_id=outcome.trade_id,
+    )
+
+
 def result_keyboard(outcome: ConfirmOutcome, opening_id: int,
                     symbol: str, side: TradeSide) -> InlineKeyboardMarkup | None:
     if outcome.trade_id is not None:
@@ -645,7 +656,9 @@ async def confirm_open(callback: CallbackQuery, state: FSMContext, user: User,
             keyboard = None   # старая карточка: «Пересчитать» тут пересчитал бы чужую форму
     elif current:
         await state.clear()   # переписка мастера удаляется, карточка остаётся итогом
-    await callback.message.edit_text(outcome.text, reply_markup=keyboard)
+    await outbox.edit(
+        callback.message, db, _meta(user, opening_id, outcome), outcome.text, keyboard
+    )
 
 
 @router.callback_query(F.data.startswith(OpenCB.NO))
@@ -702,7 +715,9 @@ async def cancel_limit(callback: CallbackQuery, user: User, session: AsyncSessio
         position_keyboard(opening.symbol, opening.side)
         if outcome.trade_id is not None and opening is not None else None
     )
-    await callback.message.edit_text(outcome.text, reply_markup=keyboard)
+    await outbox.edit(
+        callback.message, db, _meta(user, opening_id, outcome), outcome.text, keyboard
+    )
 
 
 # --- «Назад» -----------------------------------------------------------------------------------

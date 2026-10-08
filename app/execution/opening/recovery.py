@@ -14,9 +14,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Protocol
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
@@ -24,6 +24,7 @@ from sqlalchemy.orm import selectinload
 from app.core.config import Settings
 from app.core.locks import LockBusyError, RedisLock, position_lock_key
 from app.core.logging import get_logger
+from app.database.models.outgoing_message import OutgoingMeta
 from app.database.models.trade_opening import TradeOpening
 from app.database.models.user import User
 from app.database.session import Database
@@ -37,8 +38,14 @@ from app.trading.enums import OPENING_ACTIVE, OpeningStatus, TradeSide
 
 logger = get_logger(__name__)
 
-# (telegram_id, text, позиция для кнопки «Позиция» или None) — сообщение в чат.
-Notify = Callable[[int, str, tuple[str, TradeSide] | None], Awaitable[None]]
+class Notify(Protocol):
+    """Сообщение в чат: (telegram_id, text, позиция для кнопки «Позиция» или
+    None); meta — к чему оно относится (журнал исходящих, A.2)."""
+
+    def __call__(
+        self, telegram_id: int, text: str, position: tuple[str, TradeSide] | None, *,
+        meta: OutgoingMeta | None = None,
+    ) -> Awaitable[None]: ...
 
 RECOVERABLE = (
     OpeningStatus.CONFIRMED,
@@ -121,7 +128,9 @@ async def remind_unconfirmed(
             f"🚨 Стоп всё ещё не подтверждён ({minutes} мин) — проверь позицию {who} на "
             "бирже вручную. Позицию бот не закрывает, пока биржа не подтвердит, что стопа нет."
         )
-    await notify(telegram_id, text, None)
+    await notify(telegram_id, text, None, meta=OutgoingMeta(
+        user_id=opening.user_id, kind="OPEN_ALARM_REMINDER", trade_opening_id=opening.id,
+    ))
     await redis.hset(key, mapping={"last": ts})
     logger.warning(
         "Напоминание: стоп не подтверждён", extra={"opening_id": opening.id, "minutes": minutes}
@@ -184,7 +193,10 @@ async def _one(
             return False
         if outcome.notify and outcome.text:
             button = (opening.symbol, opening.side) if outcome.trade_id is not None else None
-            await notify(user.telegram_id, outcome.text, button)
+            await notify(user.telegram_id, outcome.text, button, meta=OutgoingMeta(
+                user_id=user.id, kind=f"OPEN_{outcome.status.value}",
+                trade_opening_id=opening.id, trade_id=outcome.trade_id,
+            ))
         if outcome.status is not before:
             logger.info(
                 "Открытие восстановлено",

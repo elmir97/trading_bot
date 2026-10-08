@@ -105,7 +105,7 @@ async def opening_context(telegram_id: int):  # type: ignore[no-untyped-def]
             return OpeningService(session, s, None, user, redis=redis, factory=Factory(),
                                   market_cache=TTLCache())
 
-        async def notify(telegram_id: int, text: str, position: Any) -> None:
+        async def notify(telegram_id: int, text: str, position: Any, **_: Any) -> None:
             notes.append((telegram_id, text, position))
 
         async def recover(**kw: Any) -> int:

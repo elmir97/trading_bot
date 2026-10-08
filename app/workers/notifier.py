@@ -14,7 +14,7 @@ from enum import StrEnum
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
-from aiogram.types import BufferedInputFile, InlineKeyboardMarkup
+from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, Message
 
 from app.core.logging import get_logger
 from app.database.models.reconciliation_event import ReconciliationEvent
@@ -80,7 +80,23 @@ async def send_notification(
     *,
     reply_markup: InlineKeyboardMarkup | None = None,
 ) -> Delivery:
-    """Исход отправки. Сбой не пробрасывается (изоляция получателей, см.
+    """Исход отправки (см. send_notification_message)."""
+    delivery, _ = await send_notification_message(
+        bot, telegram_id, text, reply_markup=reply_markup
+    )
+    return delivery
+
+
+async def send_notification_message(
+    bot: Bot,
+    telegram_id: int,
+    text: str,
+    *,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> tuple[Delivery, Message | None]:
+    """Исход отправки и отправленное сообщение (09.10: его message_id пишет
+    журнал исходящих app/bot/outbox.py; дублёр бота в тестах может вернуть
+    не Message — тогда None). Сбой не пробрасывается (изоляция получателей, см.
     docstring модуля), но вызывающий код знает о нём: сканеру это нужно,
     чтобы не записать снимок неотправленного уведомления (шаг 15.5.2а),
     остальным — чтобы ставить отметку доставки только после успеха и
@@ -90,9 +106,9 @@ async def send_notification(
         # (FakeBot) в существующих тестах принимают send_message(chat_id, text)
         # без лишних именованных аргументов.
         if reply_markup is not None:
-            await bot.send_message(telegram_id, text, reply_markup=reply_markup)
+            sent = await bot.send_message(telegram_id, text, reply_markup=reply_markup)
         else:
-            await bot.send_message(telegram_id, text)
+            sent = await bot.send_message(telegram_id, text)
     except TelegramForbiddenError:
         # Пользователь заблокировал бота или удалил чат — это не сбой
         # доставки, который стоит ретраить, а устойчивое состояние.
@@ -100,13 +116,13 @@ async def send_notification(
             "Уведомление не доставлено: бот заблокирован",
             extra={"telegram_id": telegram_id},
         )
-        return Delivery.FORBIDDEN
+        return Delivery.FORBIDDEN, None
     except TelegramAPIError:
         logger.exception(
             "Не удалось отправить уведомление", extra={"telegram_id": telegram_id}
         )
-        return Delivery.FAILED
-    return Delivery.DELIVERED
+        return Delivery.FAILED, None
+    return Delivery.DELIVERED, sent if isinstance(sent, Message) else None
 
 
 async def deliver_event(

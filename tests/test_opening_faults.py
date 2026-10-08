@@ -51,7 +51,7 @@ async def _recover(c, fault: str = "") -> int:  # type: ignore[no-untyped-def]
 
     settings = c.settings.model_copy(update={"exec_open_fault": fault})
 
-    async def notify(telegram_id: int, text: str, position: Any) -> None:
+    async def notify(telegram_id: int, text: str, position: Any, **_: Any) -> None:
         c.notes.append((telegram_id, text, position))
 
     return await recover_openings(c.db, settings, c.redis, c.factory, notify)

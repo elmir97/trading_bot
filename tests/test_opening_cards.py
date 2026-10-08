@@ -175,9 +175,11 @@ async def test_unconfirmed_reminders(ctx) -> None:  # type: ignore[no-untyped-de
     await ctx.session.commit()
     await ctx.session.refresh(opening)
     sent: list[str] = []
+    metas: list[Any] = []
 
-    async def notify(telegram_id: int, text: str, position: Any) -> None:
+    async def notify(telegram_id: int, text: str, position: Any, **kw: Any) -> None:
         sent.append(text)
+        metas.append(kw.get("meta"))
 
     t0 = datetime(2026, 10, 8, 12, 0, tzinfo=UTC)
     for seconds in (0, 60, 125, 300, 430, 600, 740):
@@ -189,6 +191,10 @@ async def test_unconfirmed_reminders(ctx) -> None:  # type: ignore[no-untyped-de
     assert len(sent) == 3            # 125 с; 430 с (через 5 мин); 740 с
     assert "(7 мин)" in sent[1] and "(12 мин)" in sent[2]
     assert "не закрывает" in sent[1]
+    # журнал исходящих (A.2): к какому открытию и какой вид
+    assert {(m.kind, m.trade_opening_id, m.user_id) for m in metas} == {
+        ("OPEN_ALARM_REMINDER", opening.id, opening.user_id)
+    }
     # решилось — ключи сняты, напоминаний больше нет
     opening.status = OpeningStatus.DONE
     await remind_unconfirmed(ctx.redis, ctx.settings, opening, 1, notify,
@@ -216,8 +222,11 @@ async def test_unconfirmed_cycle_never_closes(ctx) -> None:  # type: ignore[no-u
     assert out.status is OpeningStatus.ALARM
     notes: list[str] = []
 
-    async def notify(telegram_id: int, text: str, position: Any) -> None:
+    kinds: set[str] = set()
+
+    async def notify(telegram_id: int, text: str, position: Any, **kw: Any) -> None:
         notes.append(text)
+        kinds.add(kw["meta"].kind)
 
     t0 = datetime.now(UTC)
     for seconds in (5, 130, 200, 440):
@@ -225,6 +234,7 @@ async def test_unconfirmed_cycle_never_closes(ctx) -> None:  # type: ignore[no-u
                                now=t0 + timedelta(seconds=seconds))
     assert any(n.startswith("🚨 Стоп не подтверждён 2 мин") for n in notes)
     assert any("всё ещё не подтверждён" in n for n in notes)
+    assert kinds == {"OPEN_ALARM_REMINDER"}   # итог ALARM уже показал «Да»
     assert ctx.exchange.positions                                   # не закрыта
     assert [n for n, kw in ctx.exchange.posts() if n == "post_market"] == ["post_market"]
     row = await ctx.session.scalar(select(TradeOpening).where(TradeOpening.id == opening.id))

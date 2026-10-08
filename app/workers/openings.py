@@ -10,10 +10,12 @@ from typing import Any
 
 from aiogram import Bot
 
+from app.bot import outbox
 from app.bot.handlers.positions import position_keyboard
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.security import SecretCipher
+from app.database.models.outgoing_message import OutgoingMeta
 from app.database.session import Database
 from app.execution.opening.recovery import expire_stale_cards, recover_openings
 from app.services.exchange_factory import ExchangeFactory
@@ -44,10 +46,14 @@ class OpeningsWorker:
         self._fault_warned_at: float | None = None
 
     async def notify(
-        self, telegram_id: int, text: str, position: tuple[str, TradeSide] | None
+        self, telegram_id: int, text: str, position: tuple[str, TradeSide] | None, *,
+        meta: OutgoingMeta | None = None,
     ) -> None:
         markup = position_keyboard(*position) if position is not None else None
-        await send_notification(self._bot, telegram_id, text, reply_markup=markup)
+        if meta is None:
+            await send_notification(self._bot, telegram_id, text, reply_markup=markup)
+            return
+        await outbox.send(self._bot, self._db, meta, telegram_id, text, markup)
 
     async def run(self) -> None:
         faults = self._settings.exec_open_faults

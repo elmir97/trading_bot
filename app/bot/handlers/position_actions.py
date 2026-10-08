@@ -24,6 +24,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot import outbox
 from app.bot.handlers.exchange import _describe, _market_cache
 from app.bot.keyboards.main import MenuCallback
 from app.bot.messaging import edit_or_replace
@@ -32,6 +33,7 @@ from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.numfmt import fmt_price
 from app.core.security import SecretCipher
+from app.database.models.outgoing_message import OutgoingMeta
 from app.database.models.position_action import PositionAction
 from app.database.models.user import User
 from app.database.session import Database
@@ -335,7 +337,10 @@ async def decide(
         return
     await callback.answer()
     if message is not None:
-        await edit_or_replace(message, outcome.text, back_to_positions())
+        meta = OutgoingMeta(
+            user_id=user.id, kind="ACTION_RESULT", position_action_id=action_id
+        )
+        await outbox.edit(message, db, meta, outcome.text, back_to_positions())
 
 
 async def card_action(session: AsyncSession, action_id: int) -> PositionAction | None:
