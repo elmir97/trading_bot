@@ -110,8 +110,8 @@ async def test_low_rr_flagged(validator) -> None:  # type: ignore[no-untyped-def
     message = next(
         v.message for v in result.violations if v.code is ViolationCode.LOW_RISK_REWARD
     )
-    assert "RR 1:0.5" in message
-    assert "1:2" in message
+    # 08.10.2026: «минимальный по плану — 1:2.00», не «1:2.0000» (Numeric(…, 4) из базы)
+    assert message == "RR 1:0.50, минимальный по плану — 1:2.00."
 
 
 async def test_symbol_outside_plan_flagged(validator) -> None:  # type: ignore[no-untyped-def]

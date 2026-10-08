@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
 
-from app.core.numfmt import fmt_pct
+from app.core.numfmt import fmt_pct, fmt_rr
 from app.database.models.trading_plan import TradingPlan
 from app.database.repositories.trade import PeriodPnl, TradeRepository
 from app.trading.calculations import (
@@ -192,8 +192,8 @@ class PlanValidator:
                     result.violations.append(
                         Violation(
                             ViolationCode.LOW_RISK_REWARD,
-                            f"RR 1:{rr:g}, минимальный по плану — "
-                            f"1:{plan.min_risk_reward:g}.",
+                            f"RR 1:{fmt_rr(rr)}, минимальный по плану — "
+                            f"1:{fmt_rr(plan.min_risk_reward)}.",
                         )
                     )
             except CalculationError:

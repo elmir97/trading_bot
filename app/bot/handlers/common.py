@@ -10,6 +10,7 @@ from aiogram.types import CallbackQuery, Message
 from app.bot.formatting import fmt_num
 from app.bot.keyboards.main import MenuCallback, back_to_main, main_menu
 from app.bot.messaging import edit_or_replace
+from app.core.numfmt import fmt_rr
 from app.database.models.trading_plan import TradingPlan
 from app.database.models.user import User
 from app.database.repositories.user import UserRepository
@@ -78,7 +79,7 @@ async def cmd_plan(message: Message, user: User, session) -> None:
         f"Дневной лимит убытка: {fmt_num(plan.max_daily_loss_percent)}%\n"
         f"Недельный лимит убытка: {fmt_num(plan.max_weekly_loss_percent)}%\n"
         f"Сделок в день: не более {plan.max_trades_per_day}\n"
-        f"Минимальный RR: 1:{fmt_num(plan.min_risk_reward)}\n"
+        f"Минимальный RR: 1:{fmt_rr(plan.min_risk_reward)}\n"
         f"Максимальное плечо: {plan.max_leverage}x\n\n"
         f"Инструменты: {symbols}\n"
         f"Таймфреймы: {timeframes}",

@@ -23,6 +23,7 @@ from app.bot.prompts import ask_number
 from app.bot.sizing_view import sizing_lines
 from app.bot.states.trade import RiskCalculatorStates, SettingsStates
 from app.core.config import Settings
+from app.core.numfmt import fmt_rr
 from app.core.security import SecretCipher, mask_secret
 from app.database.models.credentials import ExchangeCredentials
 from app.database.models.user import (
@@ -323,7 +324,7 @@ async def calc_target(message: Message, state: FSMContext) -> None:
         f"Объём: {fmt_qty(sizing.quantity)}\n"
         f"Риск: −{fmt_amount(sizing.risk_actual)} USDT\n"
         f"Потенциал: +{fmt_num(potential_profit.quantize(Decimal('0.01')))} USDT\n"
-        f"<b>RR: 1:{fmt_num(rr)}</b>\n\n"
+        f"<b>RR: 1:{fmt_rr(rr)}</b>\n\n"
         f"{verdict}",
         reply_markup=back_to_main(),
     )
@@ -397,7 +398,7 @@ async def show_settings(
             f"Дневной лимит убытка: {fmt_num(plan.max_daily_loss_percent)}%",
             f"Недельный лимит: {fmt_num(plan.max_weekly_loss_percent)}%",
             f"Сделок в день: {plan.max_trades_per_day}",
-            f"Минимальный RR: 1:{fmt_num(plan.min_risk_reward)}",
+            f"Минимальный RR: 1:{fmt_rr(plan.min_risk_reward)}",
         ]
     if user_settings is not None:
         lines.append(f"Часовой пояс: {user_settings.timezone}")
@@ -461,7 +462,7 @@ async def show_plan(callback: CallbackQuery, user: User, session: AsyncSession) 
         f"Дневной лимит убытка: {fmt_num(plan.max_daily_loss_percent)}%\n"
         f"Недельный лимит убытка: {fmt_num(plan.max_weekly_loss_percent)}%\n"
         f"Сделок в день: не более {plan.max_trades_per_day}\n"
-        f"Минимальный RR: 1:{fmt_num(plan.min_risk_reward)}\n"
+        f"Минимальный RR: 1:{fmt_rr(plan.min_risk_reward)}\n"
         f"Максимальное плечо: {plan.max_leverage}x\n\n"
         f"Инструменты: {', '.join(plan.allowed_symbols) or 'не ограничено'}\n"
         f"Таймфреймы: {', '.join(plan.allowed_timeframes) or 'не ограничено'}",

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from app.core.logging import get_logger
-from app.core.numfmt import fmt_price
+from app.core.numfmt import fmt_price, fmt_qty
 from app.execution.opening.execution import ProtectResult, Runner, transition
 from app.execution.opening.render import expiry_label
 from app.trading.enums import OpeningStatus, OrderStatus
@@ -163,7 +163,8 @@ def done_text(runner: Runner, result: ProtectResult) -> str:
 def working_text(runner: Runner) -> str:
     o = runner.opening
     text = (
-        f"⏳ Лимит {o.symbol} {o.side.value} {o.quantity} @ {fmt_price(o.limit_price, runner.pp)}"
+        f"⏳ Лимит {o.symbol} {o.side.value} {fmt_qty(o.quantity, runner.qp)} @ "
+        f"{fmt_price(o.limit_price, runner.pp)}"
         f" выставлен, стоп {fmt_price(o.stop_loss, runner.pp)}"
     )
     if o.take_profit is not None:

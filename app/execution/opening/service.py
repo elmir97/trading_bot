@@ -22,13 +22,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.core.locks import LockBusyError, RedisLock, position_lock_key
 from app.core.logging import get_logger
+from app.core.numfmt import fmt_price, fmt_qty
 from app.core.security import SecretCipher
 from app.database.models.execution_order import ExecutionOrder
 from app.database.models.trade_opening import TradeOpening
 from app.database.models.user import User
 from app.database.repositories.trade import TradeRepository
 from app.database.repositories.user import UserRepository
-from app.exchanges.base import ExchangeClient, ExchangeError, MarginType
+from app.exchanges.base import ExchangeClient, ExchangeError, MarginType, SymbolInfo
 from app.execution import guards
 from app.execution.models import ExecutionRefusal
 from app.execution.models import ExecutionRefusalCode as Code
@@ -593,7 +594,7 @@ class OpeningService:
             return await self._refuse(opening, Code.CARD_STALE.value, drift)
 
         if self._settings.exec_open_dry_run:
-            return await self._dry_run(opening, calc)
+            return await self._dry_run(opening, calc, market.symbol_info)
 
         refusal_text = await self._margin_and_leverage(client, opening, market)
         if refusal_text is not None:
@@ -644,7 +645,9 @@ class OpeningService:
                 )
         return None
 
-    async def _dry_run(self, opening: TradeOpening, calc: OpeningCalc) -> ConfirmOutcome:
+    async def _dry_run(
+        self, opening: TradeOpening, calc: OpeningCalc, info: SymbolInfo
+    ) -> ConfirmOutcome:
         """EXEC_OPEN_DRY_RUN: строки того, что ушло бы, — на биржу ничего."""
         side = opening.side
         is_limit = opening.entry_type is EntryType.LIMIT
@@ -671,12 +674,18 @@ class OpeningService:
             self._session, opening, (OpeningStatus.CONFIRMED,), OpeningStatus.DRY_RUN,
             quantity=calc.quantity,
         )
-        kind = "лимит" if is_limit else "маркет"
+        pp = info.price_precision
+        kind = (
+            f"лимит @ {fmt_price(opening.limit_price, pp)}" if is_limit else "маркет"
+        )
+        take = (
+            f" и тейком {fmt_price(opening.take_profit, pp)}"
+            if opening.take_profit is not None else ""
+        )
         return ConfirmOutcome(
-            f"🧪 Сухой прогон: {kind} {opening.symbol} {side.value} {calc.quantity} со стопом "
-            f"{opening.stop_loss}"
-            + (f" и тейком {opening.take_profit}" if opening.take_profit is not None else "")
-            + " ушёл бы на биржу. Ничего не отправлено.",
+            f"🧪 Сухой прогон: {kind} {opening.symbol} {side.value} "
+            f"{fmt_qty(calc.quantity, info.quantity_precision)} со стопом "
+            f"{fmt_price(opening.stop_loss, pp)}{take} ушёл бы на биржу. Ничего не отправлено.",
             OpeningStatus.DRY_RUN,
         )
 

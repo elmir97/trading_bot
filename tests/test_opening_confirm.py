@@ -157,6 +157,9 @@ async def test_dry_run_sends_nothing(ctx) -> None:  # type: ignore[no-untyped-de
         opening.id, accept_warnings=False, message_id=55
     )
     assert out.status is OpeningStatus.DRY_RUN and "Ничего не отправлено" in out.text
+    # 08.10.2026: цены и объём — как на карточке, не сырые Decimal
+    assert "маркет XRP-USDT LONG 323 со стопом 1.4501 и тейком 1.5399 ушёл бы" in out.text
+    assert "000000" not in out.text
     assert _posts(ctx) == []
     rows = await _rows(ctx, opening.id)
     assert [r.role for r in rows] == [OrderRole.ENTRY, OrderRole.STOP_LOSS, OrderRole.TAKE_PROFIT]

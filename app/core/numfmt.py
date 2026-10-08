@@ -45,6 +45,13 @@ def fmt_pct(value: Decimal) -> str:
     return f"{value.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP):f}%"
 
 
+def fmt_rr(value: Decimal) -> str:
+    """RR после «1:» — всегда два знака (08.10.2026, замечание владельца):
+    «1:2.00», «1:0.50». Раньше рядом стояли «1:2.0000» (:g у Decimal из
+    Numeric(…, 4)) и «1:2» (fmt_num)."""
+    return f"{value.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP):f}"
+
+
 def _fallback_price_precision(value: Decimal) -> int:
     """Знаков после запятой, когда price_precision символа недоступен.
 

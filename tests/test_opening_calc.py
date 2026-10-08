@@ -209,3 +209,28 @@ class TestLimit:
         inputs = replace(INPUTS, entry_type=EntryType.LIMIT, limit_price=None)
         calc = compute(inputs, MARKET, LIMITS)
         assert "INVALID_PRICE" in _codes(calc)
+
+
+class TestCardText:
+    """08.10.2026: формат карточки — RR «1:1.00», ликвидация ближе стопа."""
+
+    def _render(self, leverage: int) -> str:
+        from app.execution.opening.render import render_card
+        from app.trading.enums import ExchangeKeyMode
+
+        inputs = replace(INPUTS, leverage=leverage)
+        return render_card(
+            inputs, compute(inputs, MARKET, LIMITS), account_mode=ExchangeKeyMode.DEMO,
+            equity=D(1500), available=D(1475), margin_type=MarginType.ISOLATED,
+            price_precision=4, quantity_precision=0, dry_run=True, ttl_seconds=60,
+        )
+
+    def test_rr_two_decimals(self) -> None:
+        assert "RR 1:1.00" in self._render(10)
+
+    def test_liquidation_farther(self) -> None:
+        assert "(в 2.9 раза дальше стопа)" in self._render(10)
+
+    def test_liquidation_closer_than_stop(self) -> None:
+        text = self._render(50)   # ликвидация ≈ 1% от входа при стопе 3%
+        assert "(⚠️ ближе стопа)" in text and "раза дальше" not in text

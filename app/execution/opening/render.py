@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from decimal import ROUND_DOWN, Decimal
 
-from app.core.numfmt import fmt_amount, fmt_pct, fmt_price, fmt_qty
+from app.core.numfmt import fmt_amount, fmt_pct, fmt_price, fmt_qty, fmt_rr
 from app.exchanges.base import MarginType
 from app.execution.opening.calc import Issue, Level, OpeningCalc, OpeningInputs
 from app.trading.enums import EntryType, ExchangeKeyMode
@@ -64,7 +64,7 @@ def render_card(
         take_pct = (inputs.take_profit - calc.entry_price) * sign / calc.entry_price * HUNDRED
         levels += f" · Тейк {fmt_price(inputs.take_profit, p)} (+{fmt_pct(take_pct)})"
         if calc.rr is not None:
-            levels += f" · RR {calc.rr.quantize(Decimal('0.01'))}"
+            levels += f" · RR 1:{fmt_rr(calc.rr)}"
     else:
         levels += " · без тейка"
     lines = [head, entry_line, levels]
@@ -81,10 +81,12 @@ def render_card(
             f"{inputs.leverage}x) · свободно {fmt_amount(available)} $",
         ]
         if calc.liq_estimate is not None and calc.liq_ratio is not None:
-            ratio = calc.liq_ratio.quantize(Decimal("0.1"), ROUND_DOWN)
-            lines.append(
-                f"Ликвидация ≈ {fmt_price(calc.liq_estimate, p)} (в {ratio} раза дальше стопа)"
-            )
+            if calc.liq_ratio < 1:
+                # 08.10.2026: «в 0.3 раза дальше стопа» читалось как «дальше».
+                where = "⚠️ ближе стопа"
+            else:
+                where = f"в {calc.liq_ratio.quantize(Decimal('0.1'), ROUND_DOWN)} раза дальше стопа"
+            lines.append(f"Ликвидация ≈ {fmt_price(calc.liq_estimate, p)} ({where})")
         elif margin_type is MarginType.CROSSED:
             lines.append("Ликвидация — по всему счёту (кросс), проверится после входа")
     if calc.issues:

@@ -115,3 +115,13 @@ class TestFmtRatio:
 
     def test_none(self) -> None:
         assert fmt_ratio(None) == "—"
+
+
+def test_fmt_rr_two_decimals() -> None:
+    """08.10.2026: RR после «1:» — всегда два знака: «1:2.00», не «1:2.0000» и не «1:2»."""
+    from app.core.numfmt import fmt_rr
+
+    assert fmt_rr(Decimal("2.0000")) == "2.00"
+    assert fmt_rr(Decimal("2")) == "2.00"
+    assert fmt_rr(Decimal("0.5")) == "0.50"
+    assert fmt_rr(Decimal("1.005")) == "1.01"

@@ -14,7 +14,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.formatting import fmt_num, fmt_pct
+from app.bot.formatting import fmt_pct
 from app.bot.keyboards.main import (
     MenuCallback,
     back_to,
@@ -41,6 +41,7 @@ from app.bot.states.trade import AddTradeStates, CloseTradeStates
 from app.bot.wizard_trail import remember
 from app.core.config import Settings
 from app.core.logging import get_logger
+from app.core.numfmt import fmt_rr
 from app.database.models.user import User
 from app.database.repositories.strategy import (
     MistakeTypeRepository,
@@ -363,7 +364,7 @@ async def set_take_profit(message: Message, state: FSMContext) -> None:
         except CalculationError as exc:
             await _say(message, state, f"⚠️ {exc}")
             return
-        await _say(message, state, f"Плановый RR: 1:{fmt_num(rr)}")
+        await _say(message, state, f"Плановый RR: 1:{fmt_rr(rr)}")
 
     await state.update_data(take_profit=str(value))
     await _ask_quantity_mode(message, state)
