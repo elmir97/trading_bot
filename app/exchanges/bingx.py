@@ -460,28 +460,37 @@ class BingXClient(ExchangeClient):
     ) -> Any:
         params = params or {}
 
-        if signed:
-            if not self._api_key:
-                raise ExchangeAuthError(
-                    "Не заданы ключи BingX. Подключи их в настройках бота."
-                )
-            # BingX и для POST ждёт параметры строкой запроса, не JSON-телом —
-            # подписанная строка формируется одинаково для любого метода.
-            url = f"{path}?{self._build_signed_query(params)}"
-            headers = {"X-BX-APIKEY": self._api_key}
-        else:
-            url = f"{path}?{urlencode(params)}" if params else path
-            headers = {}
+        if signed and not self._api_key:
+            raise ExchangeAuthError(
+                "Не заданы ключи BingX. Подключи их в настройках бота."
+            )
+        headers: dict[str, str] = {"X-BX-APIKEY": self._api_key} if self._api_key and signed else {}
 
         if method not in ("GET", "POST", "DELETE"):
             raise ValueError(f"Неподдерживаемый метод: {method}")
-        retries = max_retries if max_retries is not None else self._max_retries
+        # 08.10.2026: повторяет клиент только чтение (GET). POST и DELETE —
+        # ордера, плечо, режим маржи, отмена — ровно одна попытка при любом
+        # max_retries: после обрыва исход решает вызывающий код (поиск по
+        # clientOrderId, чтение openOrders/плеча), иначе повтор мог бы
+        # выставить второй ордер.
+        if method == "GET":
+            retries = max_retries if max_retries is not None else self._max_retries
+        else:
+            retries = 1
 
         await self._maybe_throttle(method, path)
 
         last_error: Exception | None = None
 
         for attempt in range(1, retries + 1):
+            # Подпись и timestamp — заново на каждую попытку (08.10.2026): строка,
+            # собранная один раз до цикла, после таймаута и паузы уходила со
+            # старым timestamp — BingX отвечал 109400 «timestamp is invalid».
+            # BingX и для POST ждёт параметры строкой запроса, не JSON-телом.
+            if signed:
+                url = f"{path}?{self._build_signed_query(params)}"
+            else:
+                url = f"{path}?{urlencode(params)}" if params else path
             try:
                 response = await self._client.request(method, url, headers=headers)
                 self.request_count += 1

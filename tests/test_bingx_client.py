@@ -2184,3 +2184,121 @@ class TestCancelOrder:
             await client.cancel_order("XRP-USDT", "1")
         assert calls["n"] == 1
         await client.close()
+
+
+def _ticking_clock(step: float):  # type: ignore[no-untyped-def]
+    """time.time, который на каждом вызове уходит вперёд на step секунд."""
+    state = {"t": 1_791_000_000.0}
+
+    def now() -> float:
+        state["t"] += step
+        return state["t"]
+
+    return now
+
+
+class TestRetrySigningAndNoOrderRepeat:
+    """08.10.2026: подпись и timestamp — заново на каждую попытку (прод, 2×
+    «109400 timestamp is invalid» после таймаута позиций); повторяет клиент
+    только GET — POST/DELETE ровно один раз при любом max_retries."""
+
+    @staticmethod
+    def _signed_ok(client: BingXClient, request: httpx.Request) -> bool:
+        query = unquote(request.url.query.decode())
+        raw, _, signature = query.rpartition("&signature=")
+        return client._sign(raw) == signature
+
+    async def test_get_retry_after_timeout_is_resigned(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        monkeypatch.setattr("app.exchanges.bingx.time.time", _ticking_clock(12))
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            if len(seen) == 1:
+                raise httpx.TimeoutException("timeout")
+            return ok([])
+
+        client = make_client(handler, max_retries=3)
+        client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
+        assert await client.get_positions() == []
+        assert len(seen) == 2
+        stamps = [int(dict(httpx.QueryParams(r.url.query))["timestamp"]) for r in seen]
+        assert stamps[1] - stamps[0] >= 12_000   # свежий timestamp, не старый
+        sigs = [dict(httpx.QueryParams(r.url.query))["signature"] for r in seen]
+        assert sigs[0] != sigs[1]
+        assert all(self._signed_ok(client, r) for r in seen)
+        await client.close()
+
+    async def test_get_retry_after_5xx_is_resigned(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        monkeypatch.setattr("app.exchanges.bingx.time.time", _ticking_clock(2))
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(502) if len(seen) == 1 else ok({"orders": []})
+
+        client = make_client(handler, max_retries=3)
+        client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
+        assert await client.get_open_orders("XRP-USDT") == []
+        stamps = [dict(httpx.QueryParams(r.url.query))["timestamp"] for r in seen]
+        assert len(set(stamps)) == 2
+        await client.close()
+
+    @pytest.mark.parametrize(
+        ("name", "call"),
+        [
+            ("market", lambda c: c.place_market_order(
+                symbol="XRP-USDT", side=OrderSide.BUY, position_side="LONG",
+                quantity=D("10"), client_order_id="to1u1e",
+                stop_loss=TpSlSpec(trigger_price=D("1.4")))),
+            ("limit", lambda c: c.place_limit_order(
+                symbol="XRP-USDT", side=OrderSide.BUY, position_side="LONG",
+                quantity=D("10"), price=D("1.4"), client_order_id="to2u1e")),
+            ("conditional", lambda c: c.place_conditional_order(
+                symbol="XRP-USDT", side=OrderSide.SELL, position_side="LONG",
+                order_type="STOP_MARKET", stop_price=D("1.4"), quantity=D("10"),
+                client_order_id="to3u1s1")),
+            ("close", lambda c: c.place_market_order(
+                symbol="XRP-USDT", side=OrderSide.SELL, position_side="LONG",
+                quantity=D("10"), client_order_id="to4u1c1")),
+            ("cancel", lambda c: c.cancel_order_by_client_id("XRP-USDT", "to5u1e")),
+            ("leverage", lambda c: c.set_leverage("XRP-USDT", 5, position_side="LONG")),
+        ],
+    )
+    @pytest.mark.parametrize("failure", ["timeout", "502", "rate_limit"])
+    async def test_order_post_is_never_repeated(self, name, call, failure) -> None:  # type: ignore[no-untyped-def]
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if failure == "timeout":
+                raise httpx.TimeoutException("timeout")
+            if failure == "502":
+                return httpx.Response(502)
+            return httpx.Response(200, json={"code": 100410, "msg": "rate limit", "data": {}})
+
+        client = make_client(handler, max_retries=3)
+        client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
+        with pytest.raises((ExchangeUnavailableError, ExchangeRateLimitError)):
+            await call(client)
+        assert calls["n"] == 1, name
+        await client.close()
+
+    async def test_post_ignores_explicit_max_retries(self) -> None:
+        """Даже явный max_retries=3 в _request не повторяет POST — правило в
+        транспорте, а не на совести каждого метода."""
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            raise httpx.TimeoutException("timeout")
+
+        client = make_client(handler, max_retries=3)
+        client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
+        with pytest.raises(ExchangeUnavailableError):
+            await client._request(
+                "/openApi/swap/v2/trade/order", {"symbol": "XRP-USDT"}, signed=True,
+                method="POST", max_retries=3,
+            )
+        assert calls["n"] == 1
+        await client.close()
