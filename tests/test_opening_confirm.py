@@ -282,9 +282,12 @@ async def test_parallel_confirm_sends_once(ctx) -> None:  # type: ignore[no-unty
 
     results = await asyncio.gather(tap(), tap())
     assert _posts(ctx).count("post_market") == 1
-    assert sum(r.status is OpeningStatus.DONE for r in results) == 1
-    # второе нажатие карточку не трогает: итог показывает первое
-    assert sum(r.final for r in results) == 1
+    # Второе нажатие карточку не трогает: итог показывает первое. Статус
+    # второго зависит от момента (лок занят — None; читает статус до лока —
+    # любой промежуточный или DONE «Сделка уже открыта.»), поэтому считаем
+    # final, а не статус.
+    final = [r for r in results if r.final]
+    assert len(final) == 1 and final[0].status is OpeningStatus.DONE
 
 
 async def test_lock_busy(ctx) -> None:  # type: ignore[no-untyped-def]
