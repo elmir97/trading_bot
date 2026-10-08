@@ -29,7 +29,7 @@ from app.database.repositories.strategy import MistakeTypeRepository, StrategyRe
 from app.database.repositories.trade import TradeRepository
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
-from app.exchanges.base import MarginType
+from app.exchanges.base import ExchangeResponseError, MarginType
 from app.execution.opening.calc import OpeningInputs
 from app.execution.opening.execution import Runner, opening_client_order_id
 from app.execution.opening.recovery import recover_openings
@@ -174,9 +174,20 @@ async def test_market_happy_path(ctx) -> None:  # type: ignore[no-untyped-def]
     opening = await _card(ctx)
     out = await ctx.service().confirm(opening.id, accept_warnings=False, message_id=55)
     assert out.status is OpeningStatus.DONE, out.text
-    # плечо 20 → 10 до входа, с read-back; режим маржи уже изолированный
-    assert _posts(ctx) == ["post_leverage", "post_market"]
+    # плечо 20 → 10 до входа, с read-back; режим маржи уже изолированный; после
+    # входа вложенные стоп и тейк заменены на closePosition (08.10): новый
+    # подтверждён → вложенный снят по orderId
+    assert _posts(ctx) == [
+        "post_leverage", "post_market",
+        "post_conditional", "post_cancel_id", "post_conditional", "post_cancel_id",
+    ]
     assert ctx.exchange.leverage["LONG"] == 10
+    on_exchange = sorted((o.order_type, o.close_position, o.client_order_id)
+                         for o in ctx.exchange.orders)
+    assert on_exchange == [
+        ("STOP_MARKET", True, f"to{opening.id}u{ctx.uid}s1"),
+        ("TAKE_PROFIT_MARKET", True, f"to{opening.id}u{ctx.uid}t1"),
+    ]
     entry_kw = ctx.exchange.posts()[1][1]
     assert entry_kw["client_order_id"] == f"to{opening.id}u{ctx.uid}e"
     assert entry_kw["stop_loss"].trigger_price == D("1.4501")
@@ -187,11 +198,15 @@ async def test_market_happy_path(ctx) -> None:  # type: ignore[no-untyped-def]
     assert opening.status is OpeningStatus.DONE and opening.trade_id == out.trade_id
     assert opening.avg_price == D("1.4950") and opening.filled_qty == D(323)
     rows = await _rows(ctx, opening.id)
-    roles = {r.role: r for r in rows}
-    assert roles[OrderRole.ENTRY].status is OrderStatus.FILLED
-    assert roles[OrderRole.STOP_LOSS].exchange_order_id is not None
-    assert roles[OrderRole.STOP_LOSS].client_order_id is None   # вложенный: cid пустой
-    assert roles[OrderRole.TAKE_PROFIT].exchange_order_id is not None
+    by = [(r.role, r.client_order_id, r.status) for r in rows]
+    assert by == [
+        (OrderRole.ENTRY, f"to{opening.id}u{ctx.uid}e", OrderStatus.FILLED),
+        (OrderRole.STOP_LOSS, None, OrderStatus.CANCELLED),           # вложенный снят
+        (OrderRole.STOP_LOSS, f"to{opening.id}u{ctx.uid}s1", OrderStatus.SUBMITTED),
+        (OrderRole.TAKE_PROFIT, None, OrderStatus.CANCELLED),
+        (OrderRole.TAKE_PROFIT, f"to{opening.id}u{ctx.uid}t1", OrderStatus.SUBMITTED),
+    ]
+    assert all(r.exchange_order_id for r in rows)
     assert all(r.trade_id == out.trade_id for r in rows)
 
     trade = await _trade(ctx, out.trade_id)
@@ -203,7 +218,9 @@ async def test_market_happy_path(ctx) -> None:  # type: ignore[no-untyped-def]
     entry = [f for f in trade.fills if f.fill_side is FillSide.ENTRY]
     assert len(entry) == 1 and entry[0].external_fill_id == opening.entry_order_id
     assert "✅ Открыто: XRP-USDT LONG 323 @ 1.495" in out.text
-    assert f"сделка #{out.trade_id}" in out.text and "тейк 1.5399 ✓" in out.text
+    assert "стоп 1.4501 ✓ (на всю позицию)" in out.text
+    assert "тейк 1.5399 ✓ (на всю позицию)" in out.text
+    assert f"сделка #{out.trade_id}" in out.text
 
 
 async def test_bot_trade_skipped_by_import(ctx) -> None:  # type: ignore[no-untyped-def]
@@ -388,8 +405,10 @@ async def test_attached_stop_missing_fallback_stop(ctx) -> None:  # type: ignore
     opening = await _card(ctx)
     ctx.exchange.drop_attached_sl = True
     out = await ctx.service().confirm(opening.id, accept_warnings=False)
-    assert out.status is OpeningStatus.DONE and "поставлен отдельным ордером" in out.text
-    kw = next(kw for name, kw in ctx.exchange.posts() if name == "post_conditional")
+    assert out.status is OpeningStatus.DONE
+    assert "стоп 1.4501 ✓ (на всю позицию, поставлен отдельным ордером" in out.text
+    kw = next(kw for name, kw in ctx.exchange.posts()
+              if name == "post_conditional" and kw["order_type"] == "STOP_MARKET")
     assert kw["close_position"] is True and kw["quantity"] == D(323)
     assert kw["client_order_id"] == f"to{opening.id}u{ctx.uid}s1"
     stops = [r for r in await _rows(ctx, opening.id) if r.role is OrderRole.STOP_LOSS]
@@ -426,11 +445,54 @@ async def test_close_fails_alarm_then_recovery(ctx) -> None:  # type: ignore[no-
 
 
 async def test_take_missing_is_warning(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Тейк не встал: вложенного нет и closePosition-тейк отклонён — не авария."""
+    opening = await _card(ctx)
+    ctx.exchange.drop_attached_tp = True
+    ctx.exchange.fail_conditional_types = {"TAKE_PROFIT_MARKET"}
+    out = await ctx.service().confirm(opening.id, accept_warnings=False)
+    assert out.status is OpeningStatus.DONE
+    assert "⚠️ не встал" in out.text and "поставь его в «Позиции»" in out.text
+    assert ctx.exchange.positions   # позиция открыта, под стопом
+    stops = [o for o in ctx.exchange.orders if o.order_type == "STOP_MARKET"]
+    assert len(stops) == 1 and stops[0].close_position
+
+
+async def test_missing_attached_take_is_placed(ctx) -> None:  # type: ignore[no-untyped-def]
     opening = await _card(ctx)
     ctx.exchange.drop_attached_tp = True
     out = await ctx.service().confirm(opening.id, accept_warnings=False)
     assert out.status is OpeningStatus.DONE
-    assert "⚠️ не встал" in out.text and "поставь его в «Позиции»" in out.text
+    assert "тейк 1.5399 ✓ (на всю позицию, поставлен отдельным ордером" in out.text
+
+
+async def test_replacement_fails_attached_kept(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Замена не прошла: closePosition не встал, вложенный покрывает позицию —
+    без аварии, вложенный остаётся, предупреждение."""
+    opening = await _card(ctx)
+    ctx.exchange.fail_conditional = True
+    out = await ctx.service().confirm(opening.id, accept_warnings=False)
+    assert out.status is OpeningStatus.DONE, out.text
+    assert "стоп 1.4501 ✓ (вложенный на объём входа)" in out.text
+    assert "не встал — стоит вложенный стоп на 323" in out.text
+    assert ctx.exchange.positions and "post_cancel_id" not in _posts(ctx)
+    stops = [o for o in ctx.exchange.orders if o.order_type == "STOP_MARKET"]
+    assert len(stops) == 1 and not stops[0].close_position
+
+
+async def test_attached_not_cancelled_warns(ctx, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Вложенный не снялся — два стопа на цене, предупреждение «сними лишний»."""
+    opening = await _card(ctx)
+
+    async def stuck(symbol: str, order_id: str):  # type: ignore[no-untyped-def]
+        ctx.exchange.calls.append(("post_cancel_id", order_id))
+        raise ExchangeResponseError("BingX: busy (код 80014)", code=80014)
+
+    monkeypatch.setattr(ctx.exchange, "cancel_order", stuck)
+    out = await ctx.service().confirm(opening.id, accept_warnings=False)
+    assert out.status is OpeningStatus.DONE
+    assert "Вложенный стоп на 323 не снялся" in out.text and "Сними лишний" in out.text
+    stops = [o for o in ctx.exchange.orders if o.order_type == "STOP_MARKET"]
+    assert len(stops) == 2   # closePosition + вложенный
 
 
 async def test_liquidation_before_stop_closes(ctx) -> None:  # type: ignore[no-untyped-def]

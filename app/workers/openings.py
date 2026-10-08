@@ -15,7 +15,7 @@ from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.security import SecretCipher
 from app.database.session import Database
-from app.execution.opening.recovery import recover_openings
+from app.execution.opening.recovery import expire_stale_cards, recover_openings
 from app.services.exchange_factory import ExchangeFactory
 from app.trading.enums import TradeSide
 from app.workers.notifier import send_notification
@@ -60,6 +60,7 @@ class OpeningsWorker:
                     ",".join(sorted(faults)), extra={"faults": sorted(faults)},
                 )
                 self._fault_warned_at = now
+        await expire_stale_cards(self._db, self._settings)
         if self._redis is None:
             return
         await recover_openings(

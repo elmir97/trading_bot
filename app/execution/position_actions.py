@@ -292,6 +292,34 @@ def plan_action(
     raise ValueError(f"Неизвестное действие: {kind}")
 
 
+def levels_after_partial(
+    stops: tuple[ProtectiveOrder, ...], takes: tuple[ProtectiveOrder, ...],
+    remainder: Decimal, quantity_precision: int,
+) -> str:
+    """Что будет со стопом и тейком после частичного закрытия (08.10.2026).
+
+    closePosition — «на всю позицию»; ордер на объём (вложенный во вход,
+    ручной «на часть позиции») — BingX уменьшает его под остаток сам (Т0 08.10:
+    стоп и тейк на 195 после закрытия 48 стали 147 в ту же секунду)."""
+
+    def one(name: str, orders: tuple[ProtectiveOrder, ...]) -> str:
+        if not orders:
+            return f"{name}а нет"
+        if all(o.close_position for o in orders):
+            return f"{name} на всю позицию"
+        sized = [o for o in orders if not o.close_position and o.quantity is not None]
+        qty = ", ".join(fmt_qty(o.quantity, quantity_precision) for o in sized)
+        return (
+            f"{name} на {qty} — биржа уменьшит до "
+            f"{fmt_qty(remainder, quantity_precision)}"
+        )
+
+    rest = fmt_qty(remainder, quantity_precision)
+    if all(o.close_position for o in (*stops, *takes)) and stops and takes:
+        return f"Остаток {rest} — стоп и тейк остаются на всю позицию"
+    return f"Остаток {rest}: {one('стоп', stops)}; {one('тейк', takes)}"
+
+
 def _parse_level(params: dict[str, object]) -> Decimal | None:
     try:
         level = Decimal(str(params.get("level")).strip().replace(",", "."))
@@ -368,10 +396,8 @@ def render_card(plan: ActionPlan, inputs: ActionInputs) -> str:
         )
         if plan.pnl_estimate is not None:
             lines.append(f"PnL ≈ {fmt_money(plan.pnl_estimate)} USDT по mark (после комиссий)")
-        if plan.kind is Kind.CLOSE_PARTIAL:
-            lines.append(
-                f"Остаток {fmt_qty(plan.remainder, qp)} — стоп и тейк остаются на всю позицию"
-            )
+        if plan.kind is Kind.CLOSE_PARTIAL and plan.remainder is not None:
+            lines.append(levels_after_partial(inputs.stops, inputs.takes, plan.remainder, qp))
     if plan.kind is not Kind.SET_TAKE:
         if plan.risk_increase:
             delta = (

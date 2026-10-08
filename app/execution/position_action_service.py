@@ -61,6 +61,7 @@ from app.execution.models import ExecutionRefusalCode as Code
 from app.execution.position_actions import (
     ActionInputs,
     ActionPlan,
+    levels_after_partial,
     plan_action,
     render_card,
 )
@@ -729,7 +730,7 @@ class PositionActionService:
         )
         if not full:
             rest = p.quantity - fill.executed_qty
-            text += f"\nОстаток {fmt_qty(rest, qp)} — стоп и тейк остаются на всю позицию."
+            text += "\n" + levels_after_partial(inputs.stops, inputs.takes, rest, qp) + "."
             return await self._finish(action, PositionActionStatus.DONE, text=text)
         leftovers = [
             o for o in await client.get_open_orders(action.symbol)

@@ -251,7 +251,29 @@ class TestRenderCard:
         assert isinstance(plan, ActionPlan)
         text = render_card(plan, inputs)
         assert "Закрыть 25%: <b>7</b> маркетом" in text
-        assert "стоп и тейк остаются на всю позицию" in text
+        # 08.10.2026: тейка нет — так и пишем (раньше «стоп и тейк остаются»)
+        assert "Остаток 23: стоп на всю позицию; тейка нет" in text
+
+    def test_partial_close_both_close_position(self) -> None:
+        inputs = _inputs(takes=(_order("1.62", "tp-1"),))
+        plan = plan_action(Kind.CLOSE_PARTIAL, {"fraction": "25"}, inputs)
+        assert isinstance(plan, ActionPlan)
+        assert "Остаток 23 — стоп и тейк остаются на всю позицию" in render_card(plan, inputs)
+
+    def test_partial_close_sized_orders_shrink(self) -> None:
+        """Стоп и тейк на объём (вложенные / «на часть позиции», «В журнал»):
+        биржа уменьшает их под остаток сама — проверено Т0 08.10 (195 → 147)."""
+        sized_stop = ProtectiveOrder("stop-1", D("1.4795"), False, D(30), "MARK_PRICE")
+        sized_take = ProtectiveOrder("tp-1", D("1.62"), False, D(30), "MARK_PRICE")
+        inputs = _inputs(stops=(sized_stop,), takes=(sized_take,))
+        plan = plan_action(Kind.CLOSE_PARTIAL, {"fraction": "25"}, inputs)
+        assert isinstance(plan, ActionPlan)
+        text = render_card(plan, inputs)
+        assert (
+            "Остаток 23: стоп на 30 — биржа уменьшит до 23; тейк на 30 — биржа уменьшит до 23"
+            in text
+        )
+        assert "на всю позицию" not in text
 
     def test_r_shown_when_known(self) -> None:
         inputs = _inputs()

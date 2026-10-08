@@ -14,6 +14,7 @@ from decimal import Decimal
 from typing import Any
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -486,9 +487,36 @@ def card_keyboard(
     return builder.as_markup()
 
 
+CARD_KEY = "card_opening_id"
+CARD_MSG_KEY = "card_message_id"
+RECALC_NOTICE = (
+    "⌛ Карточка устарела — пересчитал по текущей цене. Проверь числа и нажми "
+    "«Открыть» снова."
+)
+STALE_CARD_TEXT = "Это старая карточка — она больше не действует. Работай с последней."
+
+
+async def _strip(bot: Any, chat_id: int, message_id: int) -> None:
+    """Снять кнопки с сообщения; уже снятые / удалённые / старше 48 ч — не ошибка."""
+    try:
+        await bot.edit_message_reply_markup(
+            chat_id=chat_id, message_id=message_id, reply_markup=None
+        )
+    except TelegramAPIError:
+        pass
+
+
+async def _is_current(state: FSMContext, opening_id: int | None, message_id: int | None) -> bool:
+    """Карточка — та, что в форме мастера сейчас (по открытию или сообщению)."""
+    data = await state.get_data()
+    if opening_id is not None and data.get(CARD_KEY) == opening_id:
+        return True
+    return message_id is not None and data.get(CARD_MSG_KEY) == message_id
+
+
 async def _show_card(
     event: Message | CallbackQuery, state: FSMContext, user: User, session: AsyncSession,
-    settings: Settings, cipher: SecretCipher, redis: Any,
+    settings: Settings, cipher: SecretCipher, redis: Any, *, notice: str | None = None,
 ) -> None:
     data = await state.get_data()
     service = _service(session, settings, cipher, user, redis)
@@ -502,9 +530,20 @@ async def _show_card(
     keyboard = card_keyboard(
         opening_id, can_open=outcome.can_open, warnings=outcome.has_warnings
     )
-    sent = await _send(event, state, outcome.text, keyboard)
+    text = f"{notice}\n\n{outcome.text}" if notice else outcome.text
+    sent = await _send(event, state, text, keyboard)
     if outcome.opening is not None and sent is not None:
         await service.attach_message(outcome.opening, sent.chat.id, sent.message_id)
+    await state.update_data({
+        CARD_KEY: opening_id, CARD_MSG_KEY: sent.message_id if sent is not None else None,
+    })
+    # 08.10.2026: прежние карточки больше не действуют — снять с них кнопки.
+    stale = await service.supersede_cards(
+        opening_id, sent.message_id if sent is not None else None
+    )
+    if stale and sent is not None and sent.bot is not None:
+        for chat_id, message_id in stale:
+            await _strip(sent.bot, chat_id, message_id)
 
 
 @router.callback_query(OpenTradeStates.confirm, F.data == OpenCB.EDIT)
@@ -512,6 +551,12 @@ async def _show_card(
 async def edit_card(callback: CallbackQuery, state: FSMContext, user: User,
                     session: AsyncSession, settings: Settings, cipher: SecretCipher,
                     redis: Any) -> None:
+    message = callback.message if isinstance(callback.message, Message) else None
+    if message is not None and not await _is_current(state, None, message.message_id):
+        await callback.answer(STALE_CARD_TEXT, show_alert=True)
+        if message.bot is not None:
+            await _strip(message.bot, message.chat.id, message.message_id)
+        return
     if callback.data == OpenCB.RECALC:
         await _show_card(callback, state, user, session, settings, cipher, redis)
     else:
@@ -569,11 +614,23 @@ async def confirm_open(callback: CallbackQuery, state: FSMContext, user: User,
         await callback.answer("Кнопка устарела — открой заново.", show_alert=True)
         return
     await callback.answer("Открываю…")
+    current = await _is_current(state, opening_id, callback.message.message_id)
     service = _service(session, settings, cipher, user, redis)
     outcome = await service.confirm(
         opening_id, accept_warnings=warn, message_id=callback.message.message_id
     )
+    if outcome.status is OpeningStatus.EXPIRED_CARD and current:
+        # 08.10.2026: истекла текущая карточка — сразу пересчитанная, с новыми
+        # числами; «Открыть» — заново, автоматически не открываем.
+        data = await state.get_data()
+        if data.get("leverage") is not None:
+            await _show_card(callback, state, user, session, settings, cipher, redis,
+                             notice=RECALC_NOTICE)
+            return
     if not outcome.final:
+        if not current and callback.message.bot is not None:
+            await _strip(callback.message.bot, callback.message.chat.id,
+                         callback.message.message_id)
         await callback.message.answer(outcome.text)
         return
     opening = await service.load(opening_id)
@@ -582,8 +639,11 @@ async def confirm_open(callback: CallbackQuery, state: FSMContext, user: User,
         opening.side if opening else TradeSide.LONG,
     )
     if outcome.status in (OpeningStatus.REFUSED, OpeningStatus.EXPIRED_CARD):
-        await state.set_state(OpenTradeStates.confirm)   # «Пересчитать» берёт ввод из формы
-    else:
+        if current:
+            await state.set_state(OpenTradeStates.confirm)   # «Пересчитать» — из формы
+        else:
+            keyboard = None   # старая карточка: «Пересчитать» тут пересчитал бы чужую форму
+    elif current:
         await state.clear()   # переписка мастера удаляется, карточка остаётся итогом
     await callback.message.edit_text(outcome.text, reply_markup=keyboard)
 
@@ -594,6 +654,16 @@ async def decline_open(callback: CallbackQuery, state: FSMContext, user: User,
                        db: Database, redis: Any) -> None:
     opening_id = _opening_id(callback.data, OpenCB.NO)
     await _audit(callback, db, user, ExecutionCallbackAction.TO_NO, opening_id)
+    message = callback.message if isinstance(callback.message, Message) else None
+    in_form = await state.get_state() is not None
+    if in_form and not await _is_current(
+        state, opening_id, message.message_id if message else None
+    ):
+        # Старая карточка при живой форме: форму не трогаем (08.10.2026).
+        await callback.answer(STALE_CARD_TEXT, show_alert=True)
+        if message is not None and message.bot is not None:
+            await _strip(message.bot, message.chat.id, message.message_id)
+        return
     text = (
         await _service(session, settings, cipher, user, redis).decline(opening_id)
         if opening_id is not None else "Кнопка устарела."

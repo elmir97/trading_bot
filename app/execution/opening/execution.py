@@ -5,13 +5,19 @@
 дважды. Новый вход отправляется только из confirm и только один раз —
 строка ENTRY в execution_orders (UNIQUE client_order_id) коммитится ДО HTTP.
 
-Защита позиции (разведка Р3/Р4/Р6, 05.10):
-1. вложенный стоп ищется в openOrders по positionID, типу, стороне закрытия и
-   цене (clientOrderId у него пустой);
-2. нет или объём меньше позиции — запасной STOP_MARKET closePosition + quantity
-   = объём позиции (правило разведки 02.10);
-3. запасной не встал — аварийное закрытие маркетом, сделка в журнал с выходом;
+Защита позиции (разведка Р3/Р4/Р6, 05.10; замена — решение владельца 08.10):
+1. вложенные стоп и тейк ищутся в openOrders по positionID, типу, стороне
+   закрытия и цене (clientOrderId у них пустой) — они на объём входа, не
+   closePosition;
+2. сразу после входа они заменяются на closePosition по той же цене: новый
+   (cid …s{n} / …t{n}, closePosition + quantity = объём позиции, правило
+   разведки 02.10) подтверждён → вложенный снят по orderId → снятие
+   подтверждено повторным openOrders. Позиция под стопом на каждом шаге;
+3. closePosition-стоп не встал, а вложенный покрывает позицию — остаётся
+   вложенный, предупреждение; вложенного нет — аварийное закрытие маркетом,
+   сделка в журнал с выходом;
 4. закрытие не прошло — ALARM: тревога и повтор циклом восстановления.
+Тейк — так же, но без аварии: не встал — «тейк не стоит».
 
 «Стоп не встал» (08.10.2026, решение владельца) — только окончательно: POST
 отклонён кодом биржи ИЛИ ордер по своему clientOrderId не найден (109421) /
@@ -50,6 +56,7 @@ from app.exchanges.base import (
     ExchangeUnavailableError,
     OpenOrder,
     OrderFill,
+    OrderNotFoundError,
     Position,
     TpSlSpec,
 )
@@ -81,6 +88,13 @@ _STANDING = frozenset({"NEW", "PENDING", "PARTIALLY_FILLED", "FILLED", "TRIGGERE
 _GONE = frozenset({"CANCELLED", "CANCELED", "EXPIRED", "REJECTED", "FAILED"})
 
 
+class Mode(StrEnum):
+    REPLACED = "replaced"
+    BACKUP = "backup"
+    EXISTING = "existing"
+    KEPT = "kept"
+
+
 class StopCheck(StrEnum):
     STANDING = "STANDING"   # стоит на бирже — подтверждено
     ABSENT = "ABSENT"       # окончательно нет: POST отклонён / по cid не найден или снят
@@ -106,7 +120,11 @@ class EntryResult:
 class ProtectResult:
     status: OpeningStatus          # PROTECTED / EMERGENCY_CLOSED / ALARM
     take_missing: bool = False
-    fallback_stop: bool = False
+    # Как стоит стоп/тейк (Mode): replaced — вложенный заменён на closePosition,
+    # backup — вложенного не было, поставлен closePosition, existing — уже стоял
+    # closePosition, kept — замена не прошла, стоит вложенный на объём входа.
+    stop_mode: str = ""
+    take_mode: str = ""
     warnings: tuple[str, ...] = ()
     close_fill: OrderFill | None = None
     reason: str = ""
@@ -325,14 +343,13 @@ class Runner:
     def _q(self, price: Decimal) -> Decimal:
         return price.quantize(Decimal(1).scaleb(-self.pp), rounding=ROUND_HALF_UP)
 
-    def _match(
+    def _ours(
         self, orders: list[OpenOrder], order_type: OrderType, level: Decimal, position: Position
-    ) -> OpenOrder | None:
-        """Наш стоп/тейк на позиции. Несколько (частичное исполнение лимита —
-        вложенный на каждую часть, плюс запасной closePosition): первым —
-        closePosition (покрывает весь остаток), иначе с наибольшим объёмом."""
+    ) -> list[OpenOrder]:
+        """Наши стопы/тейки на позиции по цене: вложенные (на объём входа или
+        часть лимита) и closePosition."""
         target = self._q(level)
-        candidates = [
+        return [
             o for o in orders
             if o.symbol == self.opening.symbol and o.order_type == order_type.value
             and o.position_side == self.side.value
@@ -341,6 +358,12 @@ class Runner:
             and (o.position_id is None or position.position_id is None
                  or o.position_id == position.position_id)
         ]
+
+    def _match(
+        self, orders: list[OpenOrder], order_type: OrderType, level: Decimal, position: Position
+    ) -> OpenOrder | None:
+        """Лучший из наших: closePosition (весь остаток), иначе наибольший объём."""
+        candidates = self._ours(orders, order_type, level, position)
         if not candidates:
             return None
         return max(candidates, key=lambda o: (o.close_position, o.quantity))
@@ -411,45 +434,33 @@ class Runner:
             return ProtectResult(OpeningStatus.PROTECTED, warnings=(
                 "Позиции на бирже уже нет — выход запишет сверка.",
             ))
-        stop: OpenOrder | None = None
-        take: OpenOrder | None = None
-        orders: list[OpenOrder] = []
+        stops: list[OpenOrder] = []
+        takes: list[OpenOrder] = []
         for attempt in range(PROTECT_ATTEMPTS):
             if attempt:
                 await self._sleep(self.settings.exec_order_readback_delay_ms / 1000)
             orders = await self._visible_orders()
-            stop = self._match(orders, OrderType.STOP_MARKET, o.stop_loss, position)
+            stops = self._ours(orders, OrderType.STOP_MARKET, o.stop_loss, position)
             if o.take_profit is not None:
-                take = self._match(orders, OrderType.TAKE_PROFIT_MARKET, o.take_profit, position)
-            if stop is not None and (o.take_profit is None or take is not None):
+                takes = self._ours(orders, OrderType.TAKE_PROFIT_MARKET, o.take_profit, position)
+            if stops and (o.take_profit is None or takes):
                 break
-        fallback = False
-        if stop is not None and (stop.close_position or stop.quantity >= position.quantity):
-            await self._record_conditional(OrderRole.STOP_LOSS, stop)
-        else:
-            if stop is not None:
-                await self._record_conditional(OrderRole.STOP_LOSS, stop)
-            fallback = True
-            # Прежние запасные стопы, реально ушедшие на биржу, — сначала по cid:
-            # в openOrders их может ещё не быть (стоп принят, но не виден).
-            earlier = await self._earlier_backup_stop()
-            if earlier is StopCheck.UNKNOWN:
-                return ProtectResult(
-                    OpeningStatus.ALARM, undecided=True,
-                    reason="запасной стоп не подтверждён — перепроверка следующим циклом",
-                )
-            if earlier is not StopCheck.STANDING:
-                placed = await self._fallback_stop(position)
-                if placed is StopCheck.UNKNOWN:
-                    return ProtectResult(
-                        OpeningStatus.ALARM, undecided=True,
-                        reason="запасной стоп не подтверждён — перепроверка следующим циклом",
-                    )
-                if placed is StopCheck.ABSENT:
-                    return await self._emergency(position, EXIT_REASON_EMERGENCY)
-        if take is not None:
-            await self._record_conditional(OrderRole.TAKE_PROFIT, take)
         warnings: list[str] = []
+        stop_mode = await self._ensure_close_position(
+            OrderRole.STOP_LOSS, o.stop_loss, stops, position, warnings
+        )
+        if stop_mode is StopCheck.UNKNOWN:
+            return ProtectResult(
+                OpeningStatus.ALARM, undecided=True,
+                reason="стоп не подтверждён — перепроверка следующим циклом",
+            )
+        if stop_mode is StopCheck.ABSENT:
+            return await self._emergency(position, EXIT_REASON_EMERGENCY)
+        take_mode: Mode | StopCheck | None = None
+        if o.take_profit is not None:
+            take_mode = await self._ensure_close_position(
+                OrderRole.TAKE_PROFIT, o.take_profit, takes, position, warnings
+            )
         if o.margin_type == "ISOLATED" and position.liquidation_price is not None:
             sign = Decimal(self.side.direction)
             liq = position.liquidation_price
@@ -464,9 +475,98 @@ class Runner:
                 )
         return ProtectResult(
             OpeningStatus.PROTECTED,
-            take_missing=o.take_profit is not None and take is None,
-            fallback_stop=fallback, warnings=tuple(warnings),
+            take_missing=o.take_profit is not None and not isinstance(take_mode, Mode),
+            stop_mode=str(stop_mode),
+            take_mode=str(take_mode) if isinstance(take_mode, Mode) else "",
+            warnings=tuple(warnings),
         )
+
+    async def _ensure_close_position(
+        self, role: OrderRole, level: Decimal, found: list[OpenOrder], position: Position,
+        warnings: list[str],
+    ) -> Mode | StopCheck:
+        """Стоп или тейк «на всю позицию» (closePosition) по цене level.
+
+        Mode — стоит (как именно); StopCheck.ABSENT — окончательно нет и
+        вложенного, покрывающего позицию, нет; StopCheck.UNKNOWN — не
+        подтверждён (перепроверка циклом)."""
+        is_stop = role is OrderRole.STOP_LOSS
+        name = "стоп" if is_stop else "тейк"
+        for order in found:
+            await self._record_conditional(role, order)
+        close = next((x for x in found if x.close_position), None)
+        attached = [x for x in found if not x.close_position]
+        covering = any(a.quantity >= position.quantity for a in attached)
+        if close is not None:
+            mode = Mode.EXISTING
+        else:
+            # Прежние closePosition-попытки, реально ушедшие на биржу, — сначала
+            # по cid: в openOrders их может ещё не быть (принят, но не виден).
+            earlier = await self._earlier_close(role)
+            if earlier is StopCheck.STANDING:
+                mode = Mode.EXISTING
+            elif earlier is StopCheck.UNKNOWN:
+                if covering:
+                    warnings.append(
+                        f"Замена {name}а на «всю позицию» не подтверждена — стоит вложенный "
+                        f"{name} на {fmt_qty(position.quantity, self.qp)}."
+                    )
+                    return Mode.KEPT
+                return StopCheck.UNKNOWN
+            else:
+                placed = await self._place_close(role, level, position)
+                if placed is StopCheck.STANDING:
+                    mode = Mode.REPLACED if attached else Mode.BACKUP
+                elif covering:
+                    warnings.append(
+                        f"{name.capitalize()} «на всю позицию» не встал — стоит вложенный {name} "
+                        f"на {fmt_qty(position.quantity, self.qp)} (биржа уменьшает его при "
+                        "частичном закрытии, но не увеличивает при добавке к позиции)."
+                    )
+                    return Mode.KEPT
+                else:
+                    return placed
+        left = await self._cancel_attached(role, attached)
+        if left:
+            warnings.append(
+                f"Вложенный {name} на {fmt_qty(left[0].quantity, self.qp)} не снялся — на "
+                f"позиции два {name}а на одной цене. Сними лишний в BingX."
+            )
+        if mode is Mode.EXISTING and attached:
+            mode = Mode.REPLACED
+        return mode
+
+    async def _cancel_attached(self, role: OrderRole, attached: list[OpenOrder]) -> list[OpenOrder]:
+        """Снять вложенные по orderId; снятие — только по повторному openOrders
+        (ответ отмены не доказательство). Возвращает те, что остались."""
+        if not attached:
+            return []
+        for order in attached:
+            try:
+                await self.client.cancel_order(self.opening.symbol, order.order_id)
+            except OrderNotFoundError:
+                pass
+            except ExchangeError as exc:
+                logger.warning(
+                    "Вложенный ордер не снят", extra={**self._log(), "code": exc.code}
+                )
+        await self._sleep(self.settings.exec_order_readback_delay_ms / 1000)
+        live = {o.order_id for o in await self.client.get_open_orders(
+            self.opening.symbol, max_retries=1
+        )}
+        left = [a for a in attached if a.order_id in live]
+        for row in await self._rows(role):
+            if row.exchange_order_id in {a.order_id for a in attached} and (
+                row.exchange_order_id not in live
+            ):
+                row.status = OrderStatus.CANCELLED
+        await self.session.commit()
+        if not left:
+            logger.info(
+                "Вложенный ордер заменён на closePosition",
+                extra={**self._log(), "role": role.value, "count": len(attached)},
+            )
+        return left
 
     async def _attempt_no(self, role: OrderRole) -> int:
         count = await self.session.scalar(
@@ -478,12 +578,12 @@ class Runner:
         )
         return int(count or 0) + 1
 
-    async def _earlier_backup_stop(self) -> StopCheck | None:
-        """Запасные стопы прошлых проходов, реально отправленные (не FAULT и не
-        отклонённые кодом биржи): стоит хоть один — STANDING; про какой-то нет
+    async def _earlier_close(self, role: OrderRole) -> StopCheck | None:
+        """closePosition-ордера прошлых проходов, реально отправленные (не FAULT и
+        не отклонённые кодом биржи): стоит хоть один — STANDING; про какой-то нет
         ответа — UNKNOWN; иначе None (ставить новый)."""
         unknown = False
-        for row in reversed(await self._rows(OrderRole.STOP_LOSS)):
+        for row in reversed(await self._rows(role)):
             if not row.client_order_id or row.error_code == FAULT_CODE:
                 continue
             if row.status is OrderStatus.REJECTED and row.error_code not in (None, "NOT_FOUND"):
@@ -494,7 +594,7 @@ class Runner:
                 row.exchange_order_id = order_id or row.exchange_order_id
                 await self.session.commit()
                 logger.info(
-                    "Запасной стоп прошлого прохода стоит — новый не ставлю",
+                    "closePosition прошлого прохода стоит — новый не ставлю",
                     extra={**self._log(), "cid": row.client_order_id},
                 )
                 return StopCheck.STANDING
@@ -502,19 +602,27 @@ class Runner:
                 unknown = True
         return StopCheck.UNKNOWN if unknown else None
 
-    async def _fallback_stop(self, position: Position) -> StopCheck:
+    async def _place_close(
+        self, role: OrderRole, level: Decimal, position: Position
+    ) -> StopCheck:
+        """closePosition-стоп/тейк на level: POST → openOrders → по cid.
+        Сбои EXEC_OPEN_FAULT (fail/hide_backup_stop) — только для стопа."""
         o = self.opening
-        n = await self._attempt_no(OrderRole.STOP_LOSS)
-        cid = self.cid("s", n)
+        is_stop = role is OrderRole.STOP_LOSS
+        order_type = OrderType.STOP_MARKET if is_stop else OrderType.TAKE_PROFIT_MARKET
+        n = await self._attempt_no(role)
+        cid = self.cid("s" if is_stop else "t", n)
         row = self._row(
-            OrderRole.STOP_LOSS, OrderType.STOP_MARKET, CLOSING_SIDE[self.side],
-            client_order_id=cid, quantity=position.quantity, trigger_price=o.stop_loss,
+            role, order_type, CLOSING_SIDE[self.side],
+            client_order_id=cid, quantity=position.quantity, trigger_price=level,
             status=OrderStatus.PENDING, stage="confirm",
         )
         self.session.add(row)
         await self.session.commit()
-        logger.warning("Вложенный стоп не найден — ставлю запасной", extra=self._log())
-        if self._fault("fail_backup_stop", n):
+        logger.info(
+            "Ставлю closePosition", extra={**self._log(), "role": role.value, "cid": cid}
+        )
+        if is_stop and self._fault("fail_backup_stop", n):
             row.status = OrderStatus.REJECTED
             row.error_code = FAULT_CODE
             row.error_message = "управляемый сбой fail_backup_stop: не отправлен"
@@ -523,7 +631,7 @@ class Runner:
         try:
             result = await self.client.place_conditional_order(
                 symbol=o.symbol, side=CLOSING_SIDE[self.side], position_side=self.side.value,
-                order_type=OrderType.STOP_MARKET.value, stop_price=o.stop_loss,
+                order_type=order_type.value, stop_price=level,
                 quantity=position.quantity, client_order_id=cid, close_position=True,
             )
         except ExchangeError as exc:
@@ -534,7 +642,8 @@ class Runner:
                 row.error_message = str(exc)
                 await self.session.commit()
                 logger.error(
-                    "Запасной стоп отклонён биржей", extra={**self._log(), "code": exc.code}
+                    "closePosition отклонён биржей",
+                    extra={**self._log(), "role": role.value, "code": exc.code},
                 )
                 return StopCheck.ABSENT
             # Без ответа ордер мог встать — решает чтение ниже.
@@ -543,12 +652,14 @@ class Runner:
             await self.session.commit()
         else:
             row.exchange_order_id = result.order_id or None
-        if self._fault("hide_backup_stop", n):
+        if is_stop and self._fault("hide_backup_stop", n):
             self._hidden.add(cid.casefold())
         orders = await self._visible_orders()
         found = next(
             (x for x in orders if x.client_order_id.casefold() == cid.casefold()), None
-        ) or self._match(orders, OrderType.STOP_MARKET, o.stop_loss, position)
+        ) or next(
+            (x for x in self._ours(orders, order_type, level, position) if x.close_position), None
+        )
         if found is not None:
             row.status = OrderStatus.SUBMITTED
             row.exchange_order_id = found.order_id
@@ -563,10 +674,16 @@ class Runner:
             row.status = OrderStatus.REJECTED
             row.error_code = "NOT_FOUND"
             row.error_message = "нет в openOrders, по clientOrderId не найден или снят"
-            logger.error("Запасной стоп не встал: по cid не найден", extra=self._log())
+            logger.error(
+                "closePosition не встал: по cid не найден",
+                extra={**self._log(), "role": role.value},
+            )
         else:
             row.status = OrderStatus.UNKNOWN
-            logger.warning("Запасной стоп не подтверждён — перепроверю", extra=self._log())
+            logger.warning(
+                "closePosition не подтверждён — перепроверю",
+                extra={**self._log(), "role": role.value},
+            )
         await self.session.commit()
         return check
 

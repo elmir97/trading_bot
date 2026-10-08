@@ -58,7 +58,11 @@ async def _recover(c, fault: str = "") -> int:  # type: ignore[no-untyped-def]
 
 
 def _posts(c, name: str) -> list[dict[str, Any]]:  # type: ignore[no-untyped-def]
-    return [kw for n, kw in c.exchange.posts() if n == name]
+    """POST по имени; условные ордера — только стопы (тейк заменяется отдельно)."""
+    return [
+        kw for n, kw in c.exchange.posts()
+        if n == name and not (n == "post_conditional" and kw["order_type"] != "STOP_MARKET")
+    ]
 
 
 def _stops_on_exchange(c) -> list[Any]:  # type: ignore[no-untyped-def]
@@ -120,8 +124,13 @@ async def test_service_refuses_live_with_fault(ctx) -> None:  # type: ignore[no-
     assert outcome.refusal is not None and "управляемый сбой" in outcome.text
 
 
-async def test_fault_warning_hourly(caplog) -> None:  # type: ignore[no-untyped-def]
+async def test_fault_warning_hourly(caplog, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from unittest.mock import AsyncMock
+
+    from app.workers import openings
     from app.workers.openings import OpeningsWorker
+
+    monkeypatch.setattr(openings, "expire_stale_cards", AsyncMock(return_value=0))
 
     settings = Settings(**BASE, exec_open_fault="skip_attached_stop")  # type: ignore[arg-type]
     worker = OpeningsWorker(None, None, settings, None, None, factory=object())  # type: ignore[arg-type]
@@ -137,7 +146,8 @@ async def test_fault_warning_hourly(caplog) -> None:  # type: ignore[no-untyped-
 
 async def test_t1_skip_attached_stop_backup_stop(ctx) -> None:  # type: ignore[no-untyped-def]
     opening, out = await _open(ctx, "skip_attached_stop")
-    assert out.status is OpeningStatus.DONE and "поставлен отдельным ордером" in out.text
+    assert out.status is OpeningStatus.DONE
+    assert "стоп 1.4501 ✓ (на всю позицию, поставлен отдельным ордером" in out.text
     assert _posts(ctx, "post_market")[0]["stop_loss"] is None      # вход без стопа
     [stop] = _stops_on_exchange(ctx)
     assert stop.close_position and stop.client_order_id == f"to{opening.id}u{ctx.uid}s1"

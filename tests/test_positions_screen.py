@@ -342,3 +342,23 @@ async def test_import_without_balance_marked_and_warned(env, caplog) -> None:  #
     assert env.import_balances == [None]
     assert "в журнале — сделка #21. ⚠️ Баланс счёта не получен" in text
     assert any("баланс счёта не получен" in r.getMessage() for r in caplog.records)
+
+
+
+async def test_partial_stop_shown_with_quantity_and_import_button(env) -> None:  # type: ignore[no-untyped-def]
+    """08.10.2026: ручная позиция со стопом «на часть позиции» (не closePosition) —
+    экран пишет объём ордера, не «на всю позицию»; «В журнал» доступна."""
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC)
+    partial_stop = OpenOrder(
+        order_id="77", client_order_id="", symbol="XRP-USDT", side="SELL", position_side="LONG",
+        order_type="STOP_MARKET", quantity=D(30), executed_qty=D(0), price=D(0),
+        stop_price=D("1.4795"), status="NEW", leverage=20, reduce_only=True,
+        close_position=False, working_type="MARK_PRICE", created_at=now, updated_at=now,
+        take_profit=None, stop_loss=None,
+    )
+    env.client = _Client([_position()], [partial_stop])
+    text, buttons = await _open(env)
+    assert "Стоп: 1.4795 (30)" in text and "1.4795 (на всю позицию)" not in text
+    assert any("В журнал" in b for b in buttons)

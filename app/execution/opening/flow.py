@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 
 from app.core.logging import get_logger
 from app.core.numfmt import fmt_price, fmt_qty
-from app.execution.opening.execution import ProtectResult, Runner, transition
+from app.execution.opening.execution import Mode, ProtectResult, Runner, transition
 from app.execution.opening.render import expiry_label
 from app.trading.enums import OpeningStatus, OrderStatus
 
@@ -154,14 +154,22 @@ def _expires(minutes: int | None, now: datetime) -> datetime | None:
     return now + timedelta(minutes=minutes) if minutes else None
 
 
+_MODE_NOTE = {
+    Mode.REPLACED.value: " (на всю позицию)",
+    Mode.EXISTING.value: " (на всю позицию)",
+    Mode.BACKUP.value: " (на всю позицию, поставлен отдельным ордером — вложенного не было)",
+    Mode.KEPT.value: " (вложенный на объём входа)",
+}
+
+
 def done_text(runner: Runner, result: ProtectResult) -> str:
     o = runner.opening
-    stop = f"стоп {fmt_price(o.stop_loss, runner.pp)} ✓"
-    if result.fallback_stop:
-        stop += " (поставлен отдельным ордером)"
+    stop = f"стоп {fmt_price(o.stop_loss, runner.pp)} ✓{_MODE_NOTE.get(result.stop_mode, '')}"
     parts = [stop]
     if o.take_profit is not None:
-        mark = "⚠️ не встал" if result.take_missing else "✓"
+        mark = "⚠️ не встал" if result.take_missing else (
+            "✓" + _MODE_NOTE.get(result.take_mode, "")
+        )
         parts.append(f"тейк {fmt_price(o.take_profit, runner.pp)} {mark}")
     lines = [
         f"✅ Открыто: {runner.summary()}",

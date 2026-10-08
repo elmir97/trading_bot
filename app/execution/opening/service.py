@@ -361,7 +361,7 @@ class OpeningService:
             available=market.available, margin_type=market.desired_margin_type,
             price_precision=info.price_precision, quantity_precision=info.quantity_precision,
             dry_run=self._settings.exec_open_dry_run,
-            ttl_seconds=self._settings.exec_confirm_ttl_seconds,
+            ttl_seconds=self._settings.exec_open_card_ttl_seconds,
         )
         opening = (
             await self._store(inputs, source, market, calc, issues, None, chat_id, message_id)
@@ -482,7 +482,9 @@ class OpeningService:
         ):
             return ConfirmOutcome("Это не последняя карточка — открой заново.", final=False)
         now = datetime.now(UTC)
-        if now - opening.created_at > timedelta(seconds=self._settings.exec_confirm_ttl_seconds):
+        if now - opening.created_at > timedelta(
+            seconds=self._settings.exec_open_card_ttl_seconds
+        ):
             await transition(
                 self._session, opening, (OpeningStatus.CARD,), OpeningStatus.EXPIRED_CARD,
                 decided_at=now, error_code=Code.CARD_EXPIRED.value,
@@ -731,6 +733,39 @@ class OpeningService:
                 f"Режим маржи или плечо не выставлены ({exc}). Вход не отправлен.",
             )
         return None
+
+    async def supersede_cards(
+        self, keep_opening_id: int | None, keep_message_id: int | None = None
+    ) -> list[tuple[int, int]]:
+        """Новая карточка показана — прежние карточки пользователя (CARD и
+        отказные с кнопками «Изменить/Отмена», за 2 часа) больше не действуют:
+        CARD → EXPIRED_CARD (SUPERSEDED). Возвращает (chat_id, message_id), с
+        которых чат снимает кнопки; сообщение новой карточки не трогается."""
+        since = datetime.now(UTC) - timedelta(hours=2)
+        rows = list(await self._session.scalars(
+            select(TradeOpening).where(
+                TradeOpening.user_id == self._user.id,
+                TradeOpening.status.in_((OpeningStatus.CARD, OpeningStatus.REFUSED)),
+                TradeOpening.card_message_id.is_not(None),
+                TradeOpening.created_at >= since,
+            )
+        ))
+        stale: list[tuple[int, int]] = []
+        for row in rows:
+            if row.id == keep_opening_id:
+                continue
+            if row.status is OpeningStatus.CARD:
+                await transition(
+                    self._session, row, (OpeningStatus.CARD,), OpeningStatus.EXPIRED_CARD,
+                    error_code="SUPERSEDED",
+                    error_message="Показана новая карточка — эта больше не действует.",
+                )
+            if (
+                row.chat_id is not None and row.card_message_id is not None
+                and row.card_message_id != keep_message_id
+            ):
+                stale.append((row.chat_id, row.card_message_id))
+        return stale
 
     async def attach_message(self, opening: TradeOpening, chat_id: int, message_id: int) -> None:
         """Карточка отправлена отдельным сообщением — «Открыть» сверяет его id."""

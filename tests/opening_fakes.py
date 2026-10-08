@@ -73,6 +73,7 @@ class OpeningExchange:
         self.drop_attached_sl = False               # вложенный стоп не появился
         self.drop_attached_tp = False
         self.fail_conditional = False               # отдельный стоп отклоняется
+        self.fail_conditional_types: set[str] = set()  # отказ только этих типов
         self.fail_close = False                     # аварийное закрытие отклоняется
         self.leverage_readback_off = False           # POST плеча «принят», но не применён
         self.margin_readback_off = False
@@ -273,7 +274,7 @@ class OpeningExchange:
 
     async def place_conditional_order(self, **kw: Any) -> OrderResult:
         self.calls.append(("post_conditional", kw))
-        if self.fail_conditional:
+        if self.fail_conditional or kw["order_type"] in self.fail_conditional_types:
             raise ExchangeResponseError("BingX: rejected (код 109400)", code=109400)
         position = self.positions.get(kw["position_side"])
         order_id = self._next_id()

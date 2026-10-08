@@ -128,13 +128,19 @@ async def test_partial_fills_protected_then_full(ctx) -> None:  # type: ignore[n
     # вторая часть: вложенные стопы по 100 — меньше позиции 200 → запасной на всё
     ctx.exchange.fill_limit(cid, D(100))
     await ctx.recover()
-    fallback = [kw for name, kw in ctx.exchange.posts() if name == "post_conditional"]
-    assert len(fallback) == 1 and fallback[0]["close_position"] is True
-    assert fallback[0]["quantity"] == D(200)
-    # третья: запасной closePosition уже покрывает — второго не ставим (110406)
+    def stop_posts():  # type: ignore[no-untyped-def]
+        return [kw for name, kw in ctx.exchange.posts()
+                if name == "post_conditional" and kw["order_type"] == "STOP_MARKET"]
+
+    # closePosition-стоп поставлен на первой части (заменил вложенный на 100)
+    assert len(stop_posts()) == 1 and stop_posts()[0]["close_position"] is True
+    assert stop_posts()[0]["quantity"] == D(100)
+    # новые части: вложенные снимаются, второй closePosition не ставится (110406)
     ctx.exchange.fill_limit(cid, D(50))
     await ctx.recover()
-    assert [n for n, _ in ctx.exchange.posts()].count("post_conditional") == 1
+    assert len(stop_posts()) == 1
+    stops = [o for o in ctx.exchange.orders if o.order_type == "STOP_MARKET"]
+    assert len(stops) == 1 and stops[0].close_position
 
     ctx.exchange.fill_limit(cid)   # остаток
     await ctx.recover()

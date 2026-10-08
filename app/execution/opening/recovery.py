@@ -15,10 +15,10 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 
 from app.core.config import Settings
@@ -65,6 +65,67 @@ async def opening_in_flight(
         ).limit(1)
     )
     return found is not None
+
+
+async def expire_stale_cards(db: Database, settings: Settings) -> int:
+    """Карточки CARD старше срока → EXPIRED_CARD (только статус в базе: кнопки
+    не снимаются — нажатие «Открыть» на текущей карточке покажет пересчёт)."""
+    moment = datetime.now(UTC) - timedelta(seconds=settings.exec_open_card_ttl_seconds)
+    async with db.session() as session:
+        result = await session.execute(
+            update(TradeOpening)
+            .where(TradeOpening.status == OpeningStatus.CARD, TradeOpening.created_at < moment)
+            .values(
+                status=OpeningStatus.EXPIRED_CARD, error_code="CARD_EXPIRED",
+                finished_at=datetime.now(UTC),
+            )
+        )
+        await session.commit()
+        return int(result.rowcount or 0)  # type: ignore[attr-defined]
+
+
+UNCONFIRMED_KEY = "opening:unconfirmed:{id}"
+
+
+async def remind_unconfirmed(
+    redis: Any, settings: Settings, opening: TradeOpening, telegram_id: int, notify: Notify,
+    now: datetime,
+) -> None:
+    """«Стоп не подтверждён» (ALARM без закрытия, решение владельца 08.10): через
+    exec_open_unconfirmed_alarm_seconds — повторная тревога, дальше напоминание
+    раз в exec_open_unconfirmed_remind_seconds, пока не решится. Без закрытия.
+    Время — в Redis: переживает рестарт бота."""
+    key = UNCONFIRMED_KEY.format(id=opening.id)
+    if opening.status is not OpeningStatus.ALARM or opening.error_code != "STOP_UNCONFIRMED":
+        await redis.delete(key)
+        return
+    ts = now.timestamp()
+    first = await redis.hget(key, "first")
+    if first is None:
+        await redis.hset(key, mapping={"first": ts})
+        await redis.expire(key, 86400)
+        return
+    first_ts = float(first)
+    last = await redis.hget(key, "last")
+    who = f"{opening.symbol} {opening.side.value}"
+    if last is None:
+        if ts - first_ts < settings.exec_open_unconfirmed_alarm_seconds:
+            return
+        minutes = int(settings.exec_open_unconfirmed_alarm_seconds // 60)
+        text = f"🚨 Стоп не подтверждён {minutes} мин — проверь позицию {who} на бирже вручную."
+    else:
+        if ts - float(last) < settings.exec_open_unconfirmed_remind_seconds:
+            return
+        minutes = int((ts - first_ts) // 60)
+        text = (
+            f"🚨 Стоп всё ещё не подтверждён ({minutes} мин) — проверь позицию {who} на "
+            "бирже вручную. Позицию бот не закрывает, пока биржа не подтвердит, что стопа нет."
+        )
+    await notify(telegram_id, text, None)
+    await redis.hset(key, mapping={"last": ts})
+    logger.warning(
+        "Напоминание: стоп не подтверждён", extra={"opening_id": opening.id, "minutes": minutes}
+    )
 
 
 async def recover_openings(
@@ -115,6 +176,10 @@ async def _one(
                 outcome = await _advance(session, settings, factory, opening, now)
         except LockBusyError:
             return False
+        await session.refresh(opening)
+        await remind_unconfirmed(
+            redis, settings, opening, user.telegram_id, notify, now or datetime.now(UTC)
+        )
         if outcome is None:
             return False
         if outcome.notify and outcome.text:
