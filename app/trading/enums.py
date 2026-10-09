@@ -255,6 +255,18 @@ class OrderStatus(StrEnum):
     WORKING = "WORKING"
 
 
+class CancelSource(StrEnum):
+    """Кто снял ордер — execution_orders.cancel_source (M7, очередь A.3).
+
+    Только у строк CANCELLED. NULL у CANCELLED — «на бирже точно не стоит
+    (подтверждено openOrders), кто снял — неизвестно», а не «не проверяли».
+    """
+
+    EXCHANGE = "EXCHANGE"  # биржа сама — например, при закрытии позиции
+    BOT = "BOT"            # вытеснение, срок лимита, замена вложенного на closePosition
+    USER = "USER"          # кнопка владельца, в т.ч. снятие старого стопа/моста при переносе
+
+
 class ReconciliationKind(StrEnum):
     """Что нашёл reconciler (шаг 15.6) — строка reconciliation_events.
 

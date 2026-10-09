@@ -26,7 +26,7 @@ DATABASE_URL=postgresql+asyncpg://test:test@localhost:5432/trading_bot_test
 **Прогон зелёный только при нуле skipped.** Без `DATABASE_URL` молча
 пропускается ~115 интеграционных тестов, и счёт врёт.
 
-Ориентир на 10.10.2026 (`5384b37`, reconciler → журнал исходящих): 1444 passed, 0 skipped, 0 failed; smoke 99/99; mypy 60.
+Ориентир на 10.10.2026 (M7 `e7c41a9b3d52`, cancel_source): 1452 passed, 0 skipped, 0 failed; smoke 99/99; mypy 60.
 
 Число тестов в этом файле — ориентир на момент записи, а не факт. Перед
 тем как называть его в плане или отчёте, прогонять пакет и брать свежую

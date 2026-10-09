@@ -29,7 +29,14 @@ from app.database.base import (
     QuantityNumeric,
     TimestampMixin,
 )
-from app.trading.enums import OrderRole, OrderSide, OrderStatus, OrderType, TradeSide
+from app.trading.enums import (
+    CancelSource,
+    OrderRole,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    TradeSide,
+)
 
 if TYPE_CHECKING:
     from app.database.models.signal import SignalRecord
@@ -128,6 +135,14 @@ class ExecutionOrder(IntPKMixin, TimestampMixin, Base):
         default=OrderStatus.PENDING,
         server_default="PENDING",
         nullable=False,
+    )
+    # M7 (очередь A.3): кто снял ордер — только у CANCELLED, см. CancelSource.
+    # NULL у CANCELLED = «на бирже точно не стоит (подтверждено openOrders),
+    # кто снял — неизвестно», не «не проверяли». Ордер, которого биржа уже не
+    # отдаёт, — CANCELLED + NULL, а не SUBMITTED: SUBMITTED читают settle и
+    # Mini App, для них это ложь. NULL и у всех прочих статусов.
+    cancel_source: Mapped[CancelSource | None] = mapped_column(
+        Enum(CancelSource, native_enum=False, length=16)
     )
 
     raw_response: Mapped[dict | None] = mapped_column(JSONB)

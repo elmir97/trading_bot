@@ -1,6 +1,6 @@
 # Trading Journal Bot — передача в новый чат
 
-**10.10.2026: прод без изменений (`d3533fd`, M5); в `master` — коммиты 0, 1 и «reconciler → журнал» очереди A (`688280c`, `a083491` с M6, `5384b37` — НЕ задеплоены); строка 75 проверена (сделка #12 была, закрыта reconciler'ом, позже удалена); следующий — M7 — раздел «09.10 — ОЧЕРЕДЬ A: ПРОГРЕСС», читать первым.**
+**10.10.2026: прод без изменений (`d3533fd`, M5); в `master` — коммиты 0, 1, «reconciler → журнал» и M7 очереди A (`688280c`, `a083491` с M6, `5384b37`, M7 `e7c41a9b3d52` — НЕ задеплоены); следующий — коммит 3 (A.3) — раздел «09.10 — ОЧЕРЕДЬ A: ПРОГРЕСС», читать первым.**
 
 **08.10.2026 18:54 UTC: прод — `d3533fd`; серия Т1–Т6 пройдена; лимиты Л1–Л4 пройдены (Л3 сверен: #19 EXPIRED, на демо пусто); сухой прогон открытия ВЫКЛЮЧЕН — раздел «08.10 — ТЕКУЩЕЕ СОСТОЯНИЕ» → «СОСТОЯНИЕ ПРОДА», читать первым.**
 
@@ -66,6 +66,18 @@ B4) — раздел «29.09», подраздел «Деплой 29.09 10:28 UT
   переотправка — строка `outgoing_messages`, kind `RECON_<вид события>`, `trade_id` события. Пишется **после commit**
   транзакции пользователя: reconciler держит строку сделки под FOR UPDATE, outbox пишет своей сессией с FK на сделку —
   внутри транзакции ждал бы сам себя (мутационная проверка: такой вариант вешает тест до таймаута). pytest 1444
+- **M7 `e7c41a9b3d52` — `execution_orders.cancel_source` + данные по утверждённому списку (10.10, по «да»):** колонка
+  VARCHAR(16) NULL, `CancelSource` (EXCHANGE/BOT/USER) в `app/trading/enums.py`. Строка опознаётся по (id,
+  `client_order_id`, статус до), у 114 — ещё по error_code/error_message; `client_order_id` и текст ошибки 114 — из
+  SELECT на проде 10.10 (READ ONLY, по «да»; 45 строк, набор и статусы = списку, новых нет). У 15 строк cid NULL (66, 68,
+  70, 72, 77, 84, 85, 89, 91, 97, 107, 116, 123, 127, 129), поэтому «прод или нет» решают 30 строк с cid («якоря»): ни
+  одного — WARNING «M7: данные пропущены» (тестовая/пустая БД: в тестовой те же id заняты чужими строками), все — обязаны
+  совпасть все 45 + rowcount по группам, часть — исключение. Downgrade возвращает строки, ещё стоящие в состоянии «после
+  M7», изменённые после — WARNING с id, не падает. `--sql` печатает те же UPDATE с отпечатком в WHERE. Тестовая БД:
+  upgrade/downgrade/upgrade — ветка пропуска; `alembic check` — только прежний C.8. pytest 1452. **Репетиция:**
+  `--checksum --expect-columns execution_orders.cancel_source --allow-count-change outgoing_messages`, без
+  `--allow-data-change` (downgrade обязан вернуть status/error_* точно); в выводе — «M7: данные применены — 45 строк»,
+  «данные пропущены» на копии — провал
 
 **Шаг 0 на проде (09.10, по «да», только чтение: SELECT в READ ONLY + GET openOrders/positions; проверка D — 5 GET
 `trade/order` по orderId на демо по одному, remain 29).** Разобрано 45 строк `execution_orders` (SUBMITTED 22,
@@ -103,14 +115,41 @@ B4) — раздел «29.09», подраздел «Деплой 29.09 10:28 UT
 импортированная сделка без связи с positionId, по всей видимости, не закрывалась сверкой (не проверено по коду
 `101ca0e`/`b27a7c7`). M7 по утверждённому списку (решение владельца 10.10: 75 → FILLED, `trade_id` не трогаем — сделки нет).
 Если до M7 появятся новые SUBMITTED (проверки на демо) — M7 их не трогает (только id из списка); их закроет код A.3
-или следующая миграция. Перед деплоем — повторить GET openOrders/positions (0/0), иначе стоп.
+или следующая миграция.
+
+**Чек-лист перед деплоем 1 (оба пункта — до сборки; любое расхождение — стоп и доложить владельцу):**
+- GET openOrders/positions на демо — 0/0
+- SELECT в READ ONLY: строки `execution_orders` со `status IN ('SUBMITTED','CANCELED','CANCELLED')` (до M7 колонки
+  `cancel_source` нет — значит, все такие строки) — набор id **и статус каждого** совпадают с утверждённым списком выше:
+  SUBMITTED — B, D1, C, D2 (22), `CANCELED` — A (7), `CANCELLED` — E-USER, E-BOT (16); всего 45. Новая строка (после
+  09.10) — стоп: M7 её не тронет, решать отдельно (код A.3 или следующая миграция)
+  ```sql
+  SELECT id, status FROM execution_orders
+  WHERE status IN ('SUBMITTED','CANCELED','CANCELLED') ORDER BY id;
+  ```
+
+**Чек-лист после деплоя 1 — M7 реально применила данные (SELECT в READ ONLY; любое расхождение — стоп и доложить).**
+Ветка миграции «ни одна строка не совпала — не прод, данные пропущены» на проде сработать не должна: в логе upgrade
+не должно быть строки о пропуске, и ноль изменённых строк — стоп.
+- по id списка: `status × cancel_source` — `CANCELLED`+`EXCHANGE` 25 (A 7 + B 14 + D1 4), `CANCELLED`+`USER` 10
+  (C 3 + E-USER 7), `CANCELLED`+`BOT` 9 (E-BOT), `FILLED`+NULL 1 (строка 75); итого 45
+- строка 75 — `FILLED`, `cancel_source` NULL; строка 114 — `error_code` и `error_message` NULL
+- во всей таблице: `CANCELED` — 0; `CANCELLED` с `cancel_source` NULL — 0 (кроме строк, появившихся после M7 и
+  разобранных отдельно)
+  ```sql
+  SELECT status, cancel_source, count(*) FROM execution_orders
+  WHERE id IN (<45 id списка>) GROUP BY 1, 2 ORDER BY 1, 2;
+  SELECT id, status, cancel_source, error_code, error_message FROM execution_orders WHERE id IN (75, 114);
+  SELECT status, cancel_source IS NULL AS src_null, count(*) FROM execution_orders
+  WHERE status IN ('CANCELED','CANCELLED') GROUP BY 1, 2;
+  ```
 
 **Правило `cancel_source` NULL (решение владельца 09.10):** у `CANCELLED` NULL = «на бирже точно не стоит
 (openOrders = 0), кто снял — неизвестно»; ордер, которого биржа уже не отдаёт, — `CANCELLED` + NULL, не SUBMITTED
 (SUBMITTED был бы ложью для settle и Mini App). Записано в `CLAUDE.md` («Конвенции»); в докстринг модели
 `ExecutionOrder.cancel_source` — в коммите M7.
 
-**Следующий шаг:** коммит M7 (по отдельному «да» владельца) (схема + данные по списку выше) → коммит 3
+**Следующий шаг:** коммит 3
 (A.3: `settle_conditionals`, единый `CANCELLED`, `cancel_source` в коде, ранняя запись вложенных, очистка `error_code`
 + INFO) → репетиция миграции (M6 + M7, по «да») → **⛔ проверка бота с Эльмиром (по его «да»)** → деплой 1 с миграцией (по «да») → демо Т0′ и Т2.
 
