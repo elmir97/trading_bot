@@ -37,6 +37,7 @@ from app.execution.opening.service import OpeningService
 from app.market.cache import TTLCache
 from app.services.user_service import UserService
 from app.trading.enums import (
+    CancelSource,
     EntryType,
     ExchangeKeyMode,
     FillSide,
@@ -201,10 +202,14 @@ async def test_market_happy_path(ctx) -> None:  # type: ignore[no-untyped-def]
     by = [(r.role, r.client_order_id, r.status) for r in rows]
     assert by == [
         (OrderRole.ENTRY, f"to{opening.id}u{ctx.uid}e", OrderStatus.FILLED),
+        # A.3: вложенные записаны сразу после поиска — до s1/t1.
         (OrderRole.STOP_LOSS, None, OrderStatus.CANCELLED),           # вложенный снят
-        (OrderRole.STOP_LOSS, f"to{opening.id}u{ctx.uid}s1", OrderStatus.SUBMITTED),
         (OrderRole.TAKE_PROFIT, None, OrderStatus.CANCELLED),
+        (OrderRole.STOP_LOSS, f"to{opening.id}u{ctx.uid}s1", OrderStatus.SUBMITTED),
         (OrderRole.TAKE_PROFIT, f"to{opening.id}u{ctx.uid}t1", OrderStatus.SUBMITTED),
+    ]
+    assert [r.cancel_source for r in rows if r.status is OrderStatus.CANCELLED] == [
+        CancelSource.BOT, CancelSource.BOT,                          # замена на closePosition
     ]
     assert all(r.exchange_order_id for r in rows)
     assert all(r.trade_id == out.trade_id for r in rows)

@@ -71,12 +71,14 @@ from app.execution.position_view import (
     link_trade,
     protective_orders,
 )
+from app.execution.settle import CONDITIONAL_ROLES, OPEN_STATUSES, conditional_rows, settle
 from app.market.cache import TTLCache
 from app.market.data import MarketDataService
 from app.services.exchange_factory import ExchangeFactory
 from app.services.permissions import refresh_permissions
 from app.services.position_mode import refresh_position_mode
 from app.trading.enums import (
+    CancelSource,
     FillSide,
     OrderRole,
     OrderSide,
@@ -644,13 +646,29 @@ class PositionActionService:
                 break
             if attempt + 1 < self._settings.exec_order_readback_attempts:
                 await self._delay()
+        if gone:
+            # Снят кнопкой владельца (перенос, остатки «Закрыть всё») — USER, в
+            # том числе строка, которой ордер ставился (стоп открытия, мост):
+            # иначе она висит SUBMITTED (строки 65/67/69 до M7).
+            placed = await self._session.scalars(select(ExecutionOrder).where(
+                ExecutionOrder.user_id == self._user.id,
+                ExecutionOrder.exchange_order_id == order_id,
+                ExecutionOrder.role.in_(CONDITIONAL_ROLES),
+                ExecutionOrder.status.in_((*OPEN_STATUSES, OrderStatus.REJECTED)),
+            ))
+            for row in placed:
+                row.status = OrderStatus.CANCELLED
+                row.cancel_source = CancelSource.USER
         if gone and placed_row is not None:
             placed_row.status = OrderStatus.CANCELLED
+            placed_row.cancel_source = CancelSource.USER
         else:
-            self._session.add(self._row(
+            obs = self._row(
                 action, role, otype, OrderStatus.CANCELLED if gone else OrderStatus.UNKNOWN,
                 quantity=quantity, trigger=level, exchange_order_id=order_id,
-            ))
+            )
+            obs.cancel_source = CancelSource.USER if gone else None
+            self._session.add(obs)
         await self._session.commit()
         return gone
 
@@ -742,6 +760,7 @@ class PositionActionService:
                 client, action, str(o.order_id), OrderRole.STOP_LOSS, OrderType.STOP_MARKET,
                 o.stop_price, o.quantity,
             )
+        await self._settle_closed(client, action)
         if leftovers:
             ids = {str(o.order_id) for o in leftovers}
             still = await self._find_any(client, action.symbol, ids)
@@ -752,6 +771,29 @@ class PositionActionService:
         else:
             text += "\nСтоп и тейк биржа сняла сама."
         return await self._finish(action, PositionActionStatus.DONE, text=text)
+
+    async def _settle_closed(self, client: ExchangeClient, action: PositionAction) -> None:
+        """Позиция закрыта целиком — строки её стопов/тейков (сделки и действий
+        этапа 4 по positionId) в CANCELLED по свежему openOrders: снятое биржей
+        при закрытии — EXCHANGE, снятое нами выше уже USER. Стоящие не трогаем."""
+        rows = await conditional_rows(
+            self._session, user_id=self._user.id, trade_id=action.trade_id,
+            position_id=action.position_id,
+        )
+        if not rows:
+            return
+        log = {"action_id": action.id, "trade_id": action.trade_id}
+        try:
+            live = {str(o.order_id) for o in await client.get_open_orders(action.symbol)}
+        except ExchangeError:
+            logger.warning("openOrders после закрытия не получены — строки не закрыты",
+                           extra=log)
+            return
+        result = settle(rows, open_order_ids=live, context=log)
+        await self._session.commit()
+        if result.standing:
+            logger.warning("Условный ордер ещё стоит после закрытия позиции",
+                           extra={**log, "ids": result.standing})
 
     async def _find_any(self, client: ExchangeClient, symbol: str, ids: set[str]) -> set[str]:
         return {str(o.order_id) for o in await client.get_open_orders(symbol)} & ids

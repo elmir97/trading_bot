@@ -34,6 +34,7 @@ from app.database.session import Database
 from app.exchanges.bingx import BingXClient
 from app.services.user_service import UserService
 from app.trading.enums import (
+    CancelSource,
     ExchangeKeyMode,
     OrderRole,
     OrderSide,
@@ -79,6 +80,8 @@ class LiveDemo:
     def __init__(self) -> None:
         self.calls: list[str] = []
         self.link_open_orders: list[dict[str, Any]] = live_items("openOrders LINK")
+        # A.3: openOrders прочих символов (по умолчанию — пусто).
+        self.open_orders: dict[str, list[dict[str, Any]]] = {}
         self.unknown_cids: set[str] = set()
         # GET /trade/order по clientOrderID: cid → живой ответ ордера.
         self.orders_by_cid: dict[str, dict[str, Any]] = {}
@@ -100,7 +103,10 @@ class LiveDemo:
         if path == "/openApi/swap/v2/trade/openOrders":
             # Без символа — все ордера (этап 3: синхронизация уровней журнала).
             symbol = params.get("symbol")
-            orders = self.link_open_orders if symbol in ("LINK-USDT", None) else []
+            orders = (
+                self.link_open_orders if symbol in ("LINK-USDT", None)
+                else self.open_orders.get(symbol, [])
+            )
             return _ok({"orders": orders})
         cid = params.get("clientOrderID")
         if path == "/openApi/swap/v2/trade/order" and cid in self.unknown_cids:
@@ -273,7 +279,11 @@ async def test_sol_closed_by_stop_on_exchange_is_closed_in_journal(ctx) -> None:
     assert {f.external_fill_id for f in sol.fills} == {SOL_ENTRY, SOL_CHILD}
     rows = await _rows(db, "SOL-USDT")
     assert rows[OrderRole.STOP_LOSS].status is OrderStatus.FILLED
-    assert rows[OrderRole.TAKE_PROFIT].status is OrderStatus.CANCELED
+    assert rows[OrderRole.STOP_LOSS].cancel_source is None
+    # A.3: тейк снят биржей при закрытии (CANCELLED в истории SOL) — единое
+    # CANCELLED и источник EXCHANGE.
+    assert rows[OrderRole.TAKE_PROFIT].status is OrderStatus.CANCELLED
+    assert rows[OrderRole.TAKE_PROFIT].cancel_source is CancelSource.EXCHANGE
 
     link = await _trade(db, link_id)
     assert link.status is TradeStatus.OPEN
@@ -755,6 +765,8 @@ async def _seed_link_manual_stop(session, demo, user_id: int) -> Trade:  # type:
     не разрешён. 1R — риск карточки: (14.4 − 13.526) × 2037.8."""
     demo.positions = live_items("positions LINK (фильтр по символу на клиенте)", LINK_MANUAL_STOP)
     demo.all_orders = {"LINK-USDT": live_items("allOrders LINK", LINK_MANUAL_STOP)}
+    # Позиции нет — её стоп и тейк биржа сняла (openOrders 27.09 их ещё отдаёт).
+    demo.link_open_orders = []
     link = await _bot_trade(
         session, user_id, "LINK-USDT", entry="14.4", qty="2037.8", entry_id=LINK_ENTRY,
         stop_id=LINK_STOP, take_id=LINK_TAKE, fee="14.672461",
@@ -798,8 +810,10 @@ async def test_link_manual_stop_closes_trade_from_fact(ctx) -> None:  # type: ig
     assert trade.closed_at == datetime(2026, 9, 29, 4, 3, 24, tzinfo=UTC)
     assert {f.external_fill_id for f in trade.fills} == {LINK_ENTRY, LINK_MANUAL_CHILD}
     rows = await _rows(db, "LINK-USDT")
-    assert rows[OrderRole.STOP_LOSS].status is OrderStatus.CANCELED
-    assert rows[OrderRole.TAKE_PROFIT].status is OrderStatus.CANCELED
+    assert rows[OrderRole.STOP_LOSS].status is OrderStatus.CANCELLED
+    assert rows[OrderRole.TAKE_PROFIT].status is OrderStatus.CANCELLED
+    assert rows[OrderRole.STOP_LOSS].cancel_source is CancelSource.EXCHANGE
+    assert rows[OrderRole.TAKE_PROFIT].cancel_source is CancelSource.EXCHANGE
 
     events = await _trade_events(db, link.id)
     ambiguous = [e for e in events if e.kind is ReconciliationKind.AMBIGUOUS]
@@ -1521,3 +1535,208 @@ def test_recon_kinds_fit_outgoing_kind_column() -> None:
 
     limit = OutgoingMessage.__table__.c.kind.type.length
     assert all(len(f"RECON_{k.value}") <= limit for k in ReconciliationKind)
+
+
+# --- 10.10: A.3 — строки стопа/тейка закрытых сделок по факту биржи ---------------
+
+XRP = "XRP-USDT"
+
+
+def _xrp_hist(oid: str, otype: str, status: str, trigger: str = "0") -> dict[str, Any]:
+    item = dict(live_items("allOrders SOL")[1])
+    item.update(symbol=XRP, orderId=int(oid), type=otype, status=status,
+                triggerOrderId=int(trigger), stopPrice="1.3000", origQty="100")
+    return item
+
+
+def _xrp_open(oid: str) -> dict[str, Any]:
+    item = dict(live_items("openOrders LINK")[0])
+    item.update(symbol=XRP, orderId=int(oid), stopPrice="1.3000", origQty="100")
+    return item
+
+
+async def _closed_xrp_trade(  # type: ignore[no-untyped-def]
+    session, user_id: int, rows: list[tuple[OrderRole, OrderStatus, str]], *,
+    mode: ExchangeKeyMode = ExchangeKeyMode.DEMO, age: timedelta = timedelta(hours=2),
+    tag: str = "1",
+) -> tuple[Trade, list[ExecutionOrder]]:
+    """Сделка BOT, уже закрытая («Закрыть всё» / аварийно), со строками
+    стопа/тейка, которые к моменту закрытия не закрылись (гонка)."""
+    journal = TradeJournal(TradeRepository(session))
+    opened = datetime.now(UTC) - age
+    trade = await journal.open_trade(
+        user_id=user_id, symbol=XRP, side=TradeSide.LONG, entry_price=D("1.4"),
+        quantity=D(100), leverage=10, opened_at=opened, source=TradeSource.BOT,
+        account_mode=mode, external_fill_id=f"9{user_id}{tag}1", fee=D("0.07"),
+    )
+    await journal.close_trade(
+        trade, exit_price=D("1.39"), fee=D("0.07"), exit_reason="Закрыть всё",
+        closed_at=opened + timedelta(minutes=5), external_fill_id=f"9{user_id}{tag}2",
+    )
+    made = [
+        ExecutionOrder(
+            user_id=user_id, trade_id=trade.id, exchange_order_id=oid, symbol=XRP,
+            side=OrderSide.SELL, position_side=TradeSide.LONG,
+            order_type=(OrderType.STOP_MARKET if role is OrderRole.STOP_LOSS
+                        else OrderType.TAKE_PROFIT_MARKET),
+            role=role, status=status,
+            error_code="NOT_FOUND" if status is OrderStatus.REJECTED else None,
+        )
+        for role, status, oid in rows
+    ]
+    session.add_all(made)
+    await session.commit()
+    return trade, made
+
+
+async def _orders(db, ids: list[int]) -> dict[int, ExecutionOrder]:  # type: ignore[no-untyped-def]
+    async with db.session() as s:
+        rows = await s.scalars(select(ExecutionOrder).where(ExecutionOrder.id.in_(ids)))
+        return {r.id: r for r in rows}
+
+
+def _sweep_calls(demo: LiveDemo) -> list[str]:
+    return [c for c in demo.calls if c.endswith(("/openOrders", "/allOrders"))]
+
+
+async def test_sweep_settles_closed_trade_rows_by_history(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Риск 3: сделка закрыта, строки остались SUBMITTED (биржа не успела
+    снять к моменту чтения). Следующий цикл: в истории CANCELLED → EXCHANGE;
+    нет ни в истории, ни в openOrders → CANCELLED без источника; REJECTED
+    (старая строка Т4) обход не трогает."""
+    settings, db, session, user, demo = ctx
+    demo.positions = []
+    _, rows = await _closed_xrp_trade(session, user.id, [
+        (OrderRole.STOP_LOSS, OrderStatus.SUBMITTED, "7001"),
+        (OrderRole.TAKE_PROFIT, OrderStatus.UNKNOWN, "7002"),
+        (OrderRole.STOP_LOSS, OrderStatus.REJECTED, "7003"),
+    ])
+    demo.all_orders[XRP] = [_xrp_hist("7001", "STOP_MARKET", "CANCELLED")]
+
+    await _run_reconciler(settings, db, FakeBot())
+
+    got = await _orders(db, [r.id for r in rows])
+    stop, take, rejected = (got[r.id] for r in rows)
+    assert (stop.status, stop.cancel_source) == (OrderStatus.CANCELLED, CancelSource.EXCHANGE)
+    assert (take.status, take.cancel_source) == (OrderStatus.CANCELLED, None)
+    assert rejected.status is OrderStatus.REJECTED and rejected.error_code == "NOT_FOUND"
+    assert _sweep_calls(demo).count("/openApi/swap/v2/trade/allOrders") == 1
+
+
+async def test_sweep_fired_stop_by_child_is_filled(ctx) -> None:  # type: ignore[no-untyped-def]
+    settings, db, session, user, demo = ctx
+    demo.positions = []
+    _, [stop] = await _closed_xrp_trade(
+        session, user.id, [(OrderRole.STOP_LOSS, OrderStatus.SUBMITTED, "7101")]
+    )
+    demo.all_orders[XRP] = [_xrp_hist("7199", "STOP_MARKET", "FILLED", trigger="7101")]
+
+    await _run_reconciler(settings, db, FakeBot())
+
+    got = (await _orders(db, [stop.id]))[stop.id]
+    assert got.status is OrderStatus.FILLED and got.cancel_source is None
+
+
+async def test_sweep_standing_order_untouched_warning_once(ctx, caplog) -> None:  # type: ignore[no-untyped-def]
+    """Ордер закрытой сделки ещё в openOrders — строку не трогать; WARNING —
+    один раз на строку, хотя обход идёт каждый цикл."""
+    from app.workers.reconciler import Reconciler
+
+    settings, db, session, user, demo = ctx
+    demo.positions = []
+    _, [stop] = await _closed_xrp_trade(
+        session, user.id, [(OrderRole.STOP_LOSS, OrderStatus.SUBMITTED, "7201")]
+    )
+    demo.all_orders[XRP] = []
+    demo.open_orders[XRP] = [_xrp_open("7201")]
+    reconciler = Reconciler(
+        FakeBot(), db, settings, SecretCipher(settings.encryption_key.get_secret_value()), None
+    )
+
+    with caplog.at_level("WARNING"):
+        await reconciler.run()
+        await reconciler.run()
+
+    got = (await _orders(db, [stop.id]))[stop.id]
+    assert got.status is OrderStatus.SUBMITTED and got.cancel_source is None
+    warned = [r for r in caplog.records if "условный ордер на бирже стоит" in r.getMessage()]
+    assert len(warned) == 1
+
+
+async def test_sweep_skips_other_account_and_old_trades_without_requests(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Строки LIVE по openOrders DEMO закрылись бы ложно; сделка старше окна
+    истории (7 дней) — «ордера нет» не доказать. Ни строк, ни запросов."""
+    settings, db, session, user, demo = ctx
+    demo.positions = []
+    _, [live] = await _closed_xrp_trade(
+        session, user.id, [(OrderRole.STOP_LOSS, OrderStatus.SUBMITTED, "7301")],
+        mode=ExchangeKeyMode.LIVE, tag="1",
+    )
+    _, [old] = await _closed_xrp_trade(
+        session, user.id, [(OrderRole.STOP_LOSS, OrderStatus.SUBMITTED, "7302")],
+        age=timedelta(days=8), tag="2",
+    )
+
+    await _run_reconciler(settings, db, FakeBot())
+
+    got = await _orders(db, [live.id, old.id])
+    assert {r.status for r in got.values()} == {OrderStatus.SUBMITTED}
+    assert _sweep_calls(demo) == []
+
+
+async def test_closes_fully_settles_every_row_not_only_last(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Сверка закрыла сделку стопом: сработавший (последний стоп) — FILLED,
+    более ранний стоп той же сделки (вложенный, не снятый в базе) и тейк —
+    по истории, а не только «последние по id»."""
+    settings, db, session, user, demo = ctx
+    settings.reconciler_stop_check_every = 1
+    early = "2104213344721920077"
+    demo.all_orders["SOL-USDT"] = [
+        *live_items("allOrders SOL"), _xrp_hist(early, "STOP_MARKET", "CANCELLED"),
+    ]
+    demo.all_orders["SOL-USDT"][-1]["symbol"] = "SOL-USDT"
+    sol = await _bot_open_trade(
+        session, user.id, "SOL-USDT", entry="123.021", qty="1362.07", entry_id=SOL_ENTRY,
+        stop_id=SOL_STOP, take_id=SOL_TAKE, fee="83.781520",
+        opened_at=datetime(2026, 9, 27, 14, 15, 30, 300000, tzinfo=UTC),
+    )
+    extra = ExecutionOrder(
+        user_id=user.id, trade_id=sol.id, exchange_order_id=early, symbol="SOL-USDT",
+        side=OrderSide.SELL, position_side=TradeSide.LONG, order_type=OrderType.STOP_MARKET,
+        role=OrderRole.STOP_LOSS, status=OrderStatus.SUBMITTED,
+    )
+    session.add(extra)
+    await session.commit()
+    extra_id = extra.id
+    demo.positions = [p for p in demo.positions if p["symbol"] != "SOL-USDT"]
+
+    await _run_reconciler(settings, db, FakeBot())
+
+    async with db.session() as s:
+        rows = list(await s.scalars(
+            select(ExecutionOrder).where(
+                ExecutionOrder.trade_id == sol.id, ExecutionOrder.role != OrderRole.ENTRY
+            )
+        ))
+    by_oid = {r.exchange_order_id: r for r in rows}
+    assert by_oid[SOL_STOP].status is OrderStatus.FILLED
+    assert by_oid[SOL_TAKE].status is OrderStatus.CANCELLED
+    assert by_oid[early].id == extra_id
+    assert (by_oid[early].status, by_oid[early].cancel_source) == (
+        OrderStatus.CANCELLED, CancelSource.EXCHANGE,
+    )
+
+
+async def test_closes_fully_standing_rows_untouched(ctx) -> None:  # type: ignore[no-untyped-def]
+    """LINK закрыта ручным стопом, а openOrders ещё отдаёт её стоп и тейк —
+    строки не трогаем (ордер стоит — не CANCELLED)."""
+    settings, db, session, user, demo = ctx
+    link = await _seed_link_manual_stop(session, demo, user.id)
+    demo.link_open_orders = live_items("openOrders LINK")
+
+    await _run_reconciler(settings, db, FakeBot())
+
+    assert (await _trade(db, link.id)).status is TradeStatus.CLOSED
+    rows = await _rows(db, "LINK-USDT")
+    assert rows[OrderRole.STOP_LOSS].status is OrderStatus.SUBMITTED
+    assert rows[OrderRole.TAKE_PROFIT].status is OrderStatus.SUBMITTED

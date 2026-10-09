@@ -16,6 +16,7 @@ import pytest_asyncio
 from app.execution.opening.calc import OpeningInputs
 from app.execution.opening.recovery import opening_in_flight
 from app.trading.enums import (
+    CancelSource,
     EntryType,
     FillSide,
     OpeningStatus,
@@ -87,6 +88,7 @@ async def test_expiry_cancels_by_bot_timer(ctx) -> None:  # type: ignore[no-unty
     assert text.startswith("⌛ Срок лимита вышел через 4 ч") and "Позиция не открыта" in text
     [entry] = await _rows(ctx, opening.id)
     assert entry.status is OrderStatus.CANCELLED
+    assert entry.cancel_source is CancelSource.BOT                 # A.3: срок держит бот
     assert not await opening_in_flight(ctx.session, ctx.uid, "XRP-USDT", TradeSide.LONG)
 
 
@@ -97,6 +99,9 @@ async def test_cancel_from_bot(ctx) -> None:  # type: ignore[no-untyped-def]
     again = await ctx.service().cancel_limit(opening.id)
     assert not again.final and again.text == "Лимит отменён."
     assert _posts(ctx).count("post_cancel") == 1
+    [entry] = await _rows(ctx, opening.id)
+    assert entry.status is OrderStatus.CANCELLED
+    assert entry.cancel_source is CancelSource.USER                # A.3: кнопка владельца
 
 
 async def test_full_fill_creates_trade(ctx) -> None:  # type: ignore[no-untyped-def]
@@ -199,6 +204,10 @@ async def test_manual_cancel_on_exchange(ctx) -> None:  # type: ignore[no-untype
     await ctx.session.refresh(opening)
     assert opening.status is OpeningStatus.CANCELLED
     assert "Лимит снят на бирже" in ctx.notes[-1][1]
+    [entry] = await _rows(ctx, opening.id)
+    await ctx.session.refresh(entry)
+    # A.3: сняли не мы — кто, неизвестно: CANCELLED + NULL.
+    assert entry.status is OrderStatus.CANCELLED and entry.cancel_source is None
 
 
 async def test_active_opening_symbol_not_orphan(ctx) -> None:  # type: ignore[no-untyped-def]

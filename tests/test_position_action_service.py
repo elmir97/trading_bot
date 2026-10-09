@@ -45,9 +45,12 @@ from app.execution.position_actions import breakeven_price
 from app.market.cache import TTLCache
 from app.services.user_service import UserService
 from app.trading.enums import (
+    CancelSource,
     ExchangeKeyMode,
     OrderRole,
+    OrderSide,
     OrderStatus,
+    OrderType,
     PositionActionKind,
     PositionActionStatus,
     TradeSide,
@@ -553,3 +556,73 @@ async def test_full_close_leftovers(ctx, auto_cancel: bool) -> None:  # type: ig
     else:
         assert ("cancel", OLD_STOP) in ctx.exchange.calls
         assert "сняты — проверено по openOrders" in result.text
+
+
+# --- A.3 (10.10): строки стопа/тейка — CANCELLED с источником по факту ---------------------
+
+
+async def _placed_stop(c, oid: str, position_id: str) -> ExecutionOrder:  # type: ignore[no-untyped-def]
+    """Стоп, поставленный прошлым действием этапа 4 над позицией position_id,
+    — строка SUBMITTED с его orderId."""
+    action = PositionAction(
+        user_id=c.uid, symbol="XRP-USDT", side=TradeSide.LONG, position_id=position_id,
+        kind=PositionActionKind.MOVE_STOP, status=PositionActionStatus.DONE,
+    )
+    c.session.add(action)
+    await c.session.flush()
+    row = ExecutionOrder(
+        user_id=c.uid, position_action_id=action.id, exchange_order_id=oid,
+        symbol="XRP-USDT", side=OrderSide.SELL, position_side=TradeSide.LONG,
+        order_type=OrderType.STOP_MARKET, role=OrderRole.STOP_LOSS, status=OrderStatus.SUBMITTED,
+    )
+    c.session.add(row)
+    await c.session.commit()
+    return row
+
+
+async def test_move_stop_cancels_old_placed_row_as_user(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Ответ владельца (1): снятие старого стопа переносом — USER, и у
+    строки, которой он ставился (до A.3 она висела SUBMITTED — строки
+    65/67/69). Мост и наблюдение — тоже USER."""
+    old = await _placed_stop(ctx, OLD_STOP, PID)
+    action, _ = await _move(ctx)
+    await ctx.session.refresh(old)
+    assert (old.status, old.cancel_source) == (OrderStatus.CANCELLED, CancelSource.USER)
+    rows = await _rows(ctx, action.id)
+    assert [r.cancel_source for r in rows if r.status is OrderStatus.CANCELLED] == [
+        CancelSource.USER, CancelSource.USER,
+    ]
+
+
+@pytest.mark.parametrize(("auto_cancel", "source"), [
+    (True, CancelSource.EXCHANGE),     # биржа сняла вместе с позицией
+    (False, CancelSource.USER),        # остаток снял бот кнопкой «Закрыть всё» (ответ 1)
+])
+async def test_full_close_settles_position_rows(  # type: ignore[no-untyped-def]
+    ctx, auto_cancel: bool, source: CancelSource
+) -> None:
+    """Ручная позиция (сделки нет): строки — по positionId её действий;
+    строка той же монеты другой позиции не задета."""
+    ctx.exchange.auto_cancel_on_close = auto_cancel
+    mine = await _placed_stop(ctx, OLD_STOP, PID)
+    other = await _placed_stop(ctx, "2105910661355299999", "P-OTHER")
+    card = await _card(ctx, PositionActionKind.CLOSE_FULL, {})
+    await ctx.service().confirm(card.action.id, message_id=55, risk_confirmed=False)
+    await ctx.session.refresh(mine)
+    await ctx.session.refresh(other)
+    assert (mine.status, mine.cancel_source) == (OrderStatus.CANCELLED, source)
+    assert other.status is OrderStatus.SUBMITTED
+
+
+async def test_full_close_standing_order_row_untouched(ctx, caplog) -> None:  # type: ignore[no-untyped-def]
+    """Остаток не снялся и стоит в openOrders — строку не трогаем, WARNING."""
+    ctx.exchange.auto_cancel_on_close = False
+    ctx.exchange.cancel_noop = True
+    mine = await _placed_stop(ctx, OLD_STOP, PID)
+    card = await _card(ctx, PositionActionKind.CLOSE_FULL, {})
+    with caplog.at_level("WARNING"):
+        await ctx.service().confirm(card.action.id, message_id=55, risk_confirmed=False)
+    await ctx.session.refresh(mine)
+    assert mine.status is OrderStatus.SUBMITTED and mine.cancel_source is None
+    assert any(r.getMessage() == "Условный ордер ещё стоит после закрытия позиции"
+               for r in caplog.records)

@@ -154,6 +154,7 @@ async def test_trade_initial_stop_loss_persists(ctx) -> None:  # type: ignore[no
 
 
 def test_both_cancel_spellings_exist() -> None:
-    """CANCELED — уже в execution_orders (reconciler 15.6), CANCELLED — BingX."""
+    """CANCELLED — единый статус снятого (A.3); CANCELED остаётся в enum для
+    чтения строк до M7 — код его не пишет (test_settle_conditionals)."""
     assert OrderStatus.CANCELED.value == "CANCELED"
     assert OrderStatus.CANCELLED.value == "CANCELLED"

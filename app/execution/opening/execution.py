@@ -60,8 +60,10 @@ from app.exchanges.base import (
     Position,
     TpSlSpec,
 )
+from app.execution.settle import conditional_rows, settle
 from app.trading.calculations import CalculationError
 from app.trading.enums import (
+    CancelSource,
     EntryType,
     OpeningStatus,
     OrderRole,
@@ -409,8 +411,7 @@ class Runner:
                 # Уже записан (в т.ч. запасной, сочтённый ненайденным в прошлом
                 # проходе, — он стоит): подтверждаем строку.
                 if row.status is not OrderStatus.SUBMITTED:
-                    row.status = OrderStatus.SUBMITTED
-                    row.exchange_order_id = order.order_id
+                    self._reconfirm(row, order.order_id)
                     await self.session.commit()
                 return
         order_type = (
@@ -423,6 +424,21 @@ class Runner:
             status=OrderStatus.SUBMITTED, stage="confirm",
         ))
         await self.session.commit()
+
+    def _reconfirm(self, row: ExecutionOrder, order_id: str | None) -> None:
+        """Строка прошлой попытки (REJECTED NOT_FOUND / UNKNOWN) — ордер на
+        бирже стоит: SUBMITTED, ошибка той попытки больше не правда (Т5)."""
+        logger.info(
+            "Ордер найден на повторной проверке — новый не ставлю",
+            extra={
+                **self._log(), "role": row.role.value, "cid": row.client_order_id,
+                "prev_status": row.status.value, "prev_error": row.error_code,
+            },
+        )
+        row.status = OrderStatus.SUBMITTED
+        row.exchange_order_id = order_id or row.exchange_order_id
+        row.error_code = None
+        row.error_message = None
 
     async def protect(self) -> ProtectResult:
         """FILLED/ALARM → PROTECTED | EMERGENCY_CLOSED | ALARM."""
@@ -445,6 +461,12 @@ class Runner:
                 takes = self._ours(orders, OrderType.TAKE_PROFIT_MARKET, o.take_profit, position)
             if stops and (o.take_profit is None or takes):
                 break
+        # Сразу в базу, до решений по стопу: аварийное закрытие ниже иначе
+        # оставило бы вложенный тейк без строки (Т2, Т4).
+        for order in stops:
+            await self._record_conditional(OrderRole.STOP_LOSS, order)
+        for order in takes:
+            await self._record_conditional(OrderRole.TAKE_PROFIT, order)
         warnings: list[str] = []
         stop_mode = await self._ensure_close_position(
             OrderRole.STOP_LOSS, o.stop_loss, stops, position, warnings
@@ -560,6 +582,7 @@ class Runner:
                 row.exchange_order_id not in live
             ):
                 row.status = OrderStatus.CANCELLED
+                row.cancel_source = CancelSource.BOT
         await self.session.commit()
         if not left:
             logger.info(
@@ -590,13 +613,8 @@ class Runner:
                 continue   # отклонён биржей с кодом — не вставал
             check, order_id = await self.check_by_cid(row.client_order_id)
             if check is StopCheck.STANDING:
-                row.status = OrderStatus.SUBMITTED
-                row.exchange_order_id = order_id or row.exchange_order_id
+                self._reconfirm(row, order_id)
                 await self.session.commit()
-                logger.info(
-                    "closePosition прошлого прохода стоит — новый не ставлю",
-                    extra={**self._log(), "cid": row.client_order_id},
-                )
                 return StopCheck.STANDING
             if check is StopCheck.UNKNOWN:
                 unknown = True
@@ -726,9 +744,41 @@ class Runner:
             row.status = OrderStatus.FILLED
             row.exchange_order_id = fill.order_id
             await self.session.commit()
+            await self._settle_after_close()
             return ProtectResult(OpeningStatus.EMERGENCY_CLOSED, close_fill=fill, reason=reason)
         await self.session.commit()
         return ProtectResult(OpeningStatus.ALARM, reason=reason)
+
+    async def _settle_after_close(self) -> None:
+        """Позиция закрыта аварийно — стоп/тейк открытия сняла биржа. Строки
+        закрываются только по openOrders; биржа снимает их за десятки мс
+        (Т4: 32–52 мс), поэтому стоящие — один повтор через паузу read-back.
+        Сбой чтения или ордер всё ещё стоит — строки не трогаем (WARNING);
+        их доберёт сверка по закрытой сделке."""
+        rows = await conditional_rows(
+            self.session, user_id=self.opening.user_id, trade_opening_id=self.opening.id
+        )
+        for attempt in range(2):
+            if not rows:
+                return
+            if attempt:
+                await self._sleep(self.settings.exec_order_readback_delay_ms / 1000)
+            try:
+                live = {o.order_id for o in await self.client.get_open_orders(
+                    self.opening.symbol, max_retries=1
+                )}
+            except ExchangeError:
+                logger.warning("openOrders после аварийного закрытия не получены",
+                               extra=self._log())
+                return
+            result = settle(rows, open_order_ids=live, context=self._log())
+            await self.session.commit()
+            rows = [r for r in rows if r.id in result.standing]
+        if rows:
+            logger.warning(
+                "Условный ордер открытия ещё стоит после закрытия позиции",
+                extra={**self._log(), "ids": [r.id for r in rows]},
+            )
 
     # --- журнал ---------------------------------------------------------------------
 

@@ -25,7 +25,7 @@ from app.exchanges.base import ExchangeError, OrderFill, OrderNotFoundError
 from app.execution.opening.execution import Runner, transition
 from app.execution.opening.flow import FlowOutcome, advance, after_protect, alarm_text
 from app.execution.opening.render import expiry_label
-from app.trading.enums import OpeningStatus, OrderStatus
+from app.trading.enums import CancelSource, OpeningStatus, OrderStatus
 
 logger = get_logger(__name__)
 
@@ -57,8 +57,9 @@ async def tick(runner: Runner, *, now: datetime | None = None) -> FlowOutcome | 
         await runner.apply_fill(fill)
         return await advance(runner, now=moment)
     if fill.status in _CANCELLED:
+        # Сняли не мы (руками в BingX или биржа) — кто, неизвестно: NULL.
         return await _finish_cancelled(runner, fill, OpeningStatus.CANCELLED,
-                                       "Лимит снят на бирже")
+                                       "Лимит снят на бирже", source=None)
     if fill.executed_qty > 0:
         partial = await _protect_partial(runner, fill)
         if partial is not None:
@@ -94,17 +95,20 @@ async def cancel(runner: Runner, final: OpeningStatus) -> FlowOutcome:
         return FlowOutcome(o.status, "Отмена отправлена, лимит ещё на бирже — проверю.",
                            notify=False)
     why = "Срок лимита вышел" if final is OpeningStatus.EXPIRED else "Лимит отменён"
-    return await _finish_cancelled(runner, fill, final, why)
+    source = CancelSource.BOT if final is OpeningStatus.EXPIRED else CancelSource.USER
+    return await _finish_cancelled(runner, fill, final, why, source=source)
 
 
 async def _finish_cancelled(
-    runner: Runner, fill: OrderFill, final: OpeningStatus, why: str
+    runner: Runner, fill: OrderFill, final: OpeningStatus, why: str,
+    *, source: CancelSource | None,
 ) -> FlowOutcome:
     o = runner.opening
     row = await runner.entry_row()
     if fill.executed_qty <= 0:
         if row is not None:
             row.status = OrderStatus.CANCELLED
+            row.cancel_source = source
             await runner.session.commit()
         await transition(runner.session, o, (OpeningStatus.WORKING,), final)
         when = (

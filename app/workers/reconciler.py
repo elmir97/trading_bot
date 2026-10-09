@@ -31,7 +31,7 @@ from decimal import Decimal
 from typing import Any
 
 from aiogram import Bot
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -57,6 +57,7 @@ from app.exchanges.base import (
     ExchangeClient,
     ExchangeError,
     ExchangeResponseError,
+    HistoryOrder,
     OrderFill,
     Position,
 )
@@ -88,9 +89,19 @@ from app.execution.redelivery import (
     late_notice,
     redelivery_due,
 )
+from app.execution.settle import (
+    CONDITIONAL_ROLES,
+    OPEN_STATUSES,
+    conditional_rows,
+    history_facts,
+    settle,
+    settleable,
+)
 from app.services.exchange_factory import ExchangeFactory
 from app.trading.enums import (
     OPENING_ACTIVE,
+    CancelSource,
+    ExchangeKeyMode,
     FillSide,
     OrderRole,
     OrderStatus,
@@ -242,6 +253,9 @@ class Reconciler:
         # Доставленные уведомления до commit их транзакции: (meta, chat_id,
         # message_id, text) — в журнал исходящих пишет _record_sent().
         self._sent: list[tuple[OutgoingMeta, int, int, str]] = []
+        # A.3: строки закрытых сделок, чей ордер ещё стоит на бирже, — WARNING
+        # один раз на строку за процесс (обход идёт каждый цикл).
+        self._standing_warned: set[int] = set()
 
     async def run(self) -> None:
         self._cycle += 1
@@ -474,6 +488,7 @@ class Reconciler:
 
             for entry in unresolved:
                 await self._resolve_unresolved_entry(ctx, client, entry, positions)
+            await self._settle_closed_trades(ctx, client, mode)
             if check_stops:
                 # Последним перед commit: list_open_for_reconcile выше идёт с
                 # populate_existing и перечитал бы несохранённые уровни.
@@ -559,7 +574,7 @@ class Reconciler:
         if not decision.exits:
             return
         await self._record_exits(
-            ctx, trade.id, decision.exits, decision.closes_fully, stop_row, take_row
+            ctx, client, trade.id, decision.exits, decision.closes_fully, conditionals, orders
         )
 
     async def _sync_levels(
@@ -629,11 +644,12 @@ class Reconciler:
     async def _record_exits(
         self,
         ctx: _UserCtx,
+        client: ExchangeClient,
         trade_id: int,
         exits: list[ExitFill],
         closes_fully: bool,
-        stop_row: ExecutionOrder | None,
-        take_row: ExecutionOrder | None,
+        conditionals: list[ExecutionOrder],
+        history: list[HistoryOrder],
     ) -> None:
         trades = TradeRepository(ctx.session)
         trade = await trades.lock_for_reconcile(trade_id)
@@ -670,17 +686,7 @@ class Reconciler:
                 self._close_text(trade, exit_fill, ctx.asset, ctx.tz_offset_hours),
             )
         if closes_fully:
-            # Условник, который сработал, — FILLED; второй биржа сняла сама
-            # при закрытии позиции (живьём 27.09: TP → CANCELLED) — CANCELED.
-            fired_kinds = {e.kind for e in exits}
-            fired_role = {
-                OrderRole.STOP_LOSS: ReconciliationKind.CLOSED_STOP_LOSS in fired_kinds,
-                OrderRole.TAKE_PROFIT: ReconciliationKind.CLOSED_TAKE_PROFIT in fired_kinds,
-            }
-            for row in (stop_row, take_row):
-                if row is None or row.status in (OrderStatus.FILLED, OrderStatus.CANCELED):
-                    continue
-                row.status = OrderStatus.FILLED if fired_role[row.role] else OrderStatus.CANCELED
+            await self._settle_trade(ctx, client, trade, exits, conditionals, history)
             triggered = {e.order_id for e in exits}
             logger.info(
                 "Сделка закрыта сверкой с биржей",
@@ -694,6 +700,133 @@ class Reconciler:
             # а close_trade меняет его на месте.
             if trade.closed_at is not None:
                 await self._check_pnl(ctx, trade)
+
+    async def _settle_trade(
+        self,
+        ctx: _UserCtx,
+        client: ExchangeClient,
+        trade: Trade,
+        exits: list[ExitFill],
+        conditionals: list[ExecutionOrder],
+        history: list[HistoryOrder],
+    ) -> None:
+        """A.3: сделка закрыта целиком. Условник, который сработал, — FILLED
+        (выход истории узнан по его orderId — снимок сделки); остальные строки
+        сделки (все, не только последние) — по истории и openOrders. Нет
+        openOrders — строки ждут обхода закрытых сделок следующим циклом."""
+        fired_kinds = {e.kind for e in exits}
+        for role, kind in (
+            (OrderRole.STOP_LOSS, ReconciliationKind.CLOSED_STOP_LOSS),
+            (OrderRole.TAKE_PROFIT, ReconciliationKind.CLOSED_TAKE_PROFIT),
+        ):
+            row = next((c for c in conditionals if c.role is role), None)
+            if row is not None and kind in fired_kinds and settleable(row):
+                row.status = OrderStatus.FILLED
+                row.cancel_source = None
+        by_id = {r.id: r for r in conditionals}
+        by_id.update({r.id: r for r in await conditional_rows(
+            ctx.session, user_id=ctx.user_id, trade_id=trade.id
+        )})
+        rows = [r for r in by_id.values() if settleable(r)]
+        if not rows:
+            return
+        try:
+            live = {o.order_id for o in await client.get_open_orders(trade.symbol)}
+        except ExchangeError:
+            logger.warning(
+                "openOrders для строк закрытой сделки не получены — доберёт следующий цикл",
+                extra={"trade_id": trade.id},
+            )
+            return
+        self._settle_rows(
+            rows, live, history_facts(history), complete=_history_complete(trade, ctx.now),
+            include_rejected=True, log={"trade_id": trade.id},
+        )
+
+    async def _settle_closed_trades(
+        self, ctx: _UserCtx, client: ExchangeClient, mode: ExchangeKeyMode
+    ) -> None:
+        """A.3 (риск 3): строки SUBMITTED/UNKNOWN у сделок, которые уже не
+        OPEN, — гонка «биржа ещё не сняла» в «Закрыть всё» и аварийном
+        закрытии, сбой openOrders при закрытии сверкой. Только счёт этого
+        прохода (строки DEMO и LIVE одной монеты по openOrders другого счёта
+        закрылись бы ложно) и сделки моложе окна истории (7 дней): «ордера
+        нет» — это история + openOrders. GET — только если такие строки есть:
+        openOrders и allOrders по символу. REJECTED здесь не берём — старые
+        строки (Т4) не трогаем (решение владельца 10.10)."""
+        since = ctx.now - HISTORY_LIMIT + timedelta(minutes=1)
+        found = (await ctx.session.execute(
+            select(ExecutionOrder, Trade)
+            .join(Trade, or_(
+                ExecutionOrder.trade_id == Trade.id,
+                and_(
+                    Trade.notification_id.is_not(None),
+                    ExecutionOrder.notification_id == Trade.notification_id,
+                ),
+            ))
+            .where(
+                Trade.user_id == ctx.user_id,
+                Trade.status != TradeStatus.OPEN,
+                Trade.account_mode == mode,
+                Trade.opened_at >= since,
+                ExecutionOrder.user_id == ctx.user_id,
+                ExecutionOrder.role.in_(CONDITIONAL_ROLES),
+                ExecutionOrder.exchange_order_id.is_not(None),
+                ExecutionOrder.status.in_(OPEN_STATUSES),
+            )
+            .order_by(ExecutionOrder.id)
+        )).all()
+        by_symbol: dict[str, dict[int, tuple[ExecutionOrder, Trade]]] = {}
+        for row, trade in found:
+            by_symbol.setdefault(row.symbol, {})[row.id] = (row, trade)
+        for symbol, items in by_symbol.items():
+            start = min(t.opened_at for _, t in items.values()) - timedelta(minutes=1)
+            try:
+                live = {o.order_id for o in await client.get_open_orders(symbol)}
+                history = await client.get_all_orders(symbol, start, ctx.now)
+            except ExchangeError:
+                logger.warning(
+                    "Строки закрытых сделок не сверены — биржа",
+                    extra={"user_id": ctx.user_id, "symbol": symbol},
+                )
+                continue
+            standing = self._settle_rows(
+                [r for r, _ in items.values()], live, history_facts(history), complete=True,
+                include_rejected=False,
+                log={"symbol": symbol, "trade_ids": sorted({t.id for _, t in items.values()})},
+            )
+            fresh = [i for i in standing if i not in self._standing_warned]
+            if fresh:
+                self._standing_warned.update(fresh)
+                logger.warning(
+                    "Сделка закрыта, а условный ордер на бирже стоит — строку не трогаю",
+                    extra={"symbol": symbol, "ids": fresh},
+                )
+
+    @staticmethod
+    def _settle_rows(
+        rows: list[ExecutionOrder],
+        live: set[str],
+        facts: dict[str, OrderStatus],
+        *,
+        complete: bool,
+        include_rejected: bool,
+        log: dict[str, Any],
+    ) -> list[int]:
+        """Есть в истории — статус по ней (снятое — EXCHANGE: позиция закрыта,
+        биржа снимает её условники). Нет ни в истории, ни в openOrders, и
+        история полная — CANCELLED без источника (кто снял, неизвестно).
+        Возвращает id строк, чей ордер ещё стоит."""
+        first = settle(
+            rows, open_order_ids=live, facts=facts, default=None,
+            source=CancelSource.EXCHANGE, include_rejected=include_rejected, context=log,
+        )
+        if complete and first.undecided:
+            settle(
+                [r for r in rows if r.id in first.undecided], open_order_ids=live,
+                source=None, include_rejected=include_rejected, context=log,
+            )
+        return first.standing
 
     async def _check_pnl(self, ctx: _UserCtx, trade: Trade) -> None:
         """28.09: PnL журнала против биржи при полном закрытии (PNL_MISMATCH).
@@ -1025,6 +1158,12 @@ def _in_scope(dedup_key: str, prefix: str) -> bool:
     if not prefix.endswith(":"):
         raise ValueError(f"Префикс dedup_key без двоеточия: {prefix!r}")
     return dedup_key == prefix[:-1] or dedup_key.startswith(prefix)
+
+
+def _history_complete(trade: Trade, now: datetime) -> bool:
+    """Окно истории сделки (_reconcile_trade) начинается не позже входа —
+    отсутствие ордера в ней значит «ордера нет»."""
+    return trade.opened_at - timedelta(minutes=1) >= now - HISTORY_LIMIT
 
 
 def _exits_after(last_fill: datetime | None, cutoff: datetime | None) -> datetime | None:

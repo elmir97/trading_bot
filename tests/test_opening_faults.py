@@ -21,7 +21,14 @@ from pydantic import ValidationError
 
 from app.core.config import Settings
 from app.execution.opening.calc import OpeningInputs
-from app.trading.enums import OpeningSource, OpeningStatus, OrderRole, OrderStatus, TradeStatus
+from app.trading.enums import (
+    CancelSource,
+    OpeningSource,
+    OpeningStatus,
+    OrderRole,
+    OrderStatus,
+    TradeStatus,
+)
 from tests.test_opening_confirm import INPUTS, _card, _rows, _trade, opening_context
 
 pytestmark = pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="Нужен PostgreSQL")
@@ -193,7 +200,10 @@ async def test_t4_hidden_stop_decided_by_cid_emergency(ctx) -> None:  # type: ig
     assert ctx.exchange.by_cid[s1]["status"] == "CANCELLED"       # снят вместе с позицией
     assert not ctx.exchange.positions and not ctx.exchange.orders
     row = next(r for r in await _rows(ctx, opening.id) if r.client_order_id == s1)
-    assert row.status is OrderStatus.REJECTED and row.error_code == "NOT_FOUND"
+    # A.3: s1 биржа приняла (orderId есть) — статус по факту после закрытия,
+    # решение «не найден» остаётся в error_code историей (владелец 10.10).
+    assert row.status is OrderStatus.CANCELLED and row.cancel_source is CancelSource.EXCHANGE
+    assert row.error_code == "NOT_FOUND"
 
 
 async def test_t5_alarm_cycle_hidden_stop_no_s2(ctx) -> None:  # type: ignore[no-untyped-def]
@@ -271,3 +281,75 @@ async def test_backup_stop_rejected_by_code_is_final(ctx) -> None:  # type: igno
     _, out = await _open(ctx)
     assert out.status is OpeningStatus.EMERGENCY_CLOSED
     assert [n for n, p in ctx.exchange.calls if n == "order_fill" and p and "s1" in p] == []
+
+
+# --- A.3 (10.10): строки стопа/тейка после аварийного закрытия и повторной проверки ---------
+
+
+async def test_t2_attached_take_recorded_and_settled(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Хвост Т2: вложенный тейк записан сразу после поиска (до решения по
+    стопу) и после аварийного закрытия — CANCELLED, снят биржей."""
+    opening, out = await _open(ctx, "skip_attached_stop,fail_backup_stop")
+    assert out.status is OpeningStatus.EMERGENCY_CLOSED
+    [take] = [r for r in await _rows(ctx, opening.id) if r.role is OrderRole.TAKE_PROFIT]
+    assert take.client_order_id is None and take.exchange_order_id
+    assert take.status is OrderStatus.CANCELLED and take.cancel_source is CancelSource.EXCHANGE
+    assert take.trade_id == out.trade_id
+
+
+async def test_t5_recheck_clears_error_and_logs(ctx, caplog) -> None:  # type: ignore[no-untyped-def]
+    """Хвосты Т5 1–2: s1 найден на повторной проверке — SUBMITTED без ошибки
+    первой попытки; в логе INFO «новый не ставлю» с прежним кодом."""
+    fault = "skip_attached_stop,hide_backup_stop,fail_emergency_close"
+    opening, _ = await _open(ctx, fault)
+    s1 = f"to{opening.id}u{ctx.uid}s1"
+    [row] = [r for r in await _rows(ctx, opening.id) if r.client_order_id == s1]
+    assert row.status is OrderStatus.REJECTED and row.error_code == "NOT_FOUND"
+    with caplog.at_level(logging.INFO):
+        assert await _recover(ctx, fault) == 1
+    await ctx.session.refresh(row)
+    assert row.status is OrderStatus.SUBMITTED
+    assert row.error_code is None and row.error_message is None
+    [rec] = [r for r in caplog.records
+             if r.getMessage() == "Ордер найден на повторной проверке — новый не ставлю"]
+    assert (rec.cid, rec.prev_status, rec.prev_error) == (s1, "REJECTED", "NOT_FOUND")
+
+
+def _stale_open_orders(c, reads: int):  # type: ignore[no-untyped-def]
+    """openOrders после закрытия позиции ещё отдаёт её условники `reads` раз
+    (биржа снимает их через десятки мс)."""
+    original = c.exchange.get_open_orders
+    state = {"last": [], "left": reads}
+
+    async def read(symbol=None, *, max_retries=None):  # type: ignore[no-untyped-def]
+        orders = await original(symbol, max_retries=max_retries)
+        if c.exchange.positions:
+            state["last"] = orders
+            return orders
+        if state["left"] > 0 and state["last"]:
+            state["left"] -= 1
+            return list(state["last"])
+        return orders
+
+    c.exchange.get_open_orders = read  # type: ignore[method-assign]
+
+
+async def test_emergency_settle_retries_once_after_race(ctx) -> None:  # type: ignore[no-untyped-def]
+    _stale_open_orders(ctx, reads=1)
+    opening, out = await _open(ctx, "skip_attached_stop,fail_backup_stop")
+    assert out.status is OpeningStatus.EMERGENCY_CLOSED
+    [take] = [r for r in await _rows(ctx, opening.id) if r.role is OrderRole.TAKE_PROFIT]
+    assert take.status is OrderStatus.CANCELLED
+
+
+async def test_emergency_settle_leaves_standing_row(ctx, caplog) -> None:  # type: ignore[no-untyped-def]
+    """Ордер всё ещё виден после повтора — строку не трогаем (её доберёт
+    обход закрытых сделок в reconciler), WARNING."""
+    _stale_open_orders(ctx, reads=2)
+    with caplog.at_level(logging.WARNING):
+        opening, out = await _open(ctx, "skip_attached_stop,fail_backup_stop")
+    assert out.status is OpeningStatus.EMERGENCY_CLOSED
+    [take] = [r for r in await _rows(ctx, opening.id) if r.role is OrderRole.TAKE_PROFIT]
+    assert take.status is OrderStatus.SUBMITTED and take.cancel_source is None
+    assert any(r.getMessage().startswith("Условный ордер открытия ещё стоит")
+               for r in caplog.records)
