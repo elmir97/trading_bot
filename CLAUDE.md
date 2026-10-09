@@ -23,10 +23,14 @@ DATABASE_URL=postgresql+asyncpg://test:test@localhost:5432/trading_bot_test
 `TRADING_EXECUTION_ENABLED=true`. Для `smoke_check.py` на Windows-консоли
 ещё `PYTHONUTF8=1`.
 
+Из сессии Claude Code pytest запускать с `--capture=sys`: при захвате по fd у дочерних процессов
+невалидный stdin, и 45 тестов `test_rehearse_migration_script.py` падают на `subprocess` (WinError 50/6) — это среда,
+не код (10.10).
+
 **Прогон зелёный только при нуле skipped.** Без `DATABASE_URL` молча
 пропускается ~115 интеграционных тестов, и счёт врёт.
 
-Ориентир на 10.10.2026 (M7 `e7c41a9b3d52`, cancel_source): 1452 passed, 0 skipped, 0 failed; smoke 99/99; mypy 60.
+Ориентир на 10.10.2026 (`7fb53d4`, A.3): 1480 passed, 0 skipped, 0 failed; smoke 99/99; mypy 60.
 
 Число тестов в этом файле — ориентир на момент записи, а не факт. Перед
 тем как называть его в плане или отчёте, прогонять пакет и брать свежую
@@ -524,7 +528,8 @@ mode=ExchangeKeyMode.DEMO)`. Отдельной DEMO-строки в
   вложенного на closePosition), `USER` (кнопка владельца, в т.ч. снятие старого стопа/моста при
   переносе этапом 4). **NULL у `CANCELLED` = «на бирже точно не стоит (подтверждено openOrders),
   кто снял — неизвестно»** — не «не проверяли». SUBMITTED у ордера, которого на бирже нет, — ложь:
-  её читают `settle` и Mini App. Статус пишется только `CANCELLED` (две L); `CANCELED` — только у
+  её читают `settle` и Mini App. Закрывает строки стопа/тейка только `app/execution/settle.py` — и только по свежему
+  openOrders (ордер там есть — строку не трогать), выбор по сделке/открытию/positionId, не по символу. Статус пишется только `CANCELLED` (две L); `CANCELED` — только у
   строк до M7, M7 их переводит
 - Молчаливый фолбэк вместо ошибки — баг. Если ожидаемого нет, падать
   внятно, а не подставлять первое попавшееся
