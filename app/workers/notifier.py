@@ -127,19 +127,20 @@ async def send_notification_message(
 
 async def deliver_event(
     bot: Bot, event: ReconciliationEvent, telegram_id: int, now: datetime, text: str
-) -> Delivery:
+) -> tuple[Delivery, Message | None]:
     """Одна попытка доставки события reconciliation_events (28.09): и для
     reconciler, и для тревог read-back на пути «Да». notified_at — только
     после успеха; бот заблокирован — gave_up_at, без повторов; сбой сети —
-    событие остаётся на переотправку (app/execution/redelivery.py)."""
+    событие остаётся на переотправку (app/execution/redelivery.py).
+    Отправленное сообщение — для журнала исходящих (09.10)."""
     event.attempts = (event.attempts or 0) + 1
     event.last_attempt_at = now
-    delivery = await send_notification(bot, telegram_id, text)
+    delivery, sent = await send_notification_message(bot, telegram_id, text)
     if delivery is Delivery.DELIVERED:
         event.notified_at = datetime.now(UTC)
     elif delivery is Delivery.FORBIDDEN:
         event.gave_up_at = now
-    return delivery
+    return delivery, sent
 
 
 async def send_notification_photo(

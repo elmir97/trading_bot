@@ -2,7 +2,8 @@
 
 Одна строка — одно сообщение в чате (chat_id, message_id), которым бот
 сообщил итог: открытие сделки (✅ / 🚨 / ALARM / ⏳ / отмена лимита),
-действие с позицией. Сверка без скринов: что, кому и когда ушло, к какому
+действие с позицией, уведомление reconciler (закрыто по стопу/тейку,
+расхождение). Сверка без скринов: что, кому и когда ушло, к какому
 открытию / сделке / действию относится. Правка того же сообщения — та же
 строка: прежний текст уходит в edits ([{at, text, kind}]), text — текущий.
 
@@ -38,7 +39,8 @@ class OutgoingMessage(IntPKMixin, Base):
     chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     # OPEN_<статус открытия> (OPEN_DONE, OPEN_ALARM, OPEN_WORKING, …),
-    # OPEN_ALARM_REMINDER, ACTION_RESULT. Без CHECK: новый вид — без миграции.
+    # OPEN_ALARM_REMINDER, ACTION_RESULT, RECON_<вид события сверки>
+    # (RECON_CLOSED_STOP_LOSS, …). Без CHECK: новый вид — без миграции.
     kind: Mapped[str] = mapped_column(String(32), nullable=False)
     trade_opening_id: Mapped[int | None] = mapped_column(
         ForeignKey("trade_openings.id", ondelete="SET NULL")

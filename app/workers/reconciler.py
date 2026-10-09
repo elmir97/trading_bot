@@ -15,6 +15,11 @@
 «позицией без сделки». Двойная запись выхода невозможна: строка сделки под
 FOR UPDATE, статус перепроверяется, external_fill_id = orderId биржи под
 uq_fill_external_id. Ордеров reconciler не отправляет никогда.
+
+Журнал исходящих (09.10, очередь A.2): каждое доставленное уведомление —
+строка outgoing_messages, kind RECON_<вид события>. Пишется после commit
+транзакции, в которой ушло: строка сделки под FOR UPDATE, а запись журнала
+идёт своей сессией с FK на сделку — внутри транзакции она ждала бы сама себя.
 """
 
 from __future__ import annotations
@@ -30,6 +35,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot import outbox
 from app.core.config import Settings
 from app.core.input_prompt import InputGate
 from app.core.logging import get_logger
@@ -37,6 +43,7 @@ from app.core.numfmt import fmt_amount, fmt_money, fmt_price, fmt_qty
 from app.core.security import SecretCipher
 from app.core.timefmt import closed_at_line
 from app.database.models.execution_order import ExecutionOrder
+from app.database.models.outgoing_message import OutgoingMeta
 from app.database.models.reconciliation_event import ReconciliationEvent
 from app.database.models.trade import Trade
 from app.database.models.trade_opening import TradeOpening
@@ -232,6 +239,9 @@ class Reconciler:
         # разбирается подряд). В памяти, как пульс: рестарт начинает отсчёт
         # 30 минут заново.
         self._history_unparsed_since: dict[int, tuple[int, datetime]] = {}
+        # Доставленные уведомления до commit их транзакции: (meta, chat_id,
+        # message_id, text) — в журнал исходящих пишет _record_sent().
+        self._sent: list[tuple[OutgoingMeta, int, int, str]] = []
 
     async def run(self) -> None:
         self._cycle += 1
@@ -265,6 +275,7 @@ class Reconciler:
         except Exception:
             self._cycle_errors += 1
             logger.exception("Переотправка уведомлений сверки упала")
+        await self._record_sent()
         for user_id in user_ids:
             try:
                 async with self._db.session() as session:
@@ -278,6 +289,14 @@ class Reconciler:
             except Exception:
                 self._cycle_errors += 1
                 logger.exception("Сверка пользователя упала", extra={"user_id": user_id})
+            await self._record_sent()
+
+    async def _record_sent(self) -> None:
+        """После commit (или отката) транзакции: сообщение уже в чате, журнал
+        пишет и при откате — он о том, что ушло, а не о событии."""
+        sent, self._sent = self._sent, []
+        for meta, chat_id, message_id, text in sent:
+            await outbox.record(self._db, meta, chat_id=chat_id, message_id=message_id, text=text)
 
     async def _redeliver(self, user_ids: list[int]) -> None:
         """Уведомления «хотя бы один раз» (28.09): события с notified_at IS
@@ -336,7 +355,13 @@ class Reconciler:
                 extra={"event_id": event.id, "kind": event.kind.value},
             )
             return None
-        return await deliver_event(self._bot, event, telegram_id, now, text)
+        delivery, sent = await deliver_event(self._bot, event, telegram_id, now, text)
+        if sent is not None:
+            meta = OutgoingMeta(
+                user_id=event.user_id, kind=f"RECON_{event.kind.value}", trade_id=event.trade_id
+            )
+            self._sent.append((meta, sent.chat.id, sent.message_id, text))
+        return delivery
 
     async def _confirm_in_flight(self) -> bool:
         if self._redis is None:

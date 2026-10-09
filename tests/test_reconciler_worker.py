@@ -1440,3 +1440,84 @@ async def test_bot_opened_trade_missing_stop_alarm(ctx) -> None:  # type: ignore
     await _run_reconciler(settings, db, bot)
 
     assert any(t.startswith("⚠️ ПОЗИЦИЯ БЕЗ СТОПА: LINK-USDT") for t in bot.sent)
+
+
+# --- 09.10: уведомления сверки — в журнал исходящих (очередь A.2) ---------------
+
+
+class MessageBot(FakeBot):
+    """Отдаёт Message, как настоящий Telegram: журнал пишет его message_id."""
+
+    def __init__(self, first_id: int = 5001) -> None:
+        super().__init__()
+        self.next_id = first_id
+
+    async def send_message(self, chat_id: int, text: str, reply_markup=None):  # type: ignore[no-untyped-def]
+        from aiogram.types import Chat, Message
+
+        self.sent.append(text)
+        self.next_id += 1
+        return Message(
+            message_id=self.next_id, date=datetime.now(UTC),
+            chat=Chat(id=chat_id, type="private"), text=text,
+        )
+
+
+async def _outgoing(db, user_id: int) -> list[Any]:  # type: ignore[no-untyped-def]
+    from app.database.models.outgoing_message import OutgoingMessage
+
+    async with db.session() as s:
+        stmt = select(OutgoingMessage).where(OutgoingMessage.user_id == user_id)
+        return list(await s.scalars(stmt.order_by(OutgoingMessage.id)))
+
+
+async def test_close_notification_is_recorded_after_commit(ctx) -> None:  # type: ignore[no-untyped-def]
+    """SOL #4 закрыта стопом: уведомление — строка outgoing_messages с
+    message_id, видом события и сделкой. Запись идёт после commit: строка
+    сделки под FOR UPDATE, а журнал пишет своей сессией с FK на неё — внутри
+    транзакции сверка ждала бы сама себя (wait_for ловит зависание)."""
+    import asyncio
+
+    settings, db, session, user, _demo = ctx
+    sol_id, _link_id = await _seed_live(session, user.id)
+    bot = MessageBot()
+
+    await asyncio.wait_for(_run_reconciler(settings, db, bot), timeout=30)
+
+    [text] = bot.sent
+    [row] = await _outgoing(db, user.id)
+    assert (row.kind, row.trade_id, row.message_id, row.chat_id, row.text) == (
+        "RECON_CLOSED_STOP_LOSS", sol_id, bot.next_id, user.telegram_id, text,
+    )
+
+
+async def test_redelivered_notification_is_recorded(ctx, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import app.workers.reconciler as reconciler_module
+
+    settings, db, session, user, _demo = ctx
+    await _pending_event(session, user.id, age=timedelta(minutes=1))
+    monkeypatch.setattr(reconciler_module, "ExchangeFactory", _DownFactory)
+
+    bot = MessageBot()
+    await _run_reconciler(settings, db, bot)
+
+    [row] = await _outgoing(db, user.id)
+    assert (row.kind, row.trade_id, row.text) == (
+        "RECON_CLOSED_STOP_LOSS", None, "🛑 SOL-USDT LONG закрыта по стопу на бирже",
+    )
+
+
+async def test_failed_notification_is_not_recorded(ctx) -> None:  # type: ignore[no-untyped-def]
+    settings, db, session, user, _demo = ctx
+    await _seed_live(session, user.id)
+
+    await _run_reconciler(settings, db, NetworkFailBot())
+
+    assert await _outgoing(db, user.id) == []
+
+
+def test_recon_kinds_fit_outgoing_kind_column() -> None:
+    from app.database.models.outgoing_message import OutgoingMessage
+
+    limit = OutgoingMessage.__table__.c.kind.type.length
+    assert all(len(f"RECON_{k.value}") <= limit for k in ReconciliationKind)
