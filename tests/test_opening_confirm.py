@@ -302,7 +302,7 @@ async def test_lock_busy(ctx) -> None:  # type: ignore[no-untyped-def]
     opening = await _card(ctx)
     async with RedisLock(ctx.redis, position_lock_key(ctx.uid, "XRP-USDT", "LONG"), 30):
         out = await ctx.service().confirm(opening.id, accept_warnings=False)
-    assert not out.final and "Уже идёт действие" in out.text
+    assert not out.final and out.busy and "Уже идёт действие" in out.text
     await ctx.session.refresh(opening)
     assert opening.status is OpeningStatus.CARD
 

@@ -313,7 +313,7 @@ async def test_yes_close_records_result_and_resolves_alarm(monkeypatch) -> None:
     cb = _callback(f"{OpenCB.CLOSE_YES}15", message_id=530)
     await open_trade.close_alarm(cb, SimpleNamespace(id=1), MagicMock(), MagicMock(),
                                  MagicMock(), MagicMock(), MagicMock())
-    service.close_alarm.assert_awaited_once_with(15)
+    assert service.close_alarm.await_args.args == (15,)
     [call] = edits.await_args_list
     assert call.args[2].kind == "OPEN_EMERGENCY_CLOSED" and call.args[3] == "🚨 Закрыто кнопкой…"
     assert _labels(call.args[4]) == ["📋 К позициям", "◀️ В меню"]

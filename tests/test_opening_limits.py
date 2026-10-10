@@ -104,6 +104,18 @@ async def test_cancel_from_bot(ctx) -> None:  # type: ignore[no-untyped-def]
     assert entry.cancel_source is CancelSource.USER                # A.3: кнопка владельца
 
 
+async def test_cancel_lock_busy_is_busy(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Деплой 3, фикс 6: лок занят — busy (ответ всплывашкой), лимит не тронут."""
+    from app.core.locks import RedisLock, position_lock_key
+
+    opening, _ = await _working(ctx)
+    async with RedisLock(ctx.redis, position_lock_key(ctx.uid, "XRP-USDT", "LONG"), 30):
+        out = await ctx.service().cancel_limit(opening.id)
+    assert out.busy and not out.final and "Уже идёт действие" in out.text
+    await ctx.session.refresh(opening)
+    assert opening.status is OpeningStatus.WORKING
+
+
 async def test_full_fill_creates_trade(ctx) -> None:  # type: ignore[no-untyped-def]
     opening, _ = await _working(ctx)
     ctx.exchange.fill_limit(f"to{opening.id}u{ctx.uid}e")

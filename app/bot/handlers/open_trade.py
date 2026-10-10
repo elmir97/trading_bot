@@ -656,6 +656,37 @@ def result_keyboard(outcome: ConfirmOutcome, opening_id: int,
     return None
 
 
+class _Ack:
+    """Ответ на нажатие (Telegram принимает один): «Открываю…» — из сервиса
+    после захвата лока; лок занят — всплывашка «Уже идёт действие» вместо
+    сообщения (деплой 3, фикс 6); иначе — пустой ответ в конце."""
+
+    def __init__(self, callback: CallbackQuery, text: str) -> None:
+        self._callback = callback
+        self._text = text
+        self.done = False
+
+    async def __call__(self) -> None:
+        self.done = True
+        await self._callback.answer(self._text)
+
+    async def finish(self, outcome: ConfirmOutcome) -> bool:
+        """True — лок был занят, ответ дан всплывашкой (дальше ничего)."""
+        if outcome.busy:
+            try:
+                await self._callback.answer(outcome.text, show_alert=True)
+            except TelegramAPIError:
+                # Ожидание лока (до 8 с) могло пережить срок ответа на нажатие.
+                logger.warning("Всплывашка «Уже идёт действие» не принята — сообщением")
+                if isinstance(self._callback.message, Message):
+                    await self._callback.message.answer(outcome.text)
+            return True
+        if not self.done:
+            self.done = True
+            await self._callback.answer()
+        return False
+
+
 @router.callback_query(F.data.startswith((OpenCB.YES, OpenCB.YES_WARN)))
 async def confirm_open(callback: CallbackQuery, state: FSMContext, user: User,
                        session: AsyncSession, settings: Settings, cipher: SecretCipher,
@@ -669,12 +700,15 @@ async def confirm_open(callback: CallbackQuery, state: FSMContext, user: User,
     if opening_id is None or not isinstance(callback.message, Message):
         await callback.answer("Кнопка устарела — открой заново.", show_alert=True)
         return
-    await callback.answer("Открываю…")
+    ack = _Ack(callback, "Открываю…")
     current = await _is_current(state, opening_id, callback.message.message_id)
     service = _service(session, settings, cipher, user, redis)
     outcome = await service.confirm(
-        opening_id, accept_warnings=warn, message_id=callback.message.message_id
+        opening_id, accept_warnings=warn, message_id=callback.message.message_id,
+        on_locked=ack,
     )
+    if await ack.finish(outcome):
+        return
     if outcome.status is OpeningStatus.EXPIRED_CARD and current:
         # 08.10.2026: истекла текущая карточка — сразу пересчитанная, с новыми
         # числами; «Открыть» — заново, автоматически не открываем.
@@ -763,9 +797,9 @@ async def cancel_limit(callback: CallbackQuery, user: User, session: AsyncSessio
             await outbox.mark(db, callback.message.chat.id, [callback.message.message_id],
                               "markup_removed", "cancel_limit")
         return
-    await callback.answer("Отменяю лимит…")
-    outcome = await service.cancel_limit(opening_id)
-    if not isinstance(callback.message, Message):
+    ack = _Ack(callback, "Отменяю лимит…")
+    outcome = await service.cancel_limit(opening_id, on_locked=ack)
+    if await ack.finish(outcome) or not isinstance(callback.message, Message):
         return
     if not outcome.final:
         await callback.message.answer(outcome.text)
@@ -828,13 +862,15 @@ async def close_alarm(callback: CallbackQuery, user: User, session: AsyncSession
     if opening_id is None or not isinstance(callback.message, Message):
         await callback.answer("Кнопка устарела.", show_alert=True)
         return
-    await callback.answer("Закрываю…")
+    ack = _Ack(callback, "Закрываю…")
     service = _service(session, settings, cipher, user, redis)
-    outcome = await service.close_alarm(opening_id)
+    outcome = await service.close_alarm(opening_id, on_locked=ack)
+    if await ack.finish(outcome):
+        return   # лок не освободился за ожидание: кнопки остаются
     message = callback.message
     if not outcome.final:
         if outcome.status is OpeningStatus.ALARM or outcome.status is None:
-            await message.answer(outcome.text)   # лок занят / позиции нет: кнопки остаются
+            await message.answer(outcome.text)   # позиции нет: кнопки остаются
             return
         await message.edit_text(outcome.text)    # тревоги уже нет — подтверждение снято
         return

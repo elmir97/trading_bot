@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -116,6 +117,16 @@ class ConfirmOutcome:
     status: OpeningStatus | None = None
     trade_id: int | None = None
     final: bool = True
+    # Лок позиции занят — ответ всплывашкой на нажатие, не сообщением
+    # (деплой 3, фикс 6).
+    busy: bool = False
+
+
+# Вызывается сразу после захвата лока позиции: «Открываю…»/«Закрываю…» на
+# нажатие — только когда действие точно пошло (иначе ответ — всплывашка «Уже
+# идёт действие»: на одно нажатие Telegram принимает один ответ).
+OnLocked = Callable[[], Awaitable[None]]
+BUSY_TEXT = "Уже идёт действие с этой позицией — подожди пару секунд."
 
 
 def _alarm_gone(opening: TradeOpening | None) -> ConfirmOutcome:
@@ -482,6 +493,7 @@ class OpeningService:
         accept_warnings: bool,
         message_id: int | None = None,
         runner_factory: Any = None,
+        on_locked: OnLocked | None = None,
     ) -> ConfirmOutcome:
         """«Открыть» из чата или Mini App. Повторное нажатие, второй интерфейс
         и параллельный вызов отсекаются условным переходом CARD → CONFIRMED и
@@ -522,13 +534,15 @@ class OpeningService:
         key = position_lock_key(self._user.id, opening.symbol, opening.side.value)
         try:
             async with RedisLock(self._redis, key, self._settings.confirm_lock_ttl_seconds):
+                if on_locked is not None:
+                    await on_locked()
                 return await self._confirm_locked(opening, bool(warnings), runner_factory)
         except LockBusyError:
-            return ConfirmOutcome(
-                "Уже идёт действие с этой позицией — подожди пару секунд.", final=False
-            )
+            return ConfirmOutcome(BUSY_TEXT, final=False, busy=True)
 
-    async def cancel_limit(self, opening_id: int) -> ConfirmOutcome:
+    async def cancel_limit(
+        self, opening_id: int, *, on_locked: OnLocked | None = None
+    ) -> ConfirmOutcome:
         """«Отменить лимит» из чата или Mini App — та же ветка, что истечение."""
         opening = await self.load(opening_id)
         if opening is None or opening.status is not OpeningStatus.WORKING:
@@ -542,6 +556,8 @@ class OpeningService:
         key = position_lock_key(self._user.id, opening.symbol, opening.side.value)
         try:
             async with RedisLock(self._redis, key, self._settings.confirm_lock_ttl_seconds):
+                if on_locked is not None:
+                    await on_locked()
                 await self._session.refresh(opening)
                 if opening.status is not OpeningStatus.WORKING:
                     return ConfirmOutcome(
@@ -563,11 +579,11 @@ class OpeningService:
                 finally:
                     await client.close()
         except LockBusyError:
-            return ConfirmOutcome("Уже идёт действие с этой позицией — подожди.", final=False)
+            return ConfirmOutcome(BUSY_TEXT, final=False, busy=True)
         return ConfirmOutcome(outcome.text, outcome.status, outcome.trade_id)
 
     async def close_alarm(
-        self, opening_id: int, *, runner_factory: Any = None
+        self, opening_id: int, *, runner_factory: Any = None, on_locked: OnLocked | None = None
     ) -> ConfirmOutcome:
         """«🔴 Закрыть маркетом» → «Да, закрыть» под ALARM (A.1, решение владельца
         09.10): аварийное закрытие ядром открытия под локом позиции, итог —
@@ -589,6 +605,8 @@ class OpeningService:
                 self._redis, key, self._settings.confirm_lock_ttl_seconds, wait_seconds=wait
             ):
                 await self._redis.delete(wanted)
+                if on_locked is not None:
+                    await on_locked()
                 await self._session.refresh(opening)
                 if opening.status is not OpeningStatus.ALARM:
                     return _alarm_gone(opening)
@@ -625,8 +643,7 @@ class OpeningService:
                     "user_id": self._user.id, "opening_id": opening.id, "wait_s": wait,
                 },
             )
-            return ConfirmOutcome("Уже идёт действие с этой позицией — подожди пару секунд.",
-                                  final=False)
+            return ConfirmOutcome(BUSY_TEXT, final=False, busy=True)
         finally:
             await self._redis.delete(wanted)
         if outcome.status is OpeningStatus.ALARM:

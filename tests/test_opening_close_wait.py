@@ -110,7 +110,7 @@ async def test_close_gives_up_after_wait(ctx) -> None:  # type: ignore[no-untype
         result = await ctx.service(
             exec_open_fault=ALWAYS, exec_open_close_lock_wait_seconds=0.3
         ).close_alarm(opening.id)
-    assert not result.final and "Уже идёт действие" in result.text
+    assert not result.final and result.busy and "Уже идёт действие" in result.text
     assert len(_posts(ctx, "post_market")) == markets and ctx.exchange.positions
     assert not await ctx.redis.exists(close_wanted_key(opening.id))   # снят в finally
 
