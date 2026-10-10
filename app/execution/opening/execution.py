@@ -194,6 +194,10 @@ class Runner:
         # Номер попытки запасного стопа, вставшего в этом проходе (s1, s2, …):
         # итог после тревоги — «со N-й попытки» (A.1). None — не ставили.
         self.stop_attempt: int | None = None
+        # Когда этот стоп принят биржей (ответ POST; без ответа — момент
+        # подтверждения): «позиция была без стопа N с» — до него, не до записи
+        # итога (деплой 3, фикс 4: на Т3 тейк и снятие вложенных добавили 2.4 с).
+        self.stop_at: datetime | None = None
         self._faults = settings.exec_open_faults
         # hide_backup_stop: cid, скрытые в openOrders и в запросе по cid в
         # этом проходе (новый Runner в следующем цикле их уже видит).
@@ -778,7 +782,9 @@ class Runner:
             row.status = OrderStatus.UNKNOWN
             row.error_code = type(exc).__name__
             await self.session.commit()
+            accepted_at: datetime | None = None
         else:
+            accepted_at = datetime.now(UTC)
             row.exchange_order_id = result.order_id or None
         if is_stop and self._fault("hide_backup_stop", n):
             self._hidden.add(cid.casefold())
@@ -794,6 +800,7 @@ class Runner:
             await self.session.commit()
             if is_stop:
                 self.stop_attempt = n
+                self.stop_at = accepted_at or datetime.now(UTC)
             return StopCheck.STANDING
         # Нет в openOrders — решение только по запросу ордера по cid.
         check, order_id = await self.check_by_cid(cid)
@@ -802,6 +809,7 @@ class Runner:
             row.exchange_order_id = order_id or row.exchange_order_id
             if is_stop:
                 self.stop_attempt = n
+                self.stop_at = accepted_at or datetime.now(UTC)
         elif check is StopCheck.ABSENT:
             row.status = OrderStatus.REJECTED
             row.error_code = "NOT_FOUND"

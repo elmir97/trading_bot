@@ -6,7 +6,9 @@ fail_backup_stop_always (ALARM держится до кнопки; только 
 
 from __future__ import annotations
 
+import asyncio
 import os
+import re
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -119,6 +121,32 @@ async def test_done_after_alarm_names_attempt_and_time(ctx) -> None:  # type: ig
             "попытки — позиция была без стопа") in text, text
     assert ctx.kws[-1]["resolve_alarm"] == opening.id
     assert ctx.kws[-1]["status"] is OpeningStatus.DONE
+
+
+@needs_db
+async def test_unprotected_time_is_until_stop_accepted(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Деплой 3, фикс 4: «без стопа N с» — до ответа биржи на POST стопа, а не до
+    записи итога (на Т3 тейк и снятие вложенных после стопа добавили 2.4 с)."""
+    opening, _ = await _open(ctx, T3)
+    original = ctx.exchange.place_conditional_order
+    accepted: list[datetime] = []
+
+    async def place(**kw: Any):  # type: ignore[no-untyped-def]
+        if kw["order_type"] == "TAKE_PROFIT_MARKET":
+            await asyncio.sleep(0.5)          # тейк после стопа — медленно
+        result = await original(**kw)
+        if kw["order_type"] == "STOP_MARKET":
+            accepted.append(datetime.now(UTC))
+        return result
+
+    ctx.exchange.place_conditional_order = place
+    await _recover(ctx, T3)
+    await ctx.session.refresh(opening)
+    assert opening.status is OpeningStatus.DONE and len(accepted) == 1
+    match = re.search(r"без стопа (\d+\.\d) с", ctx.notes[-1][1])
+    assert match, ctx.notes[-1][1]
+    expected = (accepted[0] - opening.filled_at).total_seconds()
+    assert abs(float(match.group(1)) - expected) <= 0.15, (match.group(1), expected)
 
 
 @needs_db

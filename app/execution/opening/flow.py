@@ -112,7 +112,10 @@ async def after_protect(runner: Runner, result: ProtectResult) -> FlowOutcome:
         # решаем, перепроверка циклом (сообщение — только для «Открыть»).
         return FlowOutcome(OpeningStatus.FILLED, position_pending_text(runner), notify=False)
     if result.status is OpeningStatus.PROTECTED:
-        note = alarm_note(runner, datetime.now(UTC)) if o.status is OpeningStatus.ALARM else ""
+        note = (
+            alarm_note(runner, runner.stop_at or datetime.now(UTC))
+            if o.status is OpeningStatus.ALARM else ""
+        )
         await transition(
             runner.session, o, (OpeningStatus.FILLED, OpeningStatus.ALARM),
             OpeningStatus.PROTECTED,
@@ -243,7 +246,8 @@ _MODE_NOTE = {
 def alarm_note(runner: Runner, now: datetime) -> str:
     """Стоп встал после тревоги (одобрено владельцем 08.10): «со N-й попытки —
     позиция была без стопа M с»; нашёлся прежний — «подтверждён повторной
-    проверкой». Время — от исполнения входа (время биржи)."""
+    проверкой». Время — от исполнения входа (время биржи) до now: момента, когда
+    биржа приняла стоп (Runner.stop_at), или подтверждения прежнего."""
     o = runner.opening
     seconds = (now - o.filled_at).total_seconds() if o.filled_at is not None else None
     took = f" через {seconds:.1f} с" if seconds is not None else ""
