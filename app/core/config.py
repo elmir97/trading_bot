@@ -232,6 +232,10 @@ class Settings(BaseSettings):
     # секунд, дальше напоминание с этим интервалом, пока не решится.
     exec_open_unconfirmed_alarm_seconds: int = 120
     exec_open_unconfirmed_remind_seconds: int = 300
+    # B.1 (10.10.2026): быстрые повторы защиты после объявления ALARM — секунды
+    # от тревоги, по возрастанию; дальше обычный цикл openings_interval_seconds.
+    # Цель владельца — без стопа ≤ 8 с при живом боте (Т3 было 18.7 с).
+    exec_open_alarm_retry_seconds: str = "1.5,3,5"
     # Управляемый сбой открытия для проверки аварийных веток на ДЕМО (08.10.2026,
     # по аналогии с --fault в rehearse_migration.sh). Список через запятую из
     # OPEN_FAULTS; каждый срабатывает только на первой попытке в открытии
@@ -347,6 +351,25 @@ class Settings(BaseSettings):
                 "EXEC_ALLOW_LIVE_MODE_ORDERS=false"
             )
         return self
+
+    @field_validator("exec_open_alarm_retry_seconds")
+    @classmethod
+    def _alarm_retry_offsets(cls, value: str) -> str:
+        try:
+            offsets = [float(x) for x in value.split(",") if x.strip()]
+        except ValueError as exc:
+            raise ValueError(f"EXEC_OPEN_ALARM_RETRY_SECONDS: не числа: {value!r}") from exc
+        if any(x <= 0 for x in offsets) or offsets != sorted(set(offsets)):
+            raise ValueError(
+                f"EXEC_OPEN_ALARM_RETRY_SECONDS: положительные по возрастанию: {value!r}"
+            )
+        return value
+
+    @property
+    def exec_open_alarm_retry_offsets(self) -> tuple[float, ...]:
+        return tuple(
+            float(x) for x in self.exec_open_alarm_retry_seconds.split(",") if x.strip()
+        )
 
     @property
     def exec_open_faults(self) -> frozenset[str]:

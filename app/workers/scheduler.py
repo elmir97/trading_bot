@@ -105,6 +105,7 @@ class BackgroundJobs:
         )
 
     async def shutdown(self) -> None:
+        await self.openings.close()
         if self._scheduler.running:
             self._scheduler.shutdown(wait=False)
             logger.info("Фоновые задачи остановлены")

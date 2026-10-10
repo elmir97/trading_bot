@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
@@ -151,8 +151,10 @@ async def recover_openings(
     *,
     statuses: tuple[OpeningStatus, ...] = RECOVERABLE,
     now: datetime | None = None,
+    on_alarm: Callable[[int], None] | None = None,
 ) -> int:
-    """Возвращает число открытий, которые сдвинулись с места."""
+    """Возвращает число открытий, которые сдвинулись с места. on_alarm(id) —
+    открытие только что перешло в ALARM (быстрые повторы, B.1)."""
     moved = 0
     async with db.session() as session:
         ids = list(await session.scalars(
@@ -161,7 +163,7 @@ async def recover_openings(
         ))
     for opening_id in ids:
         try:
-            if await _one(db, settings, redis, factory, notify, opening_id, now):
+            if await _one(db, settings, redis, factory, notify, opening_id, now, on_alarm):
                 moved += 1
         except Exception:
             # Одно открытие не роняет цикл остальных; повтор — следующим циклом.
@@ -169,9 +171,18 @@ async def recover_openings(
     return moved
 
 
+async def recover_one(
+    db: Database, settings: Settings, redis: Any, factory: Any, notify: Notify,
+    opening_id: int,
+) -> bool:
+    """Один проход по одному открытию (быстрый повтор после тревоги, B.1) —
+    тот же лок и те же ветки, что у цикла."""
+    return await _one(db, settings, redis, factory, notify, opening_id, None, None)
+
+
 async def _one(
     db: Database, settings: Settings, redis: Any, factory: Any, notify: Notify,
-    opening_id: int, now: datetime | None,
+    opening_id: int, now: datetime | None, on_alarm: Callable[[int], None] | None,
 ) -> bool:
     async with db.session() as session:
         opening = await session.get(TradeOpening, opening_id)
@@ -196,6 +207,11 @@ async def _one(
         )
         if outcome is None:
             return False
+        if (
+            on_alarm is not None and outcome.status is OpeningStatus.ALARM
+            and before is not OpeningStatus.ALARM
+        ):
+            on_alarm(opening.id)
         if outcome.notify and outcome.text:
             # «Позиция» — у записанной сделки и под тревогой (A.1: ALARM —
             # «⚙️ Позиция» и «🔴 Закрыть маркетом»).

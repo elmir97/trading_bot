@@ -660,7 +660,7 @@ def result_keyboard(outcome: ConfirmOutcome, opening_id: int,
 @router.callback_query(F.data.startswith((OpenCB.YES, OpenCB.YES_WARN)))
 async def confirm_open(callback: CallbackQuery, state: FSMContext, user: User,
                        session: AsyncSession, settings: Settings, cipher: SecretCipher,
-                       db: Database, redis: Any) -> None:
+                       db: Database, redis: Any, alarm_retry: Any = None) -> None:
     warn = str(callback.data).startswith(OpenCB.YES_WARN)
     opening_id = _opening_id(callback.data, OpenCB.YES_WARN if warn else OpenCB.YES)
     action = ExecutionCallbackAction.TO_YES_WARN if warn else ExecutionCallbackAction.TO_YES
@@ -705,6 +705,10 @@ async def confirm_open(callback: CallbackQuery, state: FSMContext, user: User,
     await outbox.edit(
         callback.message, db, _meta(user, opening_id, outcome), outcome.text, keyboard
     )
+    if outcome.status is OpeningStatus.ALARM and alarm_retry is not None:
+        # B.1: не ждать цикла 15 с; после записи тревоги в журнал — «✅ Решено»
+        # ищет её там.
+        alarm_retry(opening_id)
 
 
 @router.callback_query(F.data.startswith(OpenCB.NO))
@@ -782,7 +786,9 @@ async def cancel_limit(callback: CallbackQuery, user: User, session: AsyncSessio
 
 def close_confirm_keyboard(opening_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="🔴 Да, закрыть", callback_data=f"{OpenCB.CLOSE_YES}{opening_id}"),
+        InlineKeyboardButton(
+            text="🔴 Да, закрыть", callback_data=f"{OpenCB.CLOSE_YES}{opening_id}"
+        ),
         InlineKeyboardButton(text="Нет", callback_data=f"{OpenCB.CLOSE_NO}{opening_id}"),
     ]])
 
@@ -815,7 +821,7 @@ async def ask_close_alarm(callback: CallbackQuery, user: User, session: AsyncSes
 @router.callback_query(F.data.startswith(OpenCB.CLOSE_YES))
 async def close_alarm(callback: CallbackQuery, user: User, session: AsyncSession,
                       settings: Settings, cipher: SecretCipher, db: Database,
-                      redis: Any) -> None:
+                      redis: Any, alarm_retry: Any = None) -> None:
     opening_id = _opening_id(callback.data, OpenCB.CLOSE_YES)
     if not await _audit(callback, db, user, ExecutionCallbackAction.TO_CLOSE_YES, opening_id):
         await callback.answer(AUDIT_FAILED_TEXT, show_alert=True)
@@ -839,8 +845,11 @@ async def close_alarm(callback: CallbackQuery, user: User, session: AsyncSession
         message, db, _meta(user, opening_id, outcome), outcome.text,
         opening_keyboard(outcome.status, opening_id, position),
     )
-    if outcome.status is not OpeningStatus.ALARM and outcome.status is not None             and message.bot is not None:
-        await opening_messages.resolve_alarm(message.bot, db, opening_id, outcome.status)
+    if outcome.status is OpeningStatus.ALARM and alarm_retry is not None:
+        alarm_retry(opening_id)   # закрыть не удалось — снова повторы защиты
+    status = outcome.status
+    if status is not None and status is not OpeningStatus.ALARM and message.bot is not None:
+        await opening_messages.resolve_alarm(message.bot, db, opening_id, status)
 
 
 @router.callback_query(F.data.startswith(OpenCB.CLOSE_NO))

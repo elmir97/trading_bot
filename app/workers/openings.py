@@ -5,10 +5,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from aiogram import Bot
+from sqlalchemy import select
 
 from app.bot import opening_messages, outbox
 from app.bot.handlers.open_trade import opening_keyboard
@@ -16,8 +20,13 @@ from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.security import SecretCipher
 from app.database.models.outgoing_message import OutgoingMeta
+from app.database.models.trade_opening import TradeOpening
 from app.database.session import Database
-from app.execution.opening.recovery import expire_stale_cards, recover_openings
+from app.execution.opening.recovery import (
+    expire_stale_cards,
+    recover_one,
+    recover_openings,
+)
 from app.services.exchange_factory import ExchangeFactory
 from app.trading.enums import OpeningStatus, TradeSide
 from app.workers.notifier import send_notification
@@ -37,6 +46,7 @@ class OpeningsWorker:
         redis: Any,
         *,
         factory: Any = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._bot = bot
         self._db = db
@@ -44,6 +54,9 @@ class OpeningsWorker:
         self._redis = redis
         self._factory = factory or ExchangeFactory(settings, cipher)
         self._fault_warned_at: float | None = None
+        self._sleep = sleep
+        # B.1: задачи быстрых повторов после тревоги — по одной на открытие.
+        self._alarm_tasks: dict[int, asyncio.Task[None]] = {}
 
     async def notify(
         self, telegram_id: int, text: str, position: tuple[str, TradeSide] | None, *,
@@ -74,6 +87,65 @@ class OpeningsWorker:
             return
         await outbox.send(self._bot, self._db, meta, telegram_id, text, markup)
 
+    def retry_alarm(self, opening_id: int) -> None:
+        """B.1 (10.10.2026): тревога объявлена — повторы защиты через
+        exec_open_alarm_retry_seconds от неё (1.5 / 3 / 5 с), не дожидаясь
+        цикла 15 с. Тот же проход, что у цикла (лок позиции: занят — повтор
+        пропущен). Тревога снята — повторы прекращаются; исчерпаны — дальше
+        цикл. Рестарт задачу теряет — её дело берёт восстановление при старте."""
+        task = self._alarm_tasks.get(opening_id)
+        if task is not None and not task.done():
+            return
+        self._alarm_tasks[opening_id] = asyncio.create_task(self._retry_alarm(opening_id))
+
+    async def _retry_alarm(self, opening_id: int) -> None:
+        elapsed = 0.0
+        try:
+            for attempt, offset in enumerate(self._settings.exec_open_alarm_retry_offsets, 1):
+                await self._sleep(max(offset - elapsed, 0.0))
+                elapsed = offset
+                if self._redis is None:
+                    return
+                await recover_one(
+                    self._db, self._settings, self._redis, self._factory, self.notify,
+                    opening_id,
+                )
+                async with self._db.session() as session:
+                    status = await session.scalar(
+                        select(TradeOpening.status).where(TradeOpening.id == opening_id)
+                    )
+                logger.info(
+                    "Быстрый повтор после тревоги", extra={
+                        "opening_id": opening_id, "attempt": attempt, "offset_s": offset,
+                        "status": status.value if status is not None else None,
+                    },
+                )
+                if status is not OpeningStatus.ALARM:
+                    return
+            logger.warning(
+                "Быстрые повторы исчерпаны — тревога остаётся, дальше цикл",
+                extra={"opening_id": opening_id},
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Быстрый повтор после тревоги упал", extra={"opening_id": opening_id}
+            )
+        finally:
+            self._alarm_tasks.pop(opening_id, None)
+
+    async def close(self) -> None:
+        """Остановка бота: незавершённые повторы снимаются (их дело возьмёт
+        восстановление при старте)."""
+        tasks = list(self._alarm_tasks.values())
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        self._alarm_tasks.clear()   # отменённая до первого шага не дойдёт до finally
+
     async def run(self) -> None:
         faults = self._settings.exec_open_faults
         if faults:
@@ -89,5 +161,6 @@ class OpeningsWorker:
         if self._redis is None:
             return
         await recover_openings(
-            self._db, self._settings, self._redis, self._factory, self.notify
+            self._db, self._settings, self._redis, self._factory, self.notify,
+            on_alarm=self.retry_alarm,
         )
