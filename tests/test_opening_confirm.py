@@ -544,8 +544,10 @@ async def test_recovery_after_fill_before_protection(ctx) -> None:  # type: igno
                     price_precision=4, quantity_precision=0)
     entry = await runner.place_entry(D(323))
     assert entry.status is OpeningStatus.FILLED
-    fill, _ = await runner.read_fill()
-    assert fill is not None and await runner.apply_fill(fill)
+    # Деплой 3: POST вернул FILLED — открытие FILLED сразу, цена входа не дочитана.
+    await ctx.session.refresh(opening)
+    assert opening.status is OpeningStatus.FILLED and opening.avg_price is None
+    assert opening.filled_qty == D(323)
     # «рестарт»
     assert await ctx.recover() == 1
     await ctx.session.refresh(opening)

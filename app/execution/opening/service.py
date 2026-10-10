@@ -124,7 +124,10 @@ def _alarm_gone(opening: TradeOpening | None) -> ConfirmOutcome:
     texts = {
         OpeningStatus.DONE: f"Стоп уже стоит — позиция под защитой (сделка #{opening.trade_id}). "
                             "Закрыть можно в «Позиции».",
-        OpeningStatus.EMERGENCY_CLOSED: f"Позиция уже закрыта (сделка #{opening.trade_id}).",
+        OpeningStatus.EMERGENCY_CLOSED: (
+            f"Позиция уже закрыта (сделка #{opening.trade_id})." if opening.trade_id
+            else "Позиция уже закрыта — сделка запишется следом."
+        ),
     }
     return ConfirmOutcome(
         texts.get(opening.status, STATUS_TEXT.get(opening.status, "Тревоги уже нет.")),

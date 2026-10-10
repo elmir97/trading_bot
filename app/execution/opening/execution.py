@@ -19,6 +19,10 @@
 4. закрытие не прошло — ALARM: тревога и повтор циклом восстановления.
 Тейк — так же, но без аварии: не встал — «тейк не стоит».
 
+Маркет, POST вернул FILLED (деплой 3) — защита сразу, без подтверждения по
+cid; цена и комиссия входа дочитываются после стопа (ensure_entry_fill), до
+этого avg_price NULL. Аварийное закрытие — до дочитки.
+
 «Стоп не встал» (08.10.2026, решение владельца) — только окончательно: POST
 отклонён кодом биржи ИЛИ ордер по своему clientOrderId не найден (109421) /
 отменён. Нет в openOrders, а по cid ответа нет — «не подтверждён»: ALARM без
@@ -307,7 +311,51 @@ class Runner:
             row.status = OrderStatus.WORKING
             await self.session.commit()
             return EntryResult(OpeningStatus.WORKING)
+        if not is_limit and result.status == "FILLED":
+            await self._filled_by_post(quantity, result.order_id)
         return EntryResult(OpeningStatus.FILLED)
+
+    async def _filled_by_post(self, quantity: Decimal, order_id: str) -> None:
+        """Маркет, POST вернул FILLED (деплой 3, фикс 2): защита сразу, без
+        подтверждения по cid — на Т3 10.10 оно не приходило 38 с. FILLED у
+        маркета — исполнен целиком: объём = отправленный. Цена и комиссия
+        входа — позже (ensure_entry_fill); avg_price NULL — признак «вход не
+        дочитан». filled_at — время ответа POST (на доли секунды позже
+        биржевого), при дочитке — время биржи."""
+        row = await self.entry_row()
+        if row is not None:
+            row.status = OrderStatus.FILLED
+            await self.session.commit()
+        await transition(
+            self.session, self.opening, (OpeningStatus.SUBMITTING,), OpeningStatus.FILLED,
+            entry_order_id=order_id or None, filled_qty=quantity, filled_at=datetime.now(UTC),
+        )
+        logger.info(
+            "Вход исполнен по ответу POST — защита сразу, цена входа позже", extra=self._log()
+        )
+
+    async def ensure_entry_fill(self) -> bool:
+        """Цена, комиссия и время входа после защиты по ответу POST. True —
+        известны (уже были или дочитаны сейчас); False — биржа ещё не отдала,
+        дочитает следующий проход."""
+        o = self.opening
+        if o.avg_price is not None:
+            return True
+        fill, _ = await self.read_fill()
+        if fill is None or fill.status != "FILLED" or fill.executed_qty <= ZERO:
+            return False
+        row = await self.entry_row()
+        if row is not None:
+            row.exchange_order_id = fill.order_id
+        o.entry_order_id = fill.order_id
+        o.filled_qty = fill.executed_qty
+        o.avg_price = fill.avg_price
+        o.entry_fee = fill.fee
+        o.filled_at = fill.filled_at or o.filled_at
+        o.position_id = fill.position_id or o.position_id
+        await self.session.commit()
+        logger.info("Вход дочитан по cid", extra=self._log())
+        return True
 
     async def read_fill(self, attempts: int | None = None) -> tuple[OrderFill | None, bool]:
         """GET входа по cid. (fill, not_found): not_found — биржа ответила
@@ -435,6 +483,15 @@ class Runner:
             None,
         )
 
+    async def _position_after_post(self) -> Position | None:
+        for _ in range(PROTECT_ATTEMPTS - 1):
+            await self._sleep(self.settings.exec_order_readback_delay_ms / 1000)
+            position = await self.position()
+            if position is not None:
+                return position
+        logger.warning("Позиция после входа по POST не видна", extra=self._log())
+        return None
+
     async def _record_conditional(self, role: OrderRole, order: OpenOrder) -> None:
         for row in await self._rows(role):
             if row.exchange_order_id == order.order_id or (
@@ -477,6 +534,15 @@ class Runner:
         """FILLED/ALARM → PROTECTED | EMERGENCY_CLOSED | ALARM."""
         o = self.opening
         position = await self.position()
+        if position is None and o.avg_price is None:
+            # Вход по ответу POST: позиция может быть ещё не видна. «Позиции нет»
+            # здесь — только после повторных чтений и подтверждённого входа.
+            position = await self._position_after_post()
+            if position is None and not await self.ensure_entry_fill():
+                return ProtectResult(
+                    OpeningStatus.FILLED, undecided=True,
+                    reason="позиция не видна, вход не дочитан — перепроверка циклом",
+                )
         if position is None:
             # Позиции уже нет (стоп сработал за секунды, закрыта руками) —
             # защищать нечего; выход запишет reconciler по истории.
@@ -834,6 +900,24 @@ class Runner:
                 extra={**self._log(), "ids": [r.id for r in rows]},
             )
 
+    async def close_fill(self) -> OrderFill | None:
+        """Исполнение аварийного закрытия по cid последней FILLED-строки CLOSE
+        (сделку дописывают после закрытия — flow.finish_emergency)."""
+        rows = [r for r in await self._rows(OrderRole.CLOSE)
+                if r.status is OrderStatus.FILLED and r.client_order_id]
+        if not rows:
+            logger.error("Аварийно закрыто, а строки закрытия FILLED нет", extra=self._log())
+            return None
+        try:
+            fill = await self.client.get_order_fill(
+                self.opening.symbol, rows[-1].client_order_id or "", max_retries=1
+            )
+        except ExchangeError as exc:
+            logger.info("Закрытие не дочитано по cid",
+                        extra={**self._log(), "error": type(exc).__name__, "code": exc.code})
+            return None
+        return fill if fill.status == "FILLED" else None
+
     # --- журнал ---------------------------------------------------------------------
 
     async def record_trade(self, close_fill: OrderFill | None = None, reason: str = "") -> int:
@@ -887,10 +971,10 @@ class Runner:
 
     def summary(self) -> str:
         o = self.opening
-        return (
-            f"{o.symbol} {self.side.value} {fmt_qty(o.filled_qty, self.qp)} @ "
-            f"{fmt_price(o.avg_price, self.pp)}"
-        )
+        text = f"{o.symbol} {self.side.value} {fmt_qty(o.filled_qty, self.qp)}"
+        if o.avg_price is None:   # вход по ответу POST, цена ещё не дочитана
+            return text
+        return f"{text} @ {fmt_price(o.avg_price, self.pp)}"
 
     def _log(self) -> dict[str, Any]:
         o = self.opening

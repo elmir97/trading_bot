@@ -8,7 +8,9 @@
 - CONFIRMED — вход не уходил (строка ENTRY появляется вместе с SUBMITTING
   одним коммитом) → REFUSED «прервано перезапуском»;
 - SUBMITTING / UNKNOWN — поиск по clientOrderId (flow.advance);
-- FILLED / ALARM — защита позиции; PROTECTED — запись сделки;
+- FILLED / ALARM — защита позиции; PROTECTED — запись сделки (вход по ответу
+  POST — после дочитки цены входа); EMERGENCY_CLOSED с ENTRY_FILL_UNREAD —
+  дописать сделку аварийного закрытия;
 - WORKING — лимит на бирже: исполнение, частичное, истечение (limits.tick).
 """
 
@@ -31,7 +33,7 @@ from app.database.session import Database
 from app.exchanges.base import ExchangeError
 from app.execution.opening import limits
 from app.execution.opening.execution import Runner, transition
-from app.execution.opening.flow import FlowOutcome, advance
+from app.execution.opening.flow import ENTRY_FILL_UNREAD, FlowOutcome, advance
 from app.market.cache import TTLCache
 from app.market.data import MarketDataService
 from app.trading.enums import OPENING_ACTIVE, OpeningStatus, TradeSide
@@ -63,6 +65,22 @@ RECOVERABLE = (
 )
 
 _market_cache = TTLCache()
+
+
+def _emergency_unread() -> Any:
+    """Аварийно закрыто, сделка не записана — вход не дочитался (деплой 3).
+    По коду, не по trade_id IS NULL: у старых открытий trade_id обнулило
+    удаление сделки (SET NULL), их дописывать нельзя."""
+    return (TradeOpening.status == OpeningStatus.EMERGENCY_CLOSED) & (
+        TradeOpening.error_code == ENTRY_FILL_UNREAD
+    )
+
+
+def _is_emergency_unread(opening: TradeOpening) -> bool:
+    return (
+        opening.status is OpeningStatus.EMERGENCY_CLOSED
+        and opening.error_code == ENTRY_FILL_UNREAD
+    )
 
 
 async def opening_in_flight(
@@ -158,8 +176,9 @@ async def recover_openings(
     moved = 0
     async with db.session() as session:
         ids = list(await session.scalars(
-            select(TradeOpening.id).where(TradeOpening.status.in_(statuses))
-            .order_by(TradeOpening.id)
+            select(TradeOpening.id).where(
+                TradeOpening.status.in_(statuses) | _emergency_unread()
+            ).order_by(TradeOpening.id)
         ))
     for opening_id in ids:
         try:
@@ -186,7 +205,7 @@ async def _one(
 ) -> bool:
     async with db.session() as session:
         opening = await session.get(TradeOpening, opening_id)
-        if opening is None or opening.status not in RECOVERABLE:
+        if opening is None or not (opening.status in RECOVERABLE or _is_emergency_unread(opening)):
             return False
         user = await session.scalar(
             select(User).where(User.id == opening.user_id).options(selectinload(User.settings))
@@ -213,11 +232,12 @@ async def _one(
         ):
             on_alarm(opening.id)
         if outcome.notify and outcome.text:
-            # «Позиция» — у записанной сделки и под тревогой (A.1: ALARM —
-            # «⚙️ Позиция» и «🔴 Закрыть маркетом»).
+            # «Позиция» — у записанной сделки, под тревогой (A.1: ALARM —
+            # «⚙️ Позиция» и «🔴 Закрыть маркетом») и под стопом без сделки.
             button = (
                 (opening.symbol, opening.side)
-                if outcome.trade_id is not None or outcome.status is OpeningStatus.ALARM
+                if outcome.trade_id is not None
+                or outcome.status in (OpeningStatus.ALARM, OpeningStatus.PROTECTED)
                 else None
             )
             left_working = (

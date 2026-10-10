@@ -96,7 +96,7 @@ async def retire_working(
 
 def alarm_resolved_text(opening: TradeOpening, status: OpeningStatus, at: str) -> str:
     who = f"{opening.symbol} {opening.side.value}"
-    if status is OpeningStatus.DONE:
+    if status in (OpeningStatus.DONE, OpeningStatus.PROTECTED):   # PROTECTED — сделка следом
         return f"🚨 → ✅ Решено: стоп поставлен в {at} — позиция {who} под защитой, итог ниже."
     if status is OpeningStatus.EMERGENCY_CLOSED:
         return f"🚨 → ✅ Решено: позиция {who} закрыта аварийно в {at} — итог ниже."

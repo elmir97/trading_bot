@@ -641,12 +641,11 @@ def opening_keyboard(
 
 def result_keyboard(outcome: ConfirmOutcome, opening_id: int,
                     symbol: str, side: TradeSide) -> InlineKeyboardMarkup | None:
-    if outcome.trade_id is not None or outcome.status in (
-        OpeningStatus.WORKING, OpeningStatus.ALARM
-    ):
+    with_position = (OpeningStatus.ALARM, OpeningStatus.PROTECTED)   # позиция есть, сделки ещё нет
+    if outcome.trade_id is not None or outcome.status in (OpeningStatus.WORKING, *with_position):
         position = (
             (symbol, side)
-            if outcome.trade_id is not None or outcome.status is OpeningStatus.ALARM else None
+            if outcome.trade_id is not None or outcome.status in with_position else None
         )
         return opening_keyboard(outcome.status, opening_id, position)
     if outcome.status in (OpeningStatus.REFUSED, OpeningStatus.EXPIRED_CARD):

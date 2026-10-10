@@ -255,12 +255,14 @@ async def test_unconfirmed_stop_alarm_without_close(ctx) -> None:  # type: ignor
     ctx.exchange.drop_attached_sl = True
     ctx.exchange.conditional_invisible_in_list = True
     opening = await _card(ctx)
-    # Чтение по cid ломается после постановки запасного стопа (вход читается штатно).
+    # Чтение по cid ломается после постановки запасного стопа — только первого:
+    # вход защищён по ответу POST (деплой 3) и дочитывается после стопа.
     original_cond = ctx.exchange.place_conditional_order
 
     async def cond_then_fail_reads(**kw: Any):  # type: ignore[no-untyped-def]
         result = await original_cond(**kw)
         ctx.exchange.fail_reads = {"order_fill"}
+        ctx.exchange.place_conditional_order = original_cond  # type: ignore[method-assign]
         return result
 
     ctx.exchange.place_conditional_order = cond_then_fail_reads  # type: ignore[method-assign]
