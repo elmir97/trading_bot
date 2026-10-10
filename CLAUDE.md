@@ -30,7 +30,7 @@ DATABASE_URL=postgresql+asyncpg://test:test@localhost:5432/trading_bot_test
 **Прогон зелёный только при нуле skipped.** Без `DATABASE_URL` молча
 пропускается ~115 интеграционных тестов, и счёт врёт.
 
-Ориентир на 10.10.2026 (`7fb53d4`, A.3): 1480 passed, 0 skipped, 0 failed; smoke 99/99; mypy 60.
+Ориентир на 10.10.2026 (`db8f7e9`, деплой 2: A.1 + B.1): 1539 passed, 0 skipped, 0 failed; smoke 102/102; mypy 60.
 
 Число тестов в этом файле — ориентир на момент записи, а не факт. Перед
 тем как называть его в плане или отчёте, прогонять пакет и брать свежую
@@ -464,6 +464,14 @@ PY
     `trade_id`; строки `execution_orders` с `trade_opening_id`: при `EXEC_OPEN_DRY_RUN=true` — только
     DRY_RUN. В логе: ERROR «Позиция открытия без стопа…», «Аварийное закрытие…», «Запасной стоп не
     встал» — флаг; INFO «Открытие восстановлено» — восстановление сработало (после рестарта)
+
+16д. С деплоя 2 (A.1/B.1, M8 `fcf50d29396e`): `execution_callbacks` `to_close`/`to_close_yes`/`to_close_no` — нажатия
+    «🔴 Закрыть маркетом» под ALARM (каждому `to_close_yes` — CLOSE-строка открытия). `outgoing_messages.kind`
+    `OPEN_ALARM_<статус>` / `OPEN_WORKING_<статус>` — тревога / ⏳ исправлены при выходе; `edits` с `event`
+    (`delete_skipped`, `markup_removed`). В логе: WARNING «Итоговое сообщение в переписке мастера — не удаляю» —
+    флаг (до 4a так терялся итог); INFO «Быстрый повтор после тревоги» (attempt, status), WARNING «Быстрые повторы
+    исчерпаны…» — флаг (тревога дольше 5 с); WARNING «⏳ лимита / Сообщение тревоги не исправлено» — сообщение
+    удалено или старше 48 ч; ERROR «message is not modified» больше не ожидается (C.1)
 
 ### F. Redis
 
