@@ -28,7 +28,7 @@ from app.bot.handlers.trades import _show_symbol_prompt
 from app.bot.keyboards.main import MenuCallback, with_nav
 from app.bot.prompts import ask_number
 from app.bot.states.trade import OpenTradeStates
-from app.bot.wizard_trail import remember
+from app.bot.wizard_trail import owned, remember
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.numfmt import fmt_pct
@@ -110,14 +110,22 @@ def _rows(*rows: list[tuple[str, str]], back: str | None = None) -> InlineKeyboa
 
 async def _send(event: Message | CallbackQuery, state: FSMContext, text: str,
                 keyboard: InlineKeyboardMarkup | None) -> Message | None:
-    """Шаг мастера: edit для кнопки, новое сообщение для текста."""
+    """Шаг мастера: edit для кнопки, новое сообщение для текста.
+
+    Правится только своё сообщение (A.1, 10.10.2026): кнопка под чужим —
+    меню, итог открытия или действия — даёт шаг новым сообщением, чужое не
+    меняется и в уборку не попадает."""
     if isinstance(event, CallbackQuery):
         await event.answer()
-        if isinstance(event.message, Message):
+        if not isinstance(event.message, Message):
+            return None
+        if await owned(state, event.message.message_id):
             await event.message.edit_text(text, reply_markup=keyboard)
             await remember(state, event.message.message_id)
             return event.message
-        return None
+        sent = await event.message.answer(text, reply_markup=keyboard)
+        await remember(state, sent.message_id)
+        return sent
     sent = await event.answer(text, reply_markup=keyboard)
     await remember(state, sent.message_id)
     return sent

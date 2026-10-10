@@ -3,7 +3,8 @@
 send() / edit() — отправка и правка итога с записью в outgoing_messages;
 record() — запись уже отправленного или отредактированного сообщения. Все
 три пишут INFO «Итоговое сообщение …» с message_id — сверка по логу и по
-базе без скринов.
+базе без скринов. finals() — какие сообщения итоговые (их мастер не правит
+и не удаляет), mark() — отметка события в edits (A.1, 10.10.2026).
 
 Своя сессия с немедленным коммитом (как app/execution/callback_audit.py):
 сессия апдейта откатывается при падении хендлера, а запись нужна как раз
@@ -15,6 +16,7 @@ chat_id в лог не пишется: в личном чате он равен 
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import UTC, datetime
 
 from aiogram import Bot
@@ -77,6 +79,48 @@ async def record(
             "position_action_id": meta.position_action_id,
         },
     )
+
+
+async def finals(db: Database, chat_id: int, message_ids: Iterable[int]) -> set[int]:
+    """Какие из сообщений — итоговые (есть в журнале исходящих). Сбой чтения
+    пробрасывается: вызывающий решает, куда безопасно (не править, не удалять)."""
+    ids = list(message_ids)
+    if not ids:
+        return set()
+    async with db.session() as session:
+        found = await session.scalars(
+            select(OutgoingMessage.message_id).where(
+                OutgoingMessage.chat_id == chat_id, OutgoingMessage.message_id.in_(ids)
+            )
+        )
+        return {int(i) for i in found}
+
+
+async def mark(
+    db: Database, chat_id: int, message_ids: Iterable[int], event: str, by: str
+) -> None:
+    """Отметка в edits без смены текста: что с итоговым сообщением сделали или
+    чего не сделали (A.1, п.3: {"at", "event", "by"}). Сбой — ERROR, наружу не
+    пробрасывается."""
+    ids = sorted(set(message_ids))
+    if not ids:
+        return
+    try:
+        async with db.session() as session:
+            rows = await session.scalars(
+                select(OutgoingMessage).where(
+                    OutgoingMessage.chat_id == chat_id, OutgoingMessage.message_id.in_(ids)
+                ).with_for_update()
+            )
+            at = datetime.now(UTC).isoformat()
+            for row in rows:
+                row.edits = [*row.edits, {"at": at, "event": event, "by": by}]
+            await session.commit()
+    except Exception:
+        logger.exception(
+            "Отметка итогового сообщения не записана",
+            extra={"event": event, "message_ids": ids},
+        )
 
 
 async def send(

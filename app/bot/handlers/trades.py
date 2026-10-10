@@ -38,7 +38,7 @@ from app.bot.keyboards.trade import (
 from app.bot.prompts import ask_number
 from app.bot.sizing_view import lot_step, sizing_lines
 from app.bot.states.trade import AddTradeStates, CloseTradeStates
-from app.bot.wizard_trail import remember
+from app.bot.wizard_trail import owned, remember
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.numfmt import fmt_rr
@@ -96,11 +96,17 @@ async def _send(  # type: ignore[no-untyped-def]
     event: Message | CallbackQuery, text: str, keyboard, state: FSMContext
 ) -> None:
     """Отправляет шаг формы: edit для колбэка, новое сообщение для текста.
-    Сообщение шага — переписка мастера (удаляется после записи/отмены)."""
+    Сообщение шага — переписка мастера (удаляется после записи/отмены).
+    Правится только своё сообщение мастера (A.1, 10.10.2026), под чужим —
+    новое."""
     if isinstance(event, CallbackQuery):
         if isinstance(event.message, Message):
-            await event.message.edit_text(text, reply_markup=keyboard)
-            await remember(state, event.message.message_id)
+            if await owned(state, event.message.message_id):
+                await event.message.edit_text(text, reply_markup=keyboard)
+                await remember(state, event.message.message_id)
+            else:
+                sent = await event.message.answer(text, reply_markup=keyboard)
+                await remember(state, sent.message_id)
         await event.answer()
     else:
         sent = await event.answer(text, reply_markup=keyboard)

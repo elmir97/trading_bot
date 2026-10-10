@@ -77,6 +77,8 @@ class FakeTelegram:
         # нумерация на чат, как в Telegram; smoke проверяет по нему, что
         # переписка мастера удалена после записи сделки.
         self.created: list[int] = []
+        # 10.10.2026 (A.1): id сообщений, которые правились (текст или кнопки).
+        self.edited_ids: list[int] = []
 
     def new_message_id(self) -> int:
         self._next_msg_id += 1
@@ -102,6 +104,7 @@ class FakeTelegram:
             return self._message(method.chat_id, method.text)
         if isinstance(method, EditMessageText):
             # editMessageText правит СУЩЕСТВУЮЩЕЕ — id не меняется.
+            self.edited_ids.append(method.message_id)
             self.last_message_id = method.message_id
             self.last_text = method.text
             self.last_markup = method.reply_markup
@@ -112,6 +115,7 @@ class FakeTelegram:
             # клавиатура (например, на "⌛ Подтверждение просрочено"), текст
             # остаётся тем же. Без этой ветки last_markup был бы устаревшим
             # для любого следующего tap() по той же карточке.
+            self.edited_ids.append(method.message_id)
             self.last_message_id = method.message_id
             self.last_markup = method.reply_markup
             self.log.append(("edit_markup", self.last_text))

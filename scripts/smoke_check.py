@@ -321,11 +321,18 @@ async def _run_scenarios(sim, tg, db, redis, settings) -> None:  # type: ignore[
     check("объём рассчитан", has(text, "объём: 0.2"), text[:200])
     check("риск верный", has(text, "риск: 2.00%"), text[:200])
     # 03.10.2026: переписка мастера удалена; остались «/start» пользователя
-    # (до формы) и карточка сделки.
-    wizard = set(tg.created[first + 1:]) - {tg.last_message_id}
+    # (до формы) и карточка сделки. 10.10.2026 (A.1): экран меню, с которого
+    # начат мастер, — не его сообщение: не правится и не удаляется, первый
+    # шаг — новым сообщением.
+    menu_id = tg.created[first + 1]
+    wizard = set(tg.created[first + 2:]) - {tg.last_message_id}
     left = sorted(wizard - set(tg.deleted))
     check("переписка мастера удалена", not left and tg.last_message_id not in tg.deleted,
           f"не удалены: {left}")
+    check("меню, с которого начат мастер, не удалено", menu_id not in tg.deleted,
+          f"удалено {menu_id}")
+    check("меню, с которого начат мастер, не правилось", menu_id not in tg.edited_ids,
+          f"правилось {menu_id}")
 
     # M4: отсечка журнала видна в «Настройках» (местное время, метка пояса).
     await _set_journal_cutoff(db, datetime(2026, 10, 3, 20, 38, 34, tzinfo=UTC))

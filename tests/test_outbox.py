@@ -165,3 +165,20 @@ async def test_openings_worker_notify_records(ctx) -> None:  # type: ignore[no-u
     assert bot.calls == 2
     [row] = await _rows(ctx)
     assert (row.message_id, row.kind) == (901, "OPEN_DONE")
+
+
+async def test_finals_and_mark(ctx) -> None:  # type: ignore[no-untyped-def]
+    """A.1 (10.10.2026): finals() — какие сообщения итоговые; mark() — отметка
+    в edits без смены текста и вида."""
+    meta = OutgoingMeta(user_id=ctx.user_id, kind="OPEN_DONE")
+    await outbox.record(ctx.db, meta, chat_id=ctx.chat_id, message_id=503, text="✅ Открыто")
+    assert await outbox.finals(ctx.db, ctx.chat_id, [502, 503, 504]) == {503}
+    assert await outbox.finals(ctx.db, ctx.chat_id + 1, [503]) == set()
+    assert await outbox.finals(ctx.db, ctx.chat_id, []) == set()
+
+    await outbox.mark(ctx.db, ctx.chat_id, [503, 504], "delete_skipped", "wizard_trail")
+    [row] = await _rows(ctx)
+    assert (row.kind, row.text, row.edited_at) == ("OPEN_DONE", "✅ Открыто", None)
+    [entry] = row.edits
+    assert (entry["event"], entry["by"]) == ("delete_skipped", "wizard_trail")
+    assert "at" in entry and "text" not in entry
