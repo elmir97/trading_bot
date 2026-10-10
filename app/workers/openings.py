@@ -9,17 +9,21 @@ import time
 from typing import Any
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramBadRequest
+from sqlalchemy import select
 
 from app.bot import outbox
-from app.bot.handlers.positions import position_keyboard
+from app.bot.handlers.open_trade import opening_keyboard
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.security import SecretCipher
-from app.database.models.outgoing_message import OutgoingMeta
+from app.database.models.outgoing_message import OutgoingMessage, OutgoingMeta
+from app.database.models.trade_opening import TradeOpening
 from app.database.session import Database
+from app.execution.opening.flow import working_exit_text
 from app.execution.opening.recovery import expire_stale_cards, recover_openings
 from app.services.exchange_factory import ExchangeFactory
-from app.trading.enums import TradeSide
+from app.trading.enums import OpeningStatus, TradeSide
 from app.workers.notifier import send_notification
 
 logger = get_logger(__name__)
@@ -47,13 +51,64 @@ class OpeningsWorker:
 
     async def notify(
         self, telegram_id: int, text: str, position: tuple[str, TradeSide] | None, *,
-        meta: OutgoingMeta | None = None,
+        meta: OutgoingMeta | None = None, status: OpeningStatus | None = None,
+        retire_working: int | None = None,
     ) -> None:
-        markup = position_keyboard(*position) if position is not None else None
+        if retire_working is not None:
+            try:
+                await self._retire_working(retire_working, status)
+            except Exception:
+                # Короткий итог на ⏳ вторичен: полный итог уходит всё равно.
+                logger.exception(
+                    "⏳ лимита не исправлен", extra={"opening_id": retire_working}
+                )
+        markup = opening_keyboard(
+            status, meta.trade_opening_id if meta is not None else None, position
+        )
         if meta is None:
             await send_notification(self._bot, telegram_id, text, reply_markup=markup)
             return
         await outbox.send(self._bot, self._db, meta, telegram_id, text, markup)
+
+    async def _retire_working(self, opening_id: int, status: OpeningStatus | None) -> None:
+        """Лимит вышел из WORKING (исполнен, истёк, снят на бирже): ⏳ —
+        карточка «Да» и сообщения OPEN_WORKING журнала исходящих — правится в
+        короткий итог, кнопка «Отменить лимит» снимается (Л3, A.1)."""
+        async with self._db.session() as session:
+            opening = await session.get(TradeOpening, opening_id)
+            if opening is None:
+                return
+            rows = (await session.execute(
+                select(OutgoingMessage.chat_id, OutgoingMessage.message_id).where(
+                    OutgoingMessage.trade_opening_id == opening_id,
+                    OutgoingMessage.kind == f"OPEN_{OpeningStatus.WORKING.value}",
+                )
+            )).all()
+        targets = {(int(c), int(m)) for c, m in rows}
+        if opening.chat_id is not None and opening.card_message_id is not None:
+            targets.add((opening.chat_id, opening.card_message_id))
+        final = status or opening.status
+        text = working_exit_text(opening, final)
+        meta = OutgoingMeta(
+            user_id=opening.user_id, kind=f"OPEN_WORKING_{final.value}",
+            trade_opening_id=opening.id, trade_id=opening.trade_id,
+        )
+        for chat_id, message_id in sorted(targets):
+            try:
+                await self._bot.edit_message_text(
+                    text, chat_id=chat_id, message_id=message_id, reply_markup=None
+                )
+            except TelegramBadRequest as exc:
+                # Удалено, старше 48 ч, уже исправлено — не роняет цикл.
+                logger.warning(
+                    "⏳ лимита не исправлен", extra={
+                        "opening_id": opening_id, "message_id": message_id,
+                        "error": str(exc)[:120],
+                    },
+                )
+                continue
+            await outbox.record(self._db, meta, chat_id=chat_id, message_id=message_id,
+                                text=text)
 
     async def run(self) -> None:
         faults = self._settings.exec_open_faults

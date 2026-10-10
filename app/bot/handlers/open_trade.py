@@ -35,6 +35,7 @@ from app.core.logging import get_logger
 from app.core.numfmt import fmt_pct
 from app.core.security import SecretCipher
 from app.database.models.outgoing_message import OutgoingMeta
+from app.database.models.trade_opening import TradeOpening
 from app.database.models.user import User
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
@@ -604,14 +605,36 @@ def _meta(user: User, opening_id: int, outcome: ConfirmOutcome) -> OutgoingMeta:
     )
 
 
-def result_keyboard(outcome: ConfirmOutcome, opening_id: int,
-                    symbol: str, side: TradeSide) -> InlineKeyboardMarkup | None:
-    if outcome.trade_id is not None:
-        return position_keyboard(symbol, side)
-    if outcome.status is OpeningStatus.WORKING:
+def closed_keyboard() -> InlineKeyboardMarkup:
+    """Под итогом, после которого позиции нет (аварийное закрытие, A.1):
+    «Позиция» вела бы на экран «уже нет»."""
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="📋 К позициям", callback_data=MenuCallback.OPEN_POSITIONS),
+        InlineKeyboardButton(text="◀️ В меню", callback_data=MenuCallback.MAIN),
+    ]])
+
+
+def opening_keyboard(
+    status: OpeningStatus | None, opening_id: int | None,
+    position: tuple[str, TradeSide] | None,
+) -> InlineKeyboardMarkup | None:
+    """Клавиатура итога открытия — одна для «Да» и для цикла восстановления."""
+    if status is OpeningStatus.EMERGENCY_CLOSED:
+        return closed_keyboard()
+    if position is not None:
+        return position_keyboard(*position)
+    if status is OpeningStatus.WORKING and opening_id is not None:
         return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
             text="✖️ Отменить лимит", callback_data=f"{OpenCB.CANCEL_LIMIT}{opening_id}"
         )]])
+    return None
+
+
+def result_keyboard(outcome: ConfirmOutcome, opening_id: int,
+                    symbol: str, side: TradeSide) -> InlineKeyboardMarkup | None:
+    if outcome.trade_id is not None or outcome.status is OpeningStatus.WORKING:
+        position = (symbol, side) if outcome.trade_id is not None else None
+        return opening_keyboard(outcome.status, opening_id, position)
     if outcome.status in (OpeningStatus.REFUSED, OpeningStatus.EXPIRED_CARD):
         return InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔄 Пересчитать", callback_data=OpenCB.RECALC)],
@@ -711,8 +734,19 @@ async def cancel_limit(callback: CallbackQuery, user: User, session: AsyncSessio
     if opening_id is None:
         await callback.answer("Кнопка устарела.", show_alert=True)
         return
-    await callback.answer("Отменяю лимит…")
     service = _service(session, settings, cipher, user, redis)
+    opening = await service.load(opening_id)
+    if opening is None or opening.status is not OpeningStatus.WORKING:
+        # Л1–Л4 (A.1): лимит уже не стоит — ответ по факту, без «Отменяю…»,
+        # на биржу ничего; кнопка под ⏳ снимается.
+        await callback.answer(_not_working_text(opening), show_alert=True)
+        if isinstance(callback.message, Message) and callback.message.bot is not None:
+            await _strip(callback.message.bot, callback.message.chat.id,
+                         callback.message.message_id)
+            await outbox.mark(db, callback.message.chat.id, [callback.message.message_id],
+                              "markup_removed", "cancel_limit")
+        return
+    await callback.answer("Отменяю лимит…")
     outcome = await service.cancel_limit(opening_id)
     if not isinstance(callback.message, Message):
         return
@@ -727,6 +761,21 @@ async def cancel_limit(callback: CallbackQuery, user: User, session: AsyncSessio
     await outbox.edit(
         callback.message, db, _meta(user, opening_id, outcome), outcome.text, keyboard
     )
+
+
+def _not_working_text(opening: TradeOpening | None) -> str:
+    if opening is None:
+        return "Лимит не найден."
+    trade = f" (сделка #{opening.trade_id})" if opening.trade_id is not None else ""
+    texts = {
+        OpeningStatus.DONE: f"Лимит уже исполнился{trade} — отменять нечего.",
+        OpeningStatus.EMERGENCY_CLOSED:
+            f"Лимит исполнился, позиция закрыта аварийно{trade} — отменять нечего.",
+        OpeningStatus.ALARM: "Лимит исполнился, стоп не подтверждён — смотри сообщение 🚨.",
+        OpeningStatus.CANCELLED: "Лимит уже отменён.",
+        OpeningStatus.EXPIRED: "Срок лимита уже вышел — лимит снят.",
+    }
+    return texts.get(opening.status, f"Лимит уже не стоит ({opening.status.value}).")
 
 
 # --- «Назад» -----------------------------------------------------------------------------------

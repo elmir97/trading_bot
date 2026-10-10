@@ -40,11 +40,14 @@ logger = get_logger(__name__)
 
 class Notify(Protocol):
     """Сообщение в чат: (telegram_id, text, позиция для кнопки «Позиция» или
-    None); meta — к чему оно относится (журнал исходящих, A.2)."""
+    None); meta — к чему оно относится (журнал исходящих, A.2); status —
+    статус открытия (клавиатура итога, A.1); retire_working — id открытия,
+    вышедшего из WORKING: его ⏳ правится в короткий итог без кнопки (Л3)."""
 
     def __call__(
         self, telegram_id: int, text: str, position: tuple[str, TradeSide] | None, *,
-        meta: OutgoingMeta | None = None,
+        meta: OutgoingMeta | None = None, status: OpeningStatus | None = None,
+        retire_working: int | None = None,
     ) -> Awaitable[None]: ...
 
 RECOVERABLE = (
@@ -193,10 +196,16 @@ async def _one(
             return False
         if outcome.notify and outcome.text:
             button = (opening.symbol, opening.side) if outcome.trade_id is not None else None
-            await notify(user.telegram_id, outcome.text, button, meta=OutgoingMeta(
-                user_id=user.id, kind=f"OPEN_{outcome.status.value}",
-                trade_opening_id=opening.id, trade_id=outcome.trade_id,
-            ))
+            left_working = (
+                before is OpeningStatus.WORKING and outcome.status is not OpeningStatus.WORKING
+            )
+            await notify(
+                user.telegram_id, outcome.text, button, meta=OutgoingMeta(
+                    user_id=user.id, kind=f"OPEN_{outcome.status.value}",
+                    trade_opening_id=opening.id, trade_id=outcome.trade_id,
+                ), status=outcome.status,
+                retire_working=opening.id if left_working else None,
+            )
         if outcome.status is not before:
             logger.info(
                 "Открытие восстановлено",

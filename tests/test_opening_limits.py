@@ -219,3 +219,117 @@ async def test_active_opening_symbol_not_orphan(ctx) -> None:  # type: ignore[no
     assert await _opening_symbols(ctx.session, ctx.uid) == {"XRP-USDT"}
     await ctx.service().cancel_limit(opening.id)
     assert await _opening_symbols(ctx.session, ctx.uid) == set()
+
+
+# --- A.1 / Л3 (10.10.2026): выход из WORKING — ⏳ правится, кнопка снимается ----------
+
+
+async def test_exit_from_working_retires_card(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Истечение и исполнение циклом: notify получает статус и id открытия,
+    чей ⏳ надо исправить; частичное исполнение (остаётся WORKING) — нет."""
+    opening, _ = await _working(ctx)
+    assert await ctx.recover(now=datetime.now(UTC) + timedelta(hours=4, minutes=1)) == 1
+    assert ctx.kws[-1]["retire_working"] == opening.id
+    assert ctx.kws[-1]["status"] is OpeningStatus.EXPIRED
+
+    filled, _ = await _working(ctx)
+    ctx.exchange.fill_limit(f"to{filled.id}u{ctx.uid}e")
+    assert await ctx.recover() == 1
+    assert ctx.kws[-1]["retire_working"] == filled.id
+    assert ctx.kws[-1]["status"] is OpeningStatus.DONE
+
+
+async def test_partial_fill_keeps_card(ctx) -> None:  # type: ignore[no-untyped-def]
+    opening, _ = await _working(ctx)
+    ctx.exchange.fill_limit(f"to{opening.id}u{ctx.uid}e", qty=D("40"))
+    await ctx.recover()
+    await ctx.session.refresh(opening)
+    assert opening.status is OpeningStatus.WORKING
+    assert all(kw.get("retire_working") is None for kw in ctx.kws)
+
+
+class _Bot:
+    """Бот для OpeningsWorker: правки ⏳ и новые сообщения."""
+
+    def __init__(self, fail_edit: bool = False) -> None:
+        self.edits: list[tuple[int, str, object]] = []
+        self.sent: list[tuple[str, object]] = []
+        self.fail_edit = fail_edit
+        self.next_id = 900
+
+    async def edit_message_text(self, text, *, chat_id, message_id, reply_markup=None):  # type: ignore[no-untyped-def]
+        from unittest.mock import MagicMock
+
+        from aiogram.exceptions import TelegramBadRequest
+
+        if self.fail_edit:
+            raise TelegramBadRequest(method=MagicMock(), message="message to edit not found")
+        self.edits.append((message_id, text, reply_markup))
+
+    async def send_message(self, chat_id, text, reply_markup=None, **_):  # type: ignore[no-untyped-def]
+        from aiogram.types import Chat, Message
+
+        self.next_id += 1
+        self.sent.append((text, reply_markup))
+        return Message(message_id=self.next_id, date=datetime.now(UTC),
+                       chat=Chat(id=chat_id, type="private"), text=text)
+
+
+async def _retire(ctx, bot: _Bot, status: OpeningStatus):  # type: ignore[no-untyped-def]
+    from app.bot import outbox
+    from app.database.models.outgoing_message import OutgoingMeta
+    from app.workers.openings import OpeningsWorker
+
+    opening, _ = await _working(ctx)
+    chat_id = ctx.user.telegram_id
+    opening.chat_id, opening.card_message_id = chat_id, 485
+    await ctx.session.commit()
+    meta = OutgoingMeta(user_id=ctx.uid, kind="OPEN_WORKING", trade_opening_id=opening.id)
+    await outbox.record(ctx.db, meta, chat_id=chat_id, message_id=485, text="⏳ Лимит")
+    worker = OpeningsWorker(bot, ctx.db, ctx.settings, None, None, factory=object())  # type: ignore[arg-type]
+    done = OutgoingMeta(user_id=ctx.uid, kind=f"OPEN_{status.value}",
+                        trade_opening_id=opening.id)
+    await worker.notify(chat_id, "⌛ Срок лимита вышел", None, meta=done, status=status,
+                        retire_working=opening.id)
+    return opening, chat_id
+
+
+async def test_worker_retires_working_card(ctx) -> None:  # type: ignore[no-untyped-def]
+    from sqlalchemy import select
+
+    from app.database.models.outgoing_message import OutgoingMessage
+
+    bot = _Bot()
+    opening, _chat_id = await _retire(ctx, bot, OpeningStatus.EXPIRED)
+    [(message_id, text, markup)] = bot.edits
+    assert message_id == 485 and markup is None             # кнопка «Отменить лимит» снята
+    assert text == "⏳ Лимит XRP-USDT LONG @ 1.48: ⌛ срок вышел, лимит снят."
+    assert bot.sent == [("⌛ Срок лимита вышел", None)]      # полный итог — новым сообщением
+    async with ctx.db.session() as session:
+        rows = {r.message_id: r for r in await session.scalars(
+            select(OutgoingMessage).where(OutgoingMessage.trade_opening_id == opening.id)
+        )}
+    assert rows[485].kind == "OPEN_WORKING_EXPIRED" and rows[485].text == text
+    assert [e["text"] for e in rows[485].edits] == ["⏳ Лимит"]
+    assert rows[901].kind == "OPEN_EXPIRED"
+
+
+async def test_worker_retire_failure_still_sends(ctx) -> None:  # type: ignore[no-untyped-def]
+    """«message to edit not found» (удалено, старше 48 ч) — WARNING, цикл не
+    падает, полный итог уходит."""
+    bot = _Bot(fail_edit=True)
+    await _retire(ctx, bot, OpeningStatus.DONE)
+    assert bot.edits == [] and len(bot.sent) == 1
+
+
+def test_working_exit_texts() -> None:
+    from types import SimpleNamespace
+
+    from app.execution.opening.flow import working_exit_text
+
+    o = SimpleNamespace(symbol="XRP-USDT", side=TradeSide.LONG, limit_price=D("1.3218"))
+    assert working_exit_text(o, OpeningStatus.DONE) == (  # type: ignore[arg-type]
+        "⏳ Лимит XRP-USDT LONG @ 1.3218: ✅ исполнен — итог ниже."
+    )
+    assert "снят на бирже" in working_exit_text(o, OpeningStatus.CANCELLED)  # type: ignore[arg-type]
+    assert "завершён" in working_exit_text(o, OpeningStatus.NOT_PLACED)  # type: ignore[arg-type]

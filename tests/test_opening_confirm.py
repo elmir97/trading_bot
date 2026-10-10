@@ -106,14 +106,17 @@ async def opening_context(telegram_id: int):  # type: ignore[no-untyped-def]
             return OpeningService(session, s, None, user, redis=redis, factory=Factory(),
                                   market_cache=TTLCache())
 
-        async def notify(telegram_id: int, text: str, position: Any, **_: Any) -> None:
+        kws: list[dict[str, Any]] = []
+
+        async def notify(telegram_id: int, text: str, position: Any, **kw: Any) -> None:
             notes.append((telegram_id, text, position))
+            kws.append(kw)
 
         async def recover(**kw: Any) -> int:
             return await recover_openings(db, settings, redis, Factory(), notify, **kw)
 
         yield SimpleNamespace(session=session, user=user, uid=uid, exchange=exchange,
-                              service=service, redis=redis, plan=plan, notes=notes,
+                              service=service, redis=redis, plan=plan, notes=notes, kws=kws,
                               recover=recover, settings=settings, db=db, factory=Factory())
         await session.rollback()
         fresh = await UserRepository(session).get_by_id(uid)

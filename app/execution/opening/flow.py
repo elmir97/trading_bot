@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 
 from app.core.logging import get_logger
 from app.core.numfmt import fmt_price, fmt_qty
+from app.database.models.trade_opening import TradeOpening
 from app.execution.opening.execution import Mode, ProtectResult, Runner, transition
 from app.execution.opening.render import expiry_label
 from app.trading.enums import OpeningStatus, OrderStatus
@@ -193,6 +194,25 @@ def working_text(runner: Runner) -> str:
     if o.expiry_minutes:
         text += f". Срок {expiry_label(o.expiry_minutes)}"
     return text + "."
+
+
+_WORKING_EXIT = {
+    OpeningStatus.DONE: "✅ исполнен — итог ниже",
+    OpeningStatus.EXPIRED: "⌛ срок вышел, лимит снят",
+    OpeningStatus.CANCELLED: "✖️ снят на бирже",
+    OpeningStatus.EMERGENCY_CLOSED: "🚨 исполнен, стоп не встал — итог ниже",
+    OpeningStatus.ALARM: "🚨 исполнен, стоп не подтверждён — итог ниже",
+}
+
+
+def working_exit_text(opening: TradeOpening, status: OpeningStatus) -> str:
+    """Короткий итог на месте ⏳ (Л3, решение владельца 09.10): лимит больше не
+    стоит — кнопка «Отменить лимит» снимается, полный итог — новым сообщением."""
+    state = _WORKING_EXIT.get(status, "завершён — итог ниже")
+    return (
+        f"⏳ Лимит {opening.symbol} {opening.side.value} @ "
+        f"{fmt_price(opening.limit_price)}: {state}."
+    )
 
 
 def unknown_text(runner: Runner) -> str:
