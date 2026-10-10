@@ -141,7 +141,7 @@ async def edit(
     reply_markup: InlineKeyboardMarkup | None = None,
 ) -> Message | None:
     """Правкой сообщения, под которым нажата кнопка (итог «Да» на карточке)."""
-    shown = await edit_or_replace(message, text, reply_markup)
+    shown = await edit_or_replace(message, text, reply_markup, allow_final=True)
     target = shown or message
     await record(db, meta, chat_id=target.chat.id, message_id=target.message_id, text=text)
     return shown

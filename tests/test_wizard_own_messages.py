@@ -226,3 +226,23 @@ async def test_failed_delete_listed_in_log(caplog: pytest.LogCaptureFixture) -> 
         await _run(state, chat.callback(700), yes)
     info = next(r for r in caplog.records if r.getMessage() == "Переписка мастера удалена")
     assert info.message_ids == [601] and info.failed_ids == [602]  # type: ignore[attr-defined]
+
+
+async def test_wizard_step_under_final_owned_message_is_new() -> None:
+    """Своё сообщение мастера, ставшее итогом (карточка → REFUSED в журнале
+    исходящих): «Пересчитать» показывает карточку новым сообщением."""
+    from app.bot.messaging import reset_final, set_final
+
+    chat, state = Chat(), _state()
+    await state.set_state(OpenTradeStates.confirm)
+    await remember(state, 600)
+
+    async def recalc(event: Any, data: Any) -> None:
+        await open_trade._send(event, state, "Карточка", None)
+
+    token = set_final(TG, 600)
+    try:
+        await _run(state, chat.callback(600), recalc)
+    finally:
+        reset_final(token)
+    assert chat.edited == [] and chat.sent == [600]

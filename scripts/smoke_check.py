@@ -690,6 +690,13 @@ async def _run_position_actions(sim, tg, db, settings) -> None:  # type: ignore[
               text[:300])
         text = await sim.tap("Да")
         check("«Да» в сухом прогоне", has(text, "сухой прогон"), text[:200])
+        # 10.10.2026 (A.1, баг №1): итог действия — в журнале исходящих;
+        # «В меню» под ним — меню новым сообщением, итог не правится.
+        result_id, edits_before = tg.last_message_id, len(tg.edited_ids)
+        text = await sim.tap("В меню")
+        check("«В меню» под итогом — новое сообщение",
+              tg.last_message_id != result_id and result_id not in tg.edited_ids[edits_before:]
+              and has(text, "выбери раздел"), f"{result_id} → {tg.last_message_id}")
 
         async with db.session() as session:
             user = await UserRepository(session).get_by_telegram_id(USER_ID)

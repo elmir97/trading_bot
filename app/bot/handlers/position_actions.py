@@ -207,7 +207,10 @@ async def _show_card(
         else card_keyboard(action.id, outcome.risk_increase)
     )
     if edit:
-        await edit_or_replace(target, outcome.text, keyboard)
+        shown = await edit_or_replace(target, outcome.text, keyboard)
+        if shown is not None and action is not None and not outcome.refused:
+            # Экран ушёл новым сообщением (под итогом, A.1) — «Да» сверяет его id.
+            await service.attach_message(action, shown.message_id)
         return
     sent = await target.answer(outcome.text, reply_markup=keyboard)
     if action is not None and not outcome.refused:

@@ -45,6 +45,7 @@ from app.bot.middlewares.access import AccessMiddleware
 from app.bot.middlewares.ai_service import AIServiceMiddleware
 from app.bot.middlewares.database import DatabaseMiddleware
 from app.bot.middlewares.errors import ErrorMiddleware
+from app.bot.middlewares.final_messages import FinalMessageMiddleware
 from app.bot.prompts import PromptMiddleware
 from app.bot.wizard_trail import WizardTrailMiddleware
 from app.core.config import Settings, get_settings
@@ -125,6 +126,9 @@ def build_dispatcher(
         observer.middleware(AccessMiddleware(settings.allowed_ids))
         observer.middleware(ErrorMiddleware())
         observer.middleware(DatabaseMiddleware(db, settings))
+        # 10.10.2026 (A.1): кнопка под итоговым сообщением — экран новым
+        # сообщением, итог не правится (app/bot/messaging.py).
+        observer.middleware(FinalMessageMiddleware(db))
         observer.middleware(AIServiceMiddleware(llm_client, settings))
         # 03.10: числовой вопрос с ForceReply — убрать, когда шаг сменился,
         # задать снова, когда ответ не принят (app/bot/prompts.py).

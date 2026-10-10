@@ -26,6 +26,7 @@ from app.bot.handlers.exchange import _market_cache
 from app.bot.handlers.positions import position_keyboard
 from app.bot.handlers.trades import _show_symbol_prompt
 from app.bot.keyboards.main import MenuCallback, with_nav
+from app.bot.messaging import is_final
 from app.bot.prompts import ask_number
 from app.bot.states.trade import OpenTradeStates
 from app.bot.wizard_trail import owned, remember
@@ -119,7 +120,7 @@ async def _send(event: Message | CallbackQuery, state: FSMContext, text: str,
         await event.answer()
         if not isinstance(event.message, Message):
             return None
-        if await owned(state, event.message.message_id):
+        if not is_final(event.message) and await owned(state, event.message.message_id):
             await event.message.edit_text(text, reply_markup=keyboard)
             await remember(state, event.message.message_id)
             return event.message

@@ -182,3 +182,28 @@ async def test_finals_and_mark(ctx) -> None:  # type: ignore[no-untyped-def]
     [entry] = row.edits
     assert (entry["event"], entry["by"]) == ("delete_skipped", "wizard_trail")
     assert "at" in entry and "text" not in entry
+
+
+async def test_edit_changes_final_on_purpose(ctx) -> None:  # type: ignore[no-untyped-def]
+    """outbox.edit — намеренная правка итога (⏳ → «Лимит отменён»): защита
+    навигации (A.1) её не перехватывает — сообщение правится, не дублируется."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.bot.messaging import reset_final, set_final
+
+    message = MagicMock(spec=Message)
+    message.chat = SimpleNamespace(id=ctx.chat_id)
+    message.message_id = 485
+    message.photo = None
+    message.edit_text = AsyncMock()
+    message.answer = AsyncMock()
+    meta = OutgoingMeta(user_id=ctx.user_id, kind="OPEN_CANCELLED")
+    token = set_final(ctx.chat_id, 485)
+    try:
+        assert await outbox.edit(message, ctx.db, meta, "✖️ Лимит отменён") is None
+    finally:
+        reset_final(token)
+    message.edit_text.assert_awaited_once()
+    message.answer.assert_not_awaited()
+    [row] = await _rows(ctx)
+    assert (row.message_id, row.text) == (485, "✖️ Лимит отменён")

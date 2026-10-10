@@ -35,6 +35,7 @@ from app.bot.keyboards.trade import (
     trade_card,
     trade_line,
 )
+from app.bot.messaging import is_final
 from app.bot.prompts import ask_number
 from app.bot.sizing_view import lot_step, sizing_lines
 from app.bot.states.trade import AddTradeStates, CloseTradeStates
@@ -101,7 +102,7 @@ async def _send(  # type: ignore[no-untyped-def]
     новое."""
     if isinstance(event, CallbackQuery):
         if isinstance(event.message, Message):
-            if await owned(state, event.message.message_id):
+            if not is_final(event.message) and await owned(state, event.message.message_id):
                 await event.message.edit_text(text, reply_markup=keyboard)
                 await remember(state, event.message.message_id)
             else:
