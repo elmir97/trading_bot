@@ -342,8 +342,20 @@ DROP CONSTRAINT ck_execution_callbacks_action_known;` + `ADD CONSTRAINT … CHEC
 итогом (итог цел после «Да»), 🔴 через `EXEC_OPEN_FAULT: "skip_attached_stop,fail_backup_stop_always"` (ALARM держится
 — «🔴 Закрыть маркетом» → «Да, закрыть» → EMERGENCY_CLOSED, сделка, ALARM → «✅ Решено…»; сбой снять сразу).
 
-**Следующий шаг:** ⛔ проверка бота с Эльмиром (по его «да») → репетиция M8 (по «да») → деплой 2 с миграцией (по
-«да») → демо выше.
+**Репетиция M8 №1 — FAIL, exit 1 (10.10 12:45 UTC, по «да»; ssh — с ручным подтверждением).** HEAD `91ad48c`, на проде
+`alembic current` = `e7c41a9b3d52`, образ `15f70e506546`, `--from e7c41a9b3d52 --image trading_bot:rehearsal --checksum`.
+Upgrade ✅ (одна строка `Running`, строки 20 таблиц = baseline, «Схема baseline → upgrade 1» = офлайн-SQL). **Downgrade 1 ❌:
+схема ≠ baseline** — только запись `ck_execution_callbacks_action_known` (набор значений тот же): baseline
+`ARRAY[('open'::character varying)::text, …]`, после downgrade `(ARRAY['open'::character varying, …])::text[]`. Причина:
+downgrade M8 ставил CHECK M5 через `IN (...)`, а копия после restore хранит выражение поэлементно (проверено на
+временных таблицах PG18) — тот же урок, что M5 08.10 (`_OLD_ACTIONS`), не перенесён; локальный тест его не ловит (тестовая
+база не проходит dump → restore). Уборка ✅ (контейнер, сеть, тег, дамп — нет).
+**Фикс (по «да»):** `_M5_ACTIONS` в M8 — в хранимой форме; тестовая база: downgrade → CHECK байт в байт = baseline
+репетиции (md5 `160e0e93`), upgrade → `to_close*` есть. Правило — `CLAUDE.md` «Конвенции», напоминание — в
+`alembic/script.py.mako`. pytest 1540 / 0 skipped, smoke 102/102 ×2, mypy 60, ruff без новых кодов.
+
+**Следующий шаг:** репетиция M8 №2 на коммите с фиксом (новый образ) → ⛔ проверка бота с Эльмиром (по его «да») →
+деплой 2 с миграцией (по «да») → демо выше.
 
 **Очередь C — дополнено 09.10:** C.7 (нестабильный тест) — закрыт `688280c`; **C.8 — дрейф схемы**: `alembic check`
 показывает `modify_default` у `exchange_credentials.mode` (модель и база расходятся в server default) — разобрать

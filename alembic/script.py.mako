@@ -22,4 +22,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Прежний CHECK с IN (...) возвращать в хранимой форме Postgres —
+    # (col)::text = ANY (ARRAY[('x'::character varying)::text, ...]), как в M5/M8;
+    # через IN схема после downgrade != baseline репетиции (CLAUDE.md, «Конвенции»).
     ${downgrades if downgrades else "pass"}
