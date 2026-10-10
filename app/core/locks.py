@@ -10,7 +10,9 @@ Redis, а не блокировка в памяти процесса: бот к�
 
 from __future__ import annotations
 
+import asyncio
 import secrets
+import time
 from types import TracebackType
 from typing import Protocol
 
@@ -45,21 +47,30 @@ class LockBusyError(RuntimeError):
 class RedisLock:
     """Блокировка на один callback: ``async with RedisLock(...):``.
 
-    Бросает LockBusyError, если ключ уже занят — сама не ждёт и не
-    ретраит: повторное нажатие должно получить мгновенный ответ, а не
-    зависнуть в очереди на тот же ордер.
+    Бросает LockBusyError, если ключ уже занят — по умолчанию сама не ждёт и
+    не ретраит: повторное нажатие должно получить мгновенный ответ, а не
+    зависнуть в очереди на тот же ордер. wait_seconds > 0 — только для
+    «🔴 Да, закрыть» под тревогой (деплой 3, фикс 5): лок держит фоновый
+    повтор защиты на 3–5 с, кнопка дожидается его, опрашивая ключ.
     """
 
-    def __init__(self, redis: RedisLike, key: str, ttl_seconds: int) -> None:
+    def __init__(
+        self, redis: RedisLike, key: str, ttl_seconds: int, *,
+        wait_seconds: float = 0.0, poll_seconds: float = 0.25,
+    ) -> None:
         self._redis = redis
         self._key = key
         self._ttl = ttl_seconds
         self._token = secrets.token_hex(16)
+        self._wait = wait_seconds
+        self._poll = poll_seconds
 
     async def __aenter__(self) -> RedisLock:
-        acquired = await self._redis.set(self._key, self._token, nx=True, ex=self._ttl)
-        if not acquired:
-            raise LockBusyError(f"Ключ {self._key} уже занят")
+        deadline = time.monotonic() + self._wait
+        while not await self._redis.set(self._key, self._token, nx=True, ex=self._ttl):
+            if time.monotonic() >= deadline:
+                raise LockBusyError(f"Ключ {self._key} уже занят")
+            await asyncio.sleep(self._poll)
         return self
 
     async def __aexit__(
@@ -83,3 +94,9 @@ def position_lock_key(user_id: int, symbol: str, side: str) -> str:
     Одна позиция — одно действие в полёте; префикс exec:lock: тот же, что у
     входа, — reconciler пропускает цикл, пока жив любой такой ключ."""
     return f"exec:lock:{user_id}:p{symbol}:{side}"
+
+
+def close_wanted_key(opening_id: int) -> str:
+    """Деплой 3, фикс 5: владелец нажал «🔴 Да, закрыть» и ждёт лок — фоновые
+    повторы защиты и цикл уступают. Не exec:lock:* — reconciler его не ждёт."""
+    return f"exec:close_wanted:o{opening_id}"

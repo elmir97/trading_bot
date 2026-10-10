@@ -24,7 +24,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 
 from app.core.config import Settings
-from app.core.locks import LockBusyError, RedisLock, position_lock_key
+from app.core.locks import LockBusyError, RedisLock, close_wanted_key, position_lock_key
 from app.core.logging import get_logger
 from app.database.models.outgoing_message import OutgoingMeta
 from app.database.models.trade_opening import TradeOpening
@@ -211,6 +211,14 @@ async def _one(
             select(User).where(User.id == opening.user_id).options(selectinload(User.settings))
         )
         if user is None:
+            return False
+        if opening.status is OpeningStatus.ALARM and await redis.exists(
+            close_wanted_key(opening.id)
+        ):
+            # Владелец нажал «🔴 Да, закрыть» и ждёт лок — повтор защиты уступает
+            # (деплой 3, фикс 5; на 🔴 10.10 повтор B.1 отнял у кнопки лок).
+            logger.info("Повтор после тревоги уступил кнопке «Закрыть»",
+                        extra={"opening_id": opening.id})
             return False
         key = position_lock_key(user.id, opening.symbol, opening.side.value)
         try:

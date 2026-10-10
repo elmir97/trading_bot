@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -20,7 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.locks import LockBusyError, RedisLock, position_lock_key
+from app.core.locks import LockBusyError, RedisLock, close_wanted_key, position_lock_key
 from app.core.logging import get_logger
 from app.core.numfmt import fmt_price, fmt_qty
 from app.core.security import SecretCipher
@@ -578,8 +579,16 @@ class OpeningService:
         if self._redis is None:
             raise RuntimeError("OpeningService.close_alarm без Redis — лок позиции обязателен")
         key = position_lock_key(self._user.id, opening.symbol, opening.side.value)
+        # Фоновые повторы защиты держат лок по 3–5 с (🔴 10.10): кнопка ждёт,
+        # а новые повторы и цикл, видя ключ, уступают ей (деплой 3, фикс 5).
+        wait = self._settings.exec_open_close_lock_wait_seconds
+        wanted = close_wanted_key(opening.id)
+        await self._redis.set(wanted, "1", ex=math.ceil(wait) + 4)
         try:
-            async with RedisLock(self._redis, key, self._settings.confirm_lock_ttl_seconds):
+            async with RedisLock(
+                self._redis, key, self._settings.confirm_lock_ttl_seconds, wait_seconds=wait
+            ):
+                await self._redis.delete(wanted)
                 await self._session.refresh(opening)
                 if opening.status is not OpeningStatus.ALARM:
                     return _alarm_gone(opening)
@@ -611,8 +620,15 @@ class OpeningService:
                 finally:
                     await client.close()
         except LockBusyError:
+            logger.warning(
+                "«Да, закрыть»: лок позиции не освободился", extra={
+                    "user_id": self._user.id, "opening_id": opening.id, "wait_s": wait,
+                },
+            )
             return ConfirmOutcome("Уже идёт действие с этой позицией — подожди пару секунд.",
                                   final=False)
+        finally:
+            await self._redis.delete(wanted)
         if outcome.status is OpeningStatus.ALARM:
             return ConfirmOutcome(
                 "⛔ Закрыть маркетом не удалось. " + outcome.text, OpeningStatus.ALARM
