@@ -42,12 +42,14 @@ class Notify(Protocol):
     """Сообщение в чат: (telegram_id, text, позиция для кнопки «Позиция» или
     None); meta — к чему оно относится (журнал исходящих, A.2); status —
     статус открытия (клавиатура итога, A.1); retire_working — id открытия,
-    вышедшего из WORKING: его ⏳ правится в короткий итог без кнопки (Л3)."""
+    вышедшего из WORKING: его ⏳ правится в короткий итог без кнопки (Л3);
+    resolve_alarm — id открытия, вышедшего из ALARM: сообщение тревоги
+    правится в «✅ Решено…» без кнопок (A.1)."""
 
     def __call__(
         self, telegram_id: int, text: str, position: tuple[str, TradeSide] | None, *,
         meta: OutgoingMeta | None = None, status: OpeningStatus | None = None,
-        retire_working: int | None = None,
+        retire_working: int | None = None, resolve_alarm: int | None = None,
     ) -> Awaitable[None]: ...
 
 RECOVERABLE = (
@@ -195,9 +197,18 @@ async def _one(
         if outcome is None:
             return False
         if outcome.notify and outcome.text:
-            button = (opening.symbol, opening.side) if outcome.trade_id is not None else None
+            # «Позиция» — у записанной сделки и под тревогой (A.1: ALARM —
+            # «⚙️ Позиция» и «🔴 Закрыть маркетом»).
+            button = (
+                (opening.symbol, opening.side)
+                if outcome.trade_id is not None or outcome.status is OpeningStatus.ALARM
+                else None
+            )
             left_working = (
                 before is OpeningStatus.WORKING and outcome.status is not OpeningStatus.WORKING
+            )
+            left_alarm = (
+                before is OpeningStatus.ALARM and outcome.status is not OpeningStatus.ALARM
             )
             await notify(
                 user.telegram_id, outcome.text, button, meta=OutgoingMeta(
@@ -205,6 +216,7 @@ async def _one(
                     trade_opening_id=opening.id, trade_id=outcome.trade_id,
                 ), status=outcome.status,
                 retire_working=opening.id if left_working else None,
+                resolve_alarm=opening.id if left_alarm else None,
             )
         if outcome.status is not before:
             logger.info(

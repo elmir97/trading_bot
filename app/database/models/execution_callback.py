@@ -28,7 +28,8 @@ class ExecutionCallback(IntPKMixin, Base):
     __table_args__ = (
         CheckConstraint(
             "action IN ('open', 'yes', 'no', 'pm_open', 'pm_yes', 'pm_yes_risk', 'pm_no', "
-            "'to_yes', 'to_yes_warn', 'to_no', 'to_cancel', 'ma_confirm', 'ma_cancel')",
+            "'to_yes', 'to_yes_warn', 'to_no', 'to_cancel', 'ma_confirm', 'ma_cancel', "
+            "'to_close', 'to_close_yes', 'to_close_no')",
             name="action_known",
         ),
         Index("ix_execution_callbacks_user_created", "user_id", "created_at"),

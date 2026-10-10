@@ -21,7 +21,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot import outbox
+from app.bot import opening_messages, outbox
 from app.bot.handlers.exchange import _market_cache
 from app.bot.handlers.positions import position_keyboard
 from app.bot.handlers.trades import _show_symbol_prompt
@@ -84,6 +84,9 @@ class OpenCB:
     YES_WARN = "ot:w:"        # + opening_id
     NO = "ot:n:"              # + opening_id
     CANCEL_LIMIT = "ot:c:"    # + opening_id
+    CLOSE = "ot:x:"           # + opening_id: «🔴 Закрыть маркетом» под ALARM
+    CLOSE_YES = "ot:xy:"      # + opening_id: «Да, закрыть»
+    CLOSE_NO = "ot:xn:"       # + opening_id: «Нет»
     RECALC = "ot:recalc"
     EDIT = "ot:edit"
 
@@ -621,6 +624,12 @@ def opening_keyboard(
     """Клавиатура итога открытия — одна для «Да» и для цикла восстановления."""
     if status is OpeningStatus.EMERGENCY_CLOSED:
         return closed_keyboard()
+    if status is OpeningStatus.ALARM and opening_id is not None:
+        # A.1: «⚙️ Позиция» и «🔴 Закрыть маркетом» (одно подтверждение).
+        rows = list(position_keyboard(*position).inline_keyboard) if position else []
+        return InlineKeyboardMarkup(inline_keyboard=[*rows, [InlineKeyboardButton(
+            text="🔴 Закрыть маркетом", callback_data=f"{OpenCB.CLOSE}{opening_id}"
+        )]])
     if position is not None:
         return position_keyboard(*position)
     if status is OpeningStatus.WORKING and opening_id is not None:
@@ -632,8 +641,13 @@ def opening_keyboard(
 
 def result_keyboard(outcome: ConfirmOutcome, opening_id: int,
                     symbol: str, side: TradeSide) -> InlineKeyboardMarkup | None:
-    if outcome.trade_id is not None or outcome.status is OpeningStatus.WORKING:
-        position = (symbol, side) if outcome.trade_id is not None else None
+    if outcome.trade_id is not None or outcome.status in (
+        OpeningStatus.WORKING, OpeningStatus.ALARM
+    ):
+        position = (
+            (symbol, side)
+            if outcome.trade_id is not None or outcome.status is OpeningStatus.ALARM else None
+        )
         return opening_keyboard(outcome.status, opening_id, position)
     if outcome.status in (OpeningStatus.REFUSED, OpeningStatus.EXPIRED_CARD):
         return InlineKeyboardMarkup(inline_keyboard=[
@@ -761,6 +775,93 @@ async def cancel_limit(callback: CallbackQuery, user: User, session: AsyncSessio
     await outbox.edit(
         callback.message, db, _meta(user, opening_id, outcome), outcome.text, keyboard
     )
+
+
+# --- «🔴 Закрыть маркетом» под ALARM (A.1, решение владельца 09.10) -----------------------
+
+
+def close_confirm_keyboard(opening_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🔴 Да, закрыть", callback_data=f"{OpenCB.CLOSE_YES}{opening_id}"),
+        InlineKeyboardButton(text="Нет", callback_data=f"{OpenCB.CLOSE_NO}{opening_id}"),
+    ]])
+
+
+@router.callback_query(F.data.startswith(OpenCB.CLOSE))
+async def ask_close_alarm(callback: CallbackQuery, user: User, session: AsyncSession,
+                          settings: Settings, cipher: SecretCipher, db: Database,
+                          redis: Any) -> None:
+    """Подтверждение — новым сообщением: сообщение тревоги — итог, не правится."""
+    opening_id = _opening_id(callback.data, OpenCB.CLOSE)
+    if not await _audit(callback, db, user, ExecutionCallbackAction.TO_CLOSE, opening_id):
+        await callback.answer(AUDIT_FAILED_TEXT, show_alert=True)
+        return
+    opening = (
+        await _service(session, settings, cipher, user, redis).load(opening_id)
+        if opening_id is not None else None
+    )
+    if opening is None or opening.status is not OpeningStatus.ALARM:
+        await callback.answer(_alarm_over_text(opening), show_alert=True)
+        return
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        await callback.message.answer(
+            f"🔴 Закрыть {opening.symbol} {opening.side.value} маркетом?\nСтоп не "
+            "подтверждён — позиция закроется по рынку, сделка запишется в журнал.",
+            reply_markup=close_confirm_keyboard(opening.id),
+        )
+
+
+@router.callback_query(F.data.startswith(OpenCB.CLOSE_YES))
+async def close_alarm(callback: CallbackQuery, user: User, session: AsyncSession,
+                      settings: Settings, cipher: SecretCipher, db: Database,
+                      redis: Any) -> None:
+    opening_id = _opening_id(callback.data, OpenCB.CLOSE_YES)
+    if not await _audit(callback, db, user, ExecutionCallbackAction.TO_CLOSE_YES, opening_id):
+        await callback.answer(AUDIT_FAILED_TEXT, show_alert=True)
+        return
+    if opening_id is None or not isinstance(callback.message, Message):
+        await callback.answer("Кнопка устарела.", show_alert=True)
+        return
+    await callback.answer("Закрываю…")
+    service = _service(session, settings, cipher, user, redis)
+    outcome = await service.close_alarm(opening_id)
+    message = callback.message
+    if not outcome.final:
+        if outcome.status is OpeningStatus.ALARM or outcome.status is None:
+            await message.answer(outcome.text)   # лок занят / позиции нет: кнопки остаются
+            return
+        await message.edit_text(outcome.text)    # тревоги уже нет — подтверждение снято
+        return
+    opening = await service.load(opening_id)
+    position = (opening.symbol, opening.side) if opening is not None else None
+    await outbox.edit(
+        message, db, _meta(user, opening_id, outcome), outcome.text,
+        opening_keyboard(outcome.status, opening_id, position),
+    )
+    if outcome.status is not OpeningStatus.ALARM and outcome.status is not None             and message.bot is not None:
+        await opening_messages.resolve_alarm(message.bot, db, opening_id, outcome.status)
+
+
+@router.callback_query(F.data.startswith(OpenCB.CLOSE_NO))
+async def keep_alarm(callback: CallbackQuery, user: User, db: Database) -> None:
+    opening_id = _opening_id(callback.data, OpenCB.CLOSE_NO)
+    await _audit(callback, db, user, ExecutionCallbackAction.TO_CLOSE_NO, opening_id)
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            "Не закрываю. Тревога в силе — стоп не подтверждён, бот повторяет попытки."
+        )
+
+
+def _alarm_over_text(opening: TradeOpening | None) -> str:
+    if opening is None:
+        return "Открытие не найдено."
+    if opening.status is OpeningStatus.DONE:
+        return f"Стоп уже стоит (сделка #{opening.trade_id}) — закрыть можно в «Позиции»."
+    if opening.status is OpeningStatus.EMERGENCY_CLOSED:
+        return f"Позиция уже закрыта (сделка #{opening.trade_id})."
+    return f"Тревоги уже нет ({opening.status.value})."
 
 
 def _not_working_text(opening: TradeOpening | None) -> str:

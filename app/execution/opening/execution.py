@@ -27,6 +27,8 @@
 
 Управляемый сбой EXEC_OPEN_FAULT (только демо, config.OPEN_FAULTS) — подмена
 реакции бота на первой попытке в открытии; реальные ордера уходят как есть.
+fail_backup_stop_always — на каждой попытке стопа и каждом автоматическом
+аварийном закрытии (ALARM держится до «🔴 Закрыть маркетом», A.1).
 Ликвидация по факту между входом и стопом — тоже аварийное закрытие.
 """
 
@@ -83,6 +85,7 @@ OPENING_SIDE = {TradeSide.LONG: OrderSide.BUY, TradeSide.SHORT: OrderSide.SELL}
 CLOSING_SIDE = {TradeSide.LONG: OrderSide.SELL, TradeSide.SHORT: OrderSide.BUY}
 EXIT_REASON_EMERGENCY = "Аварийное закрытие: стоп не встал"
 EXIT_REASON_LIQUIDATION = "Аварийное закрытие: ликвидация ближе стопа"
+EXIT_REASON_MANUAL = "Закрыто кнопкой из тревоги: стоп не встал"
 PROTECT_ATTEMPTS = 3
 FAULT_CODE = "FAULT"
 # Статусы ордера по clientOrderId: стоит (или уже сработал) / снят.
@@ -183,6 +186,9 @@ class Runner:
         self.pp = price_precision
         self.qp = quantity_precision
         self._sleep = sleep
+        # Номер попытки запасного стопа, вставшего в этом проходе (s1, s2, …):
+        # итог после тревоги — «со N-й попытки» (A.1). None — не ставили.
+        self.stop_attempt: int | None = None
         self._faults = settings.exec_open_faults
         # hide_backup_stop: cid, скрытые в openOrders и в запросе по cid в
         # этом проходе (новый Runner в следующем цикле их уже видит).
@@ -591,6 +597,15 @@ class Runner:
             )
         return left
 
+    def _fault_always(self, name: str) -> bool:
+        """Управляемый сбой на каждой попытке (fail_backup_stop_always)."""
+        if name not in self._faults:
+            return False
+        logger.warning(
+            "Управляемый сбой: %s", name, extra={**self._log(), "fault": name}
+        )
+        return True
+
     async def _attempt_no(self, role: OrderRole) -> int:
         count = await self.session.scalar(
             select(func.count()).select_from(ExecutionOrder).where(
@@ -640,7 +655,9 @@ class Runner:
         logger.info(
             "Ставлю closePosition", extra={**self._log(), "role": role.value, "cid": cid}
         )
-        if is_stop and self._fault("fail_backup_stop", n):
+        if is_stop and (
+            self._fault("fail_backup_stop", n) or self._fault_always("fail_backup_stop_always")
+        ):
             row.status = OrderStatus.REJECTED
             row.error_code = FAULT_CODE
             row.error_message = "управляемый сбой fail_backup_stop: не отправлен"
@@ -682,12 +699,16 @@ class Runner:
             row.status = OrderStatus.SUBMITTED
             row.exchange_order_id = found.order_id
             await self.session.commit()
+            if is_stop:
+                self.stop_attempt = n
             return StopCheck.STANDING
         # Нет в openOrders — решение только по запросу ордера по cid.
         check, order_id = await self.check_by_cid(cid)
         if check is StopCheck.STANDING:
             row.status = OrderStatus.SUBMITTED
             row.exchange_order_id = order_id or row.exchange_order_id
+            if is_stop:
+                self.stop_attempt = n
         elif check is StopCheck.ABSENT:
             row.status = OrderStatus.REJECTED
             row.error_code = "NOT_FOUND"
@@ -705,7 +726,11 @@ class Runner:
         await self.session.commit()
         return check
 
-    async def _emergency(self, position: Position, reason: str) -> ProtectResult:
+    async def _emergency(
+        self, position: Position, reason: str, *, manual: bool = False
+    ) -> ProtectResult:
+        """Аварийное закрытие маркетом. manual — кнопка владельца «🔴 Закрыть
+        маркетом» под ALARM: сбой fail_backup_stop_always её не трогает."""
         o = self.opening
         n = await self._attempt_no(OrderRole.CLOSE)
         cid = self.cid("c", n)
@@ -716,7 +741,9 @@ class Runner:
         self.session.add(row)
         await self.session.commit()
         logger.error("Аварийное закрытие позиции открытия", extra={**self._log(), "reason": reason})
-        if self._fault("fail_emergency_close", n):
+        if self._fault("fail_emergency_close", n) or (
+            not manual and self._fault_always("fail_backup_stop_always")
+        ):
             row.status = OrderStatus.REJECTED
             row.error_code = FAULT_CODE
             row.error_message = "управляемый сбой fail_emergency_close: не отправлено"

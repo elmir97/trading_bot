@@ -45,12 +45,13 @@ from app.execution.opening.calc import (
 )
 from app.execution.opening.execution import (
     CLOSING_SIDE,
+    EXIT_REASON_MANUAL,
     OPENING_SIDE,
     Runner,
     opening_client_order_id,
     transition,
 )
-from app.execution.opening.flow import FlowOutcome, advance, working_text
+from app.execution.opening.flow import FlowOutcome, advance, after_protect, working_text
 from app.execution.opening.render import render_card, render_refusal
 from app.market.cache import TTLCache
 from app.market.data import MarketDataService
@@ -114,6 +115,21 @@ class ConfirmOutcome:
     status: OpeningStatus | None = None
     trade_id: int | None = None
     final: bool = True
+
+
+def _alarm_gone(opening: TradeOpening | None) -> ConfirmOutcome:
+    """Тревоги уже нет — закрывать по кнопке не нужно (итог — по факту)."""
+    if opening is None:
+        return ConfirmOutcome("Открытие не найдено.", final=False)
+    texts = {
+        OpeningStatus.DONE: f"Стоп уже стоит — позиция под защитой (сделка #{opening.trade_id}). "
+                            "Закрыть можно в «Позиции».",
+        OpeningStatus.EMERGENCY_CLOSED: f"Позиция уже закрыта (сделка #{opening.trade_id}).",
+    }
+    return ConfirmOutcome(
+        texts.get(opening.status, STATUS_TEXT.get(opening.status, "Тревоги уже нет.")),
+        opening.status, opening.trade_id, final=False,
+    )
 
 
 def inputs_of(opening: TradeOpening) -> OpeningInputs:
@@ -544,6 +560,60 @@ class OpeningService:
                     await client.close()
         except LockBusyError:
             return ConfirmOutcome("Уже идёт действие с этой позицией — подожди.", final=False)
+        return ConfirmOutcome(outcome.text, outcome.status, outcome.trade_id)
+
+    async def close_alarm(
+        self, opening_id: int, *, runner_factory: Any = None
+    ) -> ConfirmOutcome:
+        """«🔴 Закрыть маркетом» → «Да, закрыть» под ALARM (A.1, решение владельца
+        09.10): аварийное закрытие ядром открытия под локом позиции, итог —
+        EMERGENCY_CLOSED со сделкой. Статус перепроверяется под локом: стоп мог
+        встать циклом или быстрым повтором — тогда закрывать не нужно."""
+        opening = await self.load(opening_id)
+        if opening is None or opening.status is not OpeningStatus.ALARM:
+            return _alarm_gone(opening)
+        if self._redis is None:
+            raise RuntimeError("OpeningService.close_alarm без Redis — лок позиции обязателен")
+        key = position_lock_key(self._user.id, opening.symbol, opening.side.value)
+        try:
+            async with RedisLock(self._redis, key, self._settings.confirm_lock_ttl_seconds):
+                await self._session.refresh(opening)
+                if opening.status is not OpeningStatus.ALARM:
+                    return _alarm_gone(opening)
+                client = await self._factory.for_user(
+                    self._session, self._user.id, mode=opening.account_mode
+                )
+                try:
+                    info = await MarketDataService(client, self._cache).get_symbol_info(
+                        opening.symbol
+                    )
+                    runner = (runner_factory or Runner)(
+                        self._session, self._settings, client, opening,
+                        price_precision=info.price_precision if info else 8,
+                        quantity_precision=info.quantity_precision if info else 8,
+                    )
+                    position = await runner.position()
+                    if position is None:
+                        return ConfirmOutcome(
+                            "Позиции на бирже уже нет — закрывать нечего. Итог запишет "
+                            "цикл открытий или сверка.", OpeningStatus.ALARM, final=False,
+                        )
+                    logger.warning(
+                        "Закрываю позицию тревоги по кнопке владельца", extra=runner._log()
+                    )
+                    result = await runner._emergency(
+                        position, EXIT_REASON_MANUAL, manual=True
+                    )
+                    outcome = await after_protect(runner, result)
+                finally:
+                    await client.close()
+        except LockBusyError:
+            return ConfirmOutcome("Уже идёт действие с этой позицией — подожди пару секунд.",
+                                  final=False)
+        if outcome.status is OpeningStatus.ALARM:
+            return ConfirmOutcome(
+                "⛔ Закрыть маркетом не удалось. " + outcome.text, OpeningStatus.ALARM
+            )
         return ConfirmOutcome(outcome.text, outcome.status, outcome.trade_id)
 
     async def _refuse(

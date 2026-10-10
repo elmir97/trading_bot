@@ -333,6 +333,10 @@ class ExecutionCallbackAction(StrEnum):
     TO_CANCEL = "to_cancel"      # «Отменить лимит»
     MA_CONFIRM = "ma_confirm"    # Mini App: «Открыть»
     MA_CANCEL = "ma_cancel"      # Mini App: «Отменить лимит»
+    # A.1 (10.10.2026, M8): «🔴 Закрыть маркетом» под ALARM, «Да, закрыть», «Нет».
+    TO_CLOSE = "to_close"
+    TO_CLOSE_YES = "to_close_yes"
+    TO_CLOSE_NO = "to_close_no"
 
 
 class PositionActionKind(StrEnum):

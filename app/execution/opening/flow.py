@@ -100,6 +100,7 @@ async def advance(runner: Runner, *, now: datetime | None = None) -> FlowOutcome
 async def after_protect(runner: Runner, result: ProtectResult) -> FlowOutcome:
     o = runner.opening
     if result.status is OpeningStatus.PROTECTED:
+        note = alarm_note(runner, datetime.now(UTC)) if o.status is OpeningStatus.ALARM else ""
         await transition(
             runner.session, o, (OpeningStatus.FILLED, OpeningStatus.ALARM),
             OpeningStatus.PROTECTED,
@@ -108,7 +109,9 @@ async def after_protect(runner: Runner, result: ProtectResult) -> FlowOutcome:
         await transition(
             runner.session, o, (OpeningStatus.PROTECTED,), OpeningStatus.DONE, trade_id=trade_id
         )
-        return FlowOutcome(OpeningStatus.DONE, done_text(runner, result), trade_id)
+        return FlowOutcome(
+            OpeningStatus.DONE, done_text(runner, result, alarm=note), trade_id
+        )
     if result.status is OpeningStatus.EMERGENCY_CLOSED:
         trade_id = await runner.record_trade(result.close_fill, result.reason)
         await transition(
@@ -163,9 +166,25 @@ _MODE_NOTE = {
 }
 
 
-def done_text(runner: Runner, result: ProtectResult) -> str:
+def alarm_note(runner: Runner, now: datetime) -> str:
+    """Стоп встал после тревоги (одобрено владельцем 08.10): «со N-й попытки —
+    позиция была без стопа M с»; нашёлся прежний — «подтверждён повторной
+    проверкой». Время — от исполнения входа (время биржи)."""
     o = runner.opening
-    stop = f"стоп {fmt_price(o.stop_loss, runner.pp)} ✓{_MODE_NOTE.get(result.stop_mode, '')}"
+    seconds = (now - o.filled_at).total_seconds() if o.filled_at is not None else None
+    took = f" через {seconds:.1f} с" if seconds is not None else ""
+    if runner.stop_attempt is None:
+        return f"подтверждён повторной проверкой{took}"
+    unprotected = f" — позиция была без стопа {seconds:.1f} с" if seconds is not None else ""
+    return f"со {runner.stop_attempt}-й попытки{unprotected}"
+
+
+def done_text(runner: Runner, result: ProtectResult, *, alarm: str = "") -> str:
+    o = runner.opening
+    note = _MODE_NOTE.get(result.stop_mode, "")
+    if alarm:
+        note = f"{note[:-1]}; {alarm})" if note.endswith(")") else f" ({alarm})"
+    stop = f"стоп {fmt_price(o.stop_loss, runner.pp)} ✓{note}"
     parts = [stop]
     if o.take_profit is not None:
         mark = "⚠️ не встал" if result.take_missing else (
