@@ -60,6 +60,7 @@ from app.exchanges.base import (
     OrderFill,
     OrderNotFoundError,
     Position,
+    ReadbackIncomplete,
     TpSlSpec,
 )
 from app.execution.settle import conditional_rows, settle
@@ -310,7 +311,9 @@ class Runner:
 
     async def read_fill(self, attempts: int | None = None) -> tuple[OrderFill | None, bool]:
         """GET входа по cid. (fill, not_found): not_found — биржа ответила
-        109421 на последнюю попытку."""
+        109421 на последнюю попытку. Каждая неудачная попытка — INFO с
+        причиной, все неудачные — WARNING (Т3 10.10: 38 с «не подтвердила»
+        без единой строки в логе)."""
         tries = attempts or self.settings.exec_order_readback_attempts
         delay = self.settings.exec_order_readback_delay_ms / 1000
         fill: OrderFill | None = None
@@ -325,10 +328,34 @@ class Runner:
                 not_found = False
             except ExchangeError as exc:
                 not_found = exc.code == ORDER_NOT_EXIST_CODE
+                self._log_unconfirmed(attempt + 1, error=exc)
                 continue
             if fill.status == "FILLED" and fill.executed_qty > ZERO:
                 return fill, False
+            self._log_unconfirmed(attempt + 1, fill=fill)
+        logger.warning(
+            "Вход не подтверждён за %d попыток", tries,
+            extra={**self._log(), "attempts": tries, "not_found": not_found,
+                   "status": fill.status if fill is not None else None},
+        )
         return fill, not_found
+
+    def _log_unconfirmed(
+        self, attempt: int, *, error: ExchangeError | None = None, fill: OrderFill | None = None
+    ) -> None:
+        """Поля — по списку: ответ BingX целиком не печатаем."""
+        extra: dict[str, Any] = {**self._log(), "attempt": attempt}
+        if error is not None:
+            extra["error"] = type(error).__name__
+            extra["code"] = error.code
+            if isinstance(error, ReadbackIncomplete):
+                extra["field"] = error.field
+                payload = error.payload or {}
+                extra["status"] = str(payload.get("status", "")) or None
+        elif fill is not None:
+            extra["status"] = fill.status
+            extra["executed_qty"] = str(fill.executed_qty)
+        logger.info("Вход не подтверждён по cid", extra=extra)
 
     async def apply_fill(self, fill: OrderFill) -> bool:
         """Исполнение входа → строка ENTRY и открытие FILLED."""
