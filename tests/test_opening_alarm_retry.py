@@ -44,17 +44,21 @@ async def ctx(unique_telegram_id):  # type: ignore[no-untyped-def]
 class _Bot:
     def __init__(self) -> None:
         self.sent: list[str] = []
+        self.markups: list[Any] = []
         self.edited: list[int] = []
+        self.edits: list[tuple[int, str, Any]] = []
         self.next_id = 700
 
     async def send_message(self, chat_id, text, reply_markup=None, **_):  # type: ignore[no-untyped-def]
         self.next_id += 1
         self.sent.append(text)
+        self.markups.append(reply_markup)
         return Message(message_id=self.next_id, date=datetime.now(UTC),
                        chat=Chat(id=chat_id, type="private"), text=text)
 
     async def edit_message_text(self, text, *, chat_id, message_id, reply_markup=None):  # type: ignore[no-untyped-def]
         self.edited.append(message_id)
+        self.edits.append((message_id, text, reply_markup))
 
 
 def _worker(ctx, fault: str, bot: _Bot, sleeps: list[float], hook=None):  # type: ignore[no-untyped-def]
@@ -241,3 +245,49 @@ async def test_cycle_passes_retry_hook(monkeypatch) -> None:  # type: ignore[no-
                             factory=object())
     await worker.run()
     assert seen["on_alarm"] == worker.retry_alarm
+
+
+@needs_db
+async def test_alarm_then_restart_startup_recovery_resolves(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Регрессия (10.10.2026): ALARM → рестарт бота (быстрые повторы потеряны) →
+    восстановление при старте — тот же вызов, что в app/main.py до поллинга
+    (OpeningsWorker.run нового процесса, настоящий notify воркера): стоп s2
+    поставлен, DONE — новым сообщением с «⚙️ Позиция», сообщение ALARM в чате
+    исправлено в «✅ Решено», кнопки под ним сняты."""
+    from sqlalchemy import select
+
+    from app.bot import outbox
+    from app.bot.handlers.open_trade import opening_keyboard
+    from app.database.models.outgoing_message import OutgoingMessage, OutgoingMeta
+
+    opening, out = await _open(ctx, T3)
+    assert out.status is OpeningStatus.ALARM
+    chat_id = ctx.user.telegram_id
+    # итог «Да» с тревогой — правкой карточки, в журнал (как confirm_open)
+    await outbox.record(ctx.db, OutgoingMeta(user_id=ctx.uid, kind="OPEN_ALARM",
+                                             trade_opening_id=opening.id),
+                        chat_id=chat_id, message_id=520, text=out.text)
+    # рестарт: процесс ушёл до повторов; новый процесс — без сбоя
+    bot = _Bot()
+    worker = _worker(ctx, "", bot, [])
+    await worker.run()
+
+    await ctx.session.refresh(opening)
+    assert opening.status is OpeningStatus.DONE
+    [stop] = _stops_on_exchange(ctx)
+    assert stop.client_order_id == f"to{opening.id}u{ctx.uid}s2"
+    [done] = bot.sent
+    assert "со 2-й попытки" in done
+    position = (opening.symbol, opening.side)
+    assert bot.markups == [opening_keyboard(OpeningStatus.DONE, opening.id, position)]
+    assert bot.markups[0].inline_keyboard[0][0].text.startswith("⚙️ Позиция")
+    [(message_id, text, markup)] = bot.edits
+    assert message_id == 520 and markup is None
+    assert text.startswith("🚨 → ✅ Решено: стоп поставлен в ")
+    async with ctx.db.session() as session:
+        kinds = dict((await session.execute(
+            select(OutgoingMessage.message_id, OutgoingMessage.kind).where(
+                OutgoingMessage.trade_opening_id == opening.id)
+        )).all())
+    assert kinds == {520: "OPEN_ALARM_DONE", 701: "OPEN_DONE"}
+    assert worker._alarm_tasks == {}                     # тревога не новая — повторов нет

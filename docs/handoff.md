@@ -323,8 +323,10 @@ modified` в «Позиции» (`positions.py:246` → `edit_or_replace`) — �
   «Быстрые повторы исчерпаны…», дальше цикл. Запуск: «Открыть» вернул ALARM (после записи итога), «Да, закрыть» не
   закрыл, цикл/старт при переходе в ALARM. INFO «Быстрый повтор после тревоги» (attempt, offset_s, status).
   Оценка Т3: ALARM ≈3.3 с + 1.5 с + s2 ≈1 с ≈ **6 с** (было 18.7) — сверить на демо
-- pytest **1539** passed / 0 skipped (было 1480), smoke 102/102 ×2, mypy 60. Регрессия «ALARM → рестарт → DONE с
-  кнопкой и правкой ALARM» покрыта тем же `recover_openings`, что зовёт старт (тесты `test_opening_alarm.py`)
+- pytest **1540** passed / 0 skipped (было 1480), smoke 102/102 ×2, mypy 60. Регрессия «ALARM → рестарт → DONE с
+  кнопкой и правкой ALARM» — отдельный тест через путь старта (`OpeningsWorker.run` нового процесса, как в
+  `app/main.py` до поллинга, настоящий notify): `test_opening_alarm_retry.py::test_alarm_then_restart_startup_recovery_resolves`;
+  мутации (нет правки ALARM в recovery / в notify; итог без кнопки) — падает
 
 **M8 — офлайн-SQL (`alembic upgrade e7c41a9b3d52:fcf50d29396e --sql`, локально):** `ALTER TABLE execution_callbacks
 DROP CONSTRAINT ck_execution_callbacks_action_known;` + `ADD CONSTRAINT … CHECK (action IN (<13 прежних>, 'to_close',
