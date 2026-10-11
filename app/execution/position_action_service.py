@@ -56,6 +56,7 @@ from app.exchanges.base import (
     OrderNotFoundError,
 )
 from app.execution import guards
+from app.execution.close_backfill import UNCONFIRMED_MESSAGE
 from app.execution.models import ExecutionRefusal, action_client_order_id
 from app.execution.models import ExecutionRefusalCode as Code
 from app.execution.position_actions import (
@@ -756,7 +757,7 @@ class PositionActionService:
             row.status = OrderStatus.UNKNOWN
             return await self._finish(
                 action, PositionActionStatus.FAILED,
-                ExecutionRefusal(Code.POSITION_CHANGED, "Исполнение закрытия не подтверждено."),
+                ExecutionRefusal(Code.POSITION_CHANGED, UNCONFIRMED_MESSAGE),
                 text=(
                     "⚠️ Исполнение не подтверждено — проверь позицию в BingX. "
                     "Повторно не отправляю."

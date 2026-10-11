@@ -62,6 +62,7 @@ from app.exchanges.base import (
     Position,
 )
 from app.exchanges.bingx import _QUOTE_ASSET_BY_MODE
+from app.execution.close_backfill import backfill_close_rows
 from app.execution.position_view import (
     apply_exchange_levels,
     protective_orders,
@@ -411,6 +412,9 @@ class Reconciler:
         )
         try:
             positions = await client.get_positions()
+            # Деплой 4, 4.4: строки закрытия UNKNOWN / FILLED без цены — до
+            # сверки сделок, чтобы она видела их orderId и цену.
+            await backfill_close_rows(session, client, user_id, now)
             trades_repo = TradeRepository(session)
             orders_repo = ExecutionOrderRepository(session)
             open_trades = await trades_repo.list_open_for_reconcile(user_id, account_mode=mode)

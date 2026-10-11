@@ -23,6 +23,7 @@ from sqlalchemy.orm import selectinload
 from app.core.config import Settings
 from app.core.security import SecretCipher
 from app.database.models.execution_order import ExecutionOrder
+from app.database.models.position_action import PositionAction
 from app.database.models.reconciliation_event import ReconciliationEvent
 from app.database.models.signal import SignalRecord
 from app.database.models.signal_notification import SignalNotification
@@ -40,6 +41,8 @@ from app.trading.enums import (
     OrderSide,
     OrderStatus,
     OrderType,
+    PositionActionKind,
+    PositionActionStatus,
     ReconciliationKind,
     SignalDirection,
     SignalLevel,
@@ -1740,3 +1743,40 @@ async def test_closes_fully_standing_rows_untouched(ctx) -> None:  # type: ignor
     rows = await _rows(db, "LINK-USDT")
     assert rows[OrderRole.STOP_LOSS].status is OrderStatus.SUBMITTED
     assert rows[OrderRole.TAKE_PROFIT].status is OrderStatus.SUBMITTED
+
+
+# --- деплой 4, 4.4: добор строки закрытия по cid ------------------------------------------
+
+
+async def test_close_row_unknown_backfilled_and_action_confirmed(ctx) -> None:  # type: ignore[no-untyped-def]
+    """#37 (11.10): «Закрыть всё» исполнилось, строка CLOSE — UNKNOWN, действие
+    FAILED «не подтверждено». Проход сверки добирает строку по cid (FILLED с
+    ценой) и переводит действие в DONE с пометкой."""
+    settings, db, session, user, demo = ctx
+    await _seed_live(session, user.id)
+    action = PositionAction(
+        user_id=user.id, symbol="LINK-USDT", side=TradeSide.LONG,
+        kind=PositionActionKind.CLOSE_FULL, status=PositionActionStatus.FAILED, params={},
+        error_code="POSITION_CHANGED", error_message="Исполнение закрытия не подтверждено.",
+    )
+    session.add(action)
+    await session.flush()
+    cid = f"tm{action.id}u{user.id}C"
+    row = ExecutionOrder(
+        user_id=user.id, position_action_id=action.id, client_order_id=cid,
+        symbol="LINK-USDT", side=OrderSide.SELL, position_side=TradeSide.LONG,
+        order_type=OrderType.MARKET, role=OrderRole.CLOSE, status=OrderStatus.UNKNOWN,
+        quantity=D("2037.8"),
+    )
+    session.add(row)
+    await session.commit()
+    demo.orders_by_cid[cid] = _live_entry(side="SELL", clientOrderId=cid)
+
+    await _run_reconciler(settings, db, FakeBot())
+
+    async with db.session() as s:
+        fresh = await s.get(ExecutionOrder, row.id)
+        done = await s.get(PositionAction, action.id)
+    assert fresh is not None and fresh.status is OrderStatus.FILLED and fresh.price is not None
+    assert done is not None and done.status is PositionActionStatus.DONE
+    assert done.error_message is None and done.params["confirmed_by"] == "добор по cid"
