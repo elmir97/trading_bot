@@ -34,10 +34,12 @@ from app.exchanges.base import (
     Balance,
     CancelResult,
     ExchangeResponseError,
+    ExchangeUnavailableError,
     OpenOrder,
     OrderFill,
     OrderResult,
     Position,
+    ReadbackIncomplete,
     SymbolInfo,
 )
 from app.execution.position_action_service import PositionActionService
@@ -109,6 +111,8 @@ class FakeExchange:
         self.auto_cancel_on_close = True
         self._seq = 0
         self.fills: dict[str, OrderFill] = {}
+        # Деплой 4: ошибки чтения по cid — по одной на вызов, пока не кончатся.
+        self.fill_errors: list[Exception] = []
 
     def names(self) -> list[str]:
         return [c[0] for c in self.calls]
@@ -179,6 +183,8 @@ class FakeExchange:
 
     async def get_order_fill(self, symbol, client_order_id, *, max_retries=None) -> OrderFill:  # type: ignore[no-untyped-def]
         self.calls.append(("fill", client_order_id))
+        if self.fill_errors:
+            raise self.fill_errors.pop(0)
         return self.fills[client_order_id]
 
     async def close(self) -> None: ...
@@ -626,3 +632,46 @@ async def test_full_close_standing_order_row_untouched(ctx, caplog) -> None:  # 
     assert mine.status is OrderStatus.SUBMITTED and mine.cancel_source is None
     assert any(r.getMessage() == "Условный ордер ещё стоит после закрытия позиции"
                for r in caplog.records)
+
+
+# --- деплой 4, 4.1: причина неудачного read-back закрытия в логе ---------------------------
+
+SECRET = "apiKey-эхо-не-печатать"
+
+
+async def test_close_readback_failures_logged_with_reason(ctx, caplog) -> None:  # type: ignore[no-untyped-def]
+    """11.10, #37: «не подтверждено» без единой строки причины. Каждая неудачная
+    попытка — INFO с типом/кодом/полем, все неудачные — WARNING; ответ биржи
+    целиком в лог не попадает."""
+    ctx.exchange.fill_errors = [
+        ReadbackIncomplete("avgPrice", payload={"status": "FILLED", "apiKey": SECRET}),
+        ExchangeResponseError("BingX: order not exist (код 109421)", code=109421),
+        ExchangeUnavailableError("BingX не ответил вовремя"),
+    ]
+    card = await _card(ctx, PositionActionKind.CLOSE_FULL, {})
+    with caplog.at_level("INFO"):
+        await ctx.service().confirm(card.action.id, message_id=55, risk_confirmed=False)
+    tries = [r for r in caplog.records if r.getMessage() == "Закрытие не подтверждено по cid"]
+    got = [(r.attempt, r.error, r.code, getattr(r, "field", None), getattr(r, "status", None),  # type: ignore[attr-defined]
+            r.cid) for r in tries]  # type: ignore[attr-defined]
+    cid = f"tm{card.action.id}u{ctx.uid}C"
+    assert got == [
+        (1, "ReadbackIncomplete", None, "avgPrice", "FILLED", cid),
+        (2, "ExchangeResponseError", 109421, None, None, cid),
+        (3, "ExchangeUnavailableError", None, None, None, cid),
+    ]
+    final = [r for r in caplog.records if r.getMessage() == "Закрытие не подтверждено за 3 попыток"]
+    assert len(final) == 1 and final[0].levelno == 30
+    assert SECRET not in str([r.__dict__ for r in caplog.records])
+
+
+async def test_close_readback_second_try_logs_one_attempt(ctx, caplog) -> None:  # type: ignore[no-untyped-def]
+    ctx.exchange.fill_errors = [ReadbackIncomplete("commission", payload={"status": "FILLED"})]
+    card = await _card(ctx, PositionActionKind.CLOSE_FULL, {})
+    with caplog.at_level("INFO"):
+        await ctx.service().confirm(card.action.id, message_id=55, risk_confirmed=False)
+    await ctx.session.refresh(card.action)
+    assert card.action.status is PositionActionStatus.DONE
+    tries = [r for r in caplog.records if r.getMessage() == "Закрытие не подтверждено по cid"]
+    assert [(r.attempt, r.field) for r in tries] == [(1, "commission")]  # type: ignore[attr-defined]
+    assert not any(r.getMessage().startswith("Закрытие не подтверждено за") for r in caplog.records)

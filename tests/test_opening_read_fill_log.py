@@ -107,3 +107,44 @@ async def test_confirmed_first_try_logs_nothing(caplog: pytest.LogCaptureFixture
     with caplog.at_level(logging.INFO):
         await runner.read_fill()
     assert _records(caplog, "Вход не подтверждён") == []
+
+
+# --- деплой 4, 4.1: тот же набор полей в остальных чтениях по cid ------------------------
+
+
+async def test_check_by_cid_unknown_logged_with_reason(caplog: pytest.LogCaptureFixture) -> None:
+    from app.execution.opening.execution import StopCheck
+
+    runner = _runner([ReadbackIncomplete("stopPrice", payload={"status": "NEW", "apiKey": SECRET})])
+    with caplog.at_level(logging.INFO):
+        check, _ = await runner.check_by_cid("to1u1s1")
+    assert check is StopCheck.UNKNOWN
+    [rec] = _records(caplog, "Стоп по cid не прочитан")
+    assert (rec.error, rec.field, rec.status, rec.cid) == (  # type: ignore[attr-defined]
+        "ReadbackIncomplete", "stopPrice", "NEW", "to1u1s1",
+    )
+    assert SECRET not in str(rec.__dict__)
+
+
+async def test_check_by_cid_not_found_is_absent_without_log(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from app.execution.opening.execution import StopCheck
+
+    runner = _runner([ExchangeResponseError("BingX: order not exist (код 109421)", code=109421)])
+    with caplog.at_level(logging.INFO):
+        check, _ = await runner.check_by_cid("to1u1s1")
+    assert check is StopCheck.ABSENT
+    assert _records(caplog, "Стоп по cid не прочитан") == []
+
+
+async def test_limit_read_failure_logged_with_field(caplog: pytest.LogCaptureFixture) -> None:
+    from app.execution.opening.limits import _read
+
+    incomplete = ReadbackIncomplete("avgPrice", payload={"status": "FILLED", "apiKey": SECRET})
+    runner = _runner([incomplete])
+    with caplog.at_level(logging.INFO):
+        assert await _read(runner) is None
+    [rec] = _records(caplog, "Лимит открытия не прочитан")
+    assert (rec.error, rec.field, rec.status) == ("ReadbackIncomplete", "avgPrice", "FILLED")  # type: ignore[attr-defined]
+    assert SECRET not in str(rec.__dict__)

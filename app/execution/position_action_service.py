@@ -52,8 +52,8 @@ from app.exchanges.base import (
     ExchangeClient,
     ExchangeError,
     OpenOrder,
+    OrderFill,
     OrderNotFoundError,
-    ReadbackIncomplete,
 )
 from app.execution import guards
 from app.execution.models import ExecutionRefusal, action_client_order_id
@@ -71,6 +71,7 @@ from app.execution.position_view import (
     link_trade,
     protective_orders,
 )
+from app.execution.readback_log import readback_failure
 from app.execution.settle import CONDITIONAL_ROLES, OPEN_STATUSES, conditional_rows, settle
 from app.market.cache import TTLCache
 from app.market.data import MarketDataService
@@ -455,6 +456,32 @@ class PositionActionService:
     async def _delay(self) -> None:
         await asyncio.sleep(self._settings.exec_order_readback_delay_ms / 1000)
 
+    async def _read_close(
+        self, client: ExchangeClient, action: PositionAction, cid: str
+    ) -> OrderFill | None:
+        """Исполнение закрытия по cid, до exec_order_readback_attempts чтений.
+        Каждая неудачная попытка — INFO с причиной, все неудачные — WARNING
+        (11.10, #37: «не подтверждено» без единой строки в логе)."""
+        tries = self._settings.exec_order_readback_attempts
+        log = {"user_id": self._user.id, "action_id": action.id, "symbol": action.symbol,
+               "cid": cid}
+        for attempt in range(tries):
+            if attempt:
+                await self._delay()
+            try:
+                fill = await client.get_order_fill(action.symbol, cid, max_retries=1)
+            except ExchangeError as exc:
+                logger.info("Закрытие не подтверждено по cid",
+                            extra={**log, "attempt": attempt + 1, **readback_failure(error=exc)})
+                continue
+            if fill.status == "FILLED" and fill.executed_qty > ZERO:
+                return fill
+            logger.info("Закрытие не подтверждено по cid",
+                        extra={**log, "attempt": attempt + 1, **readback_failure(fill=fill)})
+        logger.warning("Закрытие не подтверждено за %d попыток", tries,
+                       extra={**log, "attempts": tries})
+        return None
+
     async def _find_open(
         self, client: ExchangeClient, symbol: str, *, client_order_id: str | None = None,
         order_id: str | None = None,
@@ -712,17 +739,7 @@ class PositionActionService:
         row.exchange_order_id = str(placed.order_id) or None
         await self._session.commit()
 
-        fill = None
-        for attempt in range(self._settings.exec_order_readback_attempts):
-            try:
-                fill = await client.get_order_fill(action.symbol, cid, max_retries=1)
-            except (ReadbackIncomplete, ExchangeError):
-                fill = None
-            if fill is not None and fill.status == "FILLED" and fill.executed_qty > ZERO:
-                break
-            fill = None
-            if attempt + 1 < self._settings.exec_order_readback_attempts:
-                await self._delay()
+        fill = await self._read_close(client, action, cid)
         if fill is None:
             row.status = OrderStatus.UNKNOWN
             return await self._finish(

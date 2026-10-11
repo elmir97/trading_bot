@@ -64,9 +64,9 @@ from app.exchanges.base import (
     OrderFill,
     OrderNotFoundError,
     Position,
-    ReadbackIncomplete,
     TpSlSpec,
 )
+from app.execution.readback_log import readback_failure
 from app.execution.settle import conditional_rows, settle
 from app.trading.calculations import CalculationError
 from app.trading.enums import (
@@ -395,19 +395,11 @@ class Runner:
     def _log_unconfirmed(
         self, attempt: int, *, error: ExchangeError | None = None, fill: OrderFill | None = None
     ) -> None:
-        """Поля — по списку: ответ BingX целиком не печатаем."""
-        extra: dict[str, Any] = {**self._log(), "attempt": attempt}
-        if error is not None:
-            extra["error"] = type(error).__name__
-            extra["code"] = error.code
-            if isinstance(error, ReadbackIncomplete):
-                extra["field"] = error.field
-                payload = error.payload or {}
-                extra["status"] = str(payload.get("status", "")) or None
-        elif fill is not None:
-            extra["status"] = fill.status
-            extra["executed_qty"] = str(fill.executed_qty)
-        logger.info("Вход не подтверждён по cid", extra=extra)
+        """Поля — по списку (readback_failure): ответ BingX целиком не печатаем."""
+        logger.info(
+            "Вход не подтверждён по cid",
+            extra={**self._log(), "attempt": attempt, **readback_failure(error=error, fill=fill)},
+        )
 
     async def apply_fill(self, fill: OrderFill) -> bool:
         """Исполнение входа → строка ENTRY и открытие FILLED."""
@@ -473,6 +465,10 @@ class Runner:
         except ExchangeError as exc:
             if exc.code == ORDER_NOT_EXIST_CODE:
                 return StopCheck.ABSENT, None
+            logger.info(
+                "Стоп по cid не прочитан",
+                extra={**self._log(), "cid": cid, **readback_failure(error=exc)},
+            )
             return StopCheck.UNKNOWN, None
         if fill.status in _STANDING:
             return StopCheck.STANDING, fill.order_id
@@ -865,7 +861,9 @@ class Runner:
         fill: OrderFill | None = None
         try:
             fill = await self.client.get_order_fill(o.symbol, cid, max_retries=1)
-        except ExchangeError:
+        except ExchangeError as exc:
+            logger.info("Аварийное закрытие не прочитано по cid",
+                        extra={**self._log(), **readback_failure(error=exc)})
             fill = None
         left = await self.position()
         if fill is not None and fill.status == "FILLED" and left is None:
@@ -922,9 +920,13 @@ class Runner:
             )
         except ExchangeError as exc:
             logger.info("Закрытие не дочитано по cid",
-                        extra={**self._log(), "error": type(exc).__name__, "code": exc.code})
+                        extra={**self._log(), **readback_failure(error=exc)})
             return None
-        return fill if fill.status == "FILLED" else None
+        if fill.status != "FILLED":
+            logger.info("Закрытие не дочитано по cid",
+                        extra={**self._log(), **readback_failure(fill=fill)})
+            return None
+        return fill
 
     # --- журнал ---------------------------------------------------------------------
 

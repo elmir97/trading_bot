@@ -25,6 +25,7 @@ from app.exchanges.base import ExchangeError, OrderFill, OrderNotFoundError
 from app.execution.opening.execution import Runner, transition
 from app.execution.opening.flow import FlowOutcome, advance, after_protect, alarm_text
 from app.execution.opening.render import expiry_label
+from app.execution.readback_log import readback_failure
 from app.trading.enums import CancelSource, OpeningStatus, OrderStatus
 
 logger = get_logger(__name__)
@@ -41,7 +42,7 @@ async def _read(runner: Runner) -> OrderFill | None:
     except ExchangeError as exc:
         logger.warning(
             "Лимит открытия не прочитан — повтор следующим циклом",
-            extra={**runner._log(), "code": exc.code},
+            extra={**runner._log(), **readback_failure(error=exc)},
         )
         return None
 
