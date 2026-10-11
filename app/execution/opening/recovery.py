@@ -33,7 +33,7 @@ from app.database.session import Database
 from app.exchanges.base import ExchangeError
 from app.execution.opening import limits
 from app.execution.opening.execution import Runner, transition
-from app.execution.opening.flow import ENTRY_FILL_UNREAD, FlowOutcome, advance
+from app.execution.opening.flow import FILL_UNREAD_CODES, FlowOutcome, advance
 from app.market.cache import TTLCache
 from app.market.data import MarketDataService
 from app.trading.enums import OPENING_ACTIVE, OpeningStatus, TradeSide
@@ -68,18 +68,19 @@ _market_cache = TTLCache()
 
 
 def _emergency_unread() -> Any:
-    """Аварийно закрыто, сделка не записана — вход не дочитался (деплой 3).
+    """Аварийно закрыто, сделка не записана — вход (деплой 3) или выход
+    (деплой 4, CLOSE_FILL_UNREAD) не дочитался.
     По коду, не по trade_id IS NULL: у старых открытий trade_id обнулило
     удаление сделки (SET NULL), их дописывать нельзя."""
     return (TradeOpening.status == OpeningStatus.EMERGENCY_CLOSED) & (
-        TradeOpening.error_code == ENTRY_FILL_UNREAD
+        TradeOpening.error_code.in_(FILL_UNREAD_CODES)
     )
 
 
 def _is_emergency_unread(opening: TradeOpening) -> bool:
     return (
         opening.status is OpeningStatus.EMERGENCY_CLOSED
-        and opening.error_code == ENTRY_FILL_UNREAD
+        and opening.error_code in FILL_UNREAD_CODES
     )
 
 

@@ -19,8 +19,8 @@ import pytest_asyncio
 from sqlalchemy import update
 
 from app.database.models.trade_opening import TradeOpening
-from app.exchanges.base import ExchangeUnavailableError
-from app.execution.opening.flow import ENTRY_FILL_UNREAD
+from app.exchanges.base import ExchangeUnavailableError, ReadbackIncomplete
+from app.execution.opening.flow import CLOSE_FILL_UNREAD, ENTRY_FILL_UNREAD
 from app.trading.enums import OpeningStatus, OrderRole, OrderStatus, TradeSide, TradeStatus
 from tests.test_opening_confirm import _card, _rows, _trade, opening_context
 from tests.test_opening_faults import _recover
@@ -250,3 +250,72 @@ async def test_old_emergency_without_trade_not_rewritten(ctx) -> None:  # type: 
     ctx.exchange.calls.clear()                 # карточка читала биржу
     assert await _recover(ctx) == 0
     assert ctx.exchange.calls == [] and ctx.notes == []
+
+
+# --- деплой 4, 4.3: аварийное закрытие по FILLED из ответа POST ------------------------------
+
+
+def _fail_close_reads(c) -> None:  # type: ignore[no-untyped-def]
+    """GET аварийного закрытия по cid отдаёт неполный ответ (FILLED без avgPrice
+    — кандидат причины #37 11.10), остальные чтения — штатно."""
+    original = c.exchange.get_order_fill
+
+    async def get_order_fill(symbol: str, cid: str, **kw: Any):  # type: ignore[no-untyped-def]
+        if cid.lower().endswith("c1") and c.fail_close:
+            c.exchange.calls.append(("order_fill", cid))
+            raise ReadbackIncomplete("avgPrice", payload={"status": "FILLED"})
+        return await original(symbol, cid, **kw)
+
+    c.fail_close = True
+    c.exchange.get_order_fill = get_order_fill
+
+
+async def test_emergency_post_filled_close_unread_not_alarm(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Стоп не встал, закрытие маркетом: POST FILLED, позиции нет, а чтение по
+    cid неполное. Раньше — ALARM по закрытой позиции; теперь EMERGENCY_CLOSED
+    (CLOSE_FILL_UNREAD), сделку с выходом дописывает цикл."""
+    ctx.exchange.drop_attached_sl = True
+    ctx.exchange.fail_conditional_types = {"STOP_MARKET"}
+    _fail_close_reads(ctx)
+    opening = await _card(ctx)
+    out = await ctx.service().confirm(opening.id, accept_warnings=False)
+
+    assert not ctx.exchange.positions
+    assert out.status is OpeningStatus.EMERGENCY_CLOSED and out.trade_id is None
+    assert "закрыта маркетом.\nЦену выхода биржа ещё не отдала" in out.text
+    await ctx.session.refresh(opening)
+    assert opening.status is OpeningStatus.EMERGENCY_CLOSED
+    assert opening.error_code == CLOSE_FILL_UNREAD and opening.avg_price is not None
+    close = [r for r in await _rows(ctx, opening.id) if r.role is OrderRole.CLOSE]
+    assert [r.status for r in close] == [OrderStatus.FILLED] and close[0].exchange_order_id
+
+    await _recover(ctx)                        # чтение всё ещё неполное — ждём
+    await ctx.session.refresh(opening)
+    assert opening.trade_id is None and ctx.notes == []
+
+    ctx.fail_close = False
+    await _recover(ctx)
+    await ctx.session.refresh(opening)
+    assert opening.trade_id is not None and opening.error_code == "STOP_FAILED"
+    trade = await _trade(ctx, opening.trade_id)
+    assert trade.status is TradeStatus.CLOSED and trade.exit_price is not None
+    assert ctx.notes[-1][1].startswith(f"📒 Сделка #{opening.trade_id} записана в журнал")
+
+
+async def test_emergency_post_not_filled_close_unread_stays_alarm(ctx) -> None:  # type: ignore[no-untyped-def]
+    """POST закрытия без FILLED и чтение не прошло — исход не подтверждён:
+    прежний путь, ALARM."""
+    ctx.exchange.drop_attached_sl = True
+    ctx.exchange.fail_conditional_types = {"STOP_MARKET"}
+    _fail_close_reads(ctx)
+    original = ctx.exchange.place_market_order
+
+    async def place_market_order(**kw: Any):  # type: ignore[no-untyped-def]
+        result = await original(**kw)
+        closing = kw["client_order_id"].lower().endswith("c1")
+        return replace(result, status="NEW") if closing else result
+
+    ctx.exchange.place_market_order = place_market_order
+    opening = await _card(ctx)
+    out = await ctx.service().confirm(opening.id, accept_warnings=False)
+    assert out.status is OpeningStatus.ALARM

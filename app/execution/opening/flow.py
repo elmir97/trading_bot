@@ -27,6 +27,10 @@ UNKNOWN_ALARM_AFTER = timedelta(minutes=2)
 # EMERGENCY_CLOSED без сделки: закрыто, а вход ещё не дочитан (деплой 3) —
 # сделку допишет цикл (recovery.EMERGENCY_UNREAD), потом код → STOP_FAILED.
 ENTRY_FILL_UNREAD = "ENTRY_FILL_UNREAD"
+# Деплой 4, 4.3: закрыто по ответу POST (FILLED, позиции нет), а исполнение
+# закрытия по cid ещё не прочитано — так же дописывает цикл.
+CLOSE_FILL_UNREAD = "CLOSE_FILL_UNREAD"
+FILL_UNREAD_CODES = (ENTRY_FILL_UNREAD, CLOSE_FILL_UNREAD)
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,7 +103,7 @@ async def advance(runner: Runner, *, now: datetime | None = None) -> FlowOutcome
         )
         return FlowOutcome(OpeningStatus.DONE, done_text(runner, ProtectResult(o.status)), trade_id)
 
-    if o.status is OpeningStatus.EMERGENCY_CLOSED and o.error_code == ENTRY_FILL_UNREAD:
+    if o.status is OpeningStatus.EMERGENCY_CLOSED and o.error_code in FILL_UNREAD_CODES:
         return await finish_emergency(runner)
 
     return FlowOutcome(o.status, "", notify=False)
@@ -134,20 +138,33 @@ async def after_protect(runner: Runner, result: ProtectResult) -> FlowOutcome:
         close = result.close_fill
         price = fmt_price(close.avg_price, runner.pp) if close else "—"
         # Закрыто СНАЧАЛА (решение владельца 10.10), вход дочитывается после.
-        if not await runner.ensure_entry_fill():
+        entry_read = await runner.ensure_entry_fill()
+        if not entry_read or close is None:
             await transition(
                 runner.session, o, (OpeningStatus.FILLED, OpeningStatus.ALARM),
                 OpeningStatus.EMERGENCY_CLOSED,
-                error_code=ENTRY_FILL_UNREAD, error_message=result.reason,
+                error_code=ENTRY_FILL_UNREAD if not entry_read else CLOSE_FILL_UNREAD,
+                error_message=result.reason,
             )
-            logger.error(
-                "Позиция открытия закрыта аварийно, вход не дочитан — сделку допишет цикл",
-                extra=runner._log(),
+            if not entry_read:
+                logger.error(
+                    "Позиция открытия закрыта аварийно, вход не дочитан — сделку допишет цикл",
+                    extra=runner._log(),
+                )
+            else:
+                logger.warning(
+                    "Позиция открытия закрыта аварийно, выход не дочитан — сделку допишет цикл",
+                    extra=runner._log(),
+                )
+            closed = f"закрыта маркетом по {price}" if close else "закрыта маркетом"
+            unread = (
+                "Цены входа и выхода" if not entry_read and close is None
+                else "Цену входа" if not entry_read else "Цену выхода"
             )
             return FlowOutcome(
                 OpeningStatus.EMERGENCY_CLOSED,
-                f"🚨 {result.reason}. Позиция {runner.summary()} закрыта маркетом по {price}.\n"
-                "Цену входа биржа ещё не отдала — сделку запишу в журнал следом.",
+                f"🚨 {result.reason}. Позиция {runner.summary()} {closed}.\n"
+                f"{unread} биржа ещё не отдала — сделку запишу в журнал следом.",
             )
         trade_id = await runner.record_trade(result.close_fill, result.reason)
         await transition(
@@ -175,7 +192,7 @@ async def after_protect(runner: Runner, result: ProtectResult) -> FlowOutcome:
 
 
 async def finish_emergency(runner: Runner) -> FlowOutcome:
-    """Аварийно закрыто, а вход тогда не дочитался (ENTRY_FILL_UNREAD):
+    """Аварийно закрыто, а вход или выход тогда не дочитался (FILL_UNREAD_CODES):
     дочитать вход и выход по cid и записать сделку. Не вышло — следующий
     цикл."""
     o = runner.opening

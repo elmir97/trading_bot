@@ -849,11 +849,17 @@ class Runner:
             row.error_message = "управляемый сбой fail_emergency_close: не отправлено"
             await self.session.commit()
             return ProtectResult(OpeningStatus.ALARM, reason=reason)
+        post_filled = False
         try:
-            await self.client.place_market_order(
+            placed = await self.client.place_market_order(
                 symbol=o.symbol, side=CLOSING_SIDE[self.side], position_side=self.side.value,
                 quantity=position.quantity, client_order_id=cid,
             )
+            post_filled = placed.status == "FILLED"
+            row.exchange_order_id = placed.order_id or None
+            if post_filled:
+                logger.info("Аварийное закрытие исполнено по ответу POST",
+                            extra={**self._log(), **post_answer_fields(placed.raw)})
         except ExchangeError as exc:
             row.status = (
                 OrderStatus.UNKNOWN if isinstance(exc, ExchangeUnavailableError)
@@ -869,12 +875,19 @@ class Runner:
                         extra={**self._log(), **readback_failure(error=exc)})
             fill = None
         left = await self.position()
-        if fill is not None and fill.status == "FILLED" and left is None:
+        read = fill is not None and fill.status == "FILLED"
+        # Деплой 4, 4.3: POST вернул FILLED и позиции нет — закрыто, даже если
+        # чтение по cid не прошло (иначе ALARM по закрытой позиции). Цифры
+        # закрытия — дочиткой (flow: CLOSE_FILL_UNREAD, сделку пишет цикл).
+        if (read or post_filled) and left is None:
             row.status = OrderStatus.FILLED
-            row.exchange_order_id = fill.order_id
+            if fill is not None and read:
+                row.exchange_order_id = fill.order_id
             await self.session.commit()
             await self._settle_after_close()
-            return ProtectResult(OpeningStatus.EMERGENCY_CLOSED, close_fill=fill, reason=reason)
+            return ProtectResult(
+                OpeningStatus.EMERGENCY_CLOSED, close_fill=fill if read else None, reason=reason
+            )
         await self.session.commit()
         return ProtectResult(OpeningStatus.ALARM, reason=reason)
 
