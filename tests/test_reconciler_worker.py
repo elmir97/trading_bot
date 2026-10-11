@@ -88,6 +88,8 @@ class LiveDemo:
         self.unknown_cids: set[str] = set()
         # GET /trade/order по clientOrderID: cid → живой ответ ордера.
         self.orders_by_cid: dict[str, dict[str, Any]] = {}
+        # Деплой 4: openOrders отвечает ошибкой биржи.
+        self.fail_open_orders = False
         # По умолчанию — состояние 27.09 (LINK открыта, SOL закрыта стопом);
         # сценарий 29.09 подменяет позиции и историю LINK.
         self.positions: list[dict[str, Any]] = live_items("positions all")
@@ -103,6 +105,8 @@ class LiveDemo:
         if path == "/openApi/swap/v2/trade/allOrders":
             assert params["symbol"] in self.all_orders, "история нужна только закрытым"
             return _ok({"orders": self.all_orders[params["symbol"]]})
+        if path == "/openApi/swap/v2/trade/openOrders" and self.fail_open_orders:
+            return httpx.Response(200, json={"code": 109400, "msg": "rejected", "data": {}})
         if path == "/openApi/swap/v2/trade/openOrders":
             # Без символа — все ордера (этап 3: синхронизация уровней журнала).
             symbol = params.get("symbol")
@@ -1780,3 +1784,64 @@ async def test_close_row_unknown_backfilled_and_action_confirmed(ctx) -> None:  
     assert fresh is not None and fresh.status is OrderStatus.FILLED and fresh.price is not None
     assert done is not None and done.status is PositionActionStatus.DONE
     assert done.error_message is None and done.params["confirmed_by"] == "добор по cid"
+
+
+# --- деплой 4, 4.5: выход кнопки «Закрыть» узнан по строке CLOSE ---------------------------
+
+
+async def test_close_button_exit_is_closed_by_bot(ctx) -> None:  # type: ignore[no-untyped-def]
+    """#29 (11.10): позицию закрыл маркет «Закрыть всё», выход не записался —
+    сверка пишет его как «через бота» (строка CLOSE сделки с этим orderId), а не
+    «вне бота». Живой ордер SOL — как маркет без triggerOrderId."""
+    settings, db, session, user, demo = ctx
+    sol_id, _link_id = await _seed_live(session, user.id)
+    [child] = [o for o in demo.all_orders["SOL-USDT"] if str(o["orderId"]) == SOL_CHILD]
+    child.update(type="MARKET", triggerOrderId="", stopPrice="")
+    session.add(ExecutionOrder(
+        user_id=user.id, trade_id=sol_id, client_order_id=f"tm99u{user.id}C",
+        exchange_order_id=SOL_CHILD, symbol="SOL-USDT", side=OrderSide.SELL,
+        position_side=TradeSide.LONG, order_type=OrderType.MARKET, role=OrderRole.CLOSE,
+        status=OrderStatus.FILLED, quantity=D("1362.07"), price=D("121.611"),
+    ))
+    await session.commit()
+    bot = FakeBot()
+
+    await _run_reconciler(settings, db, bot)
+
+    sol = await _trade(db, sol_id)
+    assert sol.status is TradeStatus.CLOSED and sol.exit_reason == "Закрыто через бота"
+    kinds = [e.kind for e in await _events(db, user.id) if e.trade_id == sol_id]
+    assert ReconciliationKind.CLOSED_BY_BOT in kinds
+    assert ReconciliationKind.CLOSED_OUTSIDE_BOT not in kinds
+    assert len(bot.sent) == 1 and "SOL-USDT LONG закрыта кнопкой в боте" in bot.sent[0]
+
+
+async def test_fired_stop_filled_even_without_open_orders(ctx) -> None:  # type: ignore[no-untyped-def]
+    """4.5: сработал closePosition-стоп, у сделки есть и ранний вложенный стоп
+    (id новее). openOrders не получены — остальные строки ждут цикла, но
+    сработавший — FILLED сразу, и это он, а не первая строка роли."""
+    settings, db, session, user, demo = ctx
+    settings.reconciler_stop_check_every = 1
+    early = "2104213344721920077"
+    sol = await _bot_open_trade(
+        session, user.id, "SOL-USDT", entry="123.021", qty="1362.07", entry_id=SOL_ENTRY,
+        stop_id=SOL_STOP, take_id=SOL_TAKE, fee="83.781520",
+        opened_at=datetime(2026, 9, 27, 14, 15, 30, 300000, tzinfo=UTC),
+    )
+    session.add(ExecutionOrder(
+        user_id=user.id, trade_id=sol.id, exchange_order_id=early, symbol="SOL-USDT",
+        side=OrderSide.SELL, position_side=TradeSide.LONG, order_type=OrderType.STOP_MARKET,
+        role=OrderRole.STOP_LOSS, status=OrderStatus.SUBMITTED,
+    ))
+    await session.commit()
+    demo.positions = [p for p in demo.positions if p["symbol"] != "SOL-USDT"]
+    demo.fail_open_orders = True
+
+    await _run_reconciler(settings, db, FakeBot())
+
+    async with db.session() as s:
+        rows = list(await s.scalars(select(ExecutionOrder).where(
+            ExecutionOrder.trade_id == sol.id, ExecutionOrder.role == OrderRole.STOP_LOSS,
+        )))
+    by_oid = {r.exchange_order_id: r.status for r in rows}
+    assert by_oid == {SOL_STOP: OrderStatus.FILLED, early: OrderStatus.SUBMITTED}

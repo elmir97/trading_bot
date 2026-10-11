@@ -279,6 +279,9 @@ class ReconciliationKind(StrEnum):
     CLOSED_STOP_LOSS = "CLOSED_STOP_LOSS"
     CLOSED_TAKE_PROFIT = "CLOSED_TAKE_PROFIT"
     CLOSED_OUTSIDE_BOT = "CLOSED_OUTSIDE_BOT"
+    # Деплой 4, 4.5: закрывающий маркет бота (кнопка «Закрыть» этапа 4),
+    # выход которого записала сверка, а не само действие.
+    CLOSED_BY_BOT = "CLOSED_BY_BOT"
     PARTIAL_CLOSE = "PARTIAL_CLOSE"
     ENTRY_CONFIRMED = "ENTRY_CONFIRMED"
     ENTRY_NOT_PLACED = "ENTRY_NOT_PLACED"

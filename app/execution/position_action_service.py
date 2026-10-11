@@ -90,6 +90,7 @@ from app.trading.enums import (
     PositionActionStatus,
     TradeSide,
 )
+from app.trading.exit_reasons import EXIT_BOT_CLOSE, EXIT_BOT_PARTIAL
 from app.trading.journal import JournalError, TradeJournal
 
 logger = get_logger(__name__)
@@ -99,8 +100,8 @@ _CLOSING_SIDE = {TradeSide.LONG: OrderSide.SELL, TradeSide.SHORT: OrderSide.BUY}
 # Кэш режима позиций — на процесс, как у входа (app/services/position_mode.py).
 _position_mode_cache = TTLCache()
 
-EXIT_REASON_PARTIAL = "Частично закрыто через бота"
-EXIT_REASON_FULL = "Закрыто через бота"
+EXIT_REASON_PARTIAL = EXIT_BOT_PARTIAL
+EXIT_REASON_FULL = EXIT_BOT_CLOSE
 
 
 @dataclass(frozen=True, slots=True)

@@ -30,6 +30,7 @@ from decimal import Decimal
 from app.exchanges.base import HistoryOrder, OpenOrder, OrderFill, Position
 from app.trading.enums import ReconciliationKind, TradeSide
 from app.trading.exit_reasons import (
+    EXIT_BOT_CLOSE,
     EXIT_MANUAL_STOP,
     EXIT_MANUAL_TAKE,
     EXIT_OUTSIDE_BOT,
@@ -75,6 +76,13 @@ class BotTradeSnapshot:
     opened_at: datetime
     stop_order_id: str | None
     take_order_id: str | None
+    # Деплой 4, 4.5: все orderId стопов/тейков сделки (перенос этапом 4 ставит
+    # новый — старый снят; сработать мог любой из них) и её закрывающих
+    # маркетов (строки CLOSE: кнопка «Закрыть»). Без них перенесённый стоп —
+    # «изменённый вручную» (строка 75, 02.10), кнопка — «вне бота» (#29, 11.10).
+    stop_order_ids: frozenset[str] = frozenset()
+    take_order_ids: frozenset[str] = frozenset()
+    close_order_ids: frozenset[str] = frozenset()
     # orderId биржи, уже записанные исполнениями этой сделки (вход, выходы).
     recorded_order_ids: frozenset[str] = frozenset()
     # Этап 3: у импортированной/ручной сделки исполнения записаны с id из
@@ -133,10 +141,14 @@ def _classify_exit(
     trade: BotTradeSnapshot, order: HistoryOrder
 ) -> tuple[str, ReconciliationKind] | None:
     linked = {order.order_id, order.trigger_order_id}
-    if trade.stop_order_id is not None and trade.stop_order_id in linked:
+    stops = trade.stop_order_ids | ({trade.stop_order_id} if trade.stop_order_id else set())
+    takes = trade.take_order_ids | ({trade.take_order_id} if trade.take_order_id else set())
+    if stops & linked:
         return EXIT_STOP_LOSS, ReconciliationKind.CLOSED_STOP_LOSS
-    if trade.take_order_id is not None and trade.take_order_id in linked:
+    if takes & linked:
         return EXIT_TAKE_PROFIT, ReconciliationKind.CLOSED_TAKE_PROFIT
+    if order.order_id in trade.close_order_ids:
+        return EXIT_BOT_CLOSE, ReconciliationKind.CLOSED_BY_BOT
     # Сработал не наш условник (дочерний ордер: triggerOrderId — чужой
     # родитель, reduceOnly). Символ, positionSide, сторона закрытия, FILLED и
     # «после входа» уже отобраны в decide_trade; объём сверяется там же.

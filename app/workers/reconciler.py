@@ -138,6 +138,8 @@ _CLOSE_TEXT = {
     ReconciliationKind.CLOSED_TAKE_PROFIT: "🎯 {symbol} {side} закрыта по тейку на бирже",
     # 29.09: ℹ️, а не ⚠️ — закрытие вне бота владельцем штатно, тревоги нет.
     ReconciliationKind.CLOSED_OUTSIDE_BOT: "ℹ️ {symbol} {side} закрыта на бирже вне бота",
+    # Деплой 4, 4.5: выход кнопки «Закрыть» — записан сверкой.
+    ReconciliationKind.CLOSED_BY_BOT: "✅ {symbol} {side} закрыта кнопкой в боте",
     ReconciliationKind.PARTIAL_CLOSE: "⚠️ {symbol} {side} частично закрыта на бирже",
 }
 
@@ -528,6 +530,9 @@ class Reconciler:
             conditionals = []
         stop_row = next((c for c in conditionals if c.role is OrderRole.STOP_LOSS), None)
         take_row = next((c for c in conditionals if c.role is OrderRole.TAKE_PROFIT), None)
+        # 4.5: свои ордера сделки по trade_id — и у импортированной (действия
+        # этапа 4 пишут строки с trade_id сделки).
+        own = await repo.orders_for_trade(ctx.user_id, trade.id)
         snapshot = BotTradeSnapshot(
             trade_id=trade.id,
             symbol=trade.symbol,
@@ -536,6 +541,18 @@ class Reconciler:
             opened_at=trade.opened_at,
             stop_order_id=stop_row.exchange_order_id if stop_row else None,
             take_order_id=take_row.exchange_order_id if take_row else None,
+            stop_order_ids=frozenset(
+                r.exchange_order_id for r in own if r.role is OrderRole.STOP_LOSS
+                and r.exchange_order_id
+            ),
+            take_order_ids=frozenset(
+                r.exchange_order_id for r in own if r.role is OrderRole.TAKE_PROFIT
+                and r.exchange_order_id
+            ),
+            close_order_ids=frozenset(
+                r.exchange_order_id for r in own if r.role is OrderRole.CLOSE
+                and r.exchange_order_id
+            ),
             recorded_order_ids=frozenset(
                 f.external_fill_id for f in trade.fills if f.external_fill_id
             ),
@@ -718,13 +735,22 @@ class Reconciler:
         (выход истории узнан по его orderId — снимок сделки); остальные строки
         сделки (все, не только последние) — по истории и openOrders. Нет
         openOrders — строки ждут обхода закрытых сделок следующим циклом."""
-        fired_kinds = {e.kind for e in exits}
-        for role, kind in (
-            (OrderRole.STOP_LOSS, ReconciliationKind.CLOSED_STOP_LOSS),
-            (OrderRole.TAKE_PROFIT, ReconciliationKind.CLOSED_TAKE_PROFIT),
-        ):
-            row = next((c for c in conditionals if c.role is role), None)
-            if row is not None and kind in fired_kinds and settleable(row):
+        # Деплой 4, 4.5: сработавший — строка, чей ордер FILLED по истории (и по
+        # дочернему, triggerOrderId), а не первая строка роли: у сделки их
+        # несколько (вложенный → closePosition, перенос этапом 4). Сразу, до
+        # openOrders: без них остальные строки ждут цикла, сработавший — нет.
+        fired_kinds = {
+            ReconciliationKind.CLOSED_STOP_LOSS: OrderRole.STOP_LOSS,
+            ReconciliationKind.CLOSED_TAKE_PROFIT: OrderRole.TAKE_PROFIT,
+        }
+        fired_roles = {fired_kinds[e.kind] for e in exits if e.kind in fired_kinds}
+        facts = history_facts(history)
+        for row in conditionals:
+            if (
+                row.role in fired_roles and row.exchange_order_id is not None
+                and facts.get(row.exchange_order_id) is OrderStatus.FILLED
+                and settleable(row)
+            ):
                 row.status = OrderStatus.FILLED
                 row.cancel_source = None
         by_id = {r.id: r for r in conditionals}

@@ -93,6 +93,19 @@ class ExecutionOrderRepository:
         )
         return list(await self.session.scalars(stmt))
 
+    async def orders_for_trade(self, user_id: int, trade_id: int) -> list[ExecutionOrder]:
+        """Деплой 4, 4.5: стопы, тейки и закрывающие маркеты сделки с orderId
+        биржи — по ним сверка узнаёт выходы бота (в т.ч. действий этапа 4)."""
+        stmt = select(ExecutionOrder).where(
+            ExecutionOrder.user_id == user_id,
+            ExecutionOrder.trade_id == trade_id,
+            ExecutionOrder.role.in_(
+                (OrderRole.STOP_LOSS, OrderRole.TAKE_PROFIT, OrderRole.CLOSE)
+            ),
+            ExecutionOrder.exchange_order_id.is_not(None),
+        )
+        return list(await self.session.scalars(stmt))
+
     async def conditionals_for_trade(self, user_id: int, trade_id: int) -> list[ExecutionOrder]:
         """05.10.2026: стоп и тейк сделки, открытой из бота (TradeSource.BOT), —
         orderId условников, по которым reconciler узнаёт выход по стопу/тейку.

@@ -84,6 +84,7 @@ _RECONCILER_LABELS = {
     ReconciliationKind.CLOSED_STOP_LOSS: "закрыто по стопу",
     ReconciliationKind.CLOSED_TAKE_PROFIT: "по тейку",
     ReconciliationKind.CLOSED_OUTSIDE_BOT: "вне бота",
+    ReconciliationKind.CLOSED_BY_BOT: "через бота",
     ReconciliationKind.PARTIAL_CLOSE: "частично",
     ReconciliationKind.ENTRY_CONFIRMED: "вход найден",
     ReconciliationKind.ENTRY_NOT_PLACED: "вход не выставлен",

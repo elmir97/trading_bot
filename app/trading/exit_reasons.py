@@ -15,7 +15,12 @@ EXIT_OUTSIDE_BOT = "Закрыта на бирже вне бота"
 # стоп перенесён в безубыток). Стоп/тейк — по типу ордера, не по знаку PnL.
 EXIT_MANUAL_STOP = "Стоп, изменённый вручную — закрыто вне бота"
 EXIT_MANUAL_TAKE = "Тейк, изменённый вручную — закрыто вне бота"
+# Маркет кнопки «Закрыть» (этап 4): пишет само действие; с деплоя 4 (4.5) — и
+# сверка, если выход не записался сразу (узнаёт по строке CLOSE сделки).
+EXIT_BOT_CLOSE = "Закрыто через бота"
+EXIT_BOT_PARTIAL = "Частично закрыто через бота"
 
 BOT_EXIT_REASONS = frozenset({
     EXIT_STOP_LOSS, EXIT_TAKE_PROFIT, EXIT_OUTSIDE_BOT, EXIT_MANUAL_STOP, EXIT_MANUAL_TAKE,
+    EXIT_BOT_CLOSE, EXIT_BOT_PARTIAL,
 })

@@ -442,3 +442,60 @@ def test_lock_trailing_stop_is_not_protection() -> None:
         _link_trade(), _link_position(), [_open_stop("TRAILING_STOP_MARKET")]
     )
     assert found is not None and found.kind is ReconciliationKind.STOP_MISSING
+
+
+# --- деплой 4, 4.5: сверка узнаёт ордера этапа 4 --------------------------------------------
+
+BOT_CLOSE_REASON = "Закрыто через бота"   # строкой: как EXIT_BOT_CLOSE в exit_reasons
+
+
+def test_moved_stop_fired_is_stop_loss_not_manual() -> None:
+    """Стоп перенесён кнопкой (новый orderId, строка с trade_id сделки), сработал
+    новый — «по стопу», не «изменённый вручную» (строка 75, 02.10)."""
+    child = replace(_stop_child(), trigger_order_id="MOVED-STOP")
+    trade = _sol_trade(stop_order_ids=frozenset({SOL_STOP, "MOVED-STOP"}))
+    decision = decide_trade(trade, None, [child])
+    assert [(e.reason, e.kind) for e in decision.exits] == [
+        (EXIT_STOP_LOSS, ReconciliationKind.CLOSED_STOP_LOSS),
+    ]
+
+
+def test_moved_take_fired_is_take_profit() -> None:
+    child = replace(_stop_child(), order_type="TAKE_PROFIT_MARKET", trigger_order_id="MOVED-TAKE")
+    trade = _sol_trade(take_order_ids=frozenset({"MOVED-TAKE"}))
+    decision = decide_trade(trade, None, [child])
+    assert [(e.reason, e.kind) for e in decision.exits] == [
+        (EXIT_TAKE_PROFIT, ReconciliationKind.CLOSED_TAKE_PROFIT),
+    ]
+
+
+def test_bot_close_button_market_is_closed_by_bot() -> None:
+    """#29 (11.10): маркет «Закрыть всё» — строка CLOSE сделки с этим orderId."""
+    market = replace(_stop_child(), order_type="MARKET", trigger_order_id=None, order_id="C37")
+    trade = _sol_trade(close_order_ids=frozenset({"C37"}))
+    decision = decide_trade(trade, None, [market])
+    assert [(e.reason, e.kind) for e in decision.exits] == [
+        (BOT_CLOSE_REASON, ReconciliationKind.CLOSED_BY_BOT),
+    ]
+
+
+def test_manual_market_not_in_bot_ids_still_outside_bot() -> None:
+    market = replace(_stop_child(), order_type="MARKET", trigger_order_id=None, order_id="M1")
+    trade = _sol_trade(close_order_ids=frozenset({"C37"}), stop_order_ids=frozenset({"S2"}))
+    decision = decide_trade(trade, None, [market])
+    assert [e.kind for e in decision.exits] == [ReconciliationKind.CLOSED_OUTSIDE_BOT]
+
+
+def test_partial_bot_close_keeps_reason() -> None:
+    part = replace(
+        _stop_child(), order_type="MARKET", trigger_order_id=None, order_id="C38",
+        executed_qty=D("362.07"),
+    )
+    remaining = Position(
+        symbol="SOL-USDT", side=TradeSide.LONG, quantity=D("1000"), entry_price=D("123.021"),
+        mark_price=D("122"), leverage=10, unrealized_pnl=D("0"),
+    )
+    decision = decide_trade(_sol_trade(close_order_ids=frozenset({"C38"})), remaining, [part])
+    assert [(e.reason, e.kind) for e in decision.exits] == [
+        (BOT_CLOSE_REASON, ReconciliationKind.PARTIAL_CLOSE),
+    ]
