@@ -71,7 +71,7 @@ from app.execution.position_view import (
     link_trade,
     protective_orders,
 )
-from app.execution.readback_log import readback_failure
+from app.execution.readback_log import post_answer_fields, readback_failure
 from app.execution.settle import CONDITIONAL_ROLES, OPEN_STATUSES, conditional_rows, settle
 from app.market.cache import TTLCache
 from app.market.data import MarketDataService
@@ -735,12 +735,24 @@ class PositionActionService:
                     if unknown else f"❌ Биржа не приняла закрытие: {exc}"
                 ),
             )
-        row.status = OrderStatus.SUBMITTED
+        # Деплой 4, 4.2: маркет, POST вернул FILLED — исполнен целиком, это
+        # и есть подтверждение (11.10, #37: чтение по cid в первые ~2 с после
+        # исполнения не дало FILLED, позиция при этом закрылась). Цена и
+        # комиссия — дочиткой; не вышло — price NULL = «не дочитано», добор и
+        # выход в журнал — reconciler.
+        post_filled = placed.status == "FILLED"
+        row.status = OrderStatus.FILLED if post_filled else OrderStatus.SUBMITTED
         row.exchange_order_id = str(placed.order_id) or None
         await self._session.commit()
+        if post_filled:
+            logger.info(
+                "Закрытие исполнено по ответу POST",
+                extra={"user_id": self._user.id, "action_id": action.id, "symbol": action.symbol,
+                       **post_answer_fields(placed.raw)},
+            )
 
         fill = await self._read_close(client, action, cid)
-        if fill is None:
+        if fill is None and not post_filled:
             row.status = OrderStatus.UNKNOWN
             return await self._finish(
                 action, PositionActionStatus.FAILED,
@@ -750,21 +762,30 @@ class PositionActionService:
                     "Повторно не отправляю."
                 ),
             )
-        row.status = OrderStatus.FILLED
-        row.exchange_order_id = str(fill.order_id)
-        row.price = fill.avg_price
-        row.quantity = fill.executed_qty
-        await self._session.commit()
-
         full = action.kind is PositionActionKind.CLOSE_FULL
-        if trade is not None:
-            await self._journal_exit(trade.id, fill, full)
-        text = (
-            f"✅ Закрыто {fmt_qty(fill.executed_qty, qp)} по {fmt_price(fill.avg_price, pp)} · "
-            f"комиссия {fmt_amount(fill.fee)} USDT."
-        )
+        if fill is None:
+            row.price = None
+            await self._session.commit()
+            closed_qty = plan.close_qty
+            text = (
+                f"✅ Закрыто {fmt_qty(closed_qty, qp)} — цена выхода биржа ещё не отдала, "
+                "итог в журнале следом."
+            )
+        else:
+            row.status = OrderStatus.FILLED
+            row.exchange_order_id = str(fill.order_id)
+            row.price = fill.avg_price
+            row.quantity = fill.executed_qty
+            await self._session.commit()
+            closed_qty = fill.executed_qty
+            if trade is not None:
+                await self._journal_exit(trade.id, fill, full)
+            text = (
+                f"✅ Закрыто {fmt_qty(fill.executed_qty, qp)} по {fmt_price(fill.avg_price, pp)} · "
+                f"комиссия {fmt_amount(fill.fee)} USDT."
+            )
         if not full:
-            rest = p.quantity - fill.executed_qty
+            rest = p.quantity - closed_qty
             text += "\n" + levels_after_partial(inputs.stops, inputs.takes, rest, qp) + "."
             return await self._finish(action, PositionActionStatus.DONE, text=text)
         leftovers = [

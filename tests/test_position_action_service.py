@@ -113,6 +113,9 @@ class FakeExchange:
         self.fills: dict[str, OrderFill] = {}
         # Деплой 4: ошибки чтения по cid — по одной на вызов, пока не кончатся.
         self.fill_errors: list[Exception] = []
+        # Деплой 4, 4.2: статус и поля ответа на POST маркета.
+        self.post_status = "FILLED"
+        self.post_raw: dict[str, object] = {}
 
     def names(self) -> list[str]:
         return [c[0] for c in self.calls]
@@ -179,7 +182,7 @@ class FakeExchange:
             D("0.0234"), {}, NOW,
         )
         return OrderResult(oid, kw["client_order_id"], kw["symbol"], kw["side"].value,
-                           kw["position_side"], "MARKET", "FILLED", {})
+                           kw["position_side"], "MARKET", self.post_status, self.post_raw)
 
     async def get_order_fill(self, symbol, client_order_id, *, max_retries=None) -> OrderFill:  # type: ignore[no-untyped-def]
         self.calls.append(("fill", client_order_id))
@@ -675,3 +678,84 @@ async def test_close_readback_second_try_logs_one_attempt(ctx, caplog) -> None: 
     tries = [r for r in caplog.records if r.getMessage() == "Закрытие не подтверждено по cid"]
     assert [(r.attempt, r.field) for r in tries] == [(1, "commission")]  # type: ignore[attr-defined]
     assert not any(r.getMessage().startswith("Закрытие не подтверждено за") for r in caplog.records)
+
+
+# --- деплой 4, 4.2: POST маркета вернул FILLED — закрытие исполнено ------------------------
+
+def _read_down(c, n: int = 3) -> None:  # type: ignore[no-untyped-def]
+    c.exchange.fill_errors = [ExchangeUnavailableError("BingX не ответил вовремя")] * n
+
+
+async def _imported_trade(c) -> Trade:  # type: ignore[no-untyped-def]
+    trade = await TradeJournal(TradeRepository(c.session)).open_trade(
+        user_id=c.uid, symbol="XRP-USDT", side=TradeSide.LONG, entry_price=ENTRY,
+        quantity=D(30), stop_loss=D("1.4795"), source=TradeSource.IMPORTED,
+        account_mode=ExchangeKeyMode.DEMO,
+        external_position_id=PID, external_fill_id="f1", fee=D("0.0229"),
+    )
+    await c.session.commit()
+    return trade
+
+
+async def test_full_close_post_filled_read_down_is_done(ctx, caplog) -> None:  # type: ignore[no-untyped-def]
+    """#37 (11.10): позиция закрылась, чтение по cid не подтвердило. Теперь —
+    DONE, строка FILLED с price NULL («не дочитано»), выход в журнал не
+    пишется (его допишет reconciler), остатки на бирже разобраны как обычно.
+    В лог — имена полей ответа POST и updateTime, apiKey — только именем."""
+    trade = await _imported_trade(ctx)
+    ctx.exchange.post_raw = {"status": "FILLED", "updateTime": 1760212871343, "apiKey": SECRET}
+    _read_down(ctx)
+    card = await _card(ctx, PositionActionKind.CLOSE_FULL, {})
+    with caplog.at_level("INFO"):
+        result = await ctx.service().confirm(card.action.id, message_id=55, risk_confirmed=False)
+    assert result.text.startswith(
+        "✅ Закрыто 30 — цена выхода биржа ещё не отдала, итог в журнале следом."
+    )
+    assert "Стоп и тейк биржа сняла сама" in result.text
+    await ctx.session.refresh(card.action)
+    assert card.action.status is PositionActionStatus.DONE and card.action.error_code is None
+    [row] = [r for r in await _rows(ctx, card.action.id) if r.role is OrderRole.CLOSE]
+    assert row.status is OrderStatus.FILLED and row.price is None and row.quantity == D(30)
+    assert row.exchange_order_id
+    fresh = await ctx.session.scalar(select(Trade).where(Trade.id == trade.id))
+    assert fresh.is_open                      # выход — за reconciler
+    [rec] = [r for r in caplog.records if r.getMessage() == "Закрытие исполнено по ответу POST"]
+    assert rec.post_fields == ["apiKey", "status", "updateTime"]  # type: ignore[attr-defined]
+    assert rec.post_updateTime == "1760212871343"  # type: ignore[attr-defined]
+    assert SECRET not in str([r.__dict__ for r in caplog.records])
+
+
+async def test_partial_close_post_filled_read_down_rest_from_sent(ctx) -> None:  # type: ignore[no-untyped-def]
+    await _imported_trade(ctx)
+    _read_down(ctx)
+    card = await _card(ctx, PositionActionKind.CLOSE_PARTIAL, {"fraction": "25"})
+    result = await ctx.service().confirm(card.action.id, message_id=55, risk_confirmed=False)
+    assert result.text.startswith("✅ Закрыто 7 — цена выхода биржа ещё не отдала")
+    assert "Остаток 23" in result.text
+    await ctx.session.refresh(card.action)
+    assert card.action.status is PositionActionStatus.DONE
+
+
+async def test_close_post_not_filled_read_down_stays_unconfirmed(ctx) -> None:  # type: ignore[no-untyped-def]
+    """POST без FILLED — прежний путь: «⚠️ не подтверждено», строка UNKNOWN."""
+    ctx.exchange.post_status = "NEW"
+    _read_down(ctx)
+    card = await _card(ctx, PositionActionKind.CLOSE_FULL, {})
+    result = await ctx.service().confirm(card.action.id, message_id=55, risk_confirmed=False)
+    assert result.text.startswith("⚠️ Исполнение не подтверждено")
+    await ctx.session.refresh(card.action)
+    assert card.action.status is PositionActionStatus.FAILED
+    [row] = [r for r in await _rows(ctx, card.action.id) if r.role is OrderRole.CLOSE]
+    assert row.status is OrderStatus.UNKNOWN
+
+
+async def test_close_post_filled_read_ok_journals_exit(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Норма: POST FILLED и чтение прошло — цена и выход в журнале сразу."""
+    trade = await _imported_trade(ctx)
+    card = await _card(ctx, PositionActionKind.CLOSE_FULL, {})
+    result = await ctx.service().confirm(card.action.id, message_id=55, risk_confirmed=False)
+    assert result.text.startswith("✅ Закрыто 30 по 1.56")
+    [row] = [r for r in await _rows(ctx, card.action.id) if r.role is OrderRole.CLOSE]
+    assert row.status is OrderStatus.FILLED and row.price == D("1.5600")
+    fresh = await ctx.session.scalar(select(Trade).where(Trade.id == trade.id))
+    assert not fresh.is_open

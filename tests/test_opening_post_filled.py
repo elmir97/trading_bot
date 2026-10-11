@@ -109,6 +109,27 @@ async def test_entry_read_ok_goes_straight_to_done(ctx) -> None:  # type: ignore
     assert not [n for n, _ in before_stop if n == "order_fill"]
 
 
+async def test_post_answer_fields_logged(ctx, caplog) -> None:  # type: ignore[no-untyped-def]
+    """Деплой 4, 4.2: форма ответа POST маркета живьём не снята — в лог имена
+    полей и updateTime (значения — только по списку)."""
+    original = ctx.exchange.place_market_order
+
+    async def place_market_order(**kw: Any):  # type: ignore[no-untyped-def]
+        result = await original(**kw)
+        return replace(result, raw={"status": "FILLED", "updateTime": 1760212304176,
+                                    "apiKey": "секрет-эхо"})
+
+    ctx.exchange.place_market_order = place_market_order
+    opening = await _card(ctx)
+    with caplog.at_level("INFO"):
+        await ctx.service().confirm(opening.id, accept_warnings=False)
+    [rec] = [r for r in caplog.records
+             if r.getMessage().startswith("Вход исполнен по ответу POST")]
+    assert rec.post_fields == ["apiKey", "status", "updateTime"]  # type: ignore[attr-defined]
+    assert rec.post_updateTime == "1760212304176"  # type: ignore[attr-defined]
+    assert "секрет-эхо" not in str([r.__dict__ for r in caplog.records])
+
+
 async def test_position_visible_on_second_read(ctx) -> None:  # type: ignore[no-untyped-def]
     """Позиция не видна в первом чтении после POST — не «позиции нет»: повтор
     находит её, стоп ставится."""

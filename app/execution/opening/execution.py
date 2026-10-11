@@ -66,7 +66,7 @@ from app.exchanges.base import (
     Position,
     TpSlSpec,
 )
-from app.execution.readback_log import readback_failure
+from app.execution.readback_log import post_answer_fields, readback_failure
 from app.execution.settle import conditional_rows, settle
 from app.trading.calculations import CalculationError
 from app.trading.enums import (
@@ -316,10 +316,12 @@ class Runner:
             await self.session.commit()
             return EntryResult(OpeningStatus.WORKING)
         if not is_limit and result.status == "FILLED":
-            await self._filled_by_post(quantity, result.order_id)
+            await self._filled_by_post(quantity, result.order_id, result.raw)
         return EntryResult(OpeningStatus.FILLED)
 
-    async def _filled_by_post(self, quantity: Decimal, order_id: str) -> None:
+    async def _filled_by_post(
+        self, quantity: Decimal, order_id: str, raw: dict[str, object]
+    ) -> None:
         """Маркет, POST вернул FILLED (деплой 3, фикс 2): защита сразу, без
         подтверждения по cid — на Т3 10.10 оно не приходило 38 с. FILLED у
         маркета — исполнен целиком: объём = отправленный. Цена и комиссия
@@ -335,7 +337,8 @@ class Runner:
             entry_order_id=order_id or None, filled_qty=quantity, filled_at=datetime.now(UTC),
         )
         logger.info(
-            "Вход исполнен по ответу POST — защита сразу, цена входа позже", extra=self._log()
+            "Вход исполнен по ответу POST — защита сразу, цена входа позже",
+            extra={**self._log(), **post_answer_fields(raw)},
         )
 
     async def ensure_entry_fill(self) -> bool:

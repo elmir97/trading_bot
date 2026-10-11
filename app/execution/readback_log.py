@@ -31,3 +31,18 @@ def readback_failure(
         extra["status"] = fill.status
         extra["executed_qty"] = str(fill.executed_qty)
     return extra
+
+
+# Значения из ответа POST, которые можно печатать: остальные поля — только
+# именами (форма ответа на POST маркета живьём не снята; ищем updateTime).
+_POST_VALUES = ("status", "updateTime", "avgPrice", "executedQty", "commission")
+
+
+def post_answer_fields(raw: dict[str, object]) -> dict[str, Any]:
+    """Деплой 4, 4.2: какие поля пришли в ответе POST маркета — имена всех,
+    значения только из _POST_VALUES."""
+    extra: dict[str, Any] = {"post_fields": sorted(str(k) for k in raw)}
+    for key in _POST_VALUES:
+        if key in raw:
+            extra[f"post_{key}"] = str(raw[key])
+    return extra
