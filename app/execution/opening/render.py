@@ -8,7 +8,8 @@ from decimal import ROUND_DOWN, Decimal
 
 from app.core.numfmt import fmt_amount, fmt_pct, fmt_price, fmt_qty, fmt_rr
 from app.exchanges.base import MarginType
-from app.execution.opening.calc import Issue, Level, OpeningCalc, OpeningInputs
+from app.execution.opening.calc import Issue, Level, OpeningCalc, OpeningInputs, RoundedLevel
+from app.execution.price_step import price_step
 from app.trading.enums import EntryType, ExchangeKeyMode
 
 HUNDRED = Decimal(100)
@@ -43,6 +44,7 @@ def render_card(
     quantity_precision: int,
     dry_run: bool,
     ttl_seconds: int,
+    rounded: tuple[RoundedLevel, ...] = (),
 ) -> str:
     p = price_precision
     side = inputs.side
@@ -68,6 +70,11 @@ def render_card(
     else:
         levels += " · без тейка"
     lines = [head, entry_line, levels]
+    if rounded:
+        changes = ", ".join(
+            f"{r.label} {format(r.before, 'f')} → {fmt_price(r.after, p)}" for r in rounded
+        )
+        lines.append(f"ℹ️ Округлено к шагу цены {fmt_price(price_step(p), p)}: {changes}")
     if calc.fills_immediately:
         lines.append("ℹ️ Лимит не хуже текущей цены — исполнится сразу, как рыночный.")
     if calc.quantity > 0:

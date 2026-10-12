@@ -43,7 +43,9 @@ from app.execution.opening.calc import (
     MarketSnapshot,
     OpeningCalc,
     OpeningInputs,
+    RoundedLevel,
     compute,
+    round_inputs,
 )
 from app.execution.opening.execution import (
     CLOSING_SIDE,
@@ -96,6 +98,8 @@ class CardOutcome:
     issues: tuple[Issue, ...]
     refusal: ExecutionRefusal | None = None
     market: MarketSnapshot | None = None
+    # Уровни, сдвинутые к шагу цены (A.4): «было → стало» — карточка и Mini App.
+    rounded: tuple[RoundedLevel, ...] = ()
 
     @property
     def can_open(self) -> bool:
@@ -384,21 +388,33 @@ class OpeningService:
             )
             return CardOutcome(render_refusal(refusal.message), opening, None, (), refusal)
 
-        calc, issues = await self.evaluate(inputs, market)
         info = market.symbol_info
+        # A.4: к шагу цены ДО расчёта — объём, риск и RR от того, что уйдёт на
+        # биржу; в trade_openings — округлённое (confirm берёт уровни оттуда).
+        inputs, rounded = round_inputs(inputs, info)
+        if rounded:
+            logger.info(
+                "Уровни открытия округлены к шагу цены",
+                extra={
+                    "user_id": self._user.id, "symbol": inputs.symbol,
+                    "side": inputs.side.value, "persist": persist,
+                    "levels": [f"{r.field} {r.before} -> {r.after}" for r in rounded],
+                },
+            )
+        calc, issues = await self.evaluate(inputs, market)
         calc_view = _with_issues(calc, issues)
         text = render_card(
             inputs, calc_view, account_mode=self.account_mode, equity=market.equity,
             available=market.available, margin_type=market.desired_margin_type,
             price_precision=info.price_precision, quantity_precision=info.quantity_precision,
             dry_run=self._settings.exec_open_dry_run,
-            ttl_seconds=self._settings.exec_open_card_ttl_seconds,
+            ttl_seconds=self._settings.exec_open_card_ttl_seconds, rounded=rounded,
         )
         opening = (
             await self._store(inputs, source, market, calc, issues, None, chat_id, message_id)
             if persist else None
         )
-        return CardOutcome(text, opening, calc_view, issues, None, market)
+        return CardOutcome(text, opening, calc_view, issues, None, market, rounded)
 
     async def _store(
         self,

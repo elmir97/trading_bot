@@ -246,6 +246,69 @@ async def test_limit_card(ctx) -> None:  # type: ignore[no-untyped-def]
     assert "Лимит 1.48 · срок 4 ч" in outcome.text
 
 
+# --- A.4: шаг цены --------------------------------------------------------------------
+
+# Те же уровни, что INPUTS, но с лишним знаком: LONG — вниз к 1.4501 / 1.5399.
+OFF_STEP = replace(INPUTS, stop_loss=D("1.45016"), take_profit=D("1.53997"))
+
+
+async def test_card_rounds_levels_before_calc(ctx) -> None:  # type: ignore[no-untyped-def]
+    outcome = await ctx.service().prepare(OFF_STEP, source=OpeningSource.WIZARD)
+    row = outcome.opening
+    assert row is not None and row.status is OpeningStatus.CARD
+    # в базу — то, что уйдёт на биржу; confirm берёт уровни отсюда
+    assert (row.stop_loss, row.take_profit) == (D("1.4501"), D("1.5399"))
+    # объём и риск — от округлённого стопа (= эталон test_card_row_snapshot)
+    assert row.quantity == D(323)
+    assert row.risk_usd is not None and row.risk_usd.quantize(D("0.01")) == D("14.98")
+    assert [(r.field, r.before, r.after) for r in outcome.rounded] == [
+        ("stop_loss", D("1.45016"), D("1.4501")),
+        ("take_profit", D("1.53997"), D("1.5399")),
+    ]
+    assert (
+        "ℹ️ Округлено к шагу цены 0.0001: стоп 1.45016 → 1.4501, тейк 1.53997 → 1.5399"
+        in outcome.text
+    )
+
+
+async def test_preview_rounds_like_prepare(ctx) -> None:  # type: ignore[no-untyped-def]
+    preview = await ctx.service().preview(OFF_STEP)
+    prepared = await ctx.service().prepare(OFF_STEP, source=OpeningSource.MINIAPP)
+    assert preview.opening is None and preview.calc is not None and prepared.calc is not None
+    assert preview.rounded == prepared.rounded
+    assert preview.calc.quantity == prepared.calc.quantity == D(323)
+
+
+async def test_levels_on_step_no_note(ctx) -> None:  # type: ignore[no-untyped-def]
+    outcome = await ctx.service().prepare(INPUTS, source=OpeningSource.WIZARD)
+    assert outcome.rounded == ()
+    assert "Округлено" not in outcome.text
+
+
+async def test_rounding_can_block_take(ctx) -> None:  # type: ignore[no-untyped-def]
+    # Тейк LONG 1.49505 при last 1.4950: ближе — 1.4950, не выше цены входа → блок.
+    outcome = await ctx.service().prepare(
+        replace(INPUTS, take_profit=D("1.49505")), source=OpeningSource.WIZARD
+    )
+    assert outcome.opening is not None and outcome.opening.error_code == "TAKE_WRONG_SIDE"
+    assert outcome.opening.take_profit == D("1.4950")
+
+
+async def test_short_limit_card_rounds_up(ctx) -> None:  # type: ignore[no-untyped-def]
+    outcome = await ctx.service().prepare(
+        OpeningInputs(symbol="XRP-USDT", side=TradeSide.SHORT, entry_type=EntryType.LIMIT,
+                      limit_price=D("1.51003"), stop_loss=D("1.55004"),
+                      take_profit=D("1.45006"), risk_percent=D(1), leverage=10,
+                      expiry_minutes=240),
+        source=OpeningSource.WIZARD,
+    )
+    row = outcome.opening
+    assert row is not None
+    assert (row.limit_price, row.stop_loss, row.take_profit) == (
+        D("1.5101"), D("1.5501"), D("1.4501"),
+    )
+
+
 # --- схема M5 -----------------------------------------------------------------------
 
 
