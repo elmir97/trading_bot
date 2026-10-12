@@ -7,8 +7,12 @@
 **Решения владельца 12.10 (порядок: override → A.4 → A.5 + Mini App → B, B.9 первым):**
 - **Override:** dry run открытия НЕ возвращаем (на демо защищают `bingx_trading_mode=demo` + `exec_open_allow_live=False`);
   возврат dry run — шагом B.7 перед live. Из override убрать только мёртвую `EXEC_SYMBOL_WHITELIST` (строка 17 + комментарий
-  10–12; в `app/` не читается) — по «да», с «не жми кнопки» и пересозданием бота. Сейчас override отличается от копии
-  08.10 `override_pre_open_tests_20261008_094231.yml` только строкой `EXEC_OPEN_DRY_RUN: "false"`
+  9–12; в `app/` не читается). **Сделано 13:12 UTC** (владелец «ок», режим «Вручную», кнопки не жал): копия
+  `/opt/backups/override_pre_whitelist_20261012_131238.yml` (600), diff — ровно 5 строк, `compose config` ок; бот пересоздан
+  13:12:47 (образ тот же `c972f3664214`, restarts 0), «Start polling» 13:12:56, WARNING/ERROR/Traceback/Conflict 0; в
+  контейнере: `exec_dry_run`/`exec_open_dry_run` False, `exec_open_allow_live`/`exec_allow_live_mode_orders` False, demo,
+  `exec_open_fault` пуст, `EXEC_SYMBOL_WHITELIST` в env нет. Override теперь = копия 08.10 без whitelist + `EXEC_OPEN_DRY_RUN: "false"`.
+  Хвост: та же мёртвая строка в `.env.example:123` — убрать с ближайшим кодовым коммитом
 - **Mini App** (`docs/miniapp-plan.md` §5а): экран рынка по образцу Walt (бывший Wallet in Telegram; описание владельца),
   ввод сделки — одна форма со всеми полями и живым пересчётом, одна кнопка «Открыть» → подтверждение; модель — «Риск, $/%»,
   стоп обязателен, плечо → только маржа; график — Lightweight Charts из своей статики (без CDN), линии вход/стоп/тейк/
