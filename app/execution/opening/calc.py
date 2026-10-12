@@ -13,12 +13,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from enum import StrEnum
 
 from app.core.numfmt import fmt_amount, fmt_pct, fmt_price, fmt_qty
 from app.exchanges.base import MarginType, Position, SymbolInfo
+from app.execution.price_step import opening_level, price_step
 from app.trading.enums import EntryType, TradeSide
 
 ZERO = Decimal(0)
@@ -104,6 +105,46 @@ class OpeningCalc:
     @property
     def blocked(self) -> bool:
         return any(i.level is Level.BLOCK for i in self.issues)
+
+
+@dataclass(frozen=True, slots=True)
+class RoundedLevel:
+    """Уровень, сдвинутый к шагу цены: поле OpeningInputs, было, стало."""
+
+    field: str        # stop_loss | take_profit | limit_price
+    label: str        # «стоп» / «тейк» / «лимит» — для карточки
+    before: Decimal
+    after: Decimal
+
+
+def round_inputs(
+    inputs: OpeningInputs, info: SymbolInfo
+) -> tuple[OpeningInputs, tuple[RoundedLevel, ...]]:
+    """Стоп, тейк и лимит — к шагу цены по правилу app/execution/price_step
+    (LONG вниз, SHORT вверх). Объём потом считается уже от округлённых цен."""
+    step = price_step(info.price_precision)
+    rounded: list[RoundedLevel] = []
+
+    def level(name: str, label: str, value: Decimal | None) -> Decimal | None:
+        if value is None:
+            return None
+        after = opening_level(value, inputs.side, step)
+        if after != value:
+            rounded.append(RoundedLevel(name, label, value, after))
+        return after
+
+    is_limit = inputs.entry_type is EntryType.LIMIT
+    limit_price = (
+        level("limit_price", "лимит", inputs.limit_price) if is_limit else inputs.limit_price
+    )
+    stop_loss = level("stop_loss", "стоп", inputs.stop_loss)
+    take_profit = level("take_profit", "тейк", inputs.take_profit)
+    if not rounded:
+        return inputs, ()
+    assert stop_loss is not None
+    return replace(
+        inputs, limit_price=limit_price, stop_loss=stop_loss, take_profit=take_profit
+    ), tuple(rounded)
 
 
 def lot_step(info: SymbolInfo) -> Decimal:
