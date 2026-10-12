@@ -271,6 +271,14 @@ async def test_card_rounds_levels_before_calc(ctx) -> None:  # type: ignore[no-u
     )
 
 
+async def test_rounding_note_keeps_step_digits(ctx) -> None:  # type: ignore[no-untyped-def]
+    # 1.54002 → 1.5400: в строке «Округлено» все знаки шага, не «1.54».
+    outcome = await ctx.service().prepare(
+        replace(INPUTS, take_profit=D("1.54002")), source=OpeningSource.WIZARD
+    )
+    assert "ℹ️ Округлено к шагу цены 0.0001: тейк 1.54002 → 1.5400" in outcome.text
+
+
 async def test_preview_rounds_like_prepare(ctx) -> None:  # type: ignore[no-untyped-def]
     preview = await ctx.service().preview(OFF_STEP)
     prepared = await ctx.service().prepare(OFF_STEP, source=OpeningSource.MINIAPP)

@@ -71,10 +71,13 @@ def render_card(
         levels += " · без тейка"
     lines = [head, entry_line, levels]
     if rounded:
+        # Цена после округления — со всеми знаками шага (1.4400, не 1.44): видно,
+        # до какого знака округлили (владелец 12.10).
+        step = price_step(p)
         changes = ", ".join(
-            f"{r.label} {format(r.before, 'f')} → {fmt_price(r.after, p)}" for r in rounded
+            f"{r.label} {format(r.before, 'f')} → {r.after.quantize(step):f}" for r in rounded
         )
-        lines.append(f"ℹ️ Округлено к шагу цены {fmt_price(price_step(p), p)}: {changes}")
+        lines.append(f"ℹ️ Округлено к шагу цены {step:f}: {changes}")
     if calc.fills_immediately:
         lines.append("ℹ️ Лимит не хуже текущей цены — исполнится сразу, как рыночный.")
     if calc.quantity > 0:
