@@ -1,6 +1,6 @@
 # Mini App открытия сделки — план
 
-Статус: **план, без кода** (05.10.2026; дополнен 08.10 — §6а подготовка сервера, §9 подэтапы и место в очереди; 12.10 — §5а экраны «как в Walt», одна форма, Lightweight Charts). Mini App — основной интерфейс открытия сделки, чат-мастер —
+Статус: **подэтапы 0–2 в работе в ветке `miniapp`, без деплоя** (разбивка — §9а, «да» владельца 12.10). План — 05.10.2026; дополнен 08.10 — §6а подготовка сервера, §9 подэтапы и место в очереди; 12.10 — §5а экраны «как в Walt», одна форма, Lightweight Charts). Mini App — основной интерфейс открытия сделки, чат-мастер —
 запасной путь. Оба вызывают одно ядро (`docs/open-trade-plan.md`): расчёт, проверки, плечо/маржа, ордер,
 стоп/тейк, read-back, журнал. В Mini App своей торговой логики нет — только ввод, показ и вызов API.
 
@@ -394,6 +394,34 @@ Caddy 20–40 МБ. Итог available ≈ 880–950 МБ — выше поро�
 карточек в обе стороны (карточка Mini App снимает кнопки у карточки в чате через Bot API; карточка из чата
 делает карточку Mini App «устаревшей» на `confirm`); итог «✅ Открыто… стоп ✓ (на всю позицию)» в чат — общей
 функцией подэтапа 0.
+
+### 9а. Подэтапы 0–2 — разбивка на коммиты («да» владельца 12.10)
+
+Ветка `miniapp` от `0ca4ad8`, без деплоя и мержа; перед каждым подэтапом — rebase на master. Каждый коммит: полный
+pytest exit 0 / 0 skipped, smoke ×2, mypy, ruff (новых кодов нет кроме RUF001-003), мутации, push ветки.
+
+| Коммит | Файлы | Что |
+|---|---|---|
+| 0.1 | `app/market/contracts.py` | `search_contracts` из мастера (кэш передаётся), тесты порядка «точно → начало → вхождение» |
+| 0.2 | `app/bot/opening_result.py` | `position_keyboard`, `opening_keyboard`, `result_keyboard`, `closed_keyboard`, `strip_markup`, `send_opening_result` — одна отправка итога для цикла открытий и `api`; воркер не импортирует хендлеры |
+| 0.3 | `opening/service.py` | `plan_limits()` (риск и плечо по плану, белый список) вместо `_plan_risk`; предложение плеча уже в ядре (`suggested_leverage`, `max_leverage_for_stop`) |
+| 1.1 | `opening/calc.py`, `service.py` | ввод с `kind`: стоп/тейк ценой или %, риск $ или %; `resolve_inputs` после снимка рынка (% от входа: маркет — last, лимит — цена лимита), затем `round_inputs`; **$ → % риска — вниз до 4 знаков** (`risk_percent` — `Numeric(12,4)`, риск в $ не растёт) |
+| 1.2 | `exchanges/*`, `market/data.py` | `Ticker` + `open_price`/`price_change`/`price_change_percent`/`quote_volume` (необязательные; форма — фикстура 29.09); свечи `1m` (форма — один публичный GET) |
+| 1.3 | `app/api/{main,auth,schemas,routes}.py`, `config.py`, `requirements.txt` | каркас, initData §4, `/api/health`, `/api/me`; `miniapp_allowed_telegram_ids` (пусто → 403), `miniapp_init_data_ttl_seconds=3600` |
+| 1.4 | `app/api/routes.py` | `/api/symbols`, `/api/market/{symbol}?interval=`, `/candles` |
+| 1.5 | `app/api/routes.py`, `app/api/ratelimit.py` | preview/open/confirm/status/cancel/active, владение → 404, 429, аудит `ma_*`, вытеснение карточек в обе стороны, итог в чат |
+| 2.1 | `miniapp/vendor/` | Lightweight Charts (стабильная, старше 2 недель) + LICENSE/NOTICE, sha256 в тесте; `miniapp/` в `.dockerignore` |
+| 2.2 | `miniapp/{index.html,style.css,app.js,api.js,storage.js}`, `scripts/miniapp_dev.py` | каркас; тест статики (только свои файлы и telegram.org, без inline/`style=`/`on*=`/`eval`) |
+| 2.3 | `market.js`, `chart.js` | экран рынка |
+| 2.4 | `form.js`, `render.js` | форма, живой пересчёт (300 мс, последний побеждает) |
+| 2.5 | `confirm.js` | подтверждение, итог, опрос, восстановление полей |
+| П.1–П.2 | — | вкладка «Позиции» (только чтение) — отдельной парой коммитов после 2.5 (решение владельца 12.10) |
+
+**`scripts/miniapp_dev.py`** — локальный стенд фронта: `app.api` с подменённой авторизацией и фейковой биржей + `miniapp/` с
+заголовками CSP как у Caddy (проверка в Chrome: ноль нарушений CSP, три экрана). Страховка (владелец 12.10): слушает только
+`127.0.0.1`; отказ при признаках прода — `BOT_TOKEN` не тестовый (id бота не `0`), путь под `/opt/trading_bot`,
+`BINGX_TRADING_MODE` не `demo`; в образ не попадает (`.dockerignore`); тест на каждый отказ. Обход авторизации — только в нём,
+в `app/` его нет.
 
 Без миграции (`source='miniapp'` и `ma_confirm`/`ma_cancel` — уже в M5). Нужно от владельца: поддомен и A-запись
 (пришлёт отдельно); «да» на swap, на включение firewall/правку sshd (если понадобятся), на открытие 80/443, на
