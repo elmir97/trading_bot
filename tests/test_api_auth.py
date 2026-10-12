@@ -12,23 +12,23 @@ import sys
 import time
 from datetime import UTC, datetime
 from decimal import Decimal
-from types import SimpleNamespace
 from urllib.parse import parse_qsl, urlencode
 
 import pytest
-import pytest_asyncio
 from aiogram.utils.web_app import check_webapp_signature
 
 from app.api.auth import EXPIRED_TEXT, InitDataError, validate_init_data
-from app.api.deps import ApiState
 from app.core.config import Settings
-from app.database.repositories.strategy import MistakeTypeRepository, StrategyRepository
-from app.database.repositories.user import UserRepository
-from app.database.session import Database
 from app.exchanges.base import ExchangeUnavailableError
-from app.services.user_service import UserService
-from tests.api_helpers import TOKEN, FakeClient, FakeFactory, auth, client_for, init_data
-from tests.conftest import cleanup_user
+from tests.api_helpers import (  # noqa: F401 — api_fixture: фикстура «api»
+    TOKEN,
+    FakeClient,
+    FakeFactory,
+    api_fixture,
+    auth,
+    client_for,
+    init_data,
+)
 
 D = Decimal
 TTL = 3600
@@ -104,35 +104,6 @@ def test_settings_allowed_ids() -> None:
 # --- эндпоинты на настоящей БД ---------------------------------------------------------
 
 needs_db = pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="Нужен PostgreSQL")
-
-
-@pytest_asyncio.fixture
-async def api(unique_telegram_id):  # type: ignore[no-untyped-def]
-    tid = unique_telegram_id()
-    settings = Settings(  # type: ignore[call-arg]
-        bot_token=TOKEN, trading_execution_enabled=True, bingx_trading_mode="demo",
-        miniapp_allowed_telegram_ids=str(tid),
-    )
-    db = Database(settings)
-    async with db.session() as session:
-        user = await UserService(
-            UserRepository(session), StrategyRepository(session),
-            MistakeTypeRepository(session), settings,
-        ).get_or_create(telegram_id=tid)
-        await session.commit()
-        uid = user.id
-
-    def state(**kwargs):  # type: ignore[no-untyped-def]
-        s = settings.model_copy(update=kwargs.pop("settings", {}))
-        return ApiState(settings=s, db=db, redis=None, factory=kwargs.pop("factory", FakeFactory()))
-
-    yield SimpleNamespace(tid=tid, uid=uid, state=state, settings=settings)
-    async with db.session() as session:
-        fresh = await UserRepository(session).get_by_id(uid)
-        if fresh is not None:
-            await cleanup_user(session, fresh)
-        await session.commit()
-    await db.dispose()
 
 
 @needs_db
