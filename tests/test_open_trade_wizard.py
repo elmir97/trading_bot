@@ -10,15 +10,18 @@ import pytest
 
 from app.bot.handlers import open_trade
 from app.bot.handlers.open_trade import (
+    SEARCH_LIMIT,
     OpenCB,
     card_keyboard,
     result_keyboard,
-    search_contracts,
 )
 from app.bot.wizard_trail import _in_wizard
 from app.core.config import Settings
 from app.exchanges.base import SymbolInfo
 from app.execution.opening.service import ConfirmOutcome
+from app.market import contracts as contracts_module
+from app.market.cache import TTLCache
+from app.market.contracts import match_contracts, search_contracts
 from app.trading.enums import OpeningStatus, TradeSide
 
 D = Decimal
@@ -48,8 +51,8 @@ def contracts(monkeypatch):  # type: ignore[no-untyped-def]
         def public_client(self) -> Client:
             return Client()
 
-    monkeypatch.setattr(open_trade, "MarketDataService", Market)
-    monkeypatch.setattr(open_trade, "ExchangeFactory", Factory)
+    monkeypatch.setattr(contracts_module, "MarketDataService", Market)
+    monkeypatch.setattr(contracts_module, "ExchangeFactory", Factory)
 
 
 def _settings() -> Settings:
@@ -66,13 +69,36 @@ def _settings() -> Settings:
         ("xrp/usdt", ["XRP-USDT"]),
         ("PEP", ["PEPE-USDT", "1000PEPE-USDT"]),     # начало, затем вхождение
         ("btc", ["BTC-USDT"]),                      # только USDT-контракты
+        ("bt", ["BTC-USDT"]),                       # и по началу — без BTC-USDC
         ("zzz", []),
         ("  ", []),
     ],
 )
 async def test_search_contracts(contracts, query: str, expected: list[str]) -> None:  # type: ignore[no-untyped-def]
-    found = await search_contracts(_settings(), query)
+    found = await search_contracts(_settings(), query, TTLCache(), limit=SEARCH_LIMIT)
     assert [s.symbol for s in found] == expected
+
+
+async def test_search_contracts_empty_query_no_network(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Пустой ввод — без запроса списка контрактов."""
+    class Factory:
+        def __init__(self, settings, cipher) -> None:  # type: ignore[no-untyped-def]
+            raise AssertionError("сеть при пустом вводе")
+
+    monkeypatch.setattr(contracts_module, "ExchangeFactory", Factory)
+    assert await search_contracts(_settings(), " -USDT ", TTLCache(), limit=20) == []
+
+
+def test_match_contracts_limit() -> None:
+    """Лимит режет хвост «начало → вхождение», точное совпадение — всегда одно."""
+    many = [SymbolInfo(f"A{i:02d}-USDT", 4, 0, D(1), D(2)) for i in range(30)]
+    many.append(SymbolInfo("BA-USDT", 4, 0, D(1), D(2)))
+    found = match_contracts(many, "a", 20)
+    assert len(found) == 20 and found[0].symbol == "A00-USDT"
+    assert "BA-USDT" not in [s.symbol for s in found]       # вхождение — после начала
+    assert [s.symbol for s in match_contracts(many, "ba", 1)] == ["BA-USDT"]
+    assert [s.symbol for s in match_contracts([*many, SymbolInfo("A-USDT", 4, 0, D(1), D(2))],
+                                              "a", 20)] == ["A-USDT"]
 
 
 def _labels(markup) -> list[str]:  # type: ignore[no-untyped-def]

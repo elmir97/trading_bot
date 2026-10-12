@@ -39,7 +39,6 @@ from app.database.models.trade_opening import TradeOpening
 from app.database.models.user import User
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
-from app.exchanges.base import SymbolInfo
 from app.execution.callback_audit import record_callback
 from app.execution.opening.calc import OpeningInputs
 from app.execution.opening.render import expiry_label
@@ -48,8 +47,7 @@ from app.execution.opening.service import (
     ConfirmOutcome,
     OpeningService,
 )
-from app.market.data import MarketDataService
-from app.services.exchange_factory import ExchangeFactory
+from app.market.contracts import search_contracts
 from app.trading.calculations import CalculationError, to_decimal
 from app.trading.enums import (
     EntryType,
@@ -201,34 +199,12 @@ async def _show_symbol(
     )
 
 
-async def search_contracts(settings: Settings, query: str) -> list[SymbolInfo]:
-    """Контракты BingX по тикеру: точное совпадение — одно; иначе по началу и
-    вхождению базового актива (публичный список, общий кэш экранов)."""
-    q = query.strip().upper().replace("/", "-").removesuffix("-USDT").removesuffix("USDT")
-    q = q.strip("-")
-    if not q:
-        return []
-    client = ExchangeFactory(settings, None).public_client()  # type: ignore[arg-type]
-    try:
-        symbols = await MarketDataService(client, _market_cache).get_symbols()
-    finally:
-        await client.close()
-    usdt = [s for s in symbols if s.symbol.endswith("-USDT")]
-    exact = [s for s in usdt if s.symbol == f"{q}-USDT"]
-    if exact:
-        return exact
-    starts = sorted((s for s in usdt if s.symbol.startswith(q)), key=lambda s: s.symbol)
-    inside = sorted(
-        (s for s in usdt if q in s.symbol.removesuffix("-USDT") and s not in starts),
-        key=lambda s: s.symbol,
-    )
-    return [*starts, *inside][:SEARCH_LIMIT]
-
-
 @router.message(OpenTradeStates.symbol)
 async def type_symbol(message: Message, state: FSMContext, settings: Settings) -> None:
     try:
-        found = await search_contracts(settings, message.text or "")
+        found = await search_contracts(
+            settings, message.text or "", _market_cache, limit=SEARCH_LIMIT
+        )
     except Exception:
         logger.warning("Поиск контракта не удался", exc_info=True)
         await _say(message, state, "Список контрактов BingX сейчас недоступен — попробуй ещё раз.")
