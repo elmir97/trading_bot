@@ -84,6 +84,26 @@ COMMISSION_TTL_SECONDS = 3600
 LIMIT_EXPIRY_CHOICES = (15, 60, 240, 1440)
 
 
+@dataclass(frozen=True, slots=True)
+class PlanLimits:
+    """Торговый план для ввода: риск по умолчанию и максимум (один параметр
+    плана), максимум плеча, белый список. Плана нет — None / пусто."""
+
+    risk_percent: Decimal | None
+    max_leverage: int | None
+    allowed_symbols: tuple[str, ...]
+
+
+async def plan_limits(session: AsyncSession, user_id: int) -> PlanLimits:
+    """Общее для чат-мастера и Mini App (/api/me)."""
+    plan = await UserRepository(session).get_trading_plan(user_id)
+    if plan is None:
+        return PlanLimits(None, None, ())
+    return PlanLimits(
+        plan.risk_per_trade_percent, plan.max_leverage, tuple(plan.allowed_symbols or ())
+    )
+
+
 def desired_margin_type(user: User) -> MarginType:
     raw = user.settings.margin_type_default if user.settings else None
     return MarginType(raw) if raw in tuple(MarginType) else MarginType.ISOLATED
@@ -911,5 +931,7 @@ __all__ = [
     "LIMIT_EXPIRY_CHOICES",
     "CardOutcome",
     "OpeningService",
+    "PlanLimits",
     "desired_margin_type",
+    "plan_limits",
 ]

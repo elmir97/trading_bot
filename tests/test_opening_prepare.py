@@ -26,7 +26,7 @@ from app.database.session import Database
 from app.exchanges.base import MarginType, Position
 from app.execution.opening.calc import Issue, Level, OpeningInputs
 from app.execution.opening.checks import classify, merge
-from app.execution.opening.service import OpeningService
+from app.execution.opening.service import OpeningService, PlanLimits, plan_limits
 from app.market.cache import TTLCache
 from app.services.user_service import UserService
 from app.trading.enums import (
@@ -97,6 +97,18 @@ async def ctx(unique_telegram_id):  # type: ignore[no-untyped-def]
         await cleanup_user(session, fresh)
         await session.commit()
     await db.dispose()
+
+
+async def test_plan_limits(ctx) -> None:  # type: ignore[no-untyped-def]
+    """План для ввода (мастер и /api/me): риск, плечо, белый список; без плана — пусто."""
+    ctx.plan.allowed_symbols = ["XRP-USDT", "DOGE-USDT"]
+    await ctx.session.commit()
+    assert await plan_limits(ctx.session, ctx.uid) == PlanLimits(
+        D(2), 20, ("XRP-USDT", "DOGE-USDT")
+    )
+    await ctx.session.delete(ctx.plan)
+    await ctx.session.commit()
+    assert await plan_limits(ctx.session, ctx.uid) == PlanLimits(None, None, ())
 
 
 # --- checks: уровни нарушений плана (решение владельца 05.10) ---------------------

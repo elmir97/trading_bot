@@ -42,7 +42,6 @@ from app.core.security import SecretCipher
 from app.database.models.outgoing_message import OutgoingMeta
 from app.database.models.trade_opening import TradeOpening
 from app.database.models.user import User
-from app.database.repositories.user import UserRepository
 from app.database.session import Database
 from app.execution.callback_audit import record_callback
 from app.execution.opening.calc import OpeningInputs
@@ -51,6 +50,7 @@ from app.execution.opening.service import (
     LIMIT_EXPIRY_CHOICES,
     ConfirmOutcome,
     OpeningService,
+    plan_limits,
 )
 from app.market.contracts import search_contracts
 from app.trading.calculations import CalculationError, to_decimal
@@ -192,8 +192,7 @@ async def pick_exchange(
 async def _show_symbol(
     event: Message | CallbackQuery, state: FSMContext, user: User, session: AsyncSession
 ) -> None:
-    plan = await UserRepository(session).get_trading_plan(user.id)
-    allowed = plan.allowed_symbols if plan else []
+    allowed = (await plan_limits(session, user.id)).allowed_symbols
     quick = [(s.replace("-USDT", ""), f"{OpenCB.SYMBOL}{s}") for s in allowed]
     rows = [quick[i:i + 4] for i in range(0, len(quick), 4)]
     await state.set_state(OpenTradeStates.symbol)
@@ -353,15 +352,10 @@ async def skip_take(callback: CallbackQuery, state: FSMContext, user: User,
     await _show_risk(callback, state, user, session)
 
 
-async def _plan_risk(session: AsyncSession, user: User) -> Decimal | None:
-    plan = await UserRepository(session).get_trading_plan(user.id)
-    return plan.risk_per_trade_percent if plan else None
-
-
 async def _show_risk(
     event: Message | CallbackQuery, state: FSMContext, user: User, session: AsyncSession
 ) -> None:
-    plan_risk = await _plan_risk(session, user)
+    plan_risk = (await plan_limits(session, user.id)).risk_percent
     await state.set_state(OpenTradeStates.risk)
     rows = [[(f"По плану {fmt_pct(plan_risk)}", OpenCB.RISK_PLAN)]] if plan_risk else []
     text = "Риск на сделку, % от equity (с комиссией):"
@@ -375,7 +369,7 @@ async def _show_risk(
 async def pick_plan_risk(callback: CallbackQuery, state: FSMContext, user: User,
                          session: AsyncSession, settings: Settings, cipher: SecretCipher,
                          redis: Any) -> None:
-    risk = await _plan_risk(session, user)
+    risk = (await plan_limits(session, user.id)).risk_percent
     await state.update_data(risk=str(risk))
     await _show_leverage(callback, state, user, session, settings, cipher, redis)
 
@@ -387,7 +381,7 @@ async def set_risk(message: Message, state: FSMContext, user: User, session: Asy
     if value is None:
         await _say(message, state, "Нужен риск в процентах числом, например 1 или 0.5.")
         return
-    plan_risk = await _plan_risk(session, user)
+    plan_risk = (await plan_limits(session, user.id)).risk_percent
     if plan_risk is not None and value > plan_risk:
         await _say(message, state, f"Нельзя: максимум по плану — {fmt_pct(plan_risk)}.")
         return
@@ -424,7 +418,7 @@ async def _show_leverage(
         await state.clear()
         await _send(event, state, preview.text, None)
         return
-    plan = await UserRepository(session).get_trading_plan(user.id)
+    plan_max_leverage = (await plan_limits(session, user.id)).max_leverage
     suggested = preview.calc.suggested_leverage
     buttons = [(f"{suggested}x (предложено)", f"{OpenCB.LEVERAGE}{suggested}")]
     for lev in (5, 10):
@@ -435,8 +429,8 @@ async def _show_leverage(
         f"Плечо. При этом стопе — не больше {preview.calc.max_leverage_for_stop}x "
         f"(ликвидация дальше стопа в {settings.exec_open_liq_buffer} раза)"
     )
-    if plan is not None:
-        text += f", по плану — не больше {plan.max_leverage}x"
+    if plan_max_leverage is not None:
+        text += f", по плану — не больше {plan_max_leverage}x"
     await _send(event, state, text + ".", _rows(buttons, back="risk"))
     await ask_number(event, state, "Плечо целым числом")
 

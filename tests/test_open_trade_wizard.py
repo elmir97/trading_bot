@@ -206,3 +206,84 @@ async def test_old_cancel_button_answers_by_fact(monkeypatch, status, trade_id, 
     service.cancel_limit.assert_not_awaited()
     assert stripped == [485]
     marks.assert_awaited_once()
+
+
+# --- план в шагах мастера (plan_limits, Mini App подэтап 0.3) ------------------------
+
+
+def _plan_wizard(monkeypatch, limits):  # type: ignore[no-untyped-def]
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    async def plan(session, user_id):  # type: ignore[no-untyped-def]
+        return limits
+
+    sent: list[tuple[str, object]] = []
+
+    async def send(event, state, text, keyboard):  # type: ignore[no-untyped-def]
+        sent.append((text, keyboard))
+
+    said: list[str] = []
+
+    async def say(message, state, text):  # type: ignore[no-untyped-def]
+        said.append(text)
+
+    monkeypatch.setattr(open_trade, "plan_limits", plan)
+    monkeypatch.setattr(open_trade, "_send", send)
+    monkeypatch.setattr(open_trade, "_say", say)
+    monkeypatch.setattr(open_trade, "ask_number", AsyncMock())
+    state = MagicMock()
+    state.set_state = AsyncMock()
+    state.update_data = AsyncMock()
+    state.get_data = AsyncMock(return_value={
+        "symbol": "XRP-USDT", "side": "LONG", "entry_type": "MARKET", "stop": "1.4", "risk": "1",
+    })
+    return SimpleNamespace(sent=sent, said=said, state=state, user=SimpleNamespace(id=5))
+
+
+async def test_wizard_quick_symbols_from_plan(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from app.execution.opening.service import PlanLimits
+
+    w = _plan_wizard(monkeypatch, PlanLimits(D(1), 10, ("XRP-USDT", "DOGE-USDT")))
+    await open_trade._show_symbol(object(), w.state, w.user, object())  # type: ignore[arg-type]
+    buttons = [b.callback_data for row in w.sent[0][1].inline_keyboard for b in row]  # type: ignore[attr-defined]
+    assert buttons[:2] == [f"{OpenCB.SYMBOL}XRP-USDT", f"{OpenCB.SYMBOL}DOGE-USDT"]
+
+
+async def test_wizard_risk_above_plan_refused(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.execution.opening.service import PlanLimits
+
+    w = _plan_wizard(monkeypatch, PlanLimits(D(2), 20, ()))
+    leverage = AsyncMock()
+    monkeypatch.setattr(open_trade, "_show_leverage", leverage)
+    message = MagicMock()
+    message.text = "2.5"
+    await open_trade.set_risk(message, w.state, w.user, object(), _settings(), object(), None)  # type: ignore[arg-type]
+    assert w.said == ["Нельзя: максимум по плану — 2.00%."]
+    leverage.assert_not_awaited()
+    message.text = "2"
+    await open_trade.set_risk(message, w.state, w.user, object(), _settings(), object(), None)  # type: ignore[arg-type]
+    leverage.assert_awaited_once()
+
+
+@pytest.mark.parametrize(("plan_max", "tail"), [
+    (20, ", по плану — не больше 20x."),
+    (None, " раза)."),
+])
+async def test_wizard_leverage_text_plan(monkeypatch, plan_max, tail) -> None:  # type: ignore[no-untyped-def]
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.execution.opening.service import PlanLimits
+
+    w = _plan_wizard(monkeypatch, PlanLimits(D(2), plan_max, ()))
+    service = MagicMock()
+    service.preview = AsyncMock(return_value=SimpleNamespace(
+        calc=SimpleNamespace(suggested_leverage=12, max_leverage_for_stop=18), text="",
+    ))
+    monkeypatch.setattr(open_trade, "_service", lambda *a, **k: service)
+    await open_trade._show_leverage(object(), w.state, w.user, object(), _settings(),  # type: ignore[arg-type]
+                                    object(), None)  # type: ignore[arg-type]
+    assert w.sent[0][0].endswith(tail)
