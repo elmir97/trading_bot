@@ -30,7 +30,7 @@ DATABASE_URL=postgresql+asyncpg://test:test@localhost:5432/trading_bot_test
 **Прогон зелёный только при нуле skipped.** Без `DATABASE_URL` молча
 пропускается ~115 интеграционных тестов, и счёт врёт.
 
-Ориентир на 12.10.2026 (код деплоя 4): 1600 passed, 0 skipped, 0 failed; smoke 102/102; mypy 60.
+Ориентир на 12.10.2026 (код деплоя 5): 1607 passed, 0 skipped, 0 failed; smoke 102/102; mypy 60.
 
 Число тестов в этом файле — ориентир на момент записи, а не факт. Перед
 тем как называть его в плане или отчёте, прогонять пакет и брать свежую
@@ -379,6 +379,8 @@ PY
    (управляемый сбой включают только на время проверки аварийных веток на демо и сразу снимают;
    с деплоя 3 — ещё `exec_open_close_lock_wait_seconds` (8);
    при live бот с ним не стартует, в логе раз в час WARNING «EXEC_OPEN_FAULT включён»).
+   С деплоя 5 — `bingx_rate_limit_threshold` (20) и `bingx_private_rate_limit_threshold` (2; в INFO
+   «Троттлинг BingX…» поле `threshold`).
    `bingx_base_url` — только публичный клиент; ключевой клиент в режиме
    demo ходит на `bingx_demo_base_url`
 
