@@ -288,6 +288,7 @@ async def test_emergency_post_filled_close_unread_not_alarm(ctx) -> None:  # typ
     assert opening.error_code == CLOSE_FILL_UNREAD and opening.avg_price is not None
     close = [r for r in await _rows(ctx, opening.id) if r.role is OrderRole.CLOSE]
     assert [r.status for r in close] == [OrderStatus.FILLED] and close[0].exchange_order_id
+    assert close[0].price is None              # цифр ещё нет
 
     await _recover(ctx)                        # чтение всё ещё неполное — ждём
     await ctx.session.refresh(opening)
@@ -300,6 +301,10 @@ async def test_emergency_post_filled_close_unread_not_alarm(ctx) -> None:  # typ
     trade = await _trade(ctx, opening.trade_id)
     assert trade.status is TradeStatus.CLOSED and trade.exit_price is not None
     assert ctx.notes[-1][1].startswith(f"📒 Сделка #{opening.trade_id} записана в журнал")
+    # C.18: дочитка циклом пишет цифры и в строку CLOSE.
+    [row] = [r for r in await _rows(ctx, opening.id) if r.role is OrderRole.CLOSE]
+    await ctx.session.refresh(row)
+    assert row.price == trade.exit_price and row.quantity == trade.quantity
 
 
 async def test_emergency_post_not_filled_close_unread_stays_alarm(ctx) -> None:  # type: ignore[no-untyped-def]

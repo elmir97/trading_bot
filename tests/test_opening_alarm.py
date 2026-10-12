@@ -84,6 +84,10 @@ async def test_always_fault_keeps_alarm_until_button(ctx) -> None:  # type: igno
     closes = [r for r in await _rows(ctx, opening.id) if r.role is OrderRole.CLOSE]
     assert closes[-1].status is OrderStatus.FILLED                 # ручное — без сбоя
     assert len(closes) == 5 and all(r.error_code == "FAULT" for r in closes[:-1])  # «Да» + 3 цикла
+    # C.18 (🔴 #32, 12.10): цифры закрытия — сразу в строку, не ждать добора.
+    assert closes[-1].price == trade.exit_price and closes[-1].price is not None
+    assert closes[-1].quantity == trade.quantity
+    assert closes[-1].raw_response is not None and "commission" in closes[-1].raw_response
 
 
 @needs_db

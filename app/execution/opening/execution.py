@@ -887,7 +887,7 @@ class Runner:
         if (read or post_filled) and left is None:
             row.status = OrderStatus.FILLED
             if fill is not None and read:
-                row.exchange_order_id = fill.order_id
+                self._fill_close_row(row, fill)
             await self.session.commit()
             await self._settle_after_close()
             return ProtectResult(
@@ -947,7 +947,22 @@ class Runner:
             logger.info("Закрытие не дочитано по cid",
                         extra={**self._log(), **readback_failure(fill=fill)})
             return None
+        self._fill_close_row(rows[-1], fill)
+        await self.session.commit()
         return fill
+
+    @staticmethod
+    def _fill_close_row(row: ExecutionOrder, fill: OrderFill) -> None:
+        """Цифры исполнения закрытия — в саму строку CLOSE (C.18, 12.10: сделка
+        брала выход из чтения, а строка оставалась с price NULL до добора)."""
+        row.status = OrderStatus.FILLED
+        row.exchange_order_id = fill.order_id or row.exchange_order_id
+        row.price = fill.avg_price
+        row.quantity = fill.executed_qty
+        row.raw_response = {
+            "status": fill.status, "avgPrice": str(fill.avg_price),
+            "executedQty": str(fill.executed_qty), "commission": str(fill.fee),
+        }
 
     # --- журнал ---------------------------------------------------------------------
 
