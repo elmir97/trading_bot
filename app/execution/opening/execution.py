@@ -66,6 +66,8 @@ from app.exchanges.base import (
     Position,
     TpSlSpec,
 )
+from app.execution.opening.calc import RoundedLevel
+from app.execution.price_step import on_step, opening_level, price_step
 from app.execution.readback_log import post_answer_fields, readback_failure
 from app.execution.settle import conditional_rows, settle
 from app.trading.calculations import CalculationError
@@ -172,6 +174,35 @@ async def transition(
     return True
 
 
+_LEVEL_LABELS = {"limit_price": "лимит", "stop_loss": "стоп", "take_profit": "тейк"}
+
+
+def levels_to_step(
+    opening: TradeOpening, price_precision: int, *fields: str
+) -> tuple[RoundedLevel, ...]:
+    """A.4, перед каждым POST: уровень открытия не на шаге цены — округлить по
+    правилу открытия (app/execution/price_step), поменять в trade_openings и
+    WARNING. Дальше всё (POST, _ours, сделка) читает уже округлённое поле.
+    Коммит — у вызывающего, до HTTP (переход статуса или строка ордера).
+    После карточки (round_inputs) срабатывать не должно — только строки,
+    записанные до A.4; WARNING — флаг чек-апа."""
+    step = price_step(price_precision)
+    changed: list[RoundedLevel] = []
+    for name in fields:
+        value: Decimal | None = getattr(opening, name)
+        if value is None or on_step(value, step):
+            continue
+        after = opening_level(value, opening.side, step)
+        setattr(opening, name, after)
+        changed.append(RoundedLevel(name, _LEVEL_LABELS[name], value, after))
+        logger.warning(
+            "Уровень открытия не на шаге цены — округлён перед POST",
+            extra={"opening_id": opening.id, "field": name, "before": str(value),
+                   "after": str(after)},
+        )
+    return tuple(changed)
+
+
 class Runner:
     def __init__(
         self,
@@ -247,6 +278,9 @@ class Runner:
         o = self.opening
         cid = self.cid("e")
         is_limit = o.entry_type is EntryType.LIMIT
+        levels_to_step(
+            o, self.pp, *(("limit_price",) if is_limit else ()), "stop_loss", "take_profit"
+        )
         row = self._row(
             OrderRole.ENTRY, OrderType.LIMIT if is_limit else OrderType.MARKET,
             OPENING_SIDE[self.side], client_order_id=cid, quantity=quantity,
@@ -743,6 +777,8 @@ class Runner:
         Сбои EXEC_OPEN_FAULT (fail/hide_backup_stop) — только для стопа."""
         o = self.opening
         is_stop = role is OrderRole.STOP_LOSS
+        levels_to_step(o, self.pp, "stop_loss" if is_stop else "take_profit")
+        level = opening_level(level, self.side, price_step(self.pp))
         order_type = OrderType.STOP_MARKET if is_stop else OrderType.TAKE_PROFIT_MARKET
         n = await self._attempt_no(role)
         cid = self.cid("s" if is_stop else "t", n)

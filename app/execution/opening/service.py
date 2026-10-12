@@ -52,6 +52,7 @@ from app.execution.opening.execution import (
     EXIT_REASON_MANUAL,
     OPENING_SIDE,
     Runner,
+    levels_to_step,
     opening_client_order_id,
     transition,
 )
@@ -704,11 +705,16 @@ class OpeningService:
     async def _execute(
         self, opening: TradeOpening, client: ExchangeClient, runner_factory: Any
     ) -> ConfirmOutcome:
-        inputs = inputs_of(opening)
-        market, refusal = await self.market_snapshot(client, inputs)
+        market, refusal = await self.market_snapshot(client, inputs_of(opening))
         if market is None:
             assert refusal is not None
             return await self._refuse(opening, refusal.code.value, refusal.message)
+        # A.4: карточка уже округлила; здесь — строки до A.4 (WARNING) и смена
+        # точности контракта между карточкой и «Да». Объём — от того, что уйдёт.
+        levels_to_step(
+            opening, market.symbol_info.price_precision, "limit_price", "stop_loss", "take_profit"
+        )
+        inputs = inputs_of(opening)
         calc, issues = await self.evaluate(inputs, market)
         blocks = [i for i in issues if i.level is Level.BLOCK]
         if blocks:

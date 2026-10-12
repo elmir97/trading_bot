@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -577,3 +578,112 @@ async def test_short_market(ctx) -> None:  # type: ignore[no-untyped-def]
     assert out.status is OpeningStatus.DONE, out.text
     kw = next(kw for name, kw in ctx.exchange.posts() if name == "post_market")
     assert kw["side"].value == "SELL" and kw["position_side"] == "SHORT"
+
+
+# --- A.4: шаг цены перед POST ------------------------------------------------------------
+
+_OFF_STEP = "Уровень открытия не на шаге цены — округлён перед POST"
+
+
+async def _legacy_levels(c, opening: TradeOpening, **values: Any) -> None:  # type: ignore[no-untyped-def]
+    """Строка, записанная до A.4: карточка не округляла уровни."""
+    await c.session.execute(
+        update(TradeOpening).where(TradeOpening.id == opening.id).values(**values)
+    )
+    await c.session.commit()
+    await c.session.refresh(opening)
+
+
+def _off_step(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.getMessage() == _OFF_STEP]
+
+
+async def test_confirm_rounds_legacy_levels_before_entry(ctx, caplog) -> None:  # type: ignore[no-untyped-def]
+    opening = await _card(ctx)
+    await _legacy_levels(ctx, opening, stop_loss=D("1.45016"), take_profit=D("1.53997"))
+    with caplog.at_level(logging.INFO):
+        out = await ctx.service().confirm(opening.id, accept_warnings=False)
+    assert out.status is OpeningStatus.DONE, out.text
+    # на биржу и в базу — округлённое по правилу открытия (LONG вниз)
+    entry_kw = next(kw for name, kw in ctx.exchange.posts() if name == "post_market")
+    assert entry_kw["stop_loss"].trigger_price == D("1.4501")
+    assert entry_kw["take_profit"].trigger_price == D("1.5399")
+    assert entry_kw["quantity"] == D(323)      # объём — от округлённого стопа
+    await ctx.session.refresh(opening)
+    assert (opening.stop_loss, opening.take_profit) == (D("1.4501"), D("1.5399"))
+    closes = [r for r in await _rows(ctx, opening.id) if r.client_order_id]
+    assert {(r.role, r.trigger_price) for r in closes if r.role is not OrderRole.ENTRY} == {
+        (OrderRole.STOP_LOSS, D("1.4501")), (OrderRole.TAKE_PROFIT, D("1.5399")),
+    }
+    # вложенные узнаны как свои и заменены — на бирже ровно два closePosition
+    assert sorted((o.order_type, o.close_position) for o in ctx.exchange.orders) == [
+        ("STOP_MARKET", True), ("TAKE_PROFIT_MARKET", True),
+    ]
+    trade = await _trade(ctx, out.trade_id)
+    assert trade.initial_stop_loss == D("1.4501")
+    warned = _off_step(caplog)
+    assert [(r.field, D(r.before), D(r.after)) for r in warned] == [  # type: ignore[attr-defined]
+        ("stop_loss", D("1.45016"), D("1.4501")), ("take_profit", D("1.53997"), D("1.5399")),
+    ]
+
+
+async def test_place_entry_rounds_limit_short(ctx, caplog) -> None:  # type: ignore[no-untyped-def]
+    """Защита в самом POST (не через confirm): SHORT — вверх, лимит тоже."""
+    opening = await _card(ctx, OpeningInputs(
+        symbol="XRP-USDT", side=TradeSide.SHORT, entry_type=EntryType.LIMIT,
+        limit_price=D("1.5100"), stop_loss=D("1.5500"), take_profit=D("1.4500"),
+        risk_percent=D(1), leverage=10, expiry_minutes=240,
+    ))
+    await _legacy_levels(
+        ctx, opening, status=OpeningStatus.CONFIRMED, limit_price=D("1.51003"),
+        stop_loss=D("1.55004"), take_profit=D("1.45006"),
+    )
+    runner = Runner(ctx.session, ctx.settings, ctx.exchange, opening,
+                    price_precision=4, quantity_precision=0)
+    with caplog.at_level(logging.INFO):
+        await runner.place_entry(D(100))
+    kw = next(kw for name, kw in ctx.exchange.posts() if name == "post_limit")
+    assert kw["price"] == D("1.5101")
+    assert kw["stop_loss"].trigger_price == D("1.5501")
+    assert kw["take_profit"].trigger_price == D("1.4501")
+    await ctx.session.refresh(opening)
+    assert (opening.limit_price, opening.stop_loss, opening.take_profit) == (
+        D("1.5101"), D("1.5501"), D("1.4501"),
+    )
+    entry_row = next(r for r in await _rows(ctx, opening.id) if r.role is OrderRole.ENTRY)
+    assert entry_row.price == D("1.5101")
+    assert len(_off_step(caplog)) == 3
+
+
+async def test_backup_stop_rounded_in_recovery(ctx, caplog) -> None:  # type: ignore[no-untyped-def]
+    """Запасной closePosition-стоп из цикла восстановления — тоже по шагу."""
+    opening = await _card(ctx)
+    ctx.exchange.drop_attached_sl = True
+    await _legacy_levels(ctx, opening, status=OpeningStatus.CONFIRMED)
+    runner = Runner(ctx.session, ctx.settings, ctx.exchange, opening,
+                    price_precision=4, quantity_precision=0)
+    assert (await runner.place_entry(D(323))).status is OpeningStatus.FILLED
+    # уровень «до A.4» появился после входа (вложенного стопа нет)
+    await _legacy_levels(ctx, opening, stop_loss=D("1.45016"))
+    with caplog.at_level(logging.INFO):
+        assert await ctx.recover() == 1
+    await ctx.session.refresh(opening)
+    assert opening.status is OpeningStatus.DONE and opening.stop_loss == D("1.4501")
+    stop_kw = [kw for name, kw in ctx.exchange.posts()
+               if name == "post_conditional" and kw["order_type"] == "STOP_MARKET"]
+    assert [kw["stop_price"] for kw in stop_kw] == [D("1.4501")]
+    assert [r.field for r in _off_step(caplog)] == ["stop_loss"]  # type: ignore[attr-defined]
+
+
+async def test_dry_run_rounds_legacy_levels(ctx, caplog) -> None:  # type: ignore[no-untyped-def]
+    """Округление в confirm — до расчёта и сухого прогона, не только в POST."""
+    opening = await _card(ctx)
+    await _legacy_levels(ctx, opening, stop_loss=D("1.45016"))
+    with caplog.at_level(logging.INFO):
+        out = await ctx.service(exec_open_dry_run=True).confirm(
+            opening.id, accept_warnings=False
+        )
+    assert out.status is OpeningStatus.DRY_RUN and _posts(ctx) == []
+    stop = next(r for r in await _rows(ctx, opening.id) if r.role is OrderRole.STOP_LOSS)
+    assert stop.trigger_price == D("1.4501")
+    assert [r.field for r in _off_step(caplog)] == ["stop_loss"]  # type: ignore[attr-defined]
