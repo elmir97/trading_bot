@@ -9,6 +9,7 @@ closePosition-ордер того же типа — 110406/110407) и сбой �
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -356,6 +357,50 @@ async def test_set_take_without_old_is_one_order(ctx) -> None:  # type: ignore[n
     assert kw["close_position"] is True and kw["client_order_id"] == f"tm{action.id}u{ctx.uid}T"
     assert "cancel" not in ctx.exchange.names()
     assert action.status is PositionActionStatus.DONE and "Тейк 1.65 (на всю позицию)" in text
+
+
+async def test_set_take_rounded_closer_on_exchange(ctx) -> None:  # type: ignore[no-untyped-def]
+    """A.4: тейк этапа 4 — к шагу цены ближе к цене (LONG вниз), на бирже и в базе."""
+    action, text = await _move(ctx, kind=PositionActionKind.SET_TAKE, params={"level": "1.65009"})
+    [kw] = _places(ctx)
+    assert kw["stop_price"] == D("1.6500")
+    assert action.new_level == D("1.6500") and action.params == {"level": "1.6500"}
+    [row] = await _rows(ctx, action.id)
+    assert row.trigger_price == D("1.6500")
+    assert action.status is PositionActionStatus.DONE and "Тейк 1.65 (на всю позицию)" in text
+
+
+@pytest.mark.parametrize(
+    ("kind", "level", "posted"),
+    [
+        # объём фиксирован — ближе к цене: стоп LONG вверх, тейк LONG вниз
+        (PositionActionKind.MOVE_STOP, "1.50001", D("1.5001")),
+        (PositionActionKind.SET_TAKE, "1.65009", D("1.6500")),
+    ],
+)
+async def test_off_step_level_rounded_before_post(  # type: ignore[no-untyped-def]
+    ctx, monkeypatch, caplog, kind, level, posted,
+) -> None:
+    """Защита в самом POST: план пришёл не на шаге (например, сменилась точность
+    контракта между карточкой и «Да») — округлить, записать, WARNING."""
+    import app.execution.position_action_service as svc
+
+    real = svc.plan_action
+
+    def unrounded(k, params, inputs):  # type: ignore[no-untyped-def]
+        plan = real(k, params, inputs)
+        return replace(plan, new_level=D(level), params={"level": level})
+
+    monkeypatch.setattr(svc, "plan_action", unrounded)
+    with caplog.at_level(logging.INFO):
+        action, _ = await _move(ctx, kind=kind, params={"level": level})
+    assert action.status is PositionActionStatus.DONE
+    assert {kw["stop_price"] for kw in _places(ctx)} == {posted}
+    assert action.new_level == posted and action.params == {"level": str(posted)}
+    assert {r.trigger_price for r in await _rows(ctx, action.id) if r.client_order_id} == {posted}
+    warned = [r for r in caplog.records
+              if r.getMessage() == "Уровень действия не на шаге цены — округлён перед POST"]
+    assert [(D(r.before), D(r.after)) for r in warned] == [(D(level), posted)]  # type: ignore[attr-defined]
 
 
 async def test_step1_bridge_rejected_old_untouched(ctx) -> None:  # type: ignore[no-untyped-def]

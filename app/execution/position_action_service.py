@@ -72,6 +72,7 @@ from app.execution.position_view import (
     link_trade,
     protective_orders,
 )
+from app.execution.price_step import on_step, price_step, stop_closer, take_closer
 from app.execution.readback_log import post_answer_fields, readback_failure
 from app.execution.settle import CONDITIONAL_ROLES, OPEN_STATUSES, conditional_rows, settle
 from app.market.cache import TTLCache
@@ -570,6 +571,21 @@ class PositionActionService:
         otype = OrderType.STOP_MARKET if is_stop else OrderType.TAKE_PROFIT_MARKET
         assert plan.new_level is not None
         level = plan.new_level
+        step = price_step(pp)
+        if not on_step(level, step):
+            # A.4, перед POST: plan_action уже округлил — сюда попадает только
+            # смена точности контракта между карточкой и «Да». Объём фиксирован:
+            # стоп и тейк — ближе к цене (риск в $ не растёт); в базу — что уйдёт.
+            level = (stop_closer if is_stop else take_closer)(level, p.side, step)
+            logger.warning(
+                "Уровень действия не на шаге цены — округлён перед POST",
+                extra={"action_id": action.id, "kind": action.kind.value,
+                       "before": str(plan.new_level), "after": str(level)},
+            )
+            action.new_level = level
+            params = dict(action.params or {})
+            if "level" in params:
+                action.params = {**params, "level": str(level)}
         new_s = fmt_price(level, pp)
         old_level = plan.current_stop if is_stop else plan.current_take
         old_s = fmt_price(old_level, pp)

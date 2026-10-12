@@ -12,8 +12,10 @@ SymbolInfo) и журнала (комиссия входа, исходный с�
 «Да, увеличить риск» и никогда выше потолка торгового плана
 (risk_per_trade_percent от equity).
 
-Деньги — Decimal полной точности, округление только у уровней (к шагу цены,
-в сторону, не ухудшающую позицию) и у объёма (к шагу лота, вниз).
+Деньги — Decimal полной точности, округление только у уровней и у объёма
+(к шагу лота, вниз). Уровни — к шагу цены по правилу app/execution/price_step
+(A.4): объём фиксирован, поэтому стоп — ближе к цене (риск в $ не растёт),
+тейк — ближе.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from app.exchanges.base import Position, SymbolInfo
 from app.execution.models import ExecutionRefusal
 from app.execution.models import ExecutionRefusalCode as Code
 from app.execution.position_view import ProtectiveOrder
+from app.execution.price_step import stop_closer, take_closer
 from app.trading.enums import PositionActionKind as Kind
 from app.trading.enums import TradeSide
 
@@ -180,8 +183,8 @@ def plan_action(
             typed = _parse_level(params)
             if typed is None:
                 return _refuse(Code.INVALID_PRICE, "Цена стопа — положительное число.")
-            # К шагу цены — в сторону, не увеличивающую риск: LONG вверх, SHORT вниз.
-            level = typed.quantize(step, ROUND_CEILING if long else ROUND_FLOOR)
+            # К шагу цены — ближе к цене: объём фиксирован, риск в $ не растёт.
+            level = stop_closer(typed, p.side, step)
         ok = level <= inputs.mark - dist if long else level >= inputs.mark + dist
         if not ok:
             if breakeven:
@@ -223,7 +226,7 @@ def plan_action(
         typed_take = _parse_level(params)
         if typed_take is None:
             return _refuse(Code.INVALID_PRICE, "Цена тейка — положительное число.")
-        level = typed_take.quantize(step, ROUND_HALF_UP)
+        level = take_closer(typed_take, p.side, step)   # A.4: тейк — ближе
         ok = level >= inputs.mark + dist if long else level <= inputs.mark - dist
         if not ok:
             return _refuse(

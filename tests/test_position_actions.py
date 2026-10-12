@@ -188,6 +188,15 @@ class TestSetTake:
         plan = _plan(Kind.SET_TAKE, {"level": "1.62"}, takes=(_order("1.60", "tp-1"),))
         assert plan.replaces_order_id == "tp-1" and plan.current_take == D("1.60")
 
+    def test_level_rounded_closer(self) -> None:
+        # A.4: тейк к шагу цены — ближе к цене (LONG вниз, SHORT вверх), не HALF_UP.
+        assert _plan(Kind.SET_TAKE, {"level": "1.62009"}).new_level == D("1.6200")
+        short = _position(TradeSide.SHORT, entry="1.60")
+        plan = _plan(Kind.SET_TAKE, {"level": "1.50001"}, position=short, stops=(),
+                     mark=D("1.55"))
+        assert plan.new_level == D("1.5001")
+        assert plan.params == {"level": "1.5001"}
+
     def test_wrong_side_and_ladder(self) -> None:
         assert _refusal(Kind.SET_TAKE, {"level": "1.5601"}).code is Code.TAKE_WRONG_SIDE
         takes = (_order("1.6", "a"), _order("1.7", "b"))
