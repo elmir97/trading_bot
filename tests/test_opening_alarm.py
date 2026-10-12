@@ -21,7 +21,8 @@ from pydantic import ValidationError
 
 from app.bot import opening_messages, outbox
 from app.bot.handlers import open_trade
-from app.bot.handlers.open_trade import OpenCB, opening_keyboard
+from app.bot.handlers.open_trade import OpenCB
+from app.bot.opening_result import opening_keyboard
 from app.core.config import Settings
 from app.database.models.outgoing_message import OutgoingMessage, OutgoingMeta
 from app.trading.enums import OpeningStatus, OrderRole, OrderStatus, TradeSide, TradeStatus

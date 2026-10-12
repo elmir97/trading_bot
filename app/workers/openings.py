@@ -14,8 +14,8 @@ from typing import Any
 from aiogram import Bot
 from sqlalchemy import select
 
-from app.bot import opening_messages, outbox
-from app.bot.handlers.open_trade import opening_keyboard
+from app.bot import opening_messages
+from app.bot.opening_result import send_opening_result
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.security import SecretCipher
@@ -29,7 +29,6 @@ from app.execution.opening.recovery import (
 )
 from app.services.exchange_factory import ExchangeFactory
 from app.trading.enums import OpeningStatus, TradeSide
-from app.workers.notifier import send_notification
 
 logger = get_logger(__name__)
 
@@ -79,13 +78,11 @@ class OpeningsWorker:
                 logger.exception(
                     "Сообщение тревоги не исправлено", extra={"opening_id": resolve_alarm}
                 )
-        markup = opening_keyboard(
-            status, meta.trade_opening_id if meta is not None else None, position
+        await send_opening_result(
+            self._bot, self._db, telegram_id, text, status=status,
+            opening_id=meta.trade_opening_id if meta is not None else None,
+            position=position, meta=meta,
         )
-        if meta is None:
-            await send_notification(self._bot, telegram_id, text, reply_markup=markup)
-            return
-        await outbox.send(self._bot, self._db, meta, telegram_id, text, markup)
 
     def retry_alarm(self, opening_id: int) -> None:
         """B.1 (10.10.2026): тревога объявлена — повторы защиты через

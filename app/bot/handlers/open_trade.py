@@ -21,12 +21,17 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot import opening_messages, outbox
+from app.bot import opening_messages, opening_result, outbox
 from app.bot.handlers.exchange import _market_cache
-from app.bot.handlers.positions import position_keyboard
 from app.bot.handlers.trades import _show_symbol_prompt
 from app.bot.keyboards.main import MenuCallback, with_nav
 from app.bot.messaging import is_final
+from app.bot.opening_result import (
+    opening_keyboard,
+    position_keyboard,
+    result_keyboard,
+)
+from app.bot.opening_result import strip_markup as _strip
 from app.bot.prompts import ask_number
 from app.bot.states.trade import OpenTradeStates
 from app.bot.wizard_trail import owned, remember
@@ -81,11 +86,11 @@ class OpenCB:
     YES = "ot:y:"             # + opening_id
     YES_WARN = "ot:w:"        # + opening_id
     NO = "ot:n:"              # + opening_id
-    CANCEL_LIMIT = "ot:c:"    # + opening_id
-    CLOSE = "ot:x:"           # + opening_id: «🔴 Закрыть маркетом» под ALARM
+    CANCEL_LIMIT = opening_result.CANCEL_LIMIT   # + opening_id
+    CLOSE = opening_result.CLOSE                 # + opening_id: «🔴 Закрыть маркетом» под ALARM
     CLOSE_YES = "ot:xy:"      # + opening_id: «Да, закрыть»
     CLOSE_NO = "ot:xn:"       # + opening_id: «Нет»
-    RECALC = "ot:recalc"
+    RECALC = opening_result.RECALC
     EDIT = "ot:edit"
 
 
@@ -487,16 +492,6 @@ RECALC_NOTICE = (
 STALE_CARD_TEXT = "Это старая карточка — она больше не действует. Работай с последней."
 
 
-async def _strip(bot: Any, chat_id: int, message_id: int) -> None:
-    """Снять кнопки с сообщения; уже снятые / удалённые / старше 48 ч — не ошибка."""
-    try:
-        await bot.edit_message_reply_markup(
-            chat_id=chat_id, message_id=message_id, reply_markup=None
-        )
-    except TelegramAPIError:
-        pass
-
-
 async def _is_current(state: FSMContext, opening_id: int | None, message_id: int | None) -> bool:
     """Карточка — та, что в форме мастера сейчас (по открытию или сообщению)."""
     data = await state.get_data()
@@ -582,54 +577,6 @@ def _meta(user: User, opening_id: int, outcome: ConfirmOutcome) -> OutgoingMeta:
         user_id=user.id, kind=f"OPEN_{status}", trade_opening_id=opening_id,
         trade_id=outcome.trade_id,
     )
-
-
-def closed_keyboard() -> InlineKeyboardMarkup:
-    """Под итогом, после которого позиции нет (аварийное закрытие, A.1):
-    «Позиция» вела бы на экран «уже нет»."""
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="📋 К позициям", callback_data=MenuCallback.OPEN_POSITIONS),
-        InlineKeyboardButton(text="◀️ В меню", callback_data=MenuCallback.MAIN),
-    ]])
-
-
-def opening_keyboard(
-    status: OpeningStatus | None, opening_id: int | None,
-    position: tuple[str, TradeSide] | None,
-) -> InlineKeyboardMarkup | None:
-    """Клавиатура итога открытия — одна для «Да» и для цикла восстановления."""
-    if status is OpeningStatus.EMERGENCY_CLOSED:
-        return closed_keyboard()
-    if status is OpeningStatus.ALARM and opening_id is not None:
-        # A.1: «⚙️ Позиция» и «🔴 Закрыть маркетом» (одно подтверждение).
-        rows = list(position_keyboard(*position).inline_keyboard) if position else []
-        return InlineKeyboardMarkup(inline_keyboard=[*rows, [InlineKeyboardButton(
-            text="🔴 Закрыть маркетом", callback_data=f"{OpenCB.CLOSE}{opening_id}"
-        )]])
-    if position is not None:
-        return position_keyboard(*position)
-    if status is OpeningStatus.WORKING and opening_id is not None:
-        return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
-            text="✖️ Отменить лимит", callback_data=f"{OpenCB.CANCEL_LIMIT}{opening_id}"
-        )]])
-    return None
-
-
-def result_keyboard(outcome: ConfirmOutcome, opening_id: int,
-                    symbol: str, side: TradeSide) -> InlineKeyboardMarkup | None:
-    with_position = (OpeningStatus.ALARM, OpeningStatus.PROTECTED)   # позиция есть, сделки ещё нет
-    if outcome.trade_id is not None or outcome.status in (OpeningStatus.WORKING, *with_position):
-        position = (
-            (symbol, side)
-            if outcome.trade_id is not None or outcome.status in with_position else None
-        )
-        return opening_keyboard(outcome.status, opening_id, position)
-    if outcome.status in (OpeningStatus.REFUSED, OpeningStatus.EXPIRED_CARD):
-        return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Пересчитать", callback_data=OpenCB.RECALC)],
-            [InlineKeyboardButton(text="◀️ В меню", callback_data=MenuCallback.MAIN)],
-        ])
-    return None
 
 
 class _Ack:

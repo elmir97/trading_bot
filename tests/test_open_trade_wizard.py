@@ -146,8 +146,8 @@ def test_open_wizard_is_part_of_trail() -> None:
 def test_emergency_closed_keyboard_has_no_position_button() -> None:
     """A.1 (Т2): под аварийным закрытием — «К позициям / В меню»; «Позиция»
     вела на экран «уже нет» и затирала итог."""
-    from app.bot.handlers.open_trade import opening_keyboard
     from app.bot.keyboards.main import MenuCallback
+    from app.bot.opening_result import opening_keyboard
 
     closed = result_keyboard(ConfirmOutcome("🚨", OpeningStatus.EMERGENCY_CLOSED, 26), 21,
                              "XRP-USDT", TradeSide.LONG)

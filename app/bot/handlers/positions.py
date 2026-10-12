@@ -31,6 +31,7 @@ from app.bot.handlers.position_actions import SIDE_BY_CODE, SIDE_CODE, action_bu
 from app.bot.keyboards.main import MenuCallback
 from app.bot.keyboards.trade import TradeCB
 from app.bot.messaging import edit_or_replace
+from app.bot.opening_result import POSITION_ACTIONS
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.security import SecretCipher
@@ -61,7 +62,7 @@ IMPORT_DAYS = 30
 class PositionsCB:
     REFRESH = "pos:refresh"
     IMPORT = "pos:imp:"    # + SYMBOL:L|S
-    ACTIONS = "pos:act:"   # + SYMBOL:L|S
+    ACTIONS = POSITION_ACTIONS   # + SYMBOL:L|S
 
 
 def _short(symbol: str) -> str:
@@ -70,17 +71,6 @@ def _short(symbol: str) -> str:
 
 def _position_ref(symbol: str, side: TradeSide) -> str:
     return f"{symbol}:{SIDE_CODE[side]}"
-
-
-def position_keyboard(symbol: str, side: TradeSide) -> InlineKeyboardMarkup:
-    """Кнопка «Позиция» под итогом открытия сделки из бота (05.10.2026) —
-    экран действий этой позиции (этап 4)."""
-    builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(
-        text=f"⚙️ Позиция {_short(symbol)} {side.value}",
-        callback_data=f"{PositionsCB.ACTIONS}{_position_ref(symbol, side)}",
-    ))
-    return builder.as_markup()
 
 
 def _parse_ref(data: str, prefix: str) -> tuple[str, TradeSide] | None:

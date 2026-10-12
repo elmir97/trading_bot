@@ -286,7 +286,7 @@ async def test_alarm_then_restart_startup_recovery_resolves(ctx) -> None:  # typ
     from sqlalchemy import select
 
     from app.bot import outbox
-    from app.bot.handlers.open_trade import opening_keyboard
+    from app.bot.opening_result import opening_keyboard
     from app.database.models.outgoing_message import OutgoingMessage, OutgoingMeta
 
     opening, out = await _open(ctx, T3)
