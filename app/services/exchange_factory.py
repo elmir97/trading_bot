@@ -43,6 +43,7 @@ class ExchangeFactory:
             timeout=self._settings.http_timeout_seconds,
             max_retries=self._settings.http_max_retries,
             rate_limit_threshold=self._settings.bingx_rate_limit_threshold,
+            private_rate_limit_threshold=self._settings.bingx_private_rate_limit_threshold,
             rate_limit_throttle_enabled=self._settings.bingx_rate_limit_throttle_enabled,
         )
 
@@ -94,6 +95,7 @@ class ExchangeFactory:
             timeout=self._settings.http_timeout_seconds,
             max_retries=self._settings.http_max_retries,
             rate_limit_threshold=self._settings.bingx_rate_limit_threshold,
+            private_rate_limit_threshold=self._settings.bingx_private_rate_limit_threshold,
             rate_limit_throttle_enabled=self._settings.bingx_rate_limit_throttle_enabled,
             mode=mode,
         )

@@ -1253,7 +1253,8 @@ class TestRateLimitThrottle:
                 data = {"longLeverage": 5, "shortLeverage": 5, "maxLongLeverage": 50,
                         "maxShortLeverage": 50}
                 return ok(data, rate_limit_headers(29, 10000))
-            return ok({"leverage": 7, "symbol": "BTC-USDT"}, rate_limit_headers(4, 10000))
+            # 2 — на приватном пороге (деплой 5.1), иначе POST не ждал бы вовсе.
+            return ok({"leverage": 7, "symbol": "BTC-USDT"}, rate_limit_headers(2, 10000))
 
         client = make_client(handler, rate_limit_threshold=20)
         slept: list[float] = []
@@ -1271,6 +1272,95 @@ class TestRateLimitThrottle:
         # GET не ждёт (у него своё состояние), второй POST — ждёт.
         assert events == ["POST", "GET", "sleep", "POST"]
         assert 0 < slept[0] <= 10.0
+        await client.close()
+
+    async def test_private_get_does_not_throttle_at_remaining_above_private_threshold(
+        self,
+    ) -> None:
+        """Деплой 5.1 (Т3 12.10): openOrders, лимит 5/1 с, после первого чтения
+        остаток 4 — второе чтение не ждёт (общий порог 20 усыплял его на ~0.5 с)."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return ok({"orders": []}, rate_limit_headers(4, 1000))
+
+        client = make_client(handler)  # пороги по умолчанию: 20 / приватный 2
+        slept: list[float] = []
+        client._sleep = lambda seconds: slept.append(seconds) or _noop()  # type: ignore[assignment]
+
+        await client.get_open_orders("BTC-USDT")
+        await client.get_open_orders("BTC-USDT")
+
+        assert slept == []
+        await client.close()
+
+    async def test_private_get_throttles_at_private_threshold(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return ok({"orders": []}, rate_limit_headers(2, 1000))
+
+        client = make_client(handler)
+        slept: list[float] = []
+        client._sleep = lambda seconds: slept.append(seconds) or _noop()  # type: ignore[assignment]
+
+        await client.get_open_orders("BTC-USDT")
+        await client.get_open_orders("BTC-USDT")
+
+        assert len(slept) == 1
+        assert 0 < slept[0] <= 1.0
+        await client.close()
+
+    async def test_private_series_waits_before_exhausting_window(self) -> None:
+        """Серия чтений openOrders (5/1 с) в одном окне: остаток 4, 3, 2 —
+        четвёртый запрос ждёт конца окна, до 100410 дело не доходит."""
+        sent: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            sent.append("GET")
+            return ok({"orders": []}, rate_limit_headers(5 - len(sent), 1000))
+
+        client = make_client(handler)
+        events: list[str] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            events.append("sleep")
+
+        client._sleep = fake_sleep  # type: ignore[assignment]
+
+        for _ in range(4):
+            await client.get_open_orders("BTC-USDT")
+            events.append("GET")
+
+        assert events == ["GET", "GET", "GET", "sleep", "GET"]
+        await client.close()
+
+    async def test_public_keeps_general_threshold(self) -> None:
+        """Публичные ручки — прежний порог 20: тикер с остатком 20 ждёт."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return ok({"symbol": "BTC-USDT", "lastPrice": "1"}, rate_limit_headers(20, 10000))
+
+        client = make_client(handler)
+        slept: list[float] = []
+        client._sleep = lambda seconds: slept.append(seconds) or _noop()  # type: ignore[assignment]
+
+        await client.get_ticker("BTC-USDT")
+        await client.get_ticker("BTC-USDT")
+
+        assert len(slept) == 1
+        await client.close()
+
+    async def test_throttle_log_names_threshold(self, caplog) -> None:  # type: ignore[no-untyped-def]
+        def handler(request: httpx.Request) -> httpx.Response:
+            return ok({"orders": []}, rate_limit_headers(1, 1000))
+
+        client = make_client(handler)
+        client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
+        with caplog.at_level(logging.INFO, logger="app.exchanges.bingx"):
+            await client.get_open_orders("BTC-USDT")
+            await client.get_open_orders("BTC-USDT")
+
+        records = [r for r in caplog.records if r.getMessage().startswith("Троттлинг BingX")]
+        assert len(records) == 1
+        assert records[0].threshold == 2  # type: ignore[attr-defined]
         await client.close()
 
     async def test_post_logs_remaining_and_window_at_info(self, caplog) -> None:  # type: ignore[no-untyped-def]

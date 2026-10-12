@@ -363,6 +363,7 @@ class BingXClient(ExchangeClient):
         client: httpx.AsyncClient | None = None,
         mode: ExchangeKeyMode = ExchangeKeyMode.LIVE,
         rate_limit_threshold: int = 20,
+        private_rate_limit_threshold: int = 2,
         rate_limit_throttle_enabled: bool = True,
     ) -> None:
         self._api_key = api_key
@@ -371,6 +372,7 @@ class BingXClient(ExchangeClient):
         self._recv_window = recv_window
         self._max_retries = max_retries
         self._rate_limit_threshold = rate_limit_threshold
+        self._private_rate_limit_threshold = private_rate_limit_threshold
         self._rate_limit_throttle_enabled = rate_limit_throttle_enabled
         # По (метод, путь), не общий на клиент — см. комментарий у
         # _HEADER_RATE_LIMIT_REMAIN.
@@ -478,7 +480,7 @@ class BingXClient(ExchangeClient):
         else:
             retries = 1
 
-        await self._maybe_throttle(method, path)
+        await self._maybe_throttle(method, path, signed=signed)
 
         last_error: Exception | None = None
 
@@ -547,7 +549,7 @@ class BingXClient(ExchangeClient):
 
         await asyncio.sleep(seconds)
 
-    async def _maybe_throttle(self, method: str, path: str) -> None:
+    async def _maybe_throttle(self, method: str, path: str, *, signed: bool = False) -> None:
         """Притормаживает ПЕРЕД запросом, если по этому пути остаток мал
         (раздел "троттлинг сканера"). Постфактум-реакция на 429 (Retry-After
         в _parse) остаётся отдельно и не отменяется этим — это подстраховка
@@ -556,7 +558,11 @@ class BingXClient(ExchangeClient):
 
         Если состояния по этому пути нет (ещё не отвечали, или ответ не
         принёс заголовков) — не тормозим: отсутствие не значит "остаток 0",
-        значит "неизвестно" (см. комментарий у _HEADER_RATE_LIMIT_REMAIN)."""
+        значит "неизвестно" (см. комментарий у _HEADER_RATE_LIMIT_REMAIN).
+
+        Порог — свой у подписанных запросов (bingx_private_rate_limit_threshold,
+        деплой 5.1): их лимиты 2…40 за 1 с, общий порог 20 рассчитан на
+        публичные ~500/10 с."""
         if not self._rate_limit_throttle_enabled:
             return
         state = self._rate_limits.get((method, path))
@@ -568,7 +574,10 @@ class BingXClient(ExchangeClient):
             # стороне биржи наверняка сброшен, наше устаревшее число не
             # повод ждать.
             return
-        if state.remaining > self._rate_limit_threshold:
+        threshold = (
+            self._private_rate_limit_threshold if signed else self._rate_limit_threshold
+        )
+        if state.remaining > threshold:
             return
         logger.info(
             "Троттлинг BingX: мало остатка лимита, ждём конца окна",
@@ -576,6 +585,7 @@ class BingXClient(ExchangeClient):
                 "method": method,
                 "path": path,
                 "remaining": state.remaining,
+                "threshold": threshold,
                 "wait_seconds": round(remaining_seconds, 3),
             },
         )

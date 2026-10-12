@@ -82,6 +82,25 @@ async def test_live_key_uses_live_host(ctx) -> None:  # type: ignore[no-untyped-
         await client.close()
 
 
+async def test_private_rate_limit_threshold_from_settings(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Деплой 5.1: порог подписанных запросов приходит из настроек, общий — свой."""
+    settings, user, session, cipher, factory = ctx
+    await _add_credentials(session, cipher, user.id, ExchangeKeyMode.DEMO)
+
+    client = await factory.for_user(session, user.id, mode=ExchangeKeyMode.DEMO)
+    try:
+        assert settings.bingx_private_rate_limit_threshold == 2
+        assert client._private_rate_limit_threshold == 2  # type: ignore[attr-defined]
+        assert client._rate_limit_threshold == settings.bingx_rate_limit_threshold  # type: ignore[attr-defined]
+    finally:
+        await client.close()
+    public = factory.public_client()
+    try:
+        assert public._private_rate_limit_threshold == 2  # type: ignore[attr-defined]
+    finally:
+        await public.close()
+
+
 async def test_demo_key_uses_demo_vst_host(ctx) -> None:  # type: ignore[no-untyped-def]
     settings, user, session, cipher, factory = ctx
     await _add_credentials(session, cipher, user.id, ExchangeKeyMode.DEMO)

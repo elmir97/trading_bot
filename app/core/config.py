@@ -75,6 +75,9 @@ _READBACK_FIXED_HTTP_CALLS = 1 + 2 + 2 + 1
 #   GET/POST trade/leverage, ticker, contracts, balance — по 1 → 0
 # Пересчёт после дрейфа (ticker/contracts/balance ×2) не хуже: balance 40,
 # публичные 500 — остаток выше порога.
+# 12.10.2026 (деплой 5.1): у подписанных запросов порог 2
+# (bingx_private_rate_limit_threshold) — снов только меньше, 4 остаётся
+# верхней границей, TTL лока не пересчитываем.
 _CONFIRM_PATH_THROTTLE_SLEEPS = 4
 _PRIVATE_RATE_WINDOW_SECONDS = 1
 
@@ -145,6 +148,12 @@ class Settings(BaseSettings):
     # не token bucket. Выключатель — на случай, если порог окажется вреден
     # для каких-то приватных ручек и понадобится быстро откатить без деплоя.
     bingx_rate_limit_threshold: int = 20
+    # 12.10.2026 (деплой 5.1): порог для подписанных (приватных) запросов.
+    # Их лимиты — 2…40 за 1 с, остаток всегда <= 20, и общий порог усыплял
+    # каждое второе чтение ручки в окне (Т3: openOrders при остатке 4 из 5,
+    # 2.1 с из 8.1 без стопа). Ждём, только когда остаток <= 2 — как в
+    # правиле зондов лимитов (CLAUDE.md): дальше 100410 банит ручку ~5 мин.
+    bingx_private_rate_limit_threshold: int = 2
     bingx_rate_limit_throttle_enabled: bool = True
 
     # --- Redis (этап 15: блокировка от двойного нажатия «Да», раздел 8) ---
