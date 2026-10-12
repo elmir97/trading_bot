@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
@@ -37,14 +38,18 @@ from app.execution.models import ExecutionRefusal
 from app.execution.models import ExecutionRefusalCode as Code
 from app.execution.opening import checks, limits
 from app.execution.opening.calc import (
+    InputError,
     Issue,
     Level,
     Limits,
     MarketSnapshot,
     OpeningCalc,
     OpeningInputs,
+    RawOpeningInputs,
     RoundedLevel,
     compute,
+    percent_fields,
+    resolve_inputs,
     round_inputs,
 )
 from app.execution.opening.execution import (
@@ -121,6 +126,8 @@ class CardOutcome:
     market: MarketSnapshot | None = None
     # Уровни, сдвинутые к шагу цены (A.4): «было → стало» — карточка и Mini App.
     rounded: tuple[RoundedLevel, ...] = ()
+    # Ввод после перевода % / $ и шага цены — то, что посчитано и уйдёт (Mini App).
+    inputs: OpeningInputs | None = None
 
     @property
     def can_open(self) -> bool:
@@ -291,7 +298,7 @@ class OpeningService:
         return client, None
 
     async def market_snapshot(
-        self, client: ExchangeClient, inputs: OpeningInputs
+        self, client: ExchangeClient, inputs: OpeningInputs | RawOpeningInputs
     ) -> tuple[MarketSnapshot | None, ExecutionRefusal | None]:
         symbol = inputs.symbol
         try:
@@ -365,13 +372,13 @@ class OpeningService:
             plan_issues = checks.classify(check)
         return calc, checks.merge(calc.issues, plan_issues)
 
-    async def preview(self, inputs: OpeningInputs) -> CardOutcome:
+    async def preview(self, inputs: OpeningInputs | RawOpeningInputs) -> CardOutcome:
         """Карточка без записи (Mini App: живой пересчёт)."""
         return await self._card(inputs, persist=False, source=OpeningSource.MINIAPP)
 
     async def prepare(
         self,
-        inputs: OpeningInputs,
+        inputs: OpeningInputs | RawOpeningInputs,
         *,
         source: OpeningSource,
         chat_id: int | None = None,
@@ -385,7 +392,7 @@ class OpeningService:
 
     async def _card(
         self,
-        inputs: OpeningInputs,
+        inputs: OpeningInputs | RawOpeningInputs,
         *,
         persist: bool,
         source: OpeningSource,
@@ -403,18 +410,40 @@ class OpeningService:
                     await client.close()
         if refusal is not None or market is None:
             assert refusal is not None
-            opening = (
-                await self._store(inputs, source, None, None, (), refusal, chat_id, message_id)
-                if persist else None
-            )
+            opening = None
+            if persist and isinstance(inputs, OpeningInputs):
+                opening = await self._store(
+                    inputs, source, None, None, (), refusal, chat_id, message_id
+                )
+            elif persist:
+                # Ввод в % / $ без данных биржи в уровни не перевести — строку
+                # не пишем (stop_loss NOT NULL), отказ — в лог.
+                logger.info(
+                    "Карточка открытия не записана: отказ до расчёта уровней",
+                    extra={"user_id": self._user.id, "symbol": inputs.symbol,
+                           "code": refusal.code.value},
+                )
             return CardOutcome(render_refusal(refusal.message), opening, None, (), refusal)
 
+        hidden: frozenset[str] = frozenset()
+        if isinstance(inputs, RawOpeningInputs):
+            hidden = percent_fields(inputs)
+            try:
+                inputs = resolve_inputs(
+                    inputs, last_price=market.last_price, equity=market.equity
+                )
+            except InputError as exc:
+                bad = ExecutionRefusal(Code(exc.code), exc.message)
+                return CardOutcome(render_refusal(exc.message), None, None, (), bad, market)
         info = market.symbol_info
         # A.4: к шагу цены ДО расчёта — объём, риск и RR от того, что уйдёт на
         # биржу; в trade_openings — округлённое (confirm берёт уровни оттуда).
-        inputs, rounded = round_inputs(inputs, info)
+        inputs, rounded_all = round_inputs(inputs, info)
+        rounded = tuple(r for r in rounded_all if r.field not in hidden)
         if rounded:
-            logger.info(
+            # Превью (живой пересчёт Mini App, шаг «Плечо» мастера) — DEBUG.
+            logger.log(
+                logging.INFO if persist else logging.DEBUG,
                 "Уровни открытия округлены к шагу цены",
                 extra={
                     "user_id": self._user.id, "symbol": inputs.symbol,
@@ -435,7 +464,7 @@ class OpeningService:
             await self._store(inputs, source, market, calc, issues, None, chat_id, message_id)
             if persist else None
         )
-        return CardOutcome(text, opening, calc_view, issues, None, market, rounded)
+        return CardOutcome(text, opening, calc_view, issues, None, market, rounded, inputs)
 
     async def _store(
         self,

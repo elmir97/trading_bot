@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -12,7 +13,7 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
 from app.core.config import Settings
@@ -24,7 +25,16 @@ from app.database.repositories.strategy import MistakeTypeRepository, StrategyRe
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
 from app.exchanges.base import MarginType, Position
-from app.execution.opening.calc import Issue, Level, OpeningInputs
+from app.execution.opening.calc import (
+    Issue,
+    Level,
+    LevelInput,
+    LevelKind,
+    OpeningInputs,
+    RawOpeningInputs,
+    RiskInput,
+    RiskKind,
+)
 from app.execution.opening.checks import classify, merge
 from app.execution.opening.service import OpeningService, PlanLimits, plan_limits
 from app.market.cache import TTLCache
@@ -303,6 +313,72 @@ async def test_levels_on_step_no_note(ctx) -> None:  # type: ignore[no-untyped-d
     outcome = await ctx.service().prepare(INPUTS, source=OpeningSource.WIZARD)
     assert outcome.rounded == ()
     assert "Округлено" not in outcome.text
+
+
+# --- ввод Mini App: % и $ (RawOpeningInputs, подэтап 1.1) ---------------------------
+
+RAW = RawOpeningInputs(
+    symbol="XRP-USDT", side=TradeSide.LONG, entry_type=EntryType.MARKET,
+    stop=LevelInput(LevelKind.PERCENT, D(3)), risk=RiskInput(RiskKind.USD, D("14.98")),
+    leverage=10, take=LevelInput(LevelKind.PRICE, D("1.53997")),
+)
+
+
+async def test_raw_inputs_resolved_then_rounded(ctx, caplog) -> None:  # type: ignore[no-untyped-def]
+    # стоп 3% от last 1.4950 = 1.45015 → LONG вниз 1.4501; риск 14.98 $ → 0.9986 %
+    caplog.set_level(logging.DEBUG, logger="app.execution.opening.service")
+    preview = await ctx.service().preview(RAW)
+    assert preview.inputs is not None and preview.opening is None
+    assert (preview.inputs.stop_loss, preview.inputs.take_profit) == (D("1.4501"), D("1.5399"))
+    assert preview.inputs.risk_percent == D("0.9986")
+    # «Округлено» — только для введённого ценой (тейк), не для стопа из %
+    assert [r.field for r in preview.rounded] == ["take_profit"]
+    note = next(line for line in preview.text.splitlines() if "Округлено" in line)
+    assert "тейк 1.53997 → 1.5399" in note and "стоп" not in note
+    prepared = await ctx.service().prepare(RAW, source=OpeningSource.MINIAPP)
+    row = prepared.opening
+    assert row is not None and row.status is OpeningStatus.CARD
+    assert (row.stop_loss, row.take_profit, row.risk_percent) == (
+        D("1.4501"), D("1.5399"), D("0.9986"),
+    )
+    assert prepared.calc is not None and preview.calc is not None
+    assert prepared.calc.quantity == preview.calc.quantity
+    # превью (живой пересчёт) пишет округление на DEBUG, карточка — INFO
+    levels = [r.levelno for r in caplog.records
+              if r.getMessage() == "Уровни открытия округлены к шагу цены"]
+    assert levels == [logging.DEBUG, logging.INFO]
+
+
+async def test_raw_price_kind_equals_plain_inputs(ctx) -> None:  # type: ignore[no-untyped-def]
+    raw = replace(RAW, stop=LevelInput(LevelKind.PRICE, INPUTS.stop_loss),
+                  take=LevelInput(LevelKind.PRICE, INPUTS.take_profit),  # type: ignore[arg-type]
+                  risk=RiskInput(RiskKind.PERCENT, INPUTS.risk_percent))
+    from_raw = await ctx.service().preview(raw)
+    plain = await ctx.service().preview(INPUTS)
+    assert from_raw.text == plain.text and from_raw.inputs == plain.inputs == INPUTS
+    assert from_raw.calc == plain.calc
+
+
+async def test_raw_input_error_refused_not_stored(ctx) -> None:  # type: ignore[no-untyped-def]
+    raw = replace(RAW, entry_type=EntryType.LIMIT, limit_price=None)
+    outcome = await ctx.service().prepare(raw, source=OpeningSource.MINIAPP)
+    assert outcome.refusal is not None and outcome.refusal.code.value == "INVALID_LEVELS"
+    assert outcome.opening is None and outcome.text.startswith("⛔ Стоп в %")
+    rows = await ctx.session.scalar(
+        select(func.count()).select_from(TradeOpening).where(TradeOpening.user_id == ctx.uid)
+    )
+    assert rows == 0
+
+
+async def test_raw_gate_refusal_not_stored(ctx) -> None:  # type: ignore[no-untyped-def]
+    outcome = await ctx.service(trading_execution_enabled=False).prepare(
+        RAW, source=OpeningSource.MINIAPP
+    )
+    assert outcome.refusal is not None and outcome.opening is None
+    plain = await ctx.service(trading_execution_enabled=False).prepare(
+        INPUTS, source=OpeningSource.WIZARD
+    )
+    assert plain.opening is not None and plain.opening.status is OpeningStatus.REFUSED
 
 
 async def test_rounding_can_block_take(ctx) -> None:  # type: ignore[no-untyped-def]

@@ -58,6 +58,110 @@ class OpeningInputs:
     expiry_minutes: int | None = None
 
 
+class LevelKind(StrEnum):
+    PRICE = "price"
+    PERCENT = "percent"   # расстояние от цены входа, > 0; сторону задаёт LONG/SHORT
+
+
+class RiskKind(StrEnum):
+    USD = "usd"
+    PERCENT = "percent"
+
+
+@dataclass(frozen=True, slots=True)
+class LevelInput:
+    kind: LevelKind
+    value: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class RiskInput:
+    kind: RiskKind
+    value: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class RawOpeningInputs:
+    """Ввод Mini App (§5а): стоп и тейк — ценой или %, риск — $ или %.
+    В OpeningInputs переводит resolve_inputs, когда известны цена и equity."""
+
+    symbol: str
+    side: TradeSide
+    entry_type: EntryType
+    stop: LevelInput
+    risk: RiskInput
+    leverage: int
+    limit_price: Decimal | None = None
+    take: LevelInput | None = None
+    expiry_minutes: int | None = None
+
+
+class InputError(ValueError):
+    """Ввод не перевести в уровни (code — ExecutionRefusalCode)."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+RISK_PERCENT_STEP = Decimal("0.0001")   # trade_openings.risk_percent — Numeric(12, 4)
+
+
+def resolve_inputs(
+    raw: RawOpeningInputs, *, last_price: Decimal, equity: Decimal
+) -> OpeningInputs:
+    """% → цена от цены входа (маркет — last, лимит — цена лимита); $ риска →
+    % от equity вниз до шага колонки: риск в $ после перевода не больше
+    введённого. Шаг цены — потом, round_inputs."""
+    is_limit = raw.entry_type is EntryType.LIMIT
+    entry = raw.limit_price if is_limit else last_price
+    sign = Decimal(raw.side.direction)
+
+    def level(name: str, item: LevelInput, toward_loss: bool) -> Decimal:
+        if item.kind is LevelKind.PRICE:
+            return item.value
+        if entry is None or entry <= ZERO:
+            raise InputError("INVALID_LEVELS", f"{name} в % — нужна цена лимита больше нуля.")
+        if item.value <= ZERO:
+            raise InputError("INVALID_LEVELS", f"{name} в % — расстояние от входа больше нуля.")
+        direction = -sign if toward_loss else sign
+        price = entry * (Decimal(1) + direction * item.value / HUNDRED)
+        if price <= ZERO:
+            raise InputError("INVALID_LEVELS", f"{name} {item.value}% от входа — цена ниже нуля.")
+        return price
+
+    if raw.risk.kind is RiskKind.USD:
+        if equity <= ZERO:
+            raise InputError(
+                "NON_POSITIVE_EQUITY",
+                f"Equity счёта {fmt_amount(equity)} — риск в $ не перевести в %.",
+            )
+        risk_percent = (raw.risk.value / equity * HUNDRED).quantize(
+            RISK_PERCENT_STEP, rounding=ROUND_DOWN
+        )
+    else:
+        risk_percent = raw.risk.value
+    return OpeningInputs(
+        symbol=raw.symbol, side=raw.side, entry_type=raw.entry_type,
+        stop_loss=level("Стоп", raw.stop, toward_loss=True),
+        risk_percent=risk_percent, leverage=raw.leverage, limit_price=raw.limit_price,
+        take_profit=level("Тейк", raw.take, toward_loss=False) if raw.take else None,
+        expiry_minutes=raw.expiry_minutes,
+    )
+
+
+def percent_fields(raw: RawOpeningInputs) -> frozenset[str]:
+    """Поля OpeningInputs, введённые в % (их «Округлено к шагу» не показываем:
+    длинную цену из % пользователь не вводил)."""
+    fields: set[str] = set()
+    if raw.stop.kind is LevelKind.PERCENT:
+        fields.add("stop_loss")
+    if raw.take is not None and raw.take.kind is LevelKind.PERCENT:
+        fields.add("take_profit")
+    return frozenset(fields)
+
+
 @dataclass(frozen=True, slots=True)
 class MarketSnapshot:
     """Данные биржи на момент карточки."""

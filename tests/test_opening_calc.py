@@ -13,14 +13,22 @@ import pytest
 from app.core.numfmt import fmt_price
 from app.exchanges.base import MarginType, Position, SymbolInfo
 from app.execution.opening.calc import (
+    InputError,
     Level,
+    LevelInput,
+    LevelKind,
     Limits,
     MarketSnapshot,
     OpeningInputs,
+    RawOpeningInputs,
+    RiskInput,
+    RiskKind,
     compute,
     floor_to_step,
     liquidation_estimate,
     max_leverage_for_stop,
+    percent_fields,
+    resolve_inputs,
 )
 from app.trading.enums import EntryType, TradeSide
 
@@ -234,3 +242,76 @@ class TestCardText:
     def test_liquidation_closer_than_stop(self) -> None:
         text = self._render(50)   # ликвидация ≈ 1% от входа при стопе 3%
         assert "(⚠️ ближе стопа)" in text and "раза дальше" not in text
+
+
+# --- ввод Mini App: % → цена, $ → % (resolve_inputs, подэтап 1.1) -----------------------
+
+PCT = LevelKind.PERCENT
+RAW = RawOpeningInputs(
+    symbol="XRP-USDT", side=TradeSide.LONG, entry_type=EntryType.MARKET,
+    stop=LevelInput(PCT, D(3)), risk=RiskInput(RiskKind.PERCENT, D(1)), leverage=10,
+    take=LevelInput(PCT, D(3)),
+)
+
+
+EQUITY = D(1500)
+
+
+def _resolve(raw: RawOpeningInputs, equity: Decimal = EQUITY) -> OpeningInputs:
+    return resolve_inputs(raw, last_price=D("1.4950"), equity=equity)
+
+
+@pytest.mark.parametrize(("side", "stop", "take"), [
+    (TradeSide.LONG, D("1.45015"), D("1.53985")),    # стоп ниже входа, тейк выше
+    (TradeSide.SHORT, D("1.53985"), D("1.45015")),
+])
+def test_resolve_percent_levels_from_last(side, stop, take) -> None:  # type: ignore[no-untyped-def]
+    got = _resolve(replace(RAW, side=side))
+    assert (got.stop_loss, got.take_profit) == (stop, take)
+    assert got.risk_percent == D(1) and got.leverage == 10
+
+
+def test_resolve_limit_percent_from_limit_price() -> None:
+    got = _resolve(replace(RAW, entry_type=EntryType.LIMIT, limit_price=D("1.4800"),
+                           stop=LevelInput(PCT, D(2)), take=None, expiry_minutes=240))
+    assert got.stop_loss == D("1.4504") and got.take_profit is None
+    assert (got.limit_price, got.expiry_minutes) == (D("1.4800"), 240)
+
+
+def test_resolve_price_kind_passthrough() -> None:
+    raw = replace(RAW, stop=LevelInput(LevelKind.PRICE, D("1.45016")),
+                  take=LevelInput(LevelKind.PRICE, D("1.5399")))
+    got = _resolve(raw)
+    assert (got.stop_loss, got.take_profit) == (D("1.45016"), D("1.5399"))
+    assert percent_fields(raw) == frozenset()
+    assert percent_fields(RAW) == {"stop_loss", "take_profit"}
+    assert percent_fields(replace(RAW, take=None)) == {"stop_loss"}
+
+
+def test_resolve_usd_risk_rounds_down() -> None:
+    # 14.98 / 1500 = 0.99866…% → 0.9986 (вниз): риск в $ не больше введённого.
+    got = _resolve(replace(RAW, risk=RiskInput(RiskKind.USD, D("14.98"))))
+    assert got.risk_percent == D("0.9986")
+    assert got.risk_percent * D(1500) / 100 <= D("14.98")
+
+
+@pytest.mark.parametrize(("raw", "code"), [
+    (replace(RAW, entry_type=EntryType.LIMIT, limit_price=None), "INVALID_LEVELS"),
+    (replace(RAW, entry_type=EntryType.LIMIT, limit_price=D(0)), "INVALID_LEVELS"),
+    (replace(RAW, stop=LevelInput(PCT, D(0))), "INVALID_LEVELS"),
+    (replace(RAW, take=LevelInput(PCT, D(-1))), "INVALID_LEVELS"),
+    (replace(RAW, stop=LevelInput(PCT, D(100))), "INVALID_LEVELS"),        # LONG: стоп 0
+    (replace(RAW, side=TradeSide.SHORT, take=LevelInput(PCT, D(120))), "INVALID_LEVELS"),
+])
+def test_resolve_refuses_bad_percent(raw, code) -> None:  # type: ignore[no-untyped-def]
+    with pytest.raises(InputError) as err:
+        _resolve(raw)
+    assert err.value.code == code
+
+
+def test_resolve_usd_needs_equity() -> None:
+    with pytest.raises(InputError) as err:
+        _resolve(replace(RAW, risk=RiskInput(RiskKind.USD, D(10))), equity=D(0))
+    assert err.value.code == "NON_POSITIVE_EQUITY"
+    # риск в % при нулевом equity — не ошибка ввода: блок даст compute
+    assert _resolve(RAW, equity=D(0)).risk_percent == D(1)
