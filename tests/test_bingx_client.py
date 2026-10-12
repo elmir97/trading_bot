@@ -30,7 +30,7 @@ from app.exchanges.base import (
 )
 from app.exchanges.bingx import QUOTE_TICKER, BingXClient
 from app.trading.enums import ExchangeKeyMode, OrderSide, TradeSide
-from tests.bingx_fixtures import PUBLIC, live_call, live_items
+from tests.bingx_fixtures import MINIAPP_QUOTES, PUBLIC, live_call, live_items
 
 D = Decimal
 
@@ -253,6 +253,15 @@ class TestPublicData:
         ticker = await client.get_ticker("BTC-USDT")
 
         assert ticker.last_price == D("101234.5")
+        assert ticker.price_change_percent == D("2.31")
+        # нет поля за 24 ч — None (только показ), не 0 и не ошибка
+        assert ticker.open_price is None and ticker.quote_volume is None
+        await client.close()
+
+    async def test_ticker_without_last_price_still_fails(self) -> None:
+        client = make_client(lambda r: ok({"symbol": "BTC-USDT", "priceChange": "1"}))
+        with pytest.raises(ExchangeResponseError, match="lastPrice"):
+            await client.get_ticker("BTC-USDT")
         await client.close()
 
     async def test_klines_sorted_chronologically(self) -> None:
@@ -329,6 +338,20 @@ class TestPublicLiveForms:
         ticker = await client.get_ticker("BTC-USDT")
         assert ticker.symbol == "BTC-USDT"
         assert ticker.last_price == D(item["lastPrice"])
+        # 24 ч — для «Деталей» Mini App; проценты как есть (не доля)
+        assert ticker.open_price == D(item["openPrice"])
+        assert ticker.price_change == D(item["priceChange"])
+        assert ticker.price_change_percent == D(item["priceChangePercent"])
+        assert ticker.quote_volume == D(item["quoteVolume"])
+        await client.close()
+
+    async def test_lock_live_klines_1m(self) -> None:
+        """1m (Mini App, 12.10) — та же форма v3: без closeTime, новые первыми."""
+        items = live_items("klines XRP 1m (live)", MINIAPP_QUOTES)
+        client = make_client(lambda r: ok(items))
+        candles = await client.get_klines("XRP-USDT", "1m")
+        assert [c.open for c in candles] == [D("1.3633"), D("1.3625")]
+        assert all(c.close_time - c.open_time == timedelta(minutes=1) for c in candles)
         await client.close()
 
     @pytest.mark.parametrize("host", _HOSTS)

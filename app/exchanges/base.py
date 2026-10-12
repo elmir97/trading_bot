@@ -122,9 +122,17 @@ class ReadbackIncomplete(ExchangeResponseError):  # noqa: N818 — имя из �
 
 @dataclass(frozen=True, slots=True)
 class Ticker:
+    """last_price — обязательна. Поля за 24 ч (форма — фикстура 29.09, live и
+    demo) — только для показа (Mini App, «Детали»): нет в ответе — None.
+    price_change_percent — проценты, не доля ("0.60" = 0.60 %)."""
+
     symbol: str
     last_price: Decimal
     timestamp: datetime
+    open_price: Decimal | None = None
+    price_change: Decimal | None = None
+    price_change_percent: Decimal | None = None
+    quote_volume: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)

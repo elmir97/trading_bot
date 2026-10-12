@@ -19,6 +19,8 @@ LINK_MANUAL_STOP = Path(__file__).parent / "fixtures" / "bingx_demo_20260929_lin
 PUBLIC = Path(__file__).parent / "fixtures" / "bingx_public_20260929.json"
 # 02.10: экран «Анализ рынка» — premiumIndex и openInterest (live), openInterest (demo).
 MARKET_QUOTES = Path(__file__).parent / "fixtures" / "bingx_public_20261002.json"
+# 12.10: Mini App — свечи 1m (live).
+MINIAPP_QUOTES = Path(__file__).parent / "fixtures" / "bingx_public_20261012.json"
 
 
 @cache

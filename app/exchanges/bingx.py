@@ -113,7 +113,7 @@ _QUOTE_ASSET_BY_MODE = {
 
 # Таймфреймы в обозначениях BingX.
 INTERVALS = {
-    "5m": "5m", "15m": "15m", "30m": "30m",
+    "1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m",
     "1h": "1h", "4h": "4h", "1d": "1d",
 }
 
@@ -170,7 +170,8 @@ def _decimal_or[Empty: (Decimal, None)](value: Any, field: str, empty: Empty) ->
       не идут — read-back и сверка берут только FILLED;
     - openOrders stopPrice: "" у ордера без триггера (живьём) → None;
     - positions liquidationPrice, balance availableMargin → None: вызывающий
-      решает сам (read-back предупреждает, вход отказывает)."""
+      решает сам (read-back предупреждает, вход отказывает);
+    - ticker: поля за 24 ч (openPrice, priceChange…) → None — только показ."""
     if value is None or value == "":
         return empty
     return _to_decimal(value, field)
@@ -687,6 +688,12 @@ class BingXClient(ExchangeClient):
             symbol=data.get("symbol", symbol),
             last_price=_to_decimal(data.get("lastPrice"), "lastPrice"),
             timestamp=datetime.now(UTC),
+            open_price=_decimal_or(data.get("openPrice"), "openPrice", None),
+            price_change=_decimal_or(data.get("priceChange"), "priceChange", None),
+            price_change_percent=_decimal_or(
+                data.get("priceChangePercent"), "priceChangePercent", None
+            ),
+            quote_volume=_decimal_or(data.get("quoteVolume"), "quoteVolume", None),
         )
 
     async def get_klines(
@@ -721,7 +728,7 @@ class BingXClient(ExchangeClient):
 
     @staticmethod
     def _parse_kline(item: Any, interval: str) -> Kline:
-        minutes = {"5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440}
+        minutes = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440}
         duration_ms = minutes[interval] * 60_000
 
         if isinstance(item, dict):

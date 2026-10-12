@@ -1,0 +1,44 @@
+{
+  "captured_at": "2026-10-12T17:53:00+00:00",
+  "host": "live",
+  "_note": "Mini App, подэтап 1.2: свечи 1m (график экрана рынка). Один публичный GET без ключей из контейнера бота на проде, open-api.bingx.com, XRP-USDT, limit 2. Форма та же, что у klines v3 1h (29.09): объект без closeTime, новые первыми, цены и объём строками, time — мс числом. Заголовки лимита не записывались.",
+  "calls": [
+    {
+      "label": "klines XRP 1m (live)",
+      "host": "live",
+      "path": "/openApi/swap/v3/quote/klines",
+      "params": {"symbol": "XRP-USDT", "interval": "1m", "limit": 2},
+      "http_status": 200,
+      "rate_remain": null,
+      "rate_expire_ms": null,
+      "code": 0,
+      "msg": "",
+      "top_keys": ["code", "data", "msg"],
+      "data_type": "list",
+      "items": [
+        {
+          "keys": ["close", "high", "low", "open", "time", "volume"],
+          "fields": {
+            "time": {"value": 1791827580000, "type": "int"},
+            "open": {"value": "1.3625", "type": "str"},
+            "high": {"value": "1.3628", "type": "str"},
+            "low": {"value": "1.3620", "type": "str"},
+            "close": {"value": "1.3620", "type": "str"},
+            "volume": {"value": "1752", "type": "str"}
+          }
+        },
+        {
+          "keys": ["close", "high", "low", "open", "time", "volume"],
+          "fields": {
+            "time": {"value": 1791827520000, "type": "int"},
+            "open": {"value": "1.3633", "type": "str"},
+            "high": {"value": "1.3633", "type": "str"},
+            "low": {"value": "1.3624", "type": "str"},
+            "close": {"value": "1.3625", "type": "str"},
+            "volume": {"value": "1485", "type": "str"}
+          }
+        }
+      ]
+    }
+  ]
+}
