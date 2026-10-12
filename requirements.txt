@@ -36,3 +36,9 @@ cryptography==50.0.0
 
 # Serialization
 orjson==3.12.0
+
+# Mini App API (docs/miniapp-plan.md §2): отдельный сервис api, uvicorn без [standard]
+# (uvloop/httptools не нужны). fastapi — 0.141.x: 0.142+ тянет opentelemetry-api.
+fastapi==0.141.1
+starlette==1.7.0
+uvicorn==0.54.0

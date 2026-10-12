@@ -92,11 +92,12 @@ LIMIT_EXPIRY_CHOICES = (15, 60, 240, 1440)
 @dataclass(frozen=True, slots=True)
 class PlanLimits:
     """Торговый план для ввода: риск по умолчанию и максимум (один параметр
-    плана), максимум плеча, белый список. Плана нет — None / пусто."""
+    плана), максимум плеча, белый список, минимальный RR. Плана нет — None / пусто."""
 
     risk_percent: Decimal | None
     max_leverage: int | None
     allowed_symbols: tuple[str, ...]
+    min_rr: Decimal | None = None
 
 
 async def plan_limits(session: AsyncSession, user_id: int) -> PlanLimits:
@@ -105,7 +106,8 @@ async def plan_limits(session: AsyncSession, user_id: int) -> PlanLimits:
     if plan is None:
         return PlanLimits(None, None, ())
     return PlanLimits(
-        plan.risk_per_trade_percent, plan.max_leverage, tuple(plan.allowed_symbols or ())
+        plan.risk_per_trade_percent, plan.max_leverage, tuple(plan.allowed_symbols or ()),
+        plan.min_risk_reward,
     )
 
 

@@ -44,8 +44,10 @@ bot ──► как сейчас: поллинг, мастер, reconciler, м�
 
 ```
 app/api/
-  main.py        — FastAPI app, lifespan (Database, Redis, ExchangeFactory, Bot), без планировщика
-  auth.py        — проверка initData (§4), Depends → CurrentUser
+  main.py        — create_app() (uvicorn --factory), lifespan (Database, Redis, ExchangeFactory, Bot), без планировщика;
+                   лог — logs/api.log (bot.log чек-апа не смешивается)
+  auth.py        — проверка initData (§4), чистая функция
+  deps.py        — состояние процесса, сессия БД, Depends → CurrentUser, ApiError {code, message}
   routes.py      — эндпоинты §3
   schemas.py     — pydantic-модели; Decimal → строка
 miniapp/
@@ -279,7 +281,7 @@ NEAR) и общий вид; **экран ввода сделки у Walt не в
   api:
     build: .
     container_name: trading_bot_api
-    command: ["uvicorn", "app.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--proxy-headers"]
+    command: ["uvicorn", "--factory", "app.api.main:create_app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--proxy-headers"]
     env_file: .env
     environment: { REDIS_URL: redis://redis:6379/0 }
     depends_on: { postgres: {condition: service_healthy}, redis: {condition: service_healthy} }

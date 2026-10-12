@@ -259,6 +259,13 @@ class Settings(BaseSettings):
     # EXEC_ALLOW_LIVE_MODE_ORDERS) бот не стартует.
     exec_open_fault: str = ""
 
+    # --- Mini App (docs/miniapp-plan.md §4) ---------------------------------------
+    # Кому API отвечает: telegram_id через запятую. Пусто (по умолчанию) — 403
+    # всем; включается явно в override прода.
+    miniapp_allowed_telegram_ids: str = ""
+    # Срок initData от auth_date; просроченный — «Сессия устарела».
+    miniapp_init_data_ttl_seconds: int = Field(default=3600, gt=0)
+
     # --- Дефолты торгового плана ------------------------------------------
     # Реальные значения хранятся в БД per-user; это лишь начальные значения
     # при создании плана, а не источник истины во время работы.
@@ -388,6 +395,18 @@ class Settings(BaseSettings):
     @property
     def exec_open_faults(self) -> frozenset[str]:
         return frozenset(_split_faults(self.exec_open_fault))
+
+    @field_validator("miniapp_allowed_telegram_ids")
+    @classmethod
+    def _miniapp_ids_are_ints(cls, value: str) -> str:
+        bad = [x for x in _split_faults(value) if not x.isdigit()]
+        if bad:
+            raise ValueError(f"MINIAPP_ALLOWED_TELEGRAM_IDS: не числа: {bad}")
+        return value
+
+    @property
+    def miniapp_allowed_ids(self) -> frozenset[int]:
+        return frozenset(int(x) for x in _split_faults(self.miniapp_allowed_telegram_ids))
 
     @field_validator("database_url")
     @classmethod

@@ -114,7 +114,7 @@ async def test_plan_limits(ctx) -> None:  # type: ignore[no-untyped-def]
     ctx.plan.allowed_symbols = ["XRP-USDT", "DOGE-USDT"]
     await ctx.session.commit()
     assert await plan_limits(ctx.session, ctx.uid) == PlanLimits(
-        D(2), 20, ("XRP-USDT", "DOGE-USDT")
+        D(2), 20, ("XRP-USDT", "DOGE-USDT"), D("1.5")
     )
     await ctx.session.delete(ctx.plan)
     await ctx.session.commit()
