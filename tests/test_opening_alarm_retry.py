@@ -103,6 +103,35 @@ async def test_first_retry_places_stop(ctx) -> None:  # type: ignore[no-untyped-
     assert len(bot.sent) == 1 and "со 2-й попытки" in bot.sent[0]
 
 
+def _reads_before_first_post(calls: list[tuple[str, Any]]) -> list[str]:
+    names: list[str] = []
+    for name, _ in calls:
+        if name.startswith("post_"):
+            break
+        names.append(name)
+    return names
+
+
+@needs_db
+async def test_retry_reads_open_orders_once_before_stop(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Деплой 5.2 (Т3 12.10): первый проход ищет вложенный стоп 3 раза, повтор
+    из ALARM — одно чтение openOrders до POST s2 (было 3 с паузами, ≈2.4 с)."""
+    opening, out = await _open(ctx, T3)
+    assert out.status is OpeningStatus.ALARM
+    first_pass = [n for n, _ in ctx.exchange.calls]
+    post_market = first_pass.index("post_market")
+    assert _reads_before_first_post(
+        ctx.exchange.calls[post_market + 1:]
+    ).count("open_orders") >= 3                                     # первый проход — как был
+    mark = len(ctx.exchange.calls)
+    await _run(_worker(ctx, T3, _Bot(), []), opening.id)
+    await ctx.session.refresh(opening)
+    assert opening.status is OpeningStatus.DONE
+    retry = ctx.exchange.calls[mark:]
+    assert _reads_before_first_post(retry).count("open_orders") == 1
+    assert retry[len(_reads_before_first_post(retry))][0] == "post_conditional"   # s2
+
+
 @needs_db
 async def test_unconfirmed_alarm_retried_too(ctx) -> None:  # type: ignore[no-untyped-def]
     """Т5 («стоп не подтверждён»): повтор находит s1 — DONE без s2."""

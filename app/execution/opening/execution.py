@@ -554,7 +554,12 @@ class Runner:
             ))
         stops: list[OpenOrder] = []
         takes: list[OpenOrder] = []
-        for attempt in range(PROTECT_ATTEMPTS):
+        # Из ALARM (быстрый повтор B.1, цикл) — одно чтение: первый проход уже
+        # искал вложенные PROTECT_ATTEMPTS раз, прежние closePosition проверит
+        # _earlier_close по cid. Три чтения с паузами стоили 2.4 с без стопа
+        # (Т3 12.10, деплой 5.2).
+        attempts = 1 if o.status is OpeningStatus.ALARM else PROTECT_ATTEMPTS
+        for attempt in range(attempts):
             if attempt:
                 await self._sleep(self.settings.exec_order_readback_delay_ms / 1000)
             orders = await self._visible_orders()
