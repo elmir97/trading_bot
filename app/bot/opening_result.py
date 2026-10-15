@@ -73,15 +73,25 @@ def opening_keyboard(
     return None
 
 
+_WITH_POSITION = (OpeningStatus.ALARM, OpeningStatus.PROTECTED)   # позиция есть, сделки ещё нет
+
+
+def result_position(
+    outcome: ConfirmOutcome, symbol: str, side: TradeSide
+) -> tuple[str, TradeSide] | None:
+    """Позиция для кнопки «⚙️ Позиция» под итогом «Открыть»: сделка записана
+    или позиция уже на бирже (ALARM, PROTECTED)."""
+    if outcome.trade_id is not None or outcome.status in _WITH_POSITION:
+        return symbol, side
+    return None
+
+
 def result_keyboard(outcome: ConfirmOutcome, opening_id: int,
                     symbol: str, side: TradeSide) -> InlineKeyboardMarkup | None:
-    with_position = (OpeningStatus.ALARM, OpeningStatus.PROTECTED)   # позиция есть, сделки ещё нет
-    if outcome.trade_id is not None or outcome.status in (OpeningStatus.WORKING, *with_position):
-        position = (
-            (symbol, side)
-            if outcome.trade_id is not None or outcome.status in with_position else None
+    if outcome.trade_id is not None or outcome.status in (OpeningStatus.WORKING, *_WITH_POSITION):
+        return opening_keyboard(
+            outcome.status, opening_id, result_position(outcome, symbol, side)
         )
-        return opening_keyboard(outcome.status, opening_id, position)
     if outcome.status in (OpeningStatus.REFUSED, OpeningStatus.EXPIRED_CARD):
         return InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔄 Пересчитать", callback_data=RECALC)],
@@ -121,6 +131,7 @@ __all__ = [
     "opening_keyboard",
     "position_keyboard",
     "result_keyboard",
+    "result_position",
     "send_opening_result",
     "strip_markup",
 ]

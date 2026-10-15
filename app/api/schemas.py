@@ -5,8 +5,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 CENT = Decimal("0.01")
 
@@ -107,18 +108,172 @@ class Candles(BaseModel):
     candles: list[Candle]
 
 
+# --- открытие (§3, §5а) ------------------------------------------------------------
+
+# Ввод — строкой или числом; NaN/Infinity и мусор длиной в килобайт — 422.
+Positive = Annotated[Decimal, Field(gt=0, allow_inf_nan=False, max_digits=30)]
+
+
+class LevelIn(BaseModel):
+    kind: Literal["price", "percent"]   # percent — расстояние от входа, > 0
+    value: Positive
+
+
+class RiskIn(BaseModel):
+    kind: Literal["usd", "percent"]
+    value: Positive
+
+
+class OpenIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str = Field(pattern=r"^[A-Z0-9]{1,24}-USDT$")
+    side: Literal["LONG", "SHORT"]
+    entry_type: Literal["MARKET", "LIMIT"]
+    stop: LevelIn
+    take: LevelIn | None = None         # без тейка — null
+    risk: RiskIn
+    leverage: int = Field(ge=1, le=500)
+    limit_price: Positive | None = None
+    expiry_minutes: int | None = None   # только лимит; нет — по умолчанию настроек
+
+
+class ConfirmIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    accept_warnings: bool = False       # «Открыть всё равно»
+
+
+class IssueOut(BaseModel):
+    code: str
+    level: str                          # BLOCK | WARN
+    message: str
+
+
+class RefusalOut(BaseModel):
+    code: str
+    message: str
+
+
+class RoundedOut(BaseModel):
+    field: str                          # stop_loss | take_profit | limit_price
+    label: str
+    before: Decimal
+    after: Decimal
+
+
+class LevelsOut(BaseModel):
+    """Ввод после перевода % / $ и шага цены — то, что посчитано и уйдёт."""
+
+    entry_type: str
+    stop_loss: Decimal
+    take_profit: Decimal | None
+    limit_price: Decimal | None
+    risk_percent: Decimal               # 4 знака, как в trade_openings
+    leverage: int
+    expiry_minutes: int | None
+
+
+class CalcOut(BaseModel):
+    entry_price: Decimal
+    quantity: Decimal
+    notional: Decimal
+    risk_usd: Decimal                   # с комиссией входа и выхода по стопу
+    risk_percent: Decimal
+    fee_usd: Decimal
+    margin: Decimal
+    liq_estimate: Decimal | None
+    liq_ratio: Decimal | None
+    distance_percent: Decimal | None
+    rr: Decimal | None
+    max_leverage_for_stop: int
+    suggested_leverage: int
+    fills_immediately: bool
+
+
+class CardOut(BaseModel):
+    text: str                           # карточка как в чате (render_card) или отказ
+    can_open: bool
+    has_warnings: bool
+    issues: list[IssueOut]
+    refusal: RefusalOut | None
+    calc: CalcOut | None
+    levels: LevelsOut | None
+    rounded: list[RoundedOut]
+    price_precision: int | None
+    quantity_precision: int | None
+
+
+class OpenOut(BaseModel):
+    opening_id: int | None              # None — отказ до расчёта уровней, строки нет
+    status: str | None                  # CARD | REFUSED
+    expires_at: datetime | None         # карточка действует до (exec_open_card_ttl_seconds)
+    card: CardOut
+
+
+class OpeningOut(BaseModel):
+    id: int
+    status: str
+    final: bool                         # дальше статус сам не изменится
+    text: str
+    symbol: str
+    side: str
+    entry_type: str
+    quantity: Decimal | None            # исполнено, иначе по карточке
+    avg_price: Decimal | None
+    limit_price: Decimal | None
+    stop_loss: Decimal | None
+    take_profit: Decimal | None
+    liq_estimate: Decimal | None
+    stop_placed: bool                   # стоп стоит на бирже (строка SUBMITTED)
+    take_placed: bool
+    trade_id: int | None
+    expires_at: datetime | None         # CARD — срок карточки, WORKING — срок лимита
+    error_code: str | None
+    error_message: str | None
+
+
+class ActionOut(BaseModel):
+    """Итог confirm / cancel: text — ответ ядра; pending — ещё идёт, опрашивать GET."""
+
+    text: str
+    final: bool
+    pending: bool = False
+    busy: bool = False                  # лок позиции занят — повторить через пару секунд
+    opening: OpeningOut
+
+
+def qty(value: Decimal | None, precision: int) -> Decimal | None:
+    """Объём — знаков по quantityPrecision (он уже на шаге лота)."""
+    return price(value, precision)
+
+
 __all__ = [
+    "ActionOut",
+    "CalcOut",
     "Candle",
     "Candles",
+    "CardOut",
     "Change",
+    "ConfirmIn",
     "Contract",
     "ErrorBody",
     "Flags",
     "Health",
+    "IssueOut",
+    "LevelIn",
+    "LevelsOut",
     "Leverage",
     "Market",
     "Me",
+    "OpenIn",
+    "OpenOut",
+    "OpeningOut",
     "Plan",
+    "RefusalOut",
+    "RiskIn",
+    "RoundedOut",
     "money",
     "price",
+    "qty",
 ]

@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
@@ -919,13 +919,18 @@ class OpeningService:
         """Новая карточка показана — прежние карточки пользователя (CARD и
         отказные с кнопками «Изменить/Отмена», за 2 часа) больше не действуют:
         CARD → EXPIRED_CARD (SUPERSEDED). Возвращает (chat_id, message_id), с
-        которых чат снимает кнопки; сообщение новой карточки не трогается."""
+        которых чат снимает кнопки; сообщение новой карточки не трогается.
+        Карточки Mini App (без сообщения) вытесняются в обе стороны: чат делает
+        карточку Mini App устаревшей, Mini App — карточку чата (§9)."""
         since = datetime.now(UTC) - timedelta(hours=2)
         rows = list(await self._session.scalars(
             select(TradeOpening).where(
                 TradeOpening.user_id == self._user.id,
                 TradeOpening.status.in_((OpeningStatus.CARD, OpeningStatus.REFUSED)),
-                TradeOpening.card_message_id.is_not(None),
+                or_(
+                    TradeOpening.card_message_id.is_not(None),
+                    TradeOpening.source == OpeningSource.MINIAPP,
+                ),
                 TradeOpening.created_at >= since,
             )
         ))

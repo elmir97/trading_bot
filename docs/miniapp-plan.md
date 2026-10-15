@@ -1,6 +1,6 @@
 # Mini App открытия сделки — план
 
-Статус: **подэтапы 0–2 в работе в ветке `miniapp`, без деплоя** (разбивка — §9а, «да» владельца 12.10). План — 05.10.2026; дополнен 08.10 — §6а подготовка сервера, §9 подэтапы и место в очереди; 12.10 — §5а экраны «как в Walt», одна форма, Lightweight Charts). Mini App — основной интерфейс открытия сделки, чат-мастер —
+Статус: **подэтапы 0–2 в работе в ветке `miniapp`, без деплоя; на 15.10 сделаны 0.1–0.3 и 1.1–1.5, следующий — 2.1** (разбивка — §9а, «да» владельца 12.10). План — 05.10.2026; дополнен 08.10 — §6а подготовка сервера, §9 подэтапы и место в очереди; 12.10 — §5а экраны «как в Walt», одна форма, Lightweight Charts). Mini App — основной интерфейс открытия сделки, чат-мастер —
 запасной путь. Оба вызывают одно ядро (`docs/open-trade-plan.md`): расчёт, проверки, плечо/маржа, ордер,
 стоп/тейк, read-back, журнал. В Mini App своей торговой логики нет — только ввод, показ и вызов API.
 
@@ -32,7 +32,8 @@ bot ──► как сейчас: поллинг, мастер, reconciler, м�
 - **`api` не запускает** поллинг, планировщик, reconciler, восстановление — только запросы. Фоновая
   жизнь открытия (лимиты, истечение, восстановление после падения) — в процессе бота, как в плане ядра.
   Если `api` упадёт посреди `confirm`, открытие довосстановит бот (§7 плана ядра) — состояние в БД, не в
-  процессе
+  процессе. Исключение (1.5): быстрые повторы защиты B.1 после ALARM своего «Открыть» `api` запускает сам
+  (`OpeningsWorker.retry_alarm`, без цикла `run`); упал — тревогу подхватит цикл бота (≤ 15 с), см. handoff
 - Общие Redis-локи позиции — бот и `api` не исполняют одно и то же одновременно; двойной тап и
   параллельный вызов из чата гасятся тем же условным переходом `CARD → CONFIRMED`
 - Сообщения в чат (итог открытия, исполнение/истечение лимита) шлёт ядро через Bot API — у `api` свой
@@ -411,7 +412,7 @@ pytest exit 0 / 0 skipped, smoke ×2, mypy, ruff (новых кодов нет �
 | 1.2 | `exchanges/*`, `market/data.py` | `Ticker` + `open_price`/`price_change`/`price_change_percent`/`quote_volume` (необязательные; форма — фикстура 29.09); свечи `1m` (форма — один публичный GET) |
 | 1.3 | `app/api/{main,auth,schemas,routes}.py`, `config.py`, `requirements.txt` | каркас, initData §4, `/api/health`, `/api/me`; `miniapp_allowed_telegram_ids` (пусто → 403), `miniapp_init_data_ttl_seconds=3600` |
 | 1.4 | `app/api/routes.py` | `/api/symbols`, `/api/market/{symbol}?interval=`, `/candles` |
-| 1.5 | `app/api/routes.py`, `app/api/ratelimit.py` | preview/open/confirm/status/cancel/active, владение → 404, 429, аудит `ma_*`, вытеснение карточек в обе стороны, итог в чат |
+| 1.5 | `app/api/{routes,opening,ratelimit,schemas,deps,main}.py`, `supersede_cards` ядра | preview/open/confirm/status/cancel/active, владение → 404, 429, аудит `ma_*`, вытеснение карточек в обе стороны, итог в чат. **Сделано 15.10:** preview — на кэше процесса (`PreviewReads`: только `get_*`, marginType/плечо 30 с, цена/позиции/ордера 2 с, баланс 5 с; запись на биржу — AttributeError), `open` — свежие данные; confirm — своя задача (ждёт 20 с, дальше `pending`, опрос GET), один на открытие; аудит после 429 и 404 (чужое не пишем), сбой аудита → 503 без POST; cancel не-WORKING → 409; итог в чат — `send_opening_result`, REFUSED/EXPIRED_CARD — нет; ALARM → `OpeningsWorker.retry_alarm` процесса API; отмена правит ⏳ (`retire_working`); остановка API ждёт начатые confirm до 30 с |
 | 2.1 | `miniapp/vendor/` | Lightweight Charts (стабильная, старше 2 недель) + LICENSE/NOTICE, sha256 в тесте; `miniapp/` в `.dockerignore` |
 | 2.2 | `miniapp/{index.html,style.css,app.js,api.js,storage.js}`, `scripts/miniapp_dev.py` | каркас; тест статики (только свои файлы и telegram.org, без inline/`style=`/`on*=`/`eval`) |
 | 2.3 | `market.js`, `chart.js` | экран рынка |

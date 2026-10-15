@@ -3,27 +3,38 @@
 from __future__ import annotations
 
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Literal
+from typing import Annotated, Literal
 
 from fastapi import APIRouter
+from fastapi import Path as FastPath
+from sqlalchemy import select
 
+from app.api import opening as opening_api
 from app.api.deps import ApiError, CurrentUser, Session, State
 from app.api.market import MarketReader, change_from
+from app.api.ratelimit import ACTION_PER_SECOND, PREVIEW_PER_SECOND, limit
 from app.api.schemas import (
+    ActionOut,
     Candle,
     Candles,
+    CardOut,
     Change,
+    ConfirmIn,
     Contract,
     Flags,
     Health,
     Leverage,
     Market,
     Me,
+    OpenIn,
+    OpeningOut,
+    OpenOut,
     Plan,
     money,
     price,
 )
 from app.core.logging import get_logger
+from app.database.models.trade_opening import TradeOpening
 from app.exchanges.base import ExchangeError, SymbolInfo
 from app.execution.opening.service import (
     LIMIT_EXPIRY_CHOICES,
@@ -31,6 +42,7 @@ from app.execution.opening.service import (
     plan_limits,
 )
 from app.market.contracts import match_contracts
+from app.trading.enums import ExecutionCallbackAction, OpeningStatus
 
 logger = get_logger(__name__)
 
@@ -198,6 +210,88 @@ async def candles(
                low=px(k.low), close=px(k.close))
         for k in rows
     ])
+
+
+# --- открытие (§3) ---------------------------------------------------------------------
+
+OpeningId = Annotated[int, FastPath(ge=1, le=2**31 - 1)]
+
+
+async def _view(state: State, session: Session, opening: TradeOpening,
+                text: str | None = None) -> OpeningOut:
+    try:
+        return await opening_api.opening_out(state, session, opening, text=text)
+    except ExchangeError as exc:
+        raise _unavailable(exc) from None
+
+
+@router.post("/open/preview")
+async def open_preview(body: OpenIn, user: CurrentUser, state: State,
+                       session: Session) -> CardOut:
+    """Живой пересчёт: карточка без записи, на кэше процесса (5/с)."""
+    await limit(state.redis, user.id, "preview", PREVIEW_PER_SECOND)
+    inputs = opening_api.raw_inputs(body, state.settings.exec_open_limit_expiry_minutes)
+    outcome = await opening_api.service_for(state, session, user, preview=True).preview(inputs)
+    return opening_api.card_out(outcome)
+
+
+@router.post("/open")
+async def open_card(body: OpenIn, user: CurrentUser, state: State, session: Session) -> OpenOut:
+    """Карточка CARD (source=miniapp) на свежих данных биржи, срок —
+    exec_open_card_ttl_seconds; прежние карточки чата и Mini App вытесняются."""
+    await limit(state.redis, user.id, "open", ACTION_PER_SECOND)
+    return await opening_api.open_card(state, session, user, body)
+
+
+@router.post("/open/{opening_id}/confirm")
+async def open_confirm(opening_id: OpeningId, body: ConfirmIn, user: CurrentUser,
+                       state: State, session: Session) -> ActionOut:
+    await limit(state.redis, user.id, "confirm", ACTION_PER_SECOND)
+    service = opening_api.service_for(state, session, user)
+    opening = await opening_api.owned(service, opening_id)
+    await opening_api.audit(state, user, ExecutionCallbackAction.MA_CONFIRM, opening_id,
+                            f"ma:confirm:{opening_id}:{int(body.accept_warnings)}")
+    outcome = await opening_api.confirm(state, user.id, opening_id, body.accept_warnings)
+    await session.refresh(opening)   # confirm шёл в своей сессии
+    if outcome is None:
+        view = await _view(state, session, opening)
+        return ActionOut(text=view.text, final=False, pending=True, opening=view)
+    return ActionOut(text=outcome.text, final=outcome.final, busy=outcome.busy,
+                     opening=await _view(state, session, opening))
+
+
+@router.get("/open/{opening_id}")
+async def open_status(opening_id: OpeningId, user: CurrentUser, state: State,
+                      session: Session) -> OpeningOut:
+    service = opening_api.service_for(state, session, user)
+    return await _view(state, session, await opening_api.owned(service, opening_id))
+
+
+@router.post("/open/{opening_id}/cancel")
+async def open_cancel(opening_id: OpeningId, user: CurrentUser, state: State,
+                      session: Session) -> ActionOut:
+    """Отмена стоящего лимита; не лимит или уже не стоит — 409 с текстом статуса."""
+    await limit(state.redis, user.id, "cancel", ACTION_PER_SECOND)
+    service = opening_api.service_for(state, session, user)
+    opening = await opening_api.owned(service, opening_id)
+    await opening_api.audit(state, user, ExecutionCallbackAction.MA_CANCEL, opening_id,
+                            f"ma:cancel:{opening_id}")
+    outcome = await opening_api.cancel(state, service, opening)
+    await session.refresh(opening)
+    return ActionOut(text=outcome.text, final=outcome.final, busy=outcome.busy,
+                     opening=await _view(state, session, opening))
+
+
+@router.get("/open")
+async def open_active(user: CurrentUser, state: State, session: Session,
+                      active: Literal["1"]) -> list[OpeningOut]:
+    """Стоящие лимиты пользователя (WORKING), новые сверху."""
+    rows = await session.scalars(
+        select(TradeOpening).where(
+            TradeOpening.user_id == user.id, TradeOpening.status == OpeningStatus.WORKING,
+        ).order_by(TradeOpening.id.desc())
+    )
+    return [await _view(state, session, row) for row in rows]
 
 
 __all__ = ["router"]

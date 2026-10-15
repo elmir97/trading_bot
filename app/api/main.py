@@ -2,14 +2,20 @@
 
 Импорт модуля ничего не создаёт и не читает окружение: настройки, БД, Redis и
 клиенты биржи — в lifespan. Планировщика, поллинга, reconciler и
-восстановления открытий здесь нет (это процесс бота, docs/miniapp-plan.md §2).
+восстановления открытий здесь нет (это процесс бота, docs/miniapp-plan.md §2);
+есть только быстрые повторы защиты после тревоги своего «Открыть» (B.1).
 """
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+from aiogram import Bot
+from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.enums import ParseMode
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -22,19 +28,43 @@ from app.core.logging import get_logger, setup_logging
 from app.core.security import SecretCipher
 from app.database.session import Database
 from app.services.exchange_factory import ExchangeFactory
+from app.workers.openings import OpeningsWorker
 
 logger = get_logger(__name__)
 
 
-def build_state(settings: Settings) -> ApiState:
-    return ApiState(
-        settings=settings,
-        db=Database(settings),
-        redis=Redis.from_url(settings.redis_url, decode_responses=True),
-        factory=ExchangeFactory(
-            settings, SecretCipher(settings.encryption_key.get_secret_value())
-        ),
+CONFIRM_DRAIN_SECONDS = 30.0
+
+
+def build_state(settings: Settings) -> tuple[ApiState, OpeningsWorker]:
+    """Bot — только отправка (итог открытия в чат, снятие кнопок): поллинга
+    нет, второго getUpdates не возникает. Воркер открытий — только быстрые
+    повторы защиты после тревоги (B.1); его цикл (run) здесь не запускается."""
+    cipher = SecretCipher(settings.encryption_key.get_secret_value())
+    db = Database(settings)
+    redis = Redis.from_url(settings.redis_url, decode_responses=True)
+    factory = ExchangeFactory(settings, cipher)
+    bot = Bot(
+        token=settings.bot_token.get_secret_value(),
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        session=AiohttpSession(proxy=settings.proxy_url) if settings.proxy_url else None,
     )
+    worker = OpeningsWorker(bot, db, settings, cipher, redis, factory=factory)
+    state = ApiState(settings=settings, db=db, redis=redis, factory=factory, bot=bot,
+                     alarm_retry=worker.retry_alarm)
+    return state, worker
+
+
+async def drain(state: ApiState, timeout: float = CONFIRM_DRAIN_SECONDS) -> None:
+    """Остановка: дать начатым «Открыть» дойти до итога. Не успели — их
+    довосстановит цикл бота (состояние — в trade_openings)."""
+    tasks = [t for t in state.confirm_tasks.values() if not t.done()]
+    if not tasks:
+        return
+    _, pending = await asyncio.wait(tasks, timeout=timeout)
+    if pending:
+        logger.warning("Остановка API: «Открыть» не завершилось — доведёт цикл бота",
+                       extra={"opening_ids": sorted(state.confirm_tasks)})
 
 
 def create_app(state: ApiState | None = None) -> FastAPI:
@@ -50,7 +80,7 @@ def create_app(state: ApiState | None = None) -> FastAPI:
         # Свой файл: чек-ап читает logs/bot.log, строки API туда не мешаются.
         setup_logging(level=settings.log_level, json_output=settings.log_json,
                       secrets=settings.secret_values, log_file="api.log")
-        built = build_state(settings)
+        built, worker = build_state(settings)
         app.state.api = built
         logger.info("API Mini App запущен", extra={
             "account_mode": settings.bingx_allowed_exchange_mode.value,
@@ -59,6 +89,9 @@ def create_app(state: ApiState | None = None) -> FastAPI:
         try:
             yield
         finally:
+            await drain(built)
+            await worker.close()   # повторы защиты — дальше цикл бота
+            await built.bot.session.close()
             await built.redis.aclose()
             await built.db.dispose()
 
@@ -86,4 +119,4 @@ def create_app(state: ApiState | None = None) -> FastAPI:
     return app
 
 
-__all__ = ["build_state", "create_app"]
+__all__ = ["build_state", "create_app", "drain"]

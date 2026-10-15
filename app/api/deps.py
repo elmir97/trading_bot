@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import asyncio
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Annotated, Any
 
@@ -39,8 +40,12 @@ class ApiState:
     db: Database
     redis: Any
     factory: Any                      # ExchangeFactory (в тестах — фейк)
-    bot: Any = None                   # aiogram.Bot только для sendMessage (подэтап 1.5)
+    bot: Any = None                   # aiogram.Bot только для отправки, без поллинга
     market_cache: TTLCache = field(default_factory=TTLCache)
+    # B.1: быстрые повторы защиты после тревоги (OpeningsWorker.retry_alarm).
+    alarm_retry: Callable[[int], None] | None = None
+    # «Открыть» в своей задаче: opening_id → задача (повторный запрос ждёт её же).
+    confirm_tasks: dict[int, asyncio.Task[Any]] = field(default_factory=dict)
 
 
 def get_state(request: Request) -> ApiState:
