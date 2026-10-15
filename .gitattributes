@@ -1,3 +1,6 @@
 # Shell-скрипты уходят на сервер через stdin (scripts/rehearse_migration.sh):
 # с CRLF bash падает на первой строке, а core.autocrlf=true на этой машине.
 *.sh text eol=lf
+# Сторонние файлы Mini App — байт в байт как в пакете: sha256 сверяет
+# tests/test_miniapp_vendor.py, autocrlf не должен их трогать.
+miniapp/vendor/** -text

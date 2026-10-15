@@ -14,3 +14,5 @@ logs/
 docs/
 # Shell-скрипты запускаются с Windows через ssh и stdin, в контейнере не нужны.
 scripts/*.sh
+# Статика Mini App — её раздаёт Caddy с диска сервера, боту и api не нужна.
+miniapp/

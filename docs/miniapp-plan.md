@@ -1,6 +1,6 @@
 # Mini App открытия сделки — план
 
-Статус: **подэтапы 0–2 в работе в ветке `miniapp`, без деплоя; на 15.10 сделаны 0.1–0.3 и 1.1–1.5, следующий — 2.1** (разбивка — §9а, «да» владельца 12.10). План — 05.10.2026; дополнен 08.10 — §6а подготовка сервера, §9 подэтапы и место в очереди; 12.10 — §5а экраны «как в Walt», одна форма, Lightweight Charts). Mini App — основной интерфейс открытия сделки, чат-мастер —
+Статус: **подэтапы 0–2 в работе в ветке `miniapp`, без деплоя; на 15.10 сделаны 0.1–0.3, 1.1–1.5 и 2.1, следующий — 2.2** (разбивка — §9а, «да» владельца 12.10). План — 05.10.2026; дополнен 08.10 — §6а подготовка сервера, §9 подэтапы и место в очереди; 12.10 — §5а экраны «как в Walt», одна форма, Lightweight Charts). Mini App — основной интерфейс открытия сделки, чат-мастер —
 запасной путь. Оба вызывают одно ядро (`docs/open-trade-plan.md`): расчёт, проверки, плечо/маржа, ордер,
 стоп/тейк, read-back, журнал. В Mini App своей торговой логики нет — только ввод, показ и вызов API.
 
@@ -249,6 +249,11 @@ NEAR) и общий вид; **экран ввода сделки у Walt не в
   `miniapp/vendor/lightweight-charts-<версия>.js`, рядом `LICENSE` и `NOTICE`; в git, в образ не идёт (как вся `miniapp/`)
 - **Лицензия:** NOTICE библиотеки требует атрибуции TradingView со ссылкой на tradingview.com на странице — оставить
   встроенный логотип (`layout.attributionLogo: true`) или строку-ссылку внизу. Ссылка — не ресурс, CSP не трогает
+- **Находка 2.1 (15.10, v5.2.1):** встроенный логотип вставляет в документ элемент `<style>` (`createElement("style")`) —
+  `style-src 'self'` его блокирует: нарушение CSP в консоли и логотип без позиционирования; ссылка логотипа ещё несёт
+  `utm_source=<наш хост + путь>`. **Предложение для 2.3:** `attributionLogo: false` + своя строка-ссылка «Графики —
+  TradingView Lightweight Charts» (стиль в `style.css`, `rel="noopener noreferrer"`) — CSP без `'unsafe-inline'`. Других
+  инлайн-стилей, `eval`/`Function` и сетевых запросов в сборке нет (поиск по файлу); стили графика — через CSSOM
 - CSP: рисует в canvas, стили ставит через CSSOM — `style-src 'self'` должен выдержать. Проверка на подэтапе 2: ноль
   нарушений CSP в консоли (браузер с теми же заголовками) и на iPhone
 - Тест статики (§8) дополняется: sha256 файла библиотеки = записанному в тесте (обновление — только осознанно), `index.html`
@@ -413,7 +418,7 @@ pytest exit 0 / 0 skipped, smoke ×2, mypy, ruff (новых кодов нет �
 | 1.3 | `app/api/{main,auth,schemas,routes}.py`, `config.py`, `requirements.txt` | каркас, initData §4, `/api/health`, `/api/me`; `miniapp_allowed_telegram_ids` (пусто → 403), `miniapp_init_data_ttl_seconds=3600` |
 | 1.4 | `app/api/routes.py` | `/api/symbols`, `/api/market/{symbol}?interval=`, `/candles` |
 | 1.5 | `app/api/{routes,opening,ratelimit,schemas,deps,main}.py`, `supersede_cards` ядра | preview/open/confirm/status/cancel/active, владение → 404, 429, аудит `ma_*`, вытеснение карточек в обе стороны, итог в чат. **Сделано 15.10:** preview — на кэше процесса (`PreviewReads`: только `get_*`, marginType/плечо 30 с, цена/позиции/ордера 2 с, баланс 5 с; запись на биржу — AttributeError), `open` — свежие данные; confirm — своя задача (ждёт 20 с, дальше `pending`, опрос GET), один на открытие; аудит после 429 и 404 (чужое не пишем), сбой аудита → 503 без POST; cancel не-WORKING → 409; итог в чат — `send_opening_result`, REFUSED/EXPIRED_CARD — нет; ALARM → `OpeningsWorker.retry_alarm` процесса API; отмена правит ⏳ (`retire_working`); остановка API ждёт начатые confirm до 30 с |
-| 2.1 | `miniapp/vendor/` | Lightweight Charts (стабильная, старше 2 недель) + LICENSE/NOTICE, sha256 в тесте; `miniapp/` в `.dockerignore` |
+| 2.1 | `miniapp/vendor/` | Lightweight Charts (стабильная, старше 2 недель) + LICENSE/NOTICE, sha256 в тесте; `miniapp/` в `.dockerignore`. **Сделано 15.10:** v5.2.1 (npm 12.08.2026, integrity tarball = реестр), `standalone.production.js` 198 КБ (gzip 62 КБ), LICENSE из пакета, NOTICE с тега v5.2.1 (в пакете его нет); `miniapp/vendor/** -text` в `.gitattributes`; тест `test_miniapp_vendor.py` (набор файлов, sha256, версия, атрибуция, `.dockerignore`) |
 | 2.2 | `miniapp/{index.html,style.css,app.js,api.js,storage.js}`, `scripts/miniapp_dev.py` | каркас; тест статики (только свои файлы и telegram.org, без inline/`style=`/`on*=`/`eval`) |
 | 2.3 | `market.js`, `chart.js` | экран рынка |
 | 2.4 | `form.js`, `render.js` | форма, живой пересчёт (300 мс, последний побеждает) |
