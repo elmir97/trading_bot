@@ -131,9 +131,16 @@ python -m scripts.miniapp_dev [--port 8765]
   `BINGX_TRADING_MODE` не demo, базе не `trading_bot_test`; слушает только 127.0.0.1; в образ не попадает
 - `telegram_id=434343` зарезервирован под стенд; выход по Ctrl+C его убирает, после жёсткого kill — остаётся
   до следующего запуска
-- проверка CSP в браузере: расширение Chrome или headless Chrome по DevTools-протоколу (`--remote-debugging-port`,
-  события `Log.entryAdded`/`Runtime.consoleAPICalled`) — **свежий `--user-data-dir` на каждую проверку**: иначе
-  Chrome исполняет закэшированный ES-модуль (15.10 так видели «старые» предупреждения)
+- проверка в браузере — `scripts/miniapp_browser_check.py` (при запущенном стенде, во второй консоли):
+  ```
+  MINIAPP_CHROME="C:/Program Files/Google/Chrome/Application/chrome.exe" python -m scripts.miniapp_browser_check [--url http://127.0.0.1:8765/] [--wait 8]
+  ```
+  headless Chrome по DevTools-протоколу: console (warning/error), исключения, нарушения CSP (`Log` + слушатель
+  `securitypolicyviolation`), HTTP ≥ 400 и сбои загрузки, видимые экраны. Путь к Chrome — `--chrome` или
+  `MINIAPP_CHROME` (в скрипте не зашит). Только 127.0.0.1 (страница и DevTools). Exit 0 — чисто, 1 — замечания
+  списком, 2 — окружение не готово (нет Chrome, стенд не отвечает, URL не 127.0.0.1). **Каждый запуск — свежий
+  временный профиль, удаляется после**: со старым профилем Chrome исполняет закэшированный ES-модуль (15.10 так
+  видели «старые» предупреждения). В образ не попадает
 
 `scripts/check_redis.py` — PING и цикл проверок лока, запускать на проде:
 

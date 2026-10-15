@@ -18,3 +18,4 @@ scripts/*.sh
 miniapp/
 # Локальный стенд фронта (обход авторизации) — только на машине разработки.
 scripts/miniapp_dev.py
+scripts/miniapp_browser_check.py
