@@ -11,7 +11,15 @@
 `test_miniapp_vendor.py`; pytest **1736** / 0 skipped, smoke ×2, mypy 60, мутации 4/4). **Логотип — решение владельца 15.10 (для 2.3):**
 `attributionLogo: false` (встроенный вставляет `<style>`, CSP режет), своя ссылка на tradingview.com через `Telegram.WebApp.openLink`,
 без referrer, стиль только в CSS — §5а плана.
-**2.2 сделан 15.10** (`c268f7e` — хеш до ребейза; каркас `miniapp/`, стенд `scripts/miniapp_dev.py`, тесты `test_miniapp_static.py`/`test_miniapp_dev.py`; headless Chrome — ноль нарушений CSP; итог гейта — в §9а плана). **CSP пока задан в стенде (`scripts/miniapp_dev.py`, `CSP`); на подэтапе 3 с Caddyfile — тест, что строки CSP стенда и Caddyfile совпадают.** **Следующий — 2.3** (экран рынка, `market.js`/`chart.js`, логотип — §5а). Прошлая сессия оборвалась
+**2.2 сделан 15.10** (`c268f7e` — хеш до ребейза; каркас `miniapp/`, стенд `scripts/miniapp_dev.py`, тесты `test_miniapp_static.py`/`test_miniapp_dev.py`; headless Chrome — ноль нарушений CSP; итог гейта — в §9а плана). **CSP пока задан в стенде (`scripts/miniapp_dev.py`, `CSP`); на подэтапе 3 с Caddyfile — тест, что строки CSP стенда и Caddyfile совпадают.**
+**`scripts/miniapp_browser_check.py` — 15.10** (`df51605` — хеш до ребейза; по просьбе владельца): проверка страницы стенда в headless
+Chrome по CDP — свежий временный профиль на каждый запуск (удаляется после), кэш выключен; собирает console warning/error, исключения,
+нарушения CSP (лог Chrome + слушатель `securitypolicyviolation`, встроенный до скриптов страницы), HTTP ≥ 400 и сбои загрузки, видимые
+экраны. Только 127.0.0.1 (и страница, и DevTools; порт DevTools — из `DevToolsActivePort`); путь к Chrome — `--chrome` или
+`MINIAPP_CHROME`, без хардкода; exit 0 чисто / 1 замечания списком / 2 окружение не готово (нет Chrome, стенд не отвечает, не
+127.0.0.1); в `.dockerignore`. Ответ CDP — только по своему int id (регрессия `eval_id=None`). Тесты `test_miniapp_browser_check.py`
+(31, без Chrome), мутации 18/18; живой прогон: чисто → 0, без стенда → 2, `style=` + инлайн-скрипт → 1 (4 нарушения CSP). Запуск —
+CLAUDE.md, «Скрипты», рядом со стендом. Гейт: pytest **1797** / 0 skipped, smoke ×2, mypy 60. **Следующий — 2.3** (экран рынка, `market.js`/`chart.js`, логотип — §5а). Прошлая сессия оборвалась
 по лимиту посреди 1.5; на диске были правка `supersede_cards` (вытеснение в обе стороны), `result_position`, `app/api/opening.py`
 (задача confirm) и `ratelimit.py` — всё взято в M1.5, ничего не выброшено.
 - **M1.5:** `POST /api/open/preview` (кэш процесса, 5/с), `POST /api/open` (CARD `source=miniapp`, свежие данные, вытесняет карточки
