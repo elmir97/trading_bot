@@ -99,11 +99,9 @@ def check_environment(settings: Settings, *, script: PurePath, cwd: PurePath) ->
 
 class DevExchange(OpeningExchange):
     """Фейк ядра + то, что нужно экрану рынка: тикер с изменениями, свечи,
-    фандинг, открытый интерес. Свечи — случайное блуждание вокруг last."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._rng = random.Random(DEV_TELEGRAM_ID)
+    фандинг, открытый интерес. Свечи — случайное блуждание, которое кончается
+    на last (иначе график прыгает к цене), одно и то же для таймфрейма при
+    каждой перезагрузке; сетка свечей — по границам интервала, как у биржи."""
 
     async def get_ticker(self, symbol: str, *, max_retries: int | None = None) -> Ticker:
         self._read("ticker", symbol)
@@ -117,20 +115,20 @@ class DevExchange(OpeningExchange):
     async def get_klines(self, symbol: str, interval: str, limit: int = 500) -> list[Kline]:
         self._read("klines", interval)
         step = timedelta(minutes=_STEP.get(interval, 5))
-        now = datetime.now(UTC).replace(second=0, microsecond=0)
-        start = now - step * (limit - 1)
-        price = self.last
+        epoch = datetime(2000, 1, 1, tzinfo=UTC)
+        now = epoch + (datetime.now(UTC) - epoch) // step * step   # открытие текущей свечи
+        rng = random.Random(f"{DEV_TELEGRAM_ID}:{interval}")
+        close = self.last
         out: list[Kline] = []
-        for i in range(limit):
-            close = (price * Decimal(str(1 + self._rng.uniform(-0.004, 0.004)))).quantize(
+        for i in range(limit):                                  # от текущей свечи назад
+            open_ = (close * Decimal(str(1 + rng.uniform(-0.004, 0.004)))).quantize(
                 Decimal("0.0001"))
-            high = max(price, close) + Decimal("0.0010")
-            low = min(price, close) - Decimal("0.0010")
-            t = start + step * i
-            out.append(Kline(t, price, high, low, close, Decimal(self._rng.randint(1, 900)),
-                             t + step))
-            price = close
-        return out
+            high = max(open_, close) + Decimal("0.0010")
+            low = min(open_, close) - Decimal("0.0010")
+            t = now - step * i
+            out.append(Kline(t, open_, high, low, close, Decimal(rng.randint(1, 900)), t + step))
+            close = open_
+        return out[::-1]
 
     async def get_premium_index(self, symbol: str) -> PremiumIndex:
         self._read("premium", symbol)

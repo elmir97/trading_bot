@@ -26,10 +26,84 @@
     </section>
 
     <section class="screen" id="screen-market" hidden>
-      <p class="muted">Экран рынка — подэтап 2.3.</p>
+      <div class="market-head" id="market-head">
+        <button type="button" class="symbol-button" id="market-symbol-button"
+                aria-label="Выбрать монету">
+          <span class="coin" id="market-coin">?</span>
+          <span class="symbol" id="market-symbol">—</span>
+          <span class="caret" aria-hidden="true">▾</span>
+        </button>
+        <span class="chip chip-kind">Фьючерс</span>
+        <span class="chip" id="market-leverage" hidden></span>
+        <button type="button" class="star" id="market-favorite" aria-pressed="false"
+                aria-label="Избранное">☆</button>
+      </div>
+
+      <div id="market-body">
+        <div class="market-price">
+          <div class="price" id="market-last">—</div>
+          <div class="change">
+            <span class="pill flat" id="market-candle-change">—</span>
+            <span id="market-candle-value"></span>
+            · <span id="market-interval-label"></span>
+          </div>
+          <div class="muted small" id="market-time"></div>
+          <p class="note" id="market-stale" hidden></p>
+        </div>
+
+        <div class="chart-box">
+          <div class="chart" id="market-chart"></div>
+          <div class="chart-state" id="market-chart-state">
+            <p id="market-chart-text">Загрузка…</p>
+            <button type="button" class="button button-small" id="market-chart-retry"
+                    hidden>Повторить</button>
+          </div>
+        </div>
+
+        <div class="chart-controls">
+          <div class="segmented" id="market-intervals" role="group" aria-label="Таймфрейм">
+            <button type="button" data-interval="1m">1м</button>
+            <button type="button" data-interval="5m">5м</button>
+            <button type="button" data-interval="15m">15м</button>
+            <button type="button" data-interval="1h">1ч</button>
+            <button type="button" data-interval="4h">4ч</button>
+            <button type="button" data-interval="1d">1д</button>
+          </div>
+          <div class="segmented" id="market-types" role="group" aria-label="Тип графика">
+            <button type="button" data-type="candles">Свечи</button>
+            <button type="button" data-type="line">Линия</button>
+          </div>
+        </div>
+
+        <h2 class="section-title">Детали</h2>
+        <dl class="details">
+          <dt>Изменение за 24ч</dt><dd id="market-day-change">—</dd>
+          <dt>Объём за 24ч</dt><dd id="market-volume">—</dd>
+          <dt>Открытый интерес</dt><dd id="market-oi">—</dd>
+          <dt>Фандинг</dt><dd id="market-funding">—</dd>
+        </dl>
+        <p class="muted small" id="market-details-note" hidden></p>
+      </div>
+
+      <div class="market-error" id="market-error" hidden>
+        <p id="market-error-text"></p>
+        <button type="button" class="button" id="market-retry">Повторить</button>
+      </div>
+
+      <div class="market-search" id="market-search" hidden>
+        <div class="search-bar">
+          <input type="search" id="market-search-input" placeholder="Монета: xrp, btc…"
+                 autocomplete="off" autocapitalize="characters" spellcheck="false"
+                 aria-label="Поиск монеты">
+          <button type="button" class="link-button" id="market-search-close">Отмена</button>
+        </div>
+        <p class="muted" id="market-search-state" hidden></p>
+        <ul class="search-list" id="market-search-list"></ul>
+      </div>
     </section>
 
     <section class="screen" id="screen-trade" hidden>
+      <h1 class="section-title" id="trade-title"></h1>
       <p class="muted">Форма сделки — подэтап 2.4.</p>
     </section>
 

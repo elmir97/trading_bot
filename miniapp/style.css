@@ -102,3 +102,225 @@ main {
 }
 
 .attribution a { color: var(--hint); }
+
+.small { font-size: 12px; }
+
+.button-small { width: auto; min-height: 36px; padding: 0 16px; }
+
+.link-button {
+  border: 0;
+  background: none;
+  color: var(--link);
+  font: inherit;
+  padding: 8px 0 8px 8px;
+}
+
+/* --- Экран рынка (§5а) --- */
+
+.market-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.symbol-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 17px;
+  font-weight: 600;
+  padding: 4px 0;
+  margin-right: auto;
+  min-width: 0;
+}
+
+.symbol { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Узкий экран (iPhone SE) — плашка «Фьючерс» уступает место монете и ☆. */
+@media (max-width: 359px) {
+  .chip-kind { display: none; }
+}
+
+.caret { color: var(--hint); font-size: 13px; }
+
+.coin {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--section);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  flex: none;
+}
+
+.chip {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--section);
+  color: var(--hint);
+  font-size: 12px;
+}
+
+.star {
+  flex: none;
+  border: 0;
+  background: none;
+  color: var(--hint);
+  font-size: 20px;
+  line-height: 1;
+  padding: 4px;
+}
+
+.star[aria-pressed="true"] { color: #f5a524; }
+
+.market-price { margin: 8px 0 12px; }
+
+.price {
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+}
+
+.change { margin: 2px 0; color: var(--hint); font-variant-numeric: tabular-nums; }
+
+.pill {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--section);
+  color: var(--hint);
+  font-weight: 600;
+}
+
+.pill.up { background: rgba(22, 163, 74, 0.15); color: var(--long); }
+.pill.down { background: rgba(220, 38, 38, 0.15); color: var(--short); }
+
+.details .up { color: var(--long); }
+.details .down { color: var(--short); }
+
+.note {
+  margin: 6px 0 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--section);
+  color: var(--hint);
+  font-size: 12px;
+}
+
+/* Высота — от устойчивой высоты окна Telegram (её ставит SDK); поворот экрана и
+   изменение окна подхватывает autoSize графика (ResizeObserver). */
+.chart-box {
+  position: relative;
+  margin: 0 calc(-1 * var(--gap));
+  height: clamp(200px, calc(var(--tg-viewport-stable-height, 100vh) * 0.42), 380px);
+}
+
+.chart { position: absolute; inset: 0; }
+
+.chart-state {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 var(--gap);
+  background: var(--bg);
+  color: var(--hint);
+  text-align: center;
+}
+
+.chart-state p { margin: 0; }
+
+.chart-controls {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 8px 0 4px;
+}
+
+.segmented {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--section);
+}
+
+.segmented button {
+  min-width: 34px;
+  min-height: 30px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--hint);
+  font: inherit;
+  font-size: 13px;
+  padding: 0 6px;
+}
+
+.segmented button.selected {
+  background: var(--bg);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.section-title { font-size: 15px; margin: 16px 0 6px; }
+
+.details {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 12px;
+  margin: 0;
+}
+
+.details dt { color: var(--hint); }
+.details dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+
+.market-error { padding: var(--gap) 0; }
+
+.search-bar { display: flex; align-items: center; gap: 8px; }
+
+.search-bar input {
+  flex: 1;
+  min-height: 40px;
+  border: 0;
+  border-radius: 10px;
+  padding: 0 12px;
+  background: var(--section);
+  color: var(--text);
+  font: inherit;
+  font-size: 16px;
+}
+
+.search-list { list-style: none; margin: 8px 0 0; padding: 0; }
+
+.search-group { padding: 10px 0 4px; }
+
+.search-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  padding: 4px 0;
+}
+
+.search-item .small { margin-left: auto; }

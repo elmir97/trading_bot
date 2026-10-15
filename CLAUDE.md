@@ -131,12 +131,20 @@ python -m scripts.miniapp_dev [--port 8765]
   `BINGX_TRADING_MODE` не demo, базе не `trading_bot_test`; слушает только 127.0.0.1; в образ не попадает
 - `telegram_id=434343` зарезервирован под стенд; выход по Ctrl+C его убирает, после жёсткого kill — остаётся
   до следующего запуска
+- **pytest при запущенном стенде выбивает его пользователя** (одна база `trading_bot_test`, тесты чистят
+  пользователей) — дальше стенд на каждый запрос отвечает 500 «пользователя стенда нет»: перезапустить стенд
+- свечи стенда — блуждание, которое кончается на `last`, одно и то же для таймфрейма (график не прыгает на
+  перезагрузке); цена стоит на месте
 - проверка в браузере — `scripts/miniapp_browser_check.py` (при запущенном стенде, во второй консоли):
   ```
-  MINIAPP_CHROME="C:/Program Files/Google/Chrome/Application/chrome.exe" python -m scripts.miniapp_browser_check [--url http://127.0.0.1:8765/] [--wait 8]
+  MINIAPP_CHROME="C:/Program Files/Google/Chrome/Application/chrome.exe" python -m scripts.miniapp_browser_check [--url http://127.0.0.1:8765/] [--wait 8] [--symbol XRP-USDT]
   ```
   headless Chrome по DevTools-протоколу: console (warning/error), исключения, нарушения CSP (`Log` + слушатель
-  `securitypolicyviolation`), HTTP ≥ 400 и сбои загрузки, видимые экраны. Путь к Chrome — `--chrome` или
+  `securitypolicyviolation`), HTTP ≥ 400 и сбои загрузки, видимые экраны и число графиков. Страница не
+  догрузилась (нет видимого экрана, SDK Telegram или библиотеки графиков) — тоже замечание: SDK с telegram.org
+  в headless иногда не успевает за `--wait` (16.10 — примерно раз из трёх) → повторить или `--wait 15`. Со
+  свежим профилем монеты нет — открывается поиск, графика нет; **`--symbol` кладёт монету в localStorage до
+  скриптов страницы → экран рынка, ровно один график обязателен** (проверка 2.3 — с ним). Путь к Chrome — `--chrome` или
   `MINIAPP_CHROME` (в скрипте не зашит). Только 127.0.0.1 (страница и DevTools). Exit 0 — чисто, 1 — замечания
   списком, 2 — окружение не готово (нет Chrome, стенд не отвечает, URL не 127.0.0.1). **Каждый запуск — свежий
   временный профиль, удаляется после**: со старым профилем Chrome исполняет закэшированный ES-модуль (15.10 так

@@ -1,7 +1,7 @@
 """Проверка страницы стенда Mini App в headless Chrome (DevTools-протокол).
 
     python -m scripts.miniapp_browser_check [--url http://127.0.0.1:8765/]
-        [--chrome <путь к Chrome>] [--wait 8]
+        [--chrome <путь к Chrome>] [--wait 8] [--symbol XRP-USDT]
 
 Путь к Chrome — `--chrome` или переменная `MINIAPP_CHROME`, по умолчанию его нет.
 Каждый запуск — свежий временный профиль (иначе Chrome исполняет закэшированный
@@ -9,7 +9,10 @@ ES-модуль, CLAUDE.md), после проверки профиль удал
 
 Собирает: console (warning и error — замечание), исключения страницы,
 нарушения CSP (записи Log и событие securitypolicyviolation), статусы сетевых
-запросов (≥ 400 и сбой загрузки — замечание), итог — видимые экраны.
+запросов (≥ 400 и сбой загрузки — замечание), итог — видимые экраны и число
+графиков. Со свежим профилем монеты нет — Mini App открывает поиск, графика нет;
+`--symbol` кладёт монету в localStorage стенда до скриптов страницы — открывается
+экран рынка, и график обязан быть ровно один (иначе замечание).
 
 Только 127.0.0.1: и URL страницы, и DevTools Chrome (`--remote-debugging-address`).
 Коды выхода: 0 — чисто; 1 — есть замечания (список в выводе); 2 — окружение не
@@ -23,6 +26,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -50,9 +54,14 @@ CSP_LISTENER = (
     "document.addEventListener('securitypolicyviolation', e => console.error("
     f"'{CSP_MARK}', e.violatedDirective, e.blockedURI, e.sourceFile + ':' + e.lineNumber));"
 )
+# Ключ «последней монеты» Mini App: storage.js — префикс ma и telegram_id, вне
+# Telegram его нет → anon; market.js — имя symbol, значение JSON-строкой.
+STORAGE_SYMBOL_KEY = "ma:anon:symbol"
+SYMBOL_RE = re.compile(r"^[A-Z0-9]{1,24}-USDT$")
 STATE_EXPR = """(() => ({
   title: document.title,
   visible_screens: [...document.querySelectorAll('.screen')].filter(s => !s.hidden).map(s => s.id),
+  charts: document.querySelectorAll('.tv-lightweight-charts').length,
   lightweight_charts: window.LightweightCharts ? window.LightweightCharts.version() : null,
   telegram_sdk: typeof window.Telegram === 'object',
 }))()"""
@@ -155,16 +164,49 @@ class Transport(Protocol):
 class Report:
     collector: Collector
     state: Any
+    expect_chart: bool = False
 
     @property
     def issues(self) -> list[str]:
         problems = self.collector.issues()
         if self.state is None:
             problems.append("состояние страницы не прочитано (evaluate не ответил)")
+        else:
+            problems += page_problems(self.state, expect_chart=self.expect_chart)
         return problems
 
 
-async def run_check(transport: Transport, url: str, wait: float, *,
+def page_problems(state: Any, *, expect_chart: bool) -> list[str]:
+    """Страница не догрузилась — тоже замечание: 16.10 SDK с telegram.org иногда не
+    успевал за --wait, экранов не было, а без этой проверки итог был «чисто»."""
+    if not isinstance(state, dict):
+        return [f"состояние страницы не разобрано: {state!r}"]
+    out = []
+    if not state.get("visible_screens"):
+        out.append("ни один экран не показан — страница не догрузилась (увеличь --wait)")
+    if not state.get("telegram_sdk"):
+        out.append("SDK Telegram не загрузился")
+    if not state.get("lightweight_charts"):
+        out.append("библиотека графиков не загрузилась")
+    if expect_chart and state.get("charts") != 1:
+        out.append(f"графиков на странице {state.get('charts')}, ждали 1 (--symbol)")
+    return out
+
+
+def require_symbol(symbol: str) -> str:
+    if not SYMBOL_RE.match(symbol):
+        raise EnvironmentNotReadyError(f"--symbol {symbol!r}: нужен контракт вида XRP-USDT")
+    return symbol
+
+
+def seed_script(symbol: str) -> str:
+    """Монета в localStorage до скриптов страницы; хранилище недоступно — молча."""
+    value = json.dumps(json.dumps(require_symbol(symbol)))
+    return (f"try {{ localStorage.setItem({json.dumps(STORAGE_SYMBOL_KEY)}, {value}); }} "
+            "catch (e) {}")
+
+
+async def run_check(transport: Transport, url: str, wait: float, *, symbol: str | None = None,
                     clock: Callable[[], float] = time.monotonic) -> Report:
     collector = Collector()
     seq = 0
@@ -191,6 +233,8 @@ async def run_check(transport: Transport, url: str, wait: float, *,
         await call(method)
     await call("Network.setCacheDisabled", {"cacheDisabled": True})
     await call("Page.addScriptToEvaluateOnNewDocument", {"source": CSP_LISTENER})
+    if symbol is not None:
+        await call("Page.addScriptToEvaluateOnNewDocument", {"source": seed_script(symbol)})
     await call("Page.navigate", {"url": url})
     await pump(wait)
     eval_id = await call("Runtime.evaluate", {"expression": STATE_EXPR, "returnByValue": True})
@@ -199,7 +243,7 @@ async def run_check(transport: Transport, url: str, wait: float, *,
     state = None
     if reply is not None and "error" not in reply:
         state = reply.get("result", {}).get("result", {}).get("value")
-    return Report(collector, state)
+    return Report(collector, state, expect_chart=symbol is not None)
 
 
 # --- Chrome и стенд ----------------------------------------------------------------
@@ -266,7 +310,7 @@ class _WsTransport:
         return data
 
 
-async def check(url: str, chrome: Path, wait: float) -> Report:
+async def check(url: str, chrome: Path, wait: float, symbol: str | None = None) -> Report:
     async with aiohttp.ClientSession() as http:
         await stand_answers(http, url)
         with fresh_profile() as profile:
@@ -278,7 +322,7 @@ async def check(url: str, chrome: Path, wait: float) -> Report:
                     target = await r.json()
                 ws_url = require_localhost(target["webSocketDebuggerUrl"])
                 async with http.ws_connect(ws_url, max_msg_size=0) as ws:
-                    return await run_check(_WsTransport(ws), url, wait)
+                    return await run_check(_WsTransport(ws), url, wait, symbol=symbol)
             finally:
                 proc.terminate()
                 try:
@@ -303,6 +347,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--url", default=DEFAULT_URL)
     parser.add_argument("--chrome", default=None)
     parser.add_argument("--wait", type=float, default=DEFAULT_WAIT)
+    parser.add_argument("--symbol", default=None,
+                        help="монета экрана рынка (localStorage стенда), напр. XRP-USDT")
     return parser.parse_args(argv)
 
 
@@ -314,8 +360,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     try:
         url = require_localhost(args.url)
+        symbol = None if args.symbol is None else require_symbol(args.symbol)
         chrome = chrome_path(args.chrome)
-        report = asyncio.run(check(url, chrome, args.wait))
+        report = asyncio.run(check(url, chrome, args.wait, symbol))
     except EnvironmentNotReadyError as exc:
         print(f"✗ Проверка не проведена: {exc}", file=sys.stderr)
         return 2

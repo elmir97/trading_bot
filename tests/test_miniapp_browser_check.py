@@ -25,6 +25,12 @@ def _response(status: int, url: str) -> dict[str, Any]:
             "params": {"response": {"status": status, "url": url}}}
 
 
+def _loaded(**extra: Any) -> dict[str, Any]:
+    """Состояние догруженной страницы (как отдаёт STATE_EXPR)."""
+    return {"title": "Открыть сделку", "visible_screens": ["screen-market"], "charts": 0,
+            "lightweight_charts": "5.2.1", "telegram_sdk": True, **extra}
+
+
 # --- только 127.0.0.1, путь к Chrome --------------------------------------------
 
 
@@ -146,7 +152,7 @@ class FakeTransport:
         self.queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self.page_events = page_events
         self.answer_eval = answer_eval
-        self.state = state if state is not None else {"visible_screens": ["screen-market"]}
+        self.state = state if state is not None else _loaded()
 
     async def send(self, msg: dict[str, Any]) -> None:
         self.sent.append(msg)
@@ -171,7 +177,7 @@ class FakeTransport:
 async def test_session_collects_events_and_reads_state() -> None:
     t = FakeTransport([_console("log", "ready"), _response(200, "http://127.0.0.1:8765/")])
     report = await bc.run_check(t, "http://127.0.0.1:8765/", 0.05)
-    assert report.state == {"visible_screens": ["screen-market"]}
+    assert report.state == _loaded()
     assert report.issues == []
     assert [k for k, _ in report.collector.console] == ["log", "log"]   # ready + late
 
@@ -212,16 +218,17 @@ def chrome_exe(tmp_path: Path) -> Path:
     return exe
 
 
-def _report(*events: dict[str, Any], state: Any = "ok") -> bc.Report:
+def _report(*events: dict[str, Any], state: Any = None) -> bc.Report:
     c = bc.Collector()
     for e in events:
         c.feed(e)
-    return bc.Report(c, state)
+    return bc.Report(c, _loaded() if state is None else state)
 
 
 def test_exit_0_when_clean(monkeypatch: pytest.MonkeyPatch, chrome_exe: Path,
                            capsys: pytest.CaptureFixture[str]) -> None:
-    async def fake_check(url: str, chrome: Path, wait: float) -> bc.Report:
+    async def fake_check(url: str, chrome: Path, wait: float,
+                         symbol: str | None = None) -> bc.Report:
         return _report(_response(200, url))
 
     monkeypatch.setattr(bc, "check", fake_check)
@@ -231,7 +238,8 @@ def test_exit_0_when_clean(monkeypatch: pytest.MonkeyPatch, chrome_exe: Path,
 
 def test_exit_1_lists_issues(monkeypatch: pytest.MonkeyPatch, chrome_exe: Path,
                              capsys: pytest.CaptureFixture[str]) -> None:
-    async def fake_check(url: str, chrome: Path, wait: float) -> bc.Report:
+    async def fake_check(url: str, chrome: Path, wait: float,
+                         symbol: str | None = None) -> bc.Report:
         return _report(_console("error", "boom"), _response(404, url + "x.js"))
 
     monkeypatch.setattr(bc, "check", fake_check)
@@ -244,6 +252,8 @@ def test_exit_1_lists_issues(monkeypatch: pytest.MonkeyPatch, chrome_exe: Path,
 @pytest.mark.parametrize("argv", [
     ["--url", "http://localhost:8765/"],          # не 127.0.0.1
     [],                                           # Chrome не задан
+    ["--symbol", "xrp"],                          # не контракт
+    ["--symbol", "X');alert(1);//-USDT"],         # не попадёт в скрипт страницы
 ])
 def test_exit_2_when_environment_not_ready(monkeypatch: pytest.MonkeyPatch, argv: list[str],
                                            chrome_exe: Path,
@@ -264,3 +274,84 @@ def test_exit_2_when_stand_does_not_answer(monkeypatch: pytest.MonkeyPatch, chro
     assert bc.main(["--chrome", str(chrome_exe), "--url", "http://127.0.0.1:9/"]) == 2
     assert "стенд не отвечает" in capsys.readouterr().err
     assert started == []
+
+
+# --- страница не догрузилась, --symbol ------------------------------------------------
+
+
+@pytest.mark.parametrize(("state", "fragment"), [
+    (_loaded(visible_screens=[]), "ни один экран не показан"),
+    (_loaded(telegram_sdk=False), "SDK Telegram не загрузился"),
+    (_loaded(lightweight_charts=None), "библиотека графиков не загрузилась"),
+    ("ok", "не разобрано"),
+])
+def test_unloaded_page_is_an_issue(state: Any, fragment: str) -> None:
+    """Регрессия 16.10: SDK не успел за --wait, экранов нет — а итог был «чисто»."""
+    issues = bc.Report(bc.Collector(), state).issues
+    assert len(issues) == 1
+    assert fragment in issues[0]
+
+
+def test_loaded_page_without_symbol_needs_no_chart() -> None:
+    assert bc.Report(bc.Collector(), _loaded(charts=0)).issues == []
+
+
+@pytest.mark.parametrize(("charts", "ok"), [(1, True), (0, False), (2, False)])
+def test_symbol_requires_exactly_one_chart(charts: int, ok: bool) -> None:
+    issues = bc.Report(bc.Collector(), _loaded(charts=charts), expect_chart=True).issues
+    assert (issues == []) is ok
+    if not ok:
+        assert f"графиков на странице {charts}" in issues[0]
+
+
+def test_seed_script_matches_miniapp_storage_key() -> None:
+    """Ключ — как у storage.js (префикс ma, без Telegram — anon) и market.js (symbol)."""
+    storage = (_ROOT / "miniapp" / "storage.js").read_text(encoding="utf-8")
+    market = (_ROOT / "miniapp" / "market.js").read_text(encoding="utf-8")
+    assert 'const PREFIX = "ma";' in storage
+    assert '`${PREFIX}:${telegramId ?? "anon"}:`' in storage
+    assert 'storage.load("symbol"' in market
+    assert bc.STORAGE_SYMBOL_KEY == "ma:anon:symbol"
+    script = bc.seed_script("XRP-USDT")
+    assert script == ('try { localStorage.setItem("ma:anon:symbol", "\\"XRP-USDT\\""); } '
+                      "catch (e) {}")
+
+
+def test_seed_script_refuses_non_symbol() -> None:
+    with pytest.raises(bc.EnvironmentNotReadyError, match="XRP-USDT"):
+        bc.seed_script('X"); alert(1); ("-USDT')
+
+
+async def test_symbol_seeds_storage_before_navigate() -> None:
+    t = FakeTransport([], state=_loaded(charts=1))
+    report = await bc.run_check(t, "http://127.0.0.1:8765/", 0.01, symbol="XRP-USDT")
+    methods = [m["method"] for m in t.sent]
+    sources = [m["params"]["source"] for m in t.sent
+               if m["method"] == "Page.addScriptToEvaluateOnNewDocument"]
+    assert any("ma:anon:symbol" in src for src in sources)
+    seed = next(i for i, m in enumerate(t.sent)
+                if "ma:anon:symbol" in m["params"].get("source", ""))
+    assert seed < methods.index("Page.navigate")
+    assert report.expect_chart is True
+    assert report.issues == []
+
+
+async def test_without_symbol_storage_is_untouched() -> None:
+    t = FakeTransport([])
+    report = await bc.run_check(t, "http://127.0.0.1:8765/", 0.01)
+    assert not any("localStorage" in m["params"].get("source", "") for m in t.sent)
+    assert report.expect_chart is False
+
+
+def test_main_passes_symbol(monkeypatch: pytest.MonkeyPatch, chrome_exe: Path) -> None:
+    seen: list[str | None] = []
+
+    async def fake_check(url: str, chrome: Path, wait: float,
+                         symbol: str | None = None) -> bc.Report:
+        seen.append(symbol)
+        return _report()
+
+    monkeypatch.setattr(bc, "check", fake_check)
+    assert bc.main(["--chrome", str(chrome_exe), "--symbol", "XRP-USDT"]) == 0
+    assert bc.main(["--chrome", str(chrome_exe)]) == 0
+    assert seen == ["XRP-USDT", None]
