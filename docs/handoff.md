@@ -11,7 +11,7 @@
 `test_miniapp_vendor.py`; pytest **1736** / 0 skipped, smoke ×2, mypy 60, мутации 4/4). **Логотип — решение владельца 15.10 (для 2.3):**
 `attributionLogo: false` (встроенный вставляет `<style>`, CSP режет), своя ссылка на tradingview.com через `Telegram.WebApp.openLink`,
 без referrer, стиль только в CSS — §5а плана.
-**Следующий — 2.2** (каркас страницы, `scripts/miniapp_dev.py`, тест статики). Прошлая сессия оборвалась
+**2.2 сделан 15.10** (каркас `miniapp/`, стенд `scripts/miniapp_dev.py`, тесты `test_miniapp_static.py`/`test_miniapp_dev.py`; headless Chrome — ноль нарушений CSP; итог гейта — в §9а плана). **Следующий — 2.3** (экран рынка, `market.js`/`chart.js`, логотип — §5а). Прошлая сессия оборвалась
 по лимиту посреди 1.5; на диске были правка `supersede_cards` (вытеснение в обе стороны), `result_position`, `app/api/opening.py`
 (задача confirm) и `ratelimit.py` — всё взято в M1.5, ничего не выброшено.
 - **M1.5:** `POST /api/open/preview` (кэш процесса, 5/с), `POST /api/open` (CARD `source=miniapp`, свежие данные, вытесняет карточки

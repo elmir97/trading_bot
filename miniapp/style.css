@@ -1,0 +1,104 @@
+/* Тема — переменные Telegram (--tg-theme-*, их ставит telegram-web-app.js);
+   запасные значения — для браузера без Telegram (стенд). */
+:root {
+  --bg: var(--tg-theme-bg-color, #ffffff);
+  --text: var(--tg-theme-text-color, #0f1419);
+  --hint: var(--tg-theme-hint-color, #6b7280);
+  --link: var(--tg-theme-link-color, #2481cc);
+  --button: var(--tg-theme-button-color, #2481cc);
+  --button-text: var(--tg-theme-button-text-color, #ffffff);
+  --section: var(--tg-theme-secondary-bg-color, #f2f3f5);
+  --long: #16a34a;
+  --short: #dc2626;
+  --live: #dc2626;
+  --gap: 16px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: var(--tg-theme-bg-color, #17212b);
+    --text: var(--tg-theme-text-color, #f5f5f5);
+    --hint: var(--tg-theme-hint-color, #8b9398);
+    --section: var(--tg-theme-secondary-bg-color, #232e3c);
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+main {
+  flex: 1;
+  padding: 0 var(--gap);
+}
+
+[hidden] { display: none !important; }
+
+.muted { color: var(--hint); }
+
+.account {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px var(--gap);
+  background: var(--section);
+  font-size: 13px;
+}
+
+.badge {
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--button);
+  color: var(--button-text);
+  font-weight: 600;
+}
+
+.account.live .badge { background: var(--live); }
+.account.live { box-shadow: inset 0 -2px 0 var(--live); }
+
+.account-note { width: 100%; color: var(--hint); }
+
+.screen { padding: var(--gap) 0; }
+
+.error-title { font-size: 18px; margin: 0 0 8px; }
+
+.button {
+  width: 100%;
+  min-height: 44px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--button);
+  color: var(--button-text);
+  font: inherit;
+  font-weight: 600;
+}
+
+.button-long { background: var(--long); color: #ffffff; }
+.button-short { background: var(--short); color: #ffffff; }
+
+.fallback-buttons {
+  display: flex;
+  gap: 8px;
+  padding: 8px var(--gap) calc(8px + env(safe-area-inset-bottom));
+}
+
+.attribution {
+  padding: 8px var(--gap) calc(8px + env(safe-area-inset-bottom));
+  font-size: 11px;
+  text-align: center;
+}
+
+.attribution a { color: var(--hint); }

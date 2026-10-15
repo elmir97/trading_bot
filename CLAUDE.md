@@ -120,6 +120,21 @@ ruff check .
   <rev>` (репетиция уже стоящей миграции)
 - текст SQL в скрипте — только ASCII (тест): psql на Windows получает argv в cp1251
 
+`scripts/miniapp_dev.py` — локальный стенд фронта Mini App (ветка `miniapp`): API с подменённой авторизацией
+и фейковой биржей + `miniapp/` с заголовками CSP как у Caddy, `http://127.0.0.1:8765/`.
+
+```
+python -m scripts.miniapp_dev [--port 8765]
+```
+
+- те же переменные, что у smoke; отказ (exit 2) при `BOT_TOKEN` не `0:…`, запуске под `/opt/trading_bot`,
+  `BINGX_TRADING_MODE` не demo, базе не `trading_bot_test`; слушает только 127.0.0.1; в образ не попадает
+- `telegram_id=434343` зарезервирован под стенд; выход по Ctrl+C его убирает, после жёсткого kill — остаётся
+  до следующего запуска
+- проверка CSP в браузере: расширение Chrome или headless Chrome по DevTools-протоколу (`--remote-debugging-port`,
+  события `Log.entryAdded`/`Runtime.consoleAPICalled`) — **свежий `--user-data-dir` на каждую проверку**: иначе
+  Chrome исполняет закэшированный ES-модуль (15.10 так видели «старые» предупреждения)
+
 `scripts/check_redis.py` — PING и цикл проверок лока, запускать на проде:
 
 ```
