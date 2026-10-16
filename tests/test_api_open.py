@@ -184,6 +184,33 @@ async def _row(c: Any, opening_id: int) -> TradeOpening:
 # --- preview ------------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(("exchange_max", "leverage", "code"), [
+    (15, 16, "LEVERAGE_ABOVE_EXCHANGE"),        # максимум контракта 15, план 20
+    (125, 21, "PLAN_LEVERAGE_TOO_HIGH"),        # максимум плана 20
+])
+async def test_leverage_above_max_is_refused_by_server(ctx, exchange_max, leverage, code) -> None:  # type: ignore[no-untyped-def]
+    """Пункт 3: плечо выше min(максимум контракта, план) отклоняет сервер — не только
+    форма: превью и карточка BLOCK, «Да» на бирже ничего не открывает."""
+    ctx.exchange.max_leverage = exchange_max
+    body = {**BODY, "leverage": leverage}
+    preview = (await ctx.client.post("/api/open/preview", json=body, headers=ctx.h)).json()
+    assert preview["can_open"] is False
+    assert (code, "BLOCK") in {(i["code"], i["level"]) for i in preview["issues"]}
+    card = await _open(ctx, body)
+    assert card["card"]["can_open"] is False
+    oid = card["opening_id"]
+    if oid is not None:
+        r = await ctx.client.post(f"/api/open/{oid}/confirm", json={"accept_warnings": True},
+                                  headers=ctx.h)
+        assert r.json()["opening"]["status"] != "DONE"
+    assert _market_posts(ctx) == []
+    # Ровно на максимуме — можно.
+    ctx.tick()
+    edge = {**BODY, "leverage": min(exchange_max, 20)}
+    ok = (await ctx.client.post("/api/open/preview", json=edge, headers=ctx.h)).json()
+    assert code not in {i["code"] for i in ok["issues"]}
+
+
 async def test_preview_writes_nothing_and_equals_wizard_card(ctx) -> None:  # type: ignore[no-untyped-def]
     r = await ctx.client.post("/api/open/preview", json=BODY, headers=ctx.h)
     assert r.status_code == 200, r.text

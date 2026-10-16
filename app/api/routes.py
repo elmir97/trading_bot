@@ -11,7 +11,7 @@ from sqlalchemy import select
 
 from app.api import opening as opening_api
 from app.api.deps import ApiError, CurrentUser, Session, State
-from app.api.market import MarketReader, change_from
+from app.api.market import MarketReader, change_from, max_leverage
 from app.api.ratelimit import ACTION_PER_SECOND, PREVIEW_PER_SECOND, limit
 from app.api.schemas import (
     ActionOut,
@@ -35,7 +35,7 @@ from app.api.schemas import (
 )
 from app.core.logging import get_logger
 from app.database.models.trade_opening import TradeOpening
-from app.exchanges.base import ExchangeError, SymbolInfo
+from app.exchanges.base import ExchangeError, LeverageInfo, SymbolInfo
 from app.execution.opening.service import (
     LIMIT_EXPIRY_CHOICES,
     desired_margin_type,
@@ -59,11 +59,11 @@ def _unavailable(exc: ExchangeError) -> ApiError:
                     f"Биржа не ответила ({type(exc).__name__}) — повтори.")
 
 
-def _contract(info: SymbolInfo) -> Contract:
+def _contract(info: SymbolInfo, max_leverage: int | None = None) -> Contract:
     return Contract(
         symbol=info.symbol, price_precision=info.price_precision,
         quantity_precision=info.quantity_precision, min_quantity=info.min_quantity,
-        min_notional=info.min_notional,
+        min_notional=info.min_notional, max_leverage=max_leverage,
     )
 
 
@@ -124,13 +124,15 @@ async def me(user: CurrentUser, state: State, session: Session) -> Me:
 
 @router.get("/symbols")
 async def symbols(user: CurrentUser, state: State, q: str = "") -> list[Contract]:
-    """До 20 контрактов USDT-M: точное совпадение — одно; иначе по началу и вхождению."""
+    """До 20 контрактов USDT-M: точное совпадение — одно; иначе по началу и вхождению.
+    Максимум плеча — только из кэша (приватная ручка 5/с — на поиск не опрашиваем)."""
     async with MarketReader(state) as reader:
         try:
             found = match_contracts(await reader.symbols(), q, SYMBOLS_LIMIT)
         except ExchangeError as exc:
             raise _unavailable(exc) from None
-    return [_contract(s) for s in found]
+        return [_contract(s, max_leverage(reader.cached_leverage(user.id, s.symbol)))
+                for s in found]
 
 
 @router.get("/market/{symbol}")
@@ -160,6 +162,7 @@ async def market(
 
         leverage = None
         leverage_error: str | None = None
+        lev: LeverageInfo | None = None
         try:
             lev = await reader.leverage(session, user.id, symbol)
         except ExchangeError as exc:
@@ -175,7 +178,8 @@ async def market(
                                     max_long=lev.max_long_leverage,
                                     max_short=lev.max_short_leverage)
     return Market(
-        contract=_contract(info), last=last, time=ticker.timestamp, interval=interval,
+        contract=_contract(info, max_leverage(lev)), last=last, time=ticker.timestamp,
+        interval=interval,
         candle_change=Change(value=price(candle_delta, p), percent=money(candle_pct)),
         day_change=Change(value=price(ticker.price_change, p),
                           percent=money(ticker.price_change_percent)),

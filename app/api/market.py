@@ -3,7 +3,13 @@
 
 Сроки кэша: цена — 2 с, свечи 1m — 5 с, остальные свечи — 30 с, но не дольше
 конца последней свечи (`candles_ttl`), фандинг и открытый интерес — 60 с, плечо —
-30 с, список контрактов — 1 ч (как у бота).
+5 мин, список контрактов — 1 ч (как у бота).
+
+Максимум плеча контракта — только из приватной GET trade/leverage по ключу
+пользователя: публичной ручки с ним у BingX нет (docs-v3 17.10 — максимум или
+ступени отдают только ручки с подписью; в quote/contracts поля нет, живьём
+17.10). Ручка — 5/с на ключ, поэтому кэш на (пользователь, счёт, символ) 5 мин,
+а /api/symbols берёт максимум только из кэша (`cached_leverage`), без запросов.
 Клиент биржи открывается только на промах кэша и закрывается в конце запроса.
 """
 
@@ -35,7 +41,7 @@ TTL_CANDLES_DEFAULT = 30
 # Граница свечи прошла, а биржа новую ещё не отдала — перечитать почти сразу.
 TTL_CANDLES_LAG = TTL_PRICE
 TTL_DETAILS = 60
-TTL_LEVERAGE = 30
+TTL_LEVERAGE = 300
 
 
 class MarketReader:
@@ -102,6 +108,15 @@ class MarketReader:
         )
         return result
 
+    def _leverage_key(self, user_id: int, symbol: str) -> str:
+        mode = self._state.settings.bingx_allowed_exchange_mode
+        return f"leverage:{user_id}:{mode.value}:{symbol}"
+
+    def cached_leverage(self, user_id: int, symbol: str) -> LeverageInfo | None:
+        """Плечо из кэша, без запроса к бирже; не читали (или ключа нет) — None."""
+        cached: LeverageInfo | None = self._cache.get(f"api:{self._leverage_key(user_id, symbol)}")
+        return cached
+
     async def leverage(self, session: Any, user_id: int, symbol: str) -> LeverageInfo | None:
         """Плечо счёта по символу (ключ пользователя); ключа нет — None."""
         factory = self._state.factory
@@ -118,7 +133,7 @@ class MarketReader:
                 await client.close()
 
         result: LeverageInfo | None = await self._get(
-            f"leverage:{user_id}:{mode.value}:{symbol}", TTL_LEVERAGE, fetch
+            self._leverage_key(user_id, symbol), TTL_LEVERAGE, fetch
         )
         return result
 
@@ -148,6 +163,12 @@ def candles_ttl(
     return ttl
 
 
+def max_leverage(info: LeverageInfo | None) -> int | None:
+    """Максимум плеча контракта для счёта — больший из сторон (плашка N×);
+    форма проверяет по стороне (`max_long`/`max_short`)."""
+    return None if info is None else max(info.max_long_leverage, info.max_short_leverage)
+
+
 def change_from(last: Decimal, base: Decimal | None) -> tuple[Decimal | None, Decimal | None]:
     """(изменение, изменение %) цены от базы; базы нет или 0 — (None, None)."""
     if base is None or base == 0:
@@ -156,4 +177,6 @@ def change_from(last: Decimal, base: Decimal | None) -> tuple[Decimal | None, De
     return delta, delta / base * 100
 
 
-__all__ = ["CANDLES_LIMIT", "INTERVALS", "MarketReader", "candles_ttl", "change_from"]
+__all__ = [
+    "CANDLES_LIMIT", "INTERVALS", "MarketReader", "candles_ttl", "change_from", "max_leverage",
+]

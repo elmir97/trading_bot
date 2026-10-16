@@ -10,6 +10,7 @@ from decimal import Decimal
 import pytest
 
 from app.api import market as market_module
+from app.api.market import MarketReader
 from app.exchanges.base import ExchangeUnavailableError, Kline
 from tests.api_helpers import (  # noqa: F401 — api_fixture: фикстура «api»
     T0,
@@ -66,7 +67,7 @@ async def test_symbols_search_and_cache(api) -> None:  # type: ignore[no-untyped
         anon = await c.get("/api/symbols", params={"q": "xr"})
     assert [s["symbol"] for s in xr] == ["XRP-USDT", "XRPUP-USDT"]
     assert xr[0] == {"symbol": "XRP-USDT", "price_precision": 4, "quantity_precision": 0,
-                     "min_quantity": "2", "min_notional": "2"}
+                     "min_quantity": "2", "min_notional": "2", "max_leverage": None}
     assert [s["symbol"] for s in exact] == ["BTC-USDT"]          # только USDT-M
     assert anon.status_code == 401
     assert public.calls["symbols"] == 1                           # кэш списка — 1 ч
@@ -99,7 +100,8 @@ async def test_market(api) -> None:  # type: ignore[no-untyped-def]
     ttl = {k: round(e.expires_at - time.monotonic()) for k, e in cache.items()}
     assert ttl["api:ticker:XRP-USDT"] == market_module.TTL_PRICE == 2
     assert ttl["api:candles:XRP-USDT:5m"] == 30 and ttl["api:premium:XRP-USDT"] == 60
-    assert ttl[f"api:leverage:{api.uid}:DEMO:XRP-USDT"] == 30
+    assert ttl[f"api:leverage:{api.uid}:DEMO:XRP-USDT"] == market_module.TTL_LEVERAGE == 300
+    assert body["contract"]["max_leverage"] == 75              # больший из сторон 75/50
 
 
 async def test_candles(api) -> None:  # type: ignore[no-untyped-def]
@@ -176,3 +178,34 @@ async def test_market_leverage_unavailable(api) -> None:  # type: ignore[no-unty
     assert no_key["leverage"] is None and "Ключ BingX" in no_key["leverage_error"]
     assert failed["leverage"] is None and "ExchangeUnavailableError" in failed["leverage_error"]
     assert broken.closed
+    # Нет ключа или сбой — максимума нет (плашка N× скрыта), не выдуманное число.
+    assert no_key["contract"]["max_leverage"] is None
+    assert failed["contract"]["max_leverage"] is None
+
+
+async def test_symbols_max_leverage_only_from_cache(api) -> None:  # type: ignore[no-untyped-def]
+    """Пункт 3 (17.10): максимум плеча в /api/symbols — из кэша рынка, без запросов к
+    приватной ручке (5/с на ключ); не читали — None."""
+    client = FakeClient()
+    state = api.state(factory=FakeFactory(client))
+    async with client_for(state) as c:
+        h = auth(api.tid)
+        before = (await c.get("/api/symbols", params={"q": "xr"}, headers=h)).json()
+        await c.get("/api/market/XRP-USDT", headers=h)
+        after = (await c.get("/api/symbols", params={"q": "xr"}, headers=h)).json()
+    assert client.leverage_calls == 1                            # только /api/market
+    assert [(s["symbol"], s["max_leverage"]) for s in before] == [
+        ("XRP-USDT", None), ("XRPUP-USDT", None)]
+    assert [(s["symbol"], s["max_leverage"]) for s in after] == [
+        ("XRP-USDT", 75), ("XRPUP-USDT", None)]
+
+
+async def test_leverage_cache_is_per_user(api) -> None:  # type: ignore[no-untyped-def]
+    """Кэш плеча — на (пользователь, счёт, символ): чужой максимум не подставляется."""
+    state = api.state(factory=FakeFactory(FakeClient()))
+    async with client_for(state) as c:
+        await c.get("/api/market/XRP-USDT", headers=auth(api.tid))
+    async with MarketReader(state) as reader:
+        assert reader.cached_leverage(api.uid, "XRP-USDT") is not None
+        assert reader.cached_leverage(api.uid + 10_000, "XRP-USDT") is None
+        assert reader.cached_leverage(api.uid, "BTC-USDT") is None

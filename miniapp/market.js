@@ -4,10 +4,10 @@
 // Обновление — без частого опроса. Цена: GET /api/market раз в PRICE_POLL_MS (3 с,
 // §5а) — следующий запрос только после ответа на предыдущий (setTimeout, не
 // setInterval), один в полёте. Сервер держит общий кэш процесса: цена 2 с, свечи 1m
-// 5 с и прочие 30 с, фандинг/ОИ 60 с, плечо 30 с (app/api/market.py) — сколько бы
+// 5 с и прочие 30 с, фандинг/ОИ 60 с, плечо 5 мин (app/api/market.py) — сколько бы
 // вкладок ни смотрели монету, к BingX уходит не больше ~20 ticker + ≤12 klines +
 // 2 premium/ОИ в минуту на символ (≈6 за 10 с при окне публичных ручек 500 за 10 с —
-// около 1 %) и плечо (приватная, 5/с) раз в 30 с на пользователя. Чаще 2 с опрос
+// около 1 %) и плечо (приватная, 5/с) раз в 5 мин на пользователя. Чаще 2 с опрос
 // бесполезен — та же цена из кэша. Свечи (GET …/candles) — только на смене свечи
 // (время котировки дошло до конца последней) и раз в CANDLES_REFRESH_MS; между ними
 // последнюю свечу двигает цена. Новая свеча запрошена, а не пришла (или свечей нет) —
@@ -262,9 +262,10 @@ export function createMarketScreen({ api, tg, storage, onSide, onFatal }) {
     el.detailsNote.textContent = m.details_error || "";
     el.detailsNote.hidden = !m.details_error;
 
-    const lev = m.leverage;
-    el.leverage.textContent = lev ? `${Math.max(lev.max_long, lev.max_short)}×` : "";
-    el.leverage.hidden = !lev;
+    // Максимум плеча контракта для счёта (по ключу BingX); нет ключа или сбой — плашки нет.
+    const maxLeverage = m.contract.max_leverage;
+    el.leverage.textContent = maxLeverage ? `${maxLeverage}×` : "";
+    el.leverage.hidden = !maxLeverage;
   }
 
   // --- загрузка и опрос ------------------------------------------------------------

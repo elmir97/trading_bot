@@ -64,6 +64,9 @@ class Contract(BaseModel):
     quantity_precision: int
     min_quantity: Decimal
     min_notional: Decimal
+    # Максимум плеча контракта для счёта (GET trade/leverage по ключу, кэш 5 мин): нет
+    # ключа, сбой чтения или в /api/symbols ещё не читали — None, плашку N× не показывать.
+    max_leverage: int | None = None
 
 
 class Change(BaseModel):
