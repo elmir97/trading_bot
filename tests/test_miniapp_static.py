@@ -108,7 +108,7 @@ def test_html_loads_only_own_files_and_telegram(page_path: Path) -> None:
 
 def test_index_loads_sdk_library_and_app_module() -> None:
     srcs = [s.get("src") for s in _parse(_MINIAPP / "index.html").scripts]
-    assert srcs == [_TELEGRAM_SDK, _LIBRARY, "app.js"]
+    assert srcs == ["boot.js", _TELEGRAM_SDK, _LIBRARY, "app.js"]
     app = [s for s in _parse(_MINIAPP / "index.html").scripts if s.get("src") == "app.js"]
     assert app[0].get("type") == "module"
 
@@ -134,7 +134,9 @@ def test_own_js_is_csp_safe(js: Path) -> None:
 def test_own_js_has_no_external_addresses(js: Path) -> None:
     urls = set(re.findall(r"(?:https?:)?//[A-Za-z0-9.-]+\.[A-Za-z]{2,}[^\s\"'`)]*",
                           js.read_text(encoding="utf-8")))
-    assert urls <= {_TV_URL}, urls
+    # boot.js сравнивает src упавшего скрипта с адресом SDK — не загружает его.
+    allowed = {_TV_URL} | ({_TELEGRAM_SDK} if js.name == "boot.js" else set())
+    assert urls <= allowed, urls
 
 
 @pytest.mark.parametrize("js", _own("*.js"), ids=lambda p: p.name)

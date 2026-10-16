@@ -114,11 +114,14 @@ async function start() {
 }
 
 function init() {
-  if (tg) {
-    tg.ready();
-    tg.expand();
-    if (backButton) backButton.onClick(back);
+  // Без SDK запасного режима нет (без initData нет авторизации): экран boot.js.
+  if (!tg || window.maBoot.failed()) {
+    window.maBoot.fail();
+    return;
   }
+  tg.ready();
+  tg.expand();
+  if (backButton) backButton.onClick(back);
   screens = {
     market: createMarketScreen({
       api, tg, storage, onSide: openTrade,

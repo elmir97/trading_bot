@@ -7,8 +7,9 @@
   <title>Открыть сделку</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="style.css">
-  <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <script src="vendor/lightweight-charts-5.2.1.js"></script>
+  <script src="boot.js"></script>
+  <script src="https://telegram.org/js/telegram-web-app.js" defer></script>
+  <script src="vendor/lightweight-charts-5.2.1.js" defer></script>
   <script type="module" src="app.js"></script>
 </head>
 <body>
@@ -109,6 +110,12 @@
 
     <section class="screen" id="screen-confirm" hidden>
       <p class="muted">Подтверждение — подэтап 2.5.</p>
+    </section>
+
+    <section class="screen" id="screen-sdk" hidden>
+      <h1 class="error-title">Не загрузилось</h1>
+      <p>Не загрузилось. Проверь интернет и открой заново из бота.</p>
+      <button type="button" class="button" id="sdk-reload">Обновить</button>
     </section>
 
     <section class="screen" id="screen-error" hidden>
