@@ -5,13 +5,14 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path, PurePosixPath
 
 import httpx
 import pytest
 from fakeredis.aioredis import FakeRedis
 
-from app.api.deps import ApiState
+from app.api.deps import ApiState, current_user
 from app.core.config import Settings
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
@@ -112,13 +113,22 @@ def _state(db: Database | None = None, settings: Settings | None = None) -> ApiS
                     factory=stand.DevFactory(stand.DevExchange()))
 
 
+async def _stand_user_id(db: Database) -> int | None:
+    async with db.session() as session:
+        user = await UserRepository(session).get_by_telegram_id(stand.DEV_TELEGRAM_ID)
+        return None if user is None else user.id
+
+
 @needs_db
-async def test_stand_serves_page_and_api_with_headers() -> None:
+async def test_stand_serves_page_and_api_with_headers(unique_telegram_id) -> None:  # type: ignore[no-untyped-def]
+    """Свой telegram_id: пользователь запущенного стенда (434343) переживает прогон."""
     settings = _settings(database_url=os.environ["DATABASE_URL"])
     db = Database(settings)
+    tid = unique_telegram_id()
+    stand_before = await _stand_user_id(db)
     try:
-        await stand.ensure_dev_user(db, settings)
-        app = stand.build_app(_state(db, settings))
+        await stand.ensure_dev_user(db, settings, tid)
+        app = stand.build_app(_state(db, settings), tid)
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
             page = await client.get("/")
@@ -138,8 +148,27 @@ async def test_stand_serves_page_and_api_with_headers() -> None:
             candles = await client.get("/api/market/XRP-USDT/candles?interval=5m")
             assert candles.status_code == 200, candles.text
             assert len(candles.json()["candles"]) > 100
+            # Подмена авторизации отдаёт пользователя с id теста, не стенда.
+            async with db.session() as session:
+                me_user = await app.dependency_overrides[current_user](session)
+            assert me_user.telegram_id == tid
     finally:
-        await stand.remove_dev_user(db)
+        await stand.remove_dev_user(db, tid)
         async with db.session() as session:
-            assert await UserRepository(session).get_by_telegram_id(stand.DEV_TELEGRAM_ID) is None
+            assert await UserRepository(session).get_by_telegram_id(tid) is None
+        assert await _stand_user_id(db) == stand_before
         await db.dispose()
+
+
+def test_tests_never_touch_stand_user() -> None:
+    """Тесты не создают и не удаляют пользователя стенда (434343): каждый вызов
+    ensure_dev_user/remove_dev_user в tests/ — со своим telegram_id."""
+    arity = {"ensure_dev_user": 3, "remove_dev_user": 2}
+    calls = 0
+    for path in (_ROOT / "tests").glob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        for match in re.finditer(r"stand\.(ensure_dev_user|remove_dev_user)\(([^()]*)\)", text):
+            calls += 1
+            assert len(match.group(2).split(",")) == arity[match.group(1)], (
+                path.name, match.group(0))
+    assert calls >= 2

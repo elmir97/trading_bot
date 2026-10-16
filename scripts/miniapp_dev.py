@@ -157,34 +157,39 @@ class DevFactory:
         return self.exchange
 
 
-async def ensure_dev_user(db: Database, settings: Settings) -> int:
+# telegram_id у функций пользователя — для тестов: они работают со своим id и не трогают
+# пользователя запущенного стенда (общая база trading_bot_test).
+
+
+async def ensure_dev_user(
+    db: Database, settings: Settings, telegram_id: int = DEV_TELEGRAM_ID,
+) -> int:
     async with db.session() as session:
         user = await UserService(
             UserRepository(session), StrategyRepository(session),
             MistakeTypeRepository(session), settings,
-        ).get_or_create(telegram_id=DEV_TELEGRAM_ID)
+        ).get_or_create(telegram_id=telegram_id)
         user.settings.active_exchange_mode = ExchangeKeyMode.DEMO
         await session.commit()
         return user.id
 
 
-async def remove_dev_user(db: Database) -> None:
+async def remove_dev_user(db: Database, telegram_id: int = DEV_TELEGRAM_ID) -> None:
     async with db.session() as session:
-        user = await UserRepository(session).get_by_telegram_id(DEV_TELEGRAM_ID)
+        user = await UserRepository(session).get_by_telegram_id(telegram_id)
         if user is not None:
             await cleanup_user(session, user)
         await session.commit()
 
 
-async def dev_user(session: Session) -> User:
-    """Подмена current_user: initData не проверяется — всегда пользователь стенда."""
-    user = await UserRepository(session).get_by_telegram_id(DEV_TELEGRAM_ID)
-    if user is None:
-        raise RuntimeError("пользователя стенда нет — ensure_dev_user не вызван")
-    return user
+def build_app(state: ApiState, telegram_id: int = DEV_TELEGRAM_ID) -> FastAPI:
+    async def dev_user(session: Session) -> User:
+        """Подмена current_user: initData не проверяется — всегда пользователь стенда."""
+        user = await UserRepository(session).get_by_telegram_id(telegram_id)
+        if user is None:
+            raise RuntimeError("пользователя стенда нет — ensure_dev_user не вызван")
+        return user
 
-
-def build_app(state: ApiState) -> FastAPI:
     app = create_app(state)
     app.dependency_overrides[current_user] = dev_user
 
