@@ -10,7 +10,9 @@
 // около 1 %) и плечо (приватная, 5/с) раз в 30 с на пользователя. Чаще 2 с опрос
 // бесполезен — та же цена из кэша. Свечи (GET …/candles) — только на смене свечи
 // (время котировки дошло до конца последней) и раз в CANDLES_REFRESH_MS; между ними
-// последнюю свечу двигает цена. Ошибка — пауза растёт 6 → 12 → 24 → 30 с; вкладка
+// последнюю свечу двигает цена. Новая свеча запрошена, а не пришла (или свечей нет) —
+// повтор не чаще CANDLE_RETRY_MS, не на каждом опросе (candlesDue); сервер держит
+// свечи не дольше закрытия последней. Ошибка — пауза растёт 6 → 12 → 24 → 30 с; вкладка
 // скрыта (visibilitychange) или ушли с экрана — опрос стоит, запрос в полёте
 // отменяется (AbortController).
 
@@ -20,6 +22,7 @@ import { createPriceChart, intervalSeconds } from "./chart.js";
 export const INTERVALS = ["1m", "5m", "15m", "1h", "4h", "1d"];
 export const PRICE_POLL_MS = 3000;
 export const CANDLES_REFRESH_MS = 60000;
+export const CANDLE_RETRY_MS = 10000;
 export const MAX_BACKOFF_MS = 30000;
 export const SEARCH_DEBOUNCE_MS = 300;
 const DEFAULT_INTERVAL = "5m";
@@ -75,6 +78,14 @@ export function fundingLeft(nextIso, now = Date.now()) {
   const minutes = Math.floor(seconds / 60);
   const hours = Math.floor(minutes / 60);
   return hours ? `через ${hours} ч ${minutes % 60} мин` : `через ${minutes} мин`;
+}
+
+// Тянуть ли свечи на этом опросе. missing — какой свечи не хватает: начало новой
+// (unix, с), "none" — на графике свечей нет, null — всё на месте. Недостающую — сразу,
+// но ту же самую повторно не чаще CANDLE_RETRY_MS; иначе — раз в CANDLES_REFRESH_MS.
+export function candlesDue({ missing, asked, askedAt, loadedAt, now }) {
+  if (missing === null) return now - loadedAt >= CANDLES_REFRESH_MS;
+  return missing !== asked || now - askedAt >= CANDLE_RETRY_MS;
 }
 
 const clockFormat = new Intl.DateTimeFormat("ru-RU",
@@ -134,7 +145,9 @@ export function createMarketScreen({ api, tg, storage, onSide, onFatal }) {
   let timer = null;
   let controller = null;
   let failures = 0;
-  let candlesAt = 0;
+  let candlesAt = 0;         // последняя успешная загрузка свечей
+  let asked = null;          // какую недостающую свечу уже запрашивали (см. candlesDue)
+  let askedAt = 0;
   let searchTimer = null;
   let searchController = null;
   let searchSeq = 0;
@@ -274,7 +287,11 @@ export function createMarketScreen({ api, tg, storage, onSide, onFatal }) {
     return `/api/market/${encodeURIComponent(symbol)}?interval=${interval}`;
   }
 
-  async function loadCandles(myGen, signal) {
+  async function loadCandles(myGen, signal, missing = null) {
+    if (missing !== null) {
+      asked = missing;
+      askedAt = Date.now();
+    }
     const data = await api.get(
       `/api/market/${encodeURIComponent(symbol)}/candles?interval=${interval}`, { signal });
     if (myGen !== gen || !chart) return;
@@ -293,6 +310,7 @@ export function createMarketScreen({ api, tg, storage, onSide, onFatal }) {
     stopPolling();
     const myGen = ++gen;
     failures = 0;
+    asked = null;
     loaded = false;
     resetView();
     renderHead();
@@ -325,7 +343,7 @@ export function createMarketScreen({ api, tg, storage, onSide, onFatal }) {
     loaded = true;
     sideButtons(true);
     try {
-      await loadCandles(myGen, signal);
+      await loadCandles(myGen, signal, "none");
     } catch (err) {
       if (myGen !== gen || (err && err.name === "AbortError")) return;
       if (fatal(err)) return;
@@ -351,10 +369,12 @@ export function createMarketScreen({ api, tg, storage, onSide, onFatal }) {
       el.stale.hidden = true;
       const lastTime = chart ? chart.lastTime() : null;
       const quoted = Date.parse(m.time) / 1000;
-      const newCandle = lastTime !== null && quoted >= lastTime + intervalSeconds(interval);
-      if (newCandle || lastTime === null || Date.now() - candlesAt >= CANDLES_REFRESH_MS) {
-        await loadCandles(myGen, signal);
-      } else {
+      const next = lastTime === null ? null : lastTime + intervalSeconds(interval);
+      const missing = lastTime === null ? "none" : quoted >= next ? next : null;
+      if (candlesDue({ missing, asked, askedAt, loadedAt: candlesAt, now: Date.now() })) {
+        await loadCandles(myGen, signal, missing);
+      } else if (missing === null) {
+        // Пока новая свеча не пришла, цена её периода прошлую не двигает.
         chart.updateLast(m.last);
       }
     } catch (err) {

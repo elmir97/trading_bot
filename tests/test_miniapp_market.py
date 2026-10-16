@@ -129,10 +129,34 @@ def test_poll_is_a_timeout_chain_with_one_request_in_flight() -> None:
 
 
 def test_candles_reload_only_on_new_candle_or_refresh() -> None:
-    tick = _body(_js("market.js"), "async function tick()")
-    assert "quoted >= lastTime + intervalSeconds(interval)" in tick
-    assert "Date.now() - candlesAt >= CANDLES_REFRESH_MS" in tick
-    assert "chart.updateLast(m.last)" in tick
+    market = _js("market.js")
+    tick = _body(market, "async function tick()")
+    assert "lastTime + intervalSeconds(interval)" in tick
+    assert 'lastTime === null ? "none" : quoted >= next ? next : null' in tick
+    assert "candlesDue({ missing, asked, askedAt, loadedAt: candlesAt, now: Date.now() })" in tick
+    assert "await loadCandles(myGen, signal, missing)" in tick
+    # Цена двигает последнюю свечу только когда все свечи на месте.
+    assert "} else if (missing === null) {" in tick
+    assert tick.index("else if (missing === null)") < tick.index("chart.updateLast(m.last)")
+    assert len(re.findall(r"loadCandles\(", tick)) == 1
+
+
+def test_missing_candle_is_not_requested_every_tick() -> None:
+    """2.3а: новая свеча запрошена и не пришла — не тянуть /candles на каждом опросе."""
+    market = _js("market.js")
+    retry = _const(market, "CANDLE_RETRY_MS")
+    assert retry >= 3 * _const(market, "PRICE_POLL_MS")
+    assert retry < _const(market, "CANDLES_REFRESH_MS")
+    due = _body(market, "export function candlesDue({ missing, asked, askedAt, loadedAt, now }) {")
+    assert "if (missing === null) return now - loadedAt >= CANDLES_REFRESH_MS;" in due
+    assert "return missing !== asked || now - askedAt >= CANDLE_RETRY_MS;" in due
+    # Что запрошено — помечает loadCandles; полная загрузка сбрасывает и помечает «нет свечей».
+    load_candles = _body(market, "async function loadCandles(")
+    assert load_candles.index("asked = missing;") < load_candles.index("await api.get(")
+    assert "askedAt = Date.now();" in load_candles
+    load = _body(market, "async function load()")
+    assert "asked = null;" in load
+    assert 'await loadCandles(myGen, signal, "none")' in load
 
 
 def test_stale_responses_are_dropped() -> None:

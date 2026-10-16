@@ -83,8 +83,12 @@ class TTLCache:
             del self._data[key]
         return len(keys)
 
-    async def get_or_fetch(self, key: str, ttl: float, factory):  # type: ignore[no-untyped-def]
-        """Возвращает значение из кэша либо получает его через factory."""
+    async def get_or_fetch(self, key: str, ttl, factory):  # type: ignore[no-untyped-def]
+        """Возвращает значение из кэша либо получает его через factory.
+
+        ttl — секунды или функция от полученного значения (срок зависит от
+        данных: свечи живут не дольше конца последней свечи).
+        """
         cached = self.get(key)
         if cached is not None:
             self.hits += 1
@@ -100,7 +104,7 @@ class TTLCache:
 
             self.misses += 1
             value = await factory()
-            self.set(key, value, ttl)
+            self.set(key, value, ttl(value) if callable(ttl) else ttl)
             return value
 
     @property

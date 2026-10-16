@@ -101,6 +101,23 @@ class TestTTLCache:
         assert results == ["value"] * 5
         assert calls["n"] == 1
 
+    async def test_ttl_from_value(self) -> None:
+        """ttl-функция получает значение ответа: срок свечей — от их данных."""
+        cache = TTLCache()
+        seen: list[str] = []
+
+        def ttl(value: str) -> float:
+            seen.append(value)
+            return 0.01
+
+        async def factory() -> str:
+            return "value"
+
+        assert await cache.get_or_fetch("k", ttl, factory) == "value"
+        assert seen == ["value"]
+        await asyncio.sleep(0.05)
+        assert cache.get("k") is None
+
     async def test_invalidate_by_prefix(self) -> None:
         cache = TTLCache()
         cache.set("ticker:BTC", 1, 10)

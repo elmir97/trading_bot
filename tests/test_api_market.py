@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import os
 import time
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 
 from app.api import market as market_module
-from app.exchanges.base import ExchangeUnavailableError
+from app.exchanges.base import ExchangeUnavailableError, Kline
 from tests.api_helpers import (  # noqa: F401 — api_fixture: фикстура «api»
+    T0,
     FakeClient,
     FakeFactory,
     FakePublic,
@@ -22,6 +24,37 @@ from tests.api_helpers import (  # noqa: F401 — api_fixture: фикстура 
 pytestmark = pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="Нужен PostgreSQL")
 
 D = Decimal
+
+# Часы срока свечей: последняя свеча фейка (T0, 5 мин) только открылась.
+FRESH = T0.timestamp() + 1
+
+
+@pytest.fixture(autouse=True)
+def _candle_clock(monkeypatch):  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(market_module, "wall_time", lambda: FRESH)
+
+
+def _kline(open_time: datetime, minutes: int) -> Kline:
+    one = D(1)
+    return Kline(open_time, one, one, one, one, one, open_time + timedelta(minutes=minutes))
+
+
+@pytest.mark.parametrize(("interval", "minutes", "now_offset", "expected"), [
+    ("5m", 5, 1, 30),           # свеча только открылась — TTL интервала
+    ("5m", 5, 290, 10),         # до закрытия 10 с — не дольше закрытия
+    ("1m", 1, 10, 5),           # 1m — 5 с
+    ("1m", 1, 57.5, 2.5),
+    ("1d", 1440, 86390, 10),
+    ("5m", 5, 300, market_module.TTL_CANDLES_LAG),   # граница прошла, новой свечи нет
+    ("5m", 5, 400, market_module.TTL_CANDLES_LAG),
+])
+def test_candles_ttl(interval, minutes, now_offset, expected) -> None:  # type: ignore[no-untyped-def]
+    start = datetime(2026, 10, 12, 17, 0, tzinfo=UTC)
+    rows = [_kline(start - timedelta(minutes=minutes), minutes), _kline(start, minutes)]
+    ttl = market_module.candles_ttl(interval, now=lambda: start.timestamp() + now_offset)
+    assert ttl(rows) == pytest.approx(expected)
+    assert market_module.TTL_CANDLES_LAG == 2
+    assert market_module.candles_ttl(interval, now=lambda: 0)([]) == (5 if interval == "1m" else 30)
 
 
 async def test_symbols_search_and_cache(api) -> None:  # type: ignore[no-untyped-def]
@@ -82,6 +115,24 @@ async def test_candles(api) -> None:  # type: ignore[no-untyped-def]
     assert public.calls["klines:1m"] == 1
     left = state.market_cache._data["api:candles:XRP-USDT:1m"].expires_at - time.monotonic()
     assert 4 < left <= 5                                          # 1m — 5 с
+
+
+@pytest.mark.parametrize(("now", "expected"), [
+    (T0.timestamp() + 290, 10),                  # 5m: до закрытия 10 с
+    (T0.timestamp() + 300, 2),                   # граница прошла — биржа ещё не отдала новую
+])
+async def test_candles_cache_until_close(api, monkeypatch, now, expected) -> None:  # type: ignore[no-untyped-def]
+    """2.3а: свечи в кэше не дольше закрытия последней — новая свеча и изменение сразу."""
+    monkeypatch.setattr(market_module, "wall_time", lambda: now)
+    public = FakePublic()
+    state = api.state(factory=FakeFactory(FakeClient(), public=public))
+    async with client_for(state) as c:
+        await c.get("/api/market/XRP-USDT/candles", params={"interval": "5m"},
+                    headers=auth(api.tid))
+        await c.get("/api/market/XRP-USDT", params={"interval": "5m"}, headers=auth(api.tid))
+    assert public.calls["klines:5m"] == 1          # /market и /candles — один кэш
+    left = state.market_cache._data["api:candles:XRP-USDT:5m"].expires_at - time.monotonic()
+    assert expected - 1 < left <= expected
 
 
 @pytest.mark.parametrize(("path", "params", "status", "code"), [
