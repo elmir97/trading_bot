@@ -137,7 +137,7 @@ function openPositions() {
   }
 }
 
-// Карточка позиции → рынок этой монеты (линии позиции — П.2); «Назад» — к позициям.
+// Карточка позиции → рынок этой монеты с линиями позиции (П.2); «Назад» — к позициям.
 function openSymbol(symbol) {
   screens.market.setSymbol(symbol);
   show("market");
@@ -211,7 +211,7 @@ function init() {
   if (backButton) backButton.onClick(back);
   screens = {
     market: createMarketScreen({
-      api, tg, storage, onSide: openTrade,
+      api, tg, storage, onSide: openTrade, onPositions: openPositions,
       onFatal: (err) => showError(err, start),
     }),
     trade: createTradeScreen({

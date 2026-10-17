@@ -123,8 +123,8 @@ def test_chart_lines_come_from_preview() -> None:
     assert "chart.setLines(chartLines(card))" in _body(form, "function showCard(")
     chart = _js("chart.js")
     draw = _body(chart, "function drawLines()")
-    assert "candles.removePriceLine(priceLine)" in draw
-    assert "candles.createPriceLine(" in draw
+    assert "series.removePriceLine(priceLine)" in draw
+    assert "host.createPriceLine(" in draw          # видимая серия (П.2, test_miniapp_lines)
     # Форма — свой компактный график, тот же модуль: без встроенного логотипа.
     assert "createPriceChart(el.chart" in form
 

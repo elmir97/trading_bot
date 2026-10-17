@@ -315,6 +315,7 @@ def test_registry_covers_queue_scenarios() -> None:
         "confirm_limit", "confirm_expired", "confirm_block", "confirm_back",
         "pos_empty", "pos_list", "pos_unlinked", "pos_chat", "pos_no_key", "pos_503",
         "pos_401", "pos_poll", "pos_to_market", "menu_native",
+        "market_lines", "market_lines_none", "confirm_lines",
     }
     assert [s.name for s in ms.select("all")] == list(ms.SCENARIOS)
     assert ms.select("poll") == [ms.SCENARIOS["poll"]]

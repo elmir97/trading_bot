@@ -112,6 +112,13 @@ STATE_JS = """(() => {
     journal: shown('positions-journal')
       ? [...document.querySelectorAll('#positions-journal-list li')]
         .map((li) => li.textContent.trim()) : null,
+    lines: box && box.dataset.lines !== undefined
+      ? box.dataset.lines.split(' ').filter(Boolean) : null,
+    lines_on: box ? box.dataset.linesOn || null : null,
+    market_position: shown('market-position')
+      ? [...document.querySelectorAll('#market-position-list li')]
+        .map((li) => li.textContent.trim()) : null,
+    market_position_stale: shown('market-position-stale') ? text('market-position-stale') : null,
   };
 })()"""
 
@@ -120,7 +127,7 @@ STATE_JS = """(() => {
 WAIT_KEYS = ("screens", "last", "market_error", "chart_state", "stale", "error_title",
              "blocked", "lev", "lev_max", "pending", "preview_state", "confirm_card",
              "confirm_status", "confirm_action", "main_button", "positions_state",
-             "positions_note", "positions_empty")
+             "positions_note", "positions_empty", "lines", "lines_on", "market_position")
 
 
 class ScenarioError(Exception):
@@ -1198,8 +1205,10 @@ async def pos_no_key(page: Page, url: str) -> None:
 
 @scenario("pos_503", "П.1: 503 при загрузке — «Повторить»; в опросе — пометка, карточки остаются")
 async def pos_503(page: Page, url: str) -> None:
-    await open_page(page, url, Setup(preset="single", rules=[
-        Rule("/api/positions", "status", status=503, body=EXCHANGE_DOWN, times=1)]))
+    await open_page(page, url, Setup(preset="single"))
+    # Рынок сам читает позиции (линии П.2) — подмена после его запроса, иначе он её съест.
+    await page.wait_for(lambda s: bool(s["lines"]), 10, "линии позиции на рынке")
+    page.intercept(Rule("/api/positions", "status", status=503, body=EXCHANGE_DOWN, times=1))
     await page.click("#account-positions")
     await page.wait_for(lambda s: s["positions_state"] == EXCHANGE_DOWN["message"]
                         and s["positions_retry"], 10, "ошибка загрузки с «Повторить»")
@@ -1248,7 +1257,10 @@ async def pos_poll(page: Page, url: str) -> None:
     await page.wait_for(lambda s: "screen-market" in s["screens"], 8, "«Назад» → рынок")
     start = page.now()
     await page.pump(7)
-    page.expect(not _positions_requests(page, start), "ушли с вкладки — опрос позиций идёт")
+    # Рынок читает позиции сам (линии П.2): один раз при загрузке, дальше раз в 10 с.
+    after = _positions_requests(page, start)
+    page.expect(len(after) <= 1, f"ушли с вкладки — /api/positions за 7 с: {len(after)}, "
+                                 "ждали ≤ 1 (линии рынка)")
 
 
 @scenario("pos_to_market", "П.1: карточка → рынок её монеты, «Назад» → снова «Позиции»")
@@ -1292,6 +1304,76 @@ async def menu_native(page: Page, url: str) -> None:
     await page.pump(1.5)
     page.expect(bool(page.api(f"/api/market/{SYMBOL}?", since=start)),
                 "«Обновить» на рынке не перечитал рынок")
+
+
+# П.2 — линии открытой позиции на экране рынка
+
+HEDGE_LINES = {"entry:1.4810", "stop:1.4402", "stop:1.4100", "take:1.5631", "entry:1.5120"}
+
+
+def _lines(s: dict[str, Any]) -> set[str]:
+    return set(s.get("lines") or [])
+
+
+@scenario("market_lines", "П.2: хедж — линии входа/стопов/тейка/ликв. на свечах и на «линии», "
+                          "закрыта — сняты")
+async def market_lines(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(preset="hedge"))
+    s = await page.wait_for(lambda s: _lines(s) >= HEDGE_LINES, 10, "линии позиции")
+    page.expect(s.get("lines_on") == "candles", f"линии на {s.get('lines_on')!r}, ждали candles")
+    page.expect(sum(x.startswith("liq:") for x in _lines(s)) == 2,
+                f"ликвидаций: {sorted(_lines(s))}")
+    legend = s.get("market_position") or []
+    page.expect(len(legend) == 2 and legend[0].startswith("Лонг 195")
+                and "без стопа" in legend[1] and "без стопа" not in legend[0],
+                f"блок «Позиция»: {legend}")
+    await page.click('#market-types [data-type="line"]')
+    s = await page.wait_for(lambda s: s["lines_on"] == "line", 5, "линии на «линии»")
+    page.expect(_lines(s) >= HEDGE_LINES, f"на «линии» уровни: {s.get('lines')}")
+    await page.click('#market-types [data-type="candles"]')
+    await page.wait_for(lambda s: s["lines_on"] == "candles" and _lines(s) >= HEDGE_LINES, 5,
+                        "обратно на свечи")
+    # Позиции закрыты на бирже — следующий опрос (≤ 10 с + кэш 5 с) снимает линии и блок.
+    if page.seed_stand is None:
+        raise ScenarioError("сценарию нужен стенд (/dev/positions)")
+    await page.seed_stand("none")
+    start = page.now()
+    s = await page.wait_for(lambda s: s["lines"] == [] and s["market_position"] is None, 18,
+                            "линии сняты")
+    polled = _positions_requests(page, start)
+    page.expect(1 <= len(polled) <= 2, f"/api/positions до снятия: {len(polled)}, ждали 1–2")
+
+
+@scenario("market_lines_none", "П.2: нет ключа — линий и блока нет, рынок работает")
+async def market_lines_none(page: Page, url: str) -> None:
+    def patch(data: Any) -> Any:
+        return {**data, "positions": [], "exchange_error": POSITIONS_NO_KEY}
+
+    await open_page(page, url, Setup(preset="single", rules=[
+        Rule("/api/positions", "patch", patch=patch)]))
+    await page.pump(2)
+    s = await page.state()
+    page.expect(s.get("lines") == [] and s.get("market_position") is None,
+                f"без ключа: линии {s.get('lines')}, блок {s.get('market_position')}")
+    page.expect(s.get("last") not in (None, "—"), "рынок не показан")
+
+
+@scenario("confirm_lines", "П.2: «Открыть» → «К рынку» — свежий /api/positions, линии входа, стопа")
+async def confirm_lines(page: Page, url: str) -> None:
+    await open_page(page, url, Setup())
+    s = await page.state()
+    page.expect(s.get("lines") == [], f"до сделки линии: {s.get('lines')}")
+    await _ready_form(page, False)
+    await _open_and_confirm(page, False)
+    start = page.now()
+    await page.click("#confirm-back")
+    s = await page.wait_for(lambda s: "screen-market" in s["screens"]
+                            and any(x.startswith("entry:") for x in _lines(s))
+                            and any(x.startswith("stop:") for x in _lines(s)), 8,
+                            "линии новой позиции")
+    page.expect(bool(_positions_requests(page, start)), "после итога нет запроса позиций")
+    page.expect(len(s.get("market_position") or []) == 1, f"блок: {s.get('market_position')}")
+
 
 
 SCENARIO_TIMEOUT = 150.0

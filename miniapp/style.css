@@ -478,3 +478,15 @@ main {
 .positions-empty { padding: 16px 0; }
 
 .journal-list li { padding: 6px 0; border-bottom: 1px solid var(--section); }
+
+/* Блок «Позиция» на экране рынка (П.2) */
+
+.market-position-list { list-style: none; margin: 0 0 8px; padding: 0; }
+
+.market-position-list li {
+  padding: 6px 0 6px 10px;
+  border-left: 3px solid var(--section);
+}
+
+.market-position-list li.long { border-left-color: var(--long); }
+.market-position-list li.short { border-left-color: var(--short); }

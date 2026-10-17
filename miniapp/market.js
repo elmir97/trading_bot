@@ -15,6 +15,13 @@
 // свечи не дольше закрытия последней. Ошибка — пауза растёт 6 → 12 → 24 → 30 с; вкладка
 // скрыта (visibilitychange) или ушли с экрана — опрос стоит, запрос в полёте
 // отменяется (AbortController).
+//
+// Линии открытой позиции (П.2): GET /api/positions при каждой загрузке монеты (вход,
+// смена монеты/ТФ, возврат с итога сделки — сервер сбросил кэш после «Открыть») и
+// дальше раз в POSITION_POLL_MS своей цепочкой; сервер держит кэш 5 с, общий с вкладкой
+// «Позиции». Позиции этой монеты — вход, стопы, тейки, ликвидация на графике (видны и в
+// режиме «линия») и строка в блоке «Позиция»; позиции нет (закрыта, нет ключа, другой
+// счёт) — линий нет. Сбой — линии остаются с пометкой, пауза 20 → 30 с; 401 — onFatal.
 
 import { ApiError } from "./api.js";
 import { createPriceChart, intervalSeconds } from "./chart.js";
@@ -24,6 +31,7 @@ export const PRICE_POLL_MS = 3000;
 export const CANDLES_REFRESH_MS = 60000;
 export const CANDLE_RETRY_MS = 10000;
 export const MAX_BACKOFF_MS = 30000;
+export const POSITION_POLL_MS = 10000;
 export const SEARCH_DEBOUNCE_MS = 300;
 const DEFAULT_INTERVAL = "5m";
 const RECENT_LIMIT = 8;
@@ -91,9 +99,33 @@ export function candlesDue({ missing, asked, askedAt, loadedAt, now }) {
 const clockFormat = new Intl.DateTimeFormat("ru-RU",
   { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
+// Уровни позиций монеты для графика: [{kind, price, title}]. Две стороны (хедж) —
+// у подписи сторона: «Стоп Л», «Тейк Ш».
+export function positionLevels(positions) {
+  const tag = positions.length > 1;
+  const out = [];
+  for (const p of positions) {
+    const suffix = tag ? (p.side === "LONG" ? " Л" : " Ш") : "";
+    out.push({ kind: "entry", price: p.entry_price, title: `Вход${suffix}` });
+    for (const o of p.stops) out.push({ kind: "stop", price: o.price, title: `Стоп${suffix}` });
+    for (const o of p.takes) out.push({ kind: "take", price: o.price, title: `Тейк${suffix}` });
+    if (p.liquidation_price !== null) {
+      out.push({ kind: "liq", price: p.liquidation_price, title: `Ликв.${suffix}` });
+    }
+  }
+  return out;
+}
+
+export function positionSummary(p) {
+  const side = p.side === "LONG" ? "Лонг" : "Шорт";
+  const stop = p.stops.length ? "" : " · ⚠️ без стопа";
+  return `${side} ${text(p.quantity)} · вход ${text(p.entry_price)} · `
+    + `${signed(text(p.unrealized_pnl))} $${stop}`;
+}
+
 // --- экран -----------------------------------------------------------------------------
 
-export function createMarketScreen({ api, tg, storage, onSide, onFatal }) {
+export function createMarketScreen({ api, tg, storage, onSide, onPositions, onFatal }) {
   const native = tg && tg.isVersionAtLeast("7.10");   // MainButton + SecondaryButton
   const el = {
     body: $("market-body"),
@@ -120,6 +152,10 @@ export function createMarketScreen({ api, tg, storage, onSide, onFatal }) {
     openInterest: $("market-oi"),
     funding: $("market-funding"),
     detailsNote: $("market-details-note"),
+    position: $("market-position"),
+    positionList: $("market-position-list"),
+    positionStale: $("market-position-stale"),
+    positionOpen: $("market-position-open"),
     error: $("market-error"),
     errorText: $("market-error-text"),
     errorRetry: $("market-retry"),
@@ -151,6 +187,9 @@ export function createMarketScreen({ api, tg, storage, onSide, onFatal }) {
   let searchTimer = null;
   let searchController = null;
   let searchSeq = 0;
+  let posTimer = null;       // опрос позиций — своя цепочка (POSITION_POLL_MS)
+  let posController = null;
+  let posFailures = 0;
 
   // --- кнопки «Лонг»/«Шорт» --------------------------------------------------------
 
@@ -215,6 +254,7 @@ export function createMarketScreen({ api, tg, storage, onSide, onFatal }) {
     }
     el.detailsNote.hidden = true;
     el.leverage.hidden = true;
+    clearPosition();
     chartState("Загрузка…");
   }
 
@@ -275,6 +315,10 @@ export function createMarketScreen({ api, tg, storage, onSide, onFatal }) {
     timer = null;
     if (controller) controller.abort();
     controller = null;
+    if (posTimer !== null) clearTimeout(posTimer);
+    posTimer = null;
+    if (posController) posController.abort();
+    posController = null;
   }
 
   function schedule() {
@@ -343,6 +387,8 @@ export function createMarketScreen({ api, tg, storage, onSide, onFatal }) {
     renderMarket(m);
     loaded = true;
     sideButtons(true);
+    posFailures = 0;
+    pollPositions();          // параллельно свечам, своя цепочка
     try {
       await loadCandles(myGen, signal, "none");
     } catch (err) {
@@ -393,11 +439,68 @@ export function createMarketScreen({ api, tg, storage, onSide, onFatal }) {
     }
   }
 
+  // --- линии позиции (П.2) -----------------------------------------------------------
+
+  function clearPosition() {
+    if (chart) chart.setLines([]);
+    el.positionList.replaceChildren();
+    el.positionStale.hidden = true;
+    el.position.hidden = true;
+  }
+
+  function renderPosition(list) {
+    if (chart) chart.setLines(positionLevels(list));
+    el.positionList.replaceChildren(...list.map((p) => {
+      const item = document.createElement("li");
+      item.dataset.position = `${p.symbol}:${p.side}`;
+      item.className = p.side === "LONG" ? "long" : "short";
+      item.textContent = positionSummary(p);
+      return item;
+    }));
+    el.positionStale.hidden = true;
+    el.position.hidden = list.length === 0;
+  }
+
+  function schedulePositions() {
+    if (!active || document.hidden || !loaded || posTimer !== null) return;
+    const delay = posFailures
+      ? Math.min(POSITION_POLL_MS * 2 ** posFailures, MAX_BACKOFF_MS) : POSITION_POLL_MS;
+    posTimer = setTimeout(pollPositions, delay);
+  }
+
+  async function pollPositions() {
+    posTimer = null;
+    if (!active || document.hidden || !loaded) return;
+    const myGen = gen;
+    posController = new AbortController();
+    try {
+      const data = await api.get("/api/positions", { signal: posController.signal });
+      if (myGen !== gen) return;
+      posFailures = 0;
+      renderPosition(data.positions.filter((p) => p.symbol === symbol));
+    } catch (err) {
+      if (myGen !== gen || (err && err.name === "AbortError")) return;
+      if (fatal(err)) return;
+      posFailures += 1;
+      if (!el.position.hidden) {
+        const wait = Math.min(POSITION_POLL_MS * 2 ** posFailures, MAX_BACKOFF_MS) / 1000;
+        el.positionStale.textContent = `${err instanceof ApiError ? err.message : "Нет связи."} `
+          + `Линии позиции могут быть устаревшими — повторю через ${wait} с.`;
+        el.positionStale.hidden = false;
+      }
+    }
+    if (myGen === gen) {
+      posController = null;
+      schedulePositions();
+    }
+  }
+
   function onVisibility() {
     if (document.hidden) {
       stopPolling();
-    } else if (active && loaded && timer === null && controller === null) {
-      tick();
+    } else if (active && loaded) {
+      if (timer === null && controller === null) tick();
+      if (posTimer === null && posController === null) pollPositions();
     }
   }
 
@@ -568,6 +671,7 @@ export function createMarketScreen({ api, tg, storage, onSide, onFatal }) {
     if (chart) chart.setType(chartType);
     renderHead();
   });
+  el.positionOpen.addEventListener("click", () => active && onPositions());
   el.errorRetry.addEventListener("click", () => active && load());
   el.chartRetry.addEventListener("click", () => active && load());
 

@@ -10,8 +10,10 @@
 //   themeChanged; размер — autoSize (ResizeObserver библиотеки: поворот экрана, смена
 //   высоты окна). destroy() снимает подписки и зовёт chart.remove().
 // - Числа приходят строкой; Number — только чтобы нарисовать, расчётов здесь нет.
-// - Линии уровней формы (вход, стоп, тейк, ликвидация ≈) — setLines() значениями из
-//   ответа preview, на серии свечей (форма показывает свечи).
+// - Линии уровней (вход, стоп, тейк, ликвидация) — setLines(): у формы значения превью,
+//   у рынка — открытой позиции (П.2). Рисуются на видимой серии: скрытая серия
+//   (visible: false) прячет и свои price lines, поэтому setType переносит их на линию и
+//   обратно. Что нарисовано — в data-lines / data-lines-on контейнера (сценарии).
 
 const LWC = window.LightweightCharts;
 
@@ -83,8 +85,9 @@ export function createPriceChart(container, { tg = null, precision = 4, interval
   let current = formatters(interval);
   let last = null;            // последняя свеча (числа) — её обновляет цена
   let destroyed = false;
-  let levels = [];            // уровни формы: [{kind, price, title}] строками сервера
-  let priceLines = [];
+  let levels = [];            // уровни: [{kind, price, title}] строками сервера
+  let priceLines = [];        // [[серия, price line]] — снимать с той, на которой нарисованы
+  let type = "candles";
 
   const chart = LWC.createChart(container, {
     autoSize: true,
@@ -134,11 +137,14 @@ export function createPriceChart(container, { tg = null, precision = 4, interval
   }
 
   function drawLines() {
-    for (const priceLine of priceLines) candles.removePriceLine(priceLine);
-    priceLines = levels.map((level) => candles.createPriceLine({
+    for (const [series, priceLine] of priceLines) series.removePriceLine(priceLine);
+    const host = type === "line" ? line : candles;
+    priceLines = levels.map((level) => [host, host.createPriceLine({
       price: Number(level.price), title: level.title, lineWidth: 1, axisLabelVisible: true,
       ...lineStyle(level.kind, colors),
-    }));
+    })]);
+    container.dataset.lines = levels.map((level) => `${level.kind}:${level.price}`).join(" ");
+    container.dataset.linesOn = host === line ? "line" : "candles";   // где нарисованы на деле
   }
 
   // В Telegram тема приходит событием; в браузере стенда — от системной темы.
@@ -156,9 +162,12 @@ export function createPriceChart(container, { tg = null, precision = 4, interval
       candles.applyOptions({ priceFormat: priceFormat(next) });
       line.applyOptions({ priceFormat: priceFormat(next) });
     },
-    setType(type) {
-      candles.applyOptions({ visible: type !== "line" });
+    setType(next) {
+      if (destroyed) return;
+      type = next === "line" ? "line" : "candles";
+      candles.applyOptions({ visible: type === "candles" });
       line.applyOptions({ visible: type === "line" });
+      drawLines();
     },
     // rows — [{time, open, high, low, close}] строками от сервера, время UTC.
     setCandles(rows) {
@@ -195,6 +204,8 @@ export function createPriceChart(container, { tg = null, precision = 4, interval
       destroyed = true;
       if (tg) tg.offEvent("themeChanged", applyTheme);
       if (media) media.removeEventListener("change", applyTheme);
+      delete container.dataset.lines;
+      delete container.dataset.linesOn;
       chart.remove();
     },
   };
