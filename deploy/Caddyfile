@@ -1,0 +1,44 @@
+# Mini App (docs/miniapp-plan.md §2, §6): статика /srv/miniapp и /api/* → api:8000.
+# Сертификат Let's Encrypt — автоматически (HTTP-01 на :80). Наружу — только 80 и 443/tcp;
+# api, PostgreSQL и Redis портов не публикуют (tests/test_deploy_config.py).
+# Заголовки безопасности = SECURITY_HEADERS стенда scripts/miniapp_dev.py (тот же тест),
+# кроме HSTS — у стенда нет HTTPS. HSTS без includeSubDomains: корень домена — другой сервер.
+{
+	servers {
+		# Без HTTP/3: 443/udp не публикуем, Alt-Svc не обещаем.
+		protocols h1 h2
+	}
+}
+
+app.postfactumtrade.ru {
+	encode gzip
+
+	# Удаление поля (-Server) делает блок отложенным: заголовки ставятся при записи ответа,
+	# в том числе поверх ответа api (uvicorn шлёт свой Server).
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		Content-Security-Policy "default-src 'self'; script-src 'self' https://telegram.org; connect-src 'self'; img-src 'self' data:; style-src 'self'; frame-ancestors https://web.telegram.org https://*.telegram.org"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	handle /api/* {
+		request_body {
+			max_size 64KB
+		}
+		header Cache-Control "no-store"
+		reverse_proxy api:8000
+	}
+
+	handle {
+		# Имена app.js, style.css… без хеша: no-cache — webview Telegram сверяет ETag и
+		# после деплоя берёт новый JS. Библиотека в vendor/ — с версией в имени.
+		@vendor path /vendor/*
+		@app not path /vendor/*
+		header @vendor Cache-Control "public, max-age=31536000, immutable"
+		header @app Cache-Control "no-cache"
+		root * /srv/miniapp
+		file_server
+	}
+}

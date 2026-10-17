@@ -1,0 +1,29 @@
+# Шаблон docker-compose.override.yml прода для деплоя Mini App (в git — только шаблон;
+# настоящий файл живёт на сервере, права 600, в git archive не едет). Секретов здесь
+# нет: секреты — только в .env.
+#
+# Переменные исполнения — ОДИН якорь x-exec-env на bot и api: api исполняет то же
+# открытие, что бот, и обязан видеть те же флаги (иначе — дефолты app/core/config.py).
+# Значения EXEC_SYMBOL_WHITELIST и прочих — из текущего override прода (чек-ап C8),
+# не из этого шаблона.
+#
+# EXEC_OPEN_DRY_RUN: "true" — на деплое Mini App и bot, и api в сухом прогоне;
+# живое открытие из Mini App — отдельным «да» владельца (правка одной строки якоря,
+# пересоздание bot и api).
+# MINIAPP_ALLOWED_TELEGRAM_IDS — только api; пусто — 403 всем (шаг 9 деплоя).
+# MINIAPP_URL — только bot: кнопка меню Mini App; пусто — кнопка команд, как раньше.
+
+x-exec-env: &exec-env
+  TRADING_EXECUTION_ENABLED: "true"
+  EXEC_SYMBOL_WHITELIST: "<из override прода>"
+  EXEC_OPEN_DRY_RUN: "true"
+
+services:
+  bot:
+    environment:
+      <<: *exec-env
+      MINIAPP_URL: ""
+  api:
+    environment:
+      <<: *exec-env
+      MINIAPP_ALLOWED_TELEGRAM_IDS: ""

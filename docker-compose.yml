@@ -58,6 +58,9 @@ services:
 
   bot:
     build: .
+    # Имя образа — как compose ставит сам (проект trading_bot); явно — потому что
+    # api берёт тот же образ, а откат — docker tag …:rollback_<ts> → это имя.
+    image: trading_bot-bot:latest
     container_name: trading_bot
     restart: unless-stopped
     # Единственный путь секретов в контейнер: .env в образ не копируется
@@ -76,5 +79,64 @@ services:
     volumes:
       - ./logs:/app/logs
 
+  # API Mini App (docs/miniapp-plan.md §2, §6): тот же образ, что у бота (своей сборки
+  # нет — одна точка отката rollback_<ts> на оба), без поллинга, планировщика и
+  # reconciler (tests/test_deploy_config.py). Наружу не публикуется — только через caddy.
+  # Переменные исполнения — общим якорем x-exec-env в docker-compose.override.yml
+  # прода (шаблон — deploy/override.example.yml).
+  api:
+    image: trading_bot-bot:latest
+    pull_policy: never
+    container_name: trading_bot_api
+    restart: unless-stopped
+    command: ["uvicorn", "--factory", "app.api.main:create_app", "--host", "0.0.0.0",
+              "--port", "8000", "--workers", "1", "--proxy-headers",
+              "--forwarded-allow-ips", "*"]
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs          # logs/api.log
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # Единственный сервис с портами наружу: 80 (HTTP-01 Let's Encrypt, редирект) и 443/tcp.
+  caddy:
+    image: caddy:2.10.2-alpine
+    container_name: trading_bot_caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./miniapp:/srv/miniapp:ro
+      - caddy_data:/data          # сертификаты — переживают пересоздание; не удалять (лимиты LE)
+      - caddy_config:/config
+    depends_on:
+      api:
+        # Не healthy: статика отдаётся и при упавшем api.
+        condition: service_started
+    mem_limit: 96m
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
 volumes:
   postgres_data:
+  caddy_data:
+  caddy_config:

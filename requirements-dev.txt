@@ -10,3 +10,5 @@ mypy==2.3.1
 fakeredis[lua]==2.38.0
 # Статический анализ scripts/*.sh (scripts/rehearse_migration.sh) — бинарник shellcheck.
 shellcheck-py==0.11.0.1
+# Тесты deploy/: docker-compose.yml и шаблон override (YAML-якорь x-exec-env, merge-ключ <<).
+PyYAML==6.0.3

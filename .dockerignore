@@ -20,3 +20,5 @@ miniapp/
 scripts/miniapp_dev.py
 scripts/miniapp_browser_check.py
 scripts/miniapp_scenarios.py
+# Caddyfile и шаблон override — Caddy монтирует с диска сервера, образу не нужны.
+deploy/
