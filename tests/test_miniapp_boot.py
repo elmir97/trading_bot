@@ -131,3 +131,35 @@ def test_app_without_sdk_shows_same_screen_and_stops() -> None:
     assert "window.maBoot.fail();" in branch and "return;" in branch
     # Каждый экран, который показывает app.js, — из SCREENS; экран SDK — только boot.js.
     assert '"sdk"' not in app
+
+
+def test_outside_telegram_no_api_and_bot_name() -> None:
+    """Safari по ссылке (17.10): SDK есть, initData пустая — сразу «Открой Mini App из бота
+    @postfactumTrade_bot», ни экранов, ни запросов к API, ни «Повторить»."""
+    app = _text("app.js")
+    init = _body(app, "function init()")
+    guard = "if (!tg.initData) {"
+    assert init.index("if (!tg || window.maBoot.failed()) {") < init.index(guard)
+    order = [init.index(x) for x in (guard, "tg.ready()", "screens = {", "start()")]
+    assert order == sorted(order)
+    branch = _body(init, guard)
+    assert "showOutsideTelegram();" in branch and "return;" in branch
+    outside = _body(app, "function showOutsideTelegram()")
+    assert 'const BOT_USERNAME = "postfactumTrade_bot";' in app
+    assert "Открой Mini App из бота @${BOT_USERNAME}" in outside
+    assert '$("error-retry").hidden = true;' in outside
+    assert "api." not in outside and "fetch(" not in outside
+
+
+def test_api_non_json_proxy_errors_get_own_text() -> None:
+    """502/503/504 без JSON (Caddy без api) — «Сервер недоступен…»; любой JSON-ответ ошибки
+    (401/403/422/503 FastAPI) — текст сервера; прочий не-JSON — «ответил непонятно»."""
+    api = _text("api.js")
+    assert "const PROXY_STATUSES = [502, 503, 504];" in api
+    assert 'export const UNAVAILABLE_TEXT = "Сервер недоступен — повтори через минуту.";' in api
+    catch = api[api.index("data = await response.json();"):api.index("if (!response.ok)")]
+    assert "PROXY_STATUSES.includes(response.status)" in catch
+    assert '"UNAVAILABLE", UNAVAILABLE_TEXT' in catch
+    assert '"BAD_RESPONSE", BAD_RESPONSE_TEXT' in catch
+    ok = _body(api, "if (!response.ok)")
+    assert "data.message" in ok and "data.code" in ok          # JSON-ошибка — текст сервера

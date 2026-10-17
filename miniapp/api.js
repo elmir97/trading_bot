@@ -1,6 +1,8 @@
 // Запросы к /api/*: заголовок «Authorization: tma <initData>», ответ — JSON.
 // Ошибка — ApiError {status, code, message}; message сервера показывается как есть
 // (тот же текст, что в чате). Числа приходят строками — здесь не считаются.
+// Ответ не JSON: 502/503/504 — прокси (Caddy) без api (перезапуск, сбой) — UNAVAILABLE;
+// прочее — BAD_RESPONSE.
 
 export class ApiError extends Error {
   constructor(status, code, message) {
@@ -12,6 +14,8 @@ export class ApiError extends Error {
 
 export const NETWORK_TEXT = "Нет связи с сервером — повтори.";
 const BAD_RESPONSE_TEXT = "Сервер ответил непонятно — повтори.";
+export const UNAVAILABLE_TEXT = "Сервер недоступен — повтори через минуту.";
+const PROXY_STATUSES = [502, 503, 504];
 
 export function createApi(initData, fetchImpl = window.fetch.bind(window)) {
   async function request(method, path, body, signal) {
@@ -32,6 +36,9 @@ export function createApi(initData, fetchImpl = window.fetch.bind(window)) {
     try {
       data = await response.json();
     } catch {
+      if (PROXY_STATUSES.includes(response.status)) {
+        throw new ApiError(response.status, "UNAVAILABLE", UNAVAILABLE_TEXT);
+      }
       throw new ApiError(response.status, "BAD_RESPONSE", BAD_RESPONSE_TEXT);
     }
     if (!response.ok) {

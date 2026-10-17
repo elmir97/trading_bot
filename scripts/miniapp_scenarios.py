@@ -33,7 +33,7 @@ from urllib.parse import parse_qs, urlsplit
 from scripts import miniapp_browser_check as bc
 
 SYMBOL = "XRP-USDT"
-NATIVE_HASH = "#tgWebAppVersion=8.0"
+NATIVE_VERSION = "8.0"
 CALL_TIMEOUT = 10.0
 POLL_STEP = 0.2
 STORAGE = "ma:anon:"             # storage.js вне Telegram (как bc.STORAGE_SYMBOL_KEY)
@@ -144,7 +144,8 @@ class Rule:
 
     action: "status" — ответ без сервера (status, body); "patch" — ответ сервера,
     JSON правит `patch`; "fail" — обрыв до сервера (net::ERR_INTERNET_DISCONNECTED);
-    "hang" — запрос держится без ответа. times — сколько раз (None — всегда)."""
+    "hang" — запрос держится без ответа. times — сколько раз (None — всегда).
+    raw — у "status" тело как есть, не JSON (пустое — как 502 Caddy без api)."""
 
     match: str
     action: str
@@ -154,6 +155,7 @@ class Rule:
     method: str | None = None
     times: int | None = None
     exact: bool = False
+    raw: str | None = None
     hits: int = 0
 
     def applies(self, url: str, method: str) -> bool:
@@ -285,6 +287,10 @@ class Page:
                             {"requestId": rid, "errorReason": "InternetDisconnected"})
         elif rule.action == "hang":
             self.hung.append(url)
+        elif rule.action == "status" and rule.raw is not None:
+            await self.call("Fetch.fulfillRequest", {
+                "requestId": rid, "responseCode": rule.status, "responseHeaders": [],
+                "body": base64.b64encode(rule.raw.encode()).decode()})
         elif rule.action == "status":
             await self.call("Fetch.fulfillRequest", {
                 "requestId": rid, "responseCode": rule.status,
@@ -398,6 +404,7 @@ class Setup:
     storage: dict[str, Any] = field(default_factory=dict)
     rules: list[Rule] = field(default_factory=list)
     wait_screen: str | None = "screen-market"
+    init_data: bool = True             # заглушка tgWebAppData; False — как Safari по ссылке
     preset: str | None = None          # позиции стенда (miniapp_dev.PRESETS)
 
 
@@ -430,7 +437,8 @@ async def open_page(page: Page, url: str, setup: Setup) -> dict[str, Any]:
         {"urlPattern": "*/api/*", "requestStage": "Request"},
         {"urlPattern": "*telegram.org*", "requestStage": "Request"},
     ]})
-    await page.call("Page.navigate", {"url": url + (NATIVE_HASH if setup.native else "")})
+    await page.call("Page.navigate", {"url": bc.page_url(
+        url, version=NATIVE_VERSION if setup.native else None, init_data=setup.init_data)})
     if setup.wait_screen is None:
         return {}
     want = setup.wait_screen
@@ -1392,6 +1400,37 @@ async def confirm_lines(page: Page, url: str) -> None:
                             "линии новой позиции")
     page.expect(bool(_positions_requests(page, start)), "после итога нет запроса позиций")
     page.expect(len(s.get("market_position") or []) == 1, f"блок: {s.get('market_position')}")
+
+# Вне Telegram и прокси без api (17.10, Safari по ссылке на проде)
+
+OUTSIDE_TITLE = "Открой Mini App из бота @postfactumTrade_bot"
+
+
+@scenario("no_init_data", "Вне Telegram (initData пустая) — «Открой из бота», к API не ходит")
+async def no_init_data(page: Page, url: str) -> None:
+    s = await open_page(page, url, Setup(init_data=False, wait_screen="screen-error"))
+    page.expect(s.get("error_title") == OUTSIDE_TITLE, f"заголовок: {s.get('error_title')!r}")
+    await page.pump(2)
+    s = await page.state()
+    page.expect(not page.api("/api/"), f"запросы к API: {[r.path for r in page.requests]}")
+    retry = await page.js("document.getElementById('error-retry').hidden")
+    page.expect(retry is True, "на экране «Открой из бота» есть «Повторить»")
+    page.expect(s.get("fallback") is None and s.get("main_button") is None,
+                "кнопки «Лонг»/«Шорт» видны вне Telegram")
+
+
+@scenario("me_502", "Прокси без api: /api/me 502 без JSON — «Сервер недоступен», повтор открывает")
+async def me_502(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(rules=[
+        Rule("/api/me", "status", status=502, raw="", exact=True, times=1)],
+        wait_screen="screen-error"))
+    s = await page.state()
+    page.expect(s.get("error_title") == "Не получилось", f"заголовок: {s.get('error_title')!r}")
+    text = await page.js("document.getElementById('error-text').textContent")
+    page.expect(text == "Сервер недоступен — повтори через минуту.", f"текст: {text!r}")
+    await page.click("#error-retry")
+    await page.wait_for(lambda s: "screen-market" in s["screens"] and s["market_charts"] == 1,
+                        10, "рынок после «Повторить»")
 
 
 

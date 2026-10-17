@@ -105,6 +105,70 @@ AAAA/CAA нет — проверено с 8.8.8.8, 1.1.1.1, 77.88.8.8); swap 2 �
 `app/main.py:menu_button` → `MenuButtonWebApp` «Торговля» при каждом старте бота; INFO «Кнопка меню бота» (`kind`, `url`). Ставит
 только `setup_bot_ui` (тест: других `set_chat_menu_button` нет). BotFather «Menu Button» не нужен — бот перекроет; «Configure Mini App»
 (профиль, `?startapp`) — по желанию владельца. Мутации 7/7.
+**17.10 — ff и swap.** `master` → `fbbeb02` fast-forward'ом по «да» (сводка: миграций нет; для бота новое — `/start pos-…` и
+строка «Кнопка меню бота»; после деплоя — один раз пройти мастер «Добавить сделку» до карточки сухого прогона руками; превью на DEBUG —
+INFO в чек-апе меньше, это норма). **Swap 2 ГБ на проде включён 17.10 ~14:19 UTC** по «да» (§6а): `/swapfile` 600 root 2 ГБ, строка в
+`/etc/fstab` (бэкап `/etc/fstab.bak_20261017_141845`, `findmnt --verify` — 0 ошибок), `vm.swappiness=10` в
+`/etc/sysctl.d/99-swappiness.conf` (было 60 — для отката); после: Swap 2047/0, available 1058 МБ, диск 26 %; контейнеры не
+перезапускались (restarts 0). Откат: `swapoff /swapfile`, fstab из бэкапа, удалить sysctl-файл и `sysctl vm.swappiness=60`, `rm
+/swapfile` — по «да». Дальше — деплой Mini App по шагам CLAUDE.md, каждый по «да».
+**Шаг 1 деплоя (чек-ап) 17.10 ~14:23 UTC:** всё ✅, кроме ❌ sshd (пароль и root по паролю — §6а стоп) и ⚠️ 10050 открыт всем (решение:
+ufw с IP Timeweb — после деплоя, отдельным шагом; агент ограничен `Server=`); 16б #210 PENDING — известное (#40, ждёт B.9). Демо: 0 позиций,
+0 ордеров. Override прода: `TRADING_EXECUTION_ENABLED "true"`, `EXEC_DRY_RUN "false"`, `EXEC_OPEN_DRY_RUN "false"`, whitelist нет →
+якорь `x-exec-env` из этих трёх, `EXEC_OPEN_DRY_RUN "true"` (мастер в чате тоже сухой — «ок» владельца). Панель Timeweb: групп правил
+нет; IPv6 у сервера есть, AAAA для app не добавляем. Промах: временный файл логов в `/tmp` на секунды (правило «на диск ничего»).
+**sshd 17.10 14:29 UTC по «да»:** `/etc/ssh/sshd_config.d/00-hardening.conf` (600): `PasswordAuthentication no`,
+`KbdInteractiveAuthentication no`, `PermitRootLogin prohibit-password`, `PubkeyAuthentication yes` — раньше `50-cloud-init.conf` (там
+пароль yes); основной `sshd_config` не тронут. Страховка — `systemd-run --on-active=10min` (откат без метки `/run/ssh-hardening-ok`),
+снят после проверки. Проверено: новый вход по ключу (ED25519 `SHA256:FYL1aStc…` — единственный в authorized_keys), `sshd -T` — новые
+значения, вход по паролю — «Permission denied (publickey)». Откат: удалить drop-in, `sshd -t && systemctl reload ssh`.
+**Шаг 3 деплоя 17.10 ~14:38 UTC по «да»:** дамп и снапшот `/opt/backups/trading_bot_pre_deploy_20261017_143723.{sql.gz,tar.gz}` (600,
+`gzip -t` ✅, 20 таблиц, `.env` и override внутри); `git archive fbbeb02` → `/opt/trading_bot` (удалённых файлов нет), md5 350/350 = `fbbeb02`;
+точка отката `trading_bot-bot:rollback_20261017_143832` → `f7ef1e47ec2e` (= latest = образ бота, деплой 6). Бот не тронут (старт 12.10
+16:05, restarts 0); `.env`/override — 600, не менялись. `deploy/` и `miniapp/` на диске 775/664 (режимы git archive) — Caddy читает.
+**Шаг 4 17.10 ~15:06 UTC по «да»:** `chmod -R go-w deploy miniapp` (18 файлов 664→644, 3 каталога 775→755, с /022 — 0; в чек-ап 12а).
+Override: бэкап `/opt/backups/docker-compose.override.yml.bak_20261017_150611` (600), новый — якорь `x-exec-env`
+(`TRADING_EXECUTION_ENABLED "true"`, `EXEC_DRY_RUN "false"`, `EXEC_OPEN_DRY_RUN "true"`) на bot и api, `MINIAPP_URL ""` у bot (шаг
+10), `MINIAPP_ALLOWED_TELEGRAM_IDS ""` у api (шаг 9); 600. `docker compose config`: EXEC_*/TRADING_* у bot и api совпадают, порты
+только у caddy (80, 443/tcp), образ api = bot, `REDIS_URL` одинаков. Работающий бот override не видит до пересоздания (шаг 5).
+**Шаг 5 17.10:** build 15:10:38–15:11:44 UTC при работающем боте → `trading_bot-bot:latest` `5d4e95b74519` (663 МБ; в образе нет
+`deploy/`, `miniapp/`, стенда, `.env`; fastapi 0.141.1, uvicorn 0.54.0; swap на сборке 84 МБ). После «ок» владельца `up -d --no-deps bot`
+15:18:19 → старт 15:18:22, «Кнопка меню бота» `kind=COMMANDS`, «Start polling» 15:18:30, W/E/Traceback/Conflict 0; в контейнере
+`exec_open_dry_run True`, `exec_dry_run False`, `miniapp_url ''`. **Мастер на iPhone** (владелец): XRP LONG 297, стоп 1.27, тейк 1.4 →
+«🧪 Сухой прогон… Ничего не отправлено»: opening #33 DRY_RUN (`wizard`), `execution_orders` ENTRY/STOP_LOSS/TAKE_PROFIT — DRY_RUN,
+`to_yes` 1, новых сделок 0, лог — `OPEN_DRY_RUN`, W/E 0.
+**Шаг 6 17.10:** `up -d --no-deps api` 15:28:00 → healthy, restarts 0, портов нет; `api.log` «API Mini App запущен» `account_mode=DEMO
+allowed_ids=0`, W/E 0; `/api/health` 200, `/api/me` без initData 401; Conflict в боте 0. **⚠️ api 186 МиБ / 256** (выше оценки §7
+100–150, ниже порога 200) — замер после запросов Mini App и через сутки; > 200 — стоп и доклад. available 896 МБ.
+**Шаг 7 17.10:** `caddy:2.10.2-alpine` (`4c6e91c6ed0e`, `caddy validate` на сервере ✅) → `up -d --no-deps caddy` 15:31:58; сертификат
+Let's Encrypt за 12 с (HTTP-01 с первой попытки, YE2, до 15.01.2027). Слушают: 22, 80, 443 (v4/v6), 10050; порты публикует только caddy;
+restarts 0 у всех; caddy 12.9 МиБ; W в логе caddy — 2 штатных («HTTP/2|3 skipped because it requires TLS» на :80).
+**Шаг 8 17.10:** с сервера по публичному DNS: `/` HTTP/2 200, CSP/HSTS/nosniff/no-referrer/no-cache как в Caddyfile, `Server` и
+`Alt-Svc` нет; vendor — immutable; `/api/health` GET 200 (HEAD — 405, FastAPI только GET); `/api/me` без initData и с поддельной
+подписью (`Authorization: tma …`) — 401; `/dev/reset` — 404; http → 308 на https.
+**Память api — разбор 17.10 (только чтение):** matplotlib/mplfinance/pandas/numpy в api нет (ни `sys.modules`, ни `.so` в
+`/proc/1/maps`; тест `test_api_process_is_light` уже есть). 186 МиБ — база: aiogram 143 МиБ (1140 модулей, pydantic-типы Bot API;
+api тянет его через `app.workers.openings` → `app.bot.opening_result` — свой `Bot` для итога в чат, §2), SQLAlchemy async 29, FastAPI
+31, aiohttp 25; `app.api.main` целиком — 188 МиБ / 1619 модулей. Оценка §7 (100–150) неверна. Лимит 256m не трогаем; в работе > 230
+МиБ — доклад. Снизить можно только отправкой в чат без aiogram (сырой Bot API) — крупно, не сейчас.
+**Шаг 9 17.10:** `telegram_id` владельца (`users.id = 1`, маска 13…32) — из базы прямо в override на сервере (в чат не выводился); бэкап
+`/opt/backups/docker-compose.override.yml.bak_20261017_155429`; изменилась одна строка, 600. `docker compose config`: у api 1 id, у bot
+ключа нет, EXEC_*/TRADING_* bot == api. `up -d --no-deps --force-recreate api` 15:54:40 → healthy, restarts 0, «API Mini App запущен»
+`allowed_ids=1`, W/E 0; `/api/me` без initData — 401; api 186.3 МиБ. Бот не тронут (старт 15:18:22, W/E/Conflict 0). WARNING `bad_hash`
+15:45:33 в `api.log` — поддельная подпись проверки шага 8.
+**Шаг 10 17.10:** `MINIAPP_URL: "https://app.postfactumtrade.ru/"` у bot (бэкап override `…bak_20261017_155706`, одна строка, 600); после
+«ок» владельца `up -d --no-deps --force-recreate bot` 16:03:40 → «Кнопка меню бота» `kind=WEB_APP url=https://app.postfactumtrade.ru/`,
+«Start polling» 16:03:50, W/E/Traceback/Conflict 0, restarts 0; api/caddy не тронуты.
+**Safari по ссылке (владелец, 15:54 UTC):** «Сервер ответил непонятно». Причина — окно пересоздания api шага 9: caddy 15:54:44
+`GET /api/me` → 502 (`connection refused`), тело пустое, не JSON; api поднялся 15:54:53. Клиент узнаёт любой JSON-ответ ошибки
+(401/403/422/503 FastAPI — текст сервера), не узнавал только не-JSON. Плюс вне Telegram `initData` пустая, а `app.js` всё равно шёл в
+API. **Фикс (коммит после шага 10, «да» владельца):** пустая initData → сразу «Открой Mini App из бота @postfactumTrade_bot» (без API,
+без «Повторить»); 502/503/504 без JSON → «Сервер недоступен — повтори через минуту.»; стенд — initData-заглушка в хеше
+(`page_url`), правило подмены `raw`; сценарии `no_init_data`, `me_502` (ловят откат фикса — мутации в Chrome 2/2), `all` 44/44
+(`candles_1m` — повтор после сети до telegram.org); мутации по тестам 8/8. На прод — только статика `miniapp/` (`git archive` +
+`chmod -R go-w`, без сборки и рестартов) — отдельным «да».
+**Очередь (косметика, не чинить сейчас — владелец 17.10):** на iOS после итога мастера в поле ввода остаётся «В ответ» на удалённый
+вопрос ForceReply. Редирект http → https отдаёт `Server: Caddy` (авто-редирект :80 мимо блока `header`) — мелочь.
 **П.2 сделан 17.10:** экран рынка читает `GET /api/positions` при каждой загрузке монеты (вход, смена монеты/ТФ, возврат с итога
 сделки) и раз в 10 с своей цепочкой; позиции этой монеты — линии входа, стопов, тейков, ликвидации (хедж — «Стоп Л»/«Тейк Ш») и
 блок «Позиция» (сторона, объём, вход, PnL, «⚠️ без стопа», «💼 Все позиции»); сбой — линии остаются с пометкой; позиция закрыта,

@@ -158,6 +158,29 @@ async def test_status_rule_answers_without_server() -> None:
     assert page.rules[0].hits == 1
 
 
+async def test_status_rule_raw_body_is_not_json() -> None:
+    """502 Caddy без api: пустое тело без Content-Type — клиент не должен его разобрать как JSON."""
+    t, _ = await _intercept(ms.Rule("/api/me", "status", status=502, raw="", exact=True),
+                            _paused(URL + "api/me"))
+    sent = t.last("Fetch.fulfillRequest")
+    assert sent["responseCode"] == 502 and sent["body"] == "" and sent["responseHeaders"] == []
+
+
+def test_page_url_init_data_and_version() -> None:
+    init = "tgWebAppData=query_id%3Dstand%26auth_date%3D0%26hash%3Dstand"
+    assert bc.page_url(URL) == URL + "#" + init
+    assert bc.page_url(URL, version="8.0") == URL + "#" + init + "&tgWebAppVersion=8.0"
+    assert bc.page_url(URL, init_data=False) == URL                 # как Safari по ссылке
+    assert bc.page_url(URL, version="8.0", init_data=False) == URL + "#tgWebAppVersion=8.0"
+    assert "user=" not in bc.STAND_INIT_DATA      # без user — анонимное хранилище ma:anon:
+
+
+async def test_open_page_without_init_data() -> None:
+    t = FakeBrowser()
+    await ms.open_page(ms.Page(t), URL, ms.Setup(init_data=False, wait_screen=None))
+    assert t.last("Page.navigate") == {"url": URL}
+
+
 async def test_fail_rule_breaks_before_server_and_hang_never_answers() -> None:
     t, _ = await _intercept(ms.Rule("telegram.org", "fail"),
                             _paused("https://telegram.org/js/telegram-web-app.js"))
@@ -288,7 +311,7 @@ async def test_open_page_prepares_everything_before_navigate() -> None:
     assert "securitypolicyviolation" in scripts[0]
     assert '"ma:anon:symbol", "\\"XRP-USDT\\""' in scripts[1]
     assert '"ma:anon:interval", "\\"1m\\""' in scripts[1]
-    assert t.last("Page.navigate") == {"url": URL + "#tgWebAppVersion=8.0"}
+    assert t.last("Page.navigate") == {"url": bc.page_url(URL, version="8.0")}
     assert page.rules == [rule]
     patterns = [p["urlPattern"] for p in t.last("Fetch.enable")["patterns"]]
     assert patterns == ["*/api/*", "*telegram.org*"]
@@ -316,6 +339,7 @@ def test_registry_covers_queue_scenarios() -> None:
         "pos_empty", "pos_list", "pos_unlinked", "pos_chat", "pos_no_key", "pos_503",
         "pos_401", "pos_poll", "pos_to_market", "menu_native",
         "market_lines", "market_lines_none", "confirm_lines",
+        "no_init_data", "me_502",
     }
     assert [s.name for s in ms.select("all")] == list(ms.SCENARIOS)
     assert ms.select("poll") == [ms.SCENARIOS["poll"]]

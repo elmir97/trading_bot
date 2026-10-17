@@ -41,7 +41,7 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import aiohttp
 
@@ -61,6 +61,20 @@ CSP_LISTENER = (
 # Ключ «последней монеты» Mini App: storage.js — префикс ma и telegram_id, вне
 # Telegram его нет → anon; market.js — имя symbol, значение JSON-строкой.
 STORAGE_SYMBOL_KEY = "ma:anon:symbol"
+# initData стенда: вне Telegram SDK берёт её из хеша адреса (tgWebAppData). Стенд её не
+# проверяет (current_user подменён), но пустая initData — экран «Открой из бота» (app.js).
+# Без user: хранилище — анонимное (ma:anon:…), как у сценариев.
+STAND_INIT_DATA = "query_id=stand&auth_date=0&hash=stand"
+
+
+def page_url(url: str, *, version: str | None = None, init_data: bool = True) -> str:
+    """Адрес страницы стенда с параметрами Telegram в хеше."""
+    params = []
+    if init_data:
+        params.append("tgWebAppData=" + quote(STAND_INIT_DATA, safe=""))
+    if version is not None:
+        params.append(f"tgWebAppVersion={version}")
+    return url + ("#" + "&".join(params) if params else "")
 SYMBOL_RE = re.compile(r"^[A-Z0-9]{1,24}-USDT$")
 STATE_EXPR = """(() => ({
   title: document.title,
@@ -244,7 +258,7 @@ async def run_check(transport: Transport, url: str, wait: float, *, symbol: str 
     await call("Page.addScriptToEvaluateOnNewDocument", {"source": CSP_LISTENER})
     if symbol is not None:
         await call("Page.addScriptToEvaluateOnNewDocument", {"source": seed_script(symbol)})
-    await call("Page.navigate", {"url": url})
+    await call("Page.navigate", {"url": page_url(url)})
     await pump(wait)
     eval_id = await call("Runtime.evaluate", {"expression": STATE_EXPR, "returnByValue": True})
     await pump(STATE_TIMEOUT, lambda: eval_id in collector.responses)

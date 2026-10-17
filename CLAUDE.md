@@ -161,7 +161,8 @@ python -m scripts.miniapp_dev [--port 8765]
   фейковая биржа, пользователь стенда заново; только в `miniapp_dev.py`). Каждый — свой свежий Chrome; сеть
   подменяется через `Fetch` (свой статус, правка ответа, обрыв, зависание, `exact` — путь целиком) — следы своих
   правил замечанием не считаются. SDK с telegram.org не загрузился (сеть) — сценарий прерывается с этим текстом,
-  повторить. `all` (42) ≈ 8 мин; exit 0/1/2 как выше. Новый экран — новый сценарий там же
+  повторить. Стенд вне Telegram — initData-заглушка в хеше (`#tgWebAppData=…`, `page_url`), без неё — экран «Открой Mini
+  App из бота» (`no_init_data`, `Setup(init_data=False)`); `me_502` — прокси без api (502 без JSON). `all` (44) ≈ 8 мин; exit 0/1/2 как выше. Новый экран — новый сценарий там же
 
 `scripts/check_redis.py` — PING и цикл проверок лока, запускать на проде:
 
@@ -255,7 +256,7 @@ Remote `origin` — приватный резервный репозиторий
    с запасом api ~150 + caddy ~40. Фильтр хостера (панель Timeweb, 80/443) смотрит владелец
 2. «Не нажимай кнопки, перезапускаю» → «ок» владельца
 3. Шаги 1–4 обычного деплоя (umask, дамп, снапшот, архив с `miniapp/` и `deploy/`, md5,
-   `rollback_<ts>` с `docker image inspect`)
+   `rollback_<ts>` с `docker image inspect`); после распаковки `chmod -R go-w deploy miniapp`
 4. Override — своим «да»: переменные исполнения bot и api — **одним якорем** `x-exec-env`
    (шаблон `deploy/override.example.yml`, значения — из текущего override прода), в якоре
    `EXEC_OPEN_DRY_RUN: "true"` для обоих; `MINIAPP_ALLOWED_TELEGRAM_IDS: ""` (403 всем) — только
@@ -527,7 +528,9 @@ PY
    trading_bot_caddy` — ошибки ACME/TLS. Срок сертификата: `echo | openssl s_client -connect
    app.postfactumtrade.ru:443 -servername app.postfactumtrade.ru 2>/dev/null | openssl x509
    -noout -enddate` — не меньше 30 дней (Caddy продлевает сам); `curl -sI` — заголовки как в
-   `deploy/Caddyfile`, `Server` нет
+   `deploy/Caddyfile`, `Server` нет. `find /opt/trading_bot/deploy /opt/trading_bot/miniapp -perm /022`
+   — пусто (нет записи для group/other; `git archive` кладёт 775/664 — после распаковки
+   `chmod -R go-w deploy miniapp`, станут 755/644)
 
 ### E. База
 

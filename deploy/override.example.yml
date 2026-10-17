@@ -4,8 +4,8 @@
 #
 # Переменные исполнения — ОДИН якорь x-exec-env на bot и api: api исполняет то же
 # открытие, что бот, и обязан видеть те же флаги (иначе — дефолты app/core/config.py).
-# Значения EXEC_SYMBOL_WHITELIST и прочих — из текущего override прода (чек-ап C8),
-# не из этого шаблона.
+# Значения — из текущего override прода (чек-ап 8а), не из этого шаблона.
+# EXEC_DRY_RUN — действия с позицией в чате (на проде с Т0 — "false", живые на демо).
 #
 # EXEC_OPEN_DRY_RUN: "true" — на деплое Mini App и bot, и api в сухом прогоне;
 # живое открытие из Mini App — отдельным «да» владельца (правка одной строки якоря,
@@ -15,7 +15,7 @@
 
 x-exec-env: &exec-env
   TRADING_EXECUTION_ENABLED: "true"
-  EXEC_SYMBOL_WHITELIST: "<из override прода>"
+  EXEC_DRY_RUN: "false"
   EXEC_OPEN_DRY_RUN: "true"
 
 services:

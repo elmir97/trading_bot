@@ -16,6 +16,7 @@ import { createStorage } from "./storage.js";
 
 const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
 const TV_URL = "https://www.tradingview.com/";
+const BOT_USERNAME = "postfactumTrade_bot";
 const SCREENS = ["loading", "market", "trade", "confirm", "positions", "error"];
 // BackButton — с Bot API 6.1; на старом клиенте (и вне Telegram SDK говорит 6.0) не трогаем.
 const backButton = tg && tg.isVersionAtLeast("6.1") ? tg.BackButton : null;
@@ -200,10 +201,23 @@ async function start() {
   }
 }
 
+// Страница открыта не из Telegram (Safari по ссылке): SDK есть, initData пустая —
+// API ответил бы 401, к нему не ходим и экраны не строим.
+function showOutsideTelegram() {
+  $("error-title").textContent = `Открой Mini App из бота @${BOT_USERNAME}`;
+  $("error-text").textContent = "В чате с ботом — кнопка «Торговля» слева от поля ввода.";
+  $("error-retry").hidden = true;
+  show("error", { push: false });
+}
+
 function init() {
   // Без SDK запасного режима нет (без initData нет авторизации): экран boot.js.
   if (!tg || window.maBoot.failed()) {
     window.maBoot.fail();
+    return;
+  }
+  if (!tg.initData) {
+    showOutsideTelegram();
     return;
   }
   tg.ready();
