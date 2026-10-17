@@ -30,6 +30,13 @@ logger = get_logger(__name__)
 _MODE_LABEL = {ExchangeKeyMode.LIVE: "Реальные", ExchangeKeyMode.DEMO: "Демо"}
 
 
+# Простой соединения в пуле общего клиента: дольше — закрывается, следующий
+# запрос откроет новое. Короче idle-таймаута сервера BingX (решение владельца
+# 18.10: ≈5 с), чтобы не брать из пула соединение, которое сервер уже закрыл;
+# сам таймаут BingX не замерялся.
+KEEPALIVE_EXPIRY_SECONDS = 5.0
+
+
 class SharedHttp:
     """Один httpx.AsyncClient на хост на весь процесс (api Mini App).
 
@@ -56,6 +63,7 @@ class SharedHttp:
                 headers={"User-Agent": "trading-journal-bot/1.0"},
                 cookies=CookieJar(policy=DefaultCookiePolicy(allowed_domains=[])),
                 transport=self._transport,
+                limits=httpx.Limits(keepalive_expiry=KEEPALIVE_EXPIRY_SECONDS),
             )
             self._clients[key] = client
         return client

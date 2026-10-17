@@ -22,7 +22,8 @@ from app.database.models.credentials import ExchangeCredentials
 from app.database.repositories.strategy import MistakeTypeRepository, StrategyRepository
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
-from app.services.exchange_factory import ExchangeFactory, SharedHttp
+from app.services import exchange_factory
+from app.services.exchange_factory import KEEPALIVE_EXPIRY_SECONDS, ExchangeFactory, SharedHttp
 from app.services.user_service import UserService
 from app.trading.enums import ExchangeKeyMode
 from tests.conftest import cleanup_user
@@ -46,6 +47,19 @@ async def test_one_client_per_host_and_aclose_closes_all() -> None:
     # после aclose — новый клиент, не закрытый
     c = http.client("https://open-api.bingx.com")
     assert c is not a and not c.is_closed
+    await http.aclose()
+
+
+async def test_keepalive_expiry_of_shared_pool(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Соединение в пуле живёт не дольше KEEPALIVE_EXPIRY_SECONDS (≈5 с, 18.10) —
+    и в настоящем транспорте, а не только в константе. Дефолт httpx тоже 5 с,
+    поэтому константа подменяется: пул обязан взять её, а не свой дефолт."""
+    assert KEEPALIVE_EXPIRY_SECONDS == 5.0
+    monkeypatch.setattr(exchange_factory, "KEEPALIVE_EXPIRY_SECONDS", 1.5)
+    http = SharedHttp(timeout=3.0)
+    for base in ("https://open-api.bingx.com", "https://open-api-vst.bingx.com"):
+        pool = http.client(base)._transport._pool  # type: ignore[attr-defined]
+        assert pool._keepalive_expiry == 1.5
     await http.aclose()
 
 
