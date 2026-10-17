@@ -2,6 +2,10 @@
 
     python -m scripts.miniapp_browser_check [--url http://127.0.0.1:8765/]
         [--chrome <путь к Chrome>] [--wait 8] [--symbol XRP-USDT]
+    python -m scripts.miniapp_browser_check --scenario <имя>|all [--url …] [--chrome …]
+
+`--scenario` — сценарии браузера (scripts/miniapp_scenarios.py: рынок, SDK, свечи,
+форма сделки): каждый — свой свежий Chrome, итог по сценарию, exit 1 — есть замечания.
 
 Путь к Chrome — `--chrome` или переменная `MINIAPP_CHROME`, по умолчанию его нет.
 Каждый запуск — свежий временный профиль (иначе Chrome исполняет закэшированный
@@ -32,8 +36,8 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -113,6 +117,7 @@ class Collector:
     network: list[tuple[int | None, str]] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
     responses: dict[int, dict[str, Any]] = field(default_factory=dict)
+    urls: dict[str, str] = field(default_factory=dict)      # requestId → адрес
 
     def feed(self, msg: dict[str, Any]) -> None:
         if isinstance(msg.get("id"), int):
@@ -136,14 +141,18 @@ class Collector:
             if "Content Security Policy" in text:
                 self.csp.append(text)
             else:
-                self.log.append((e.get("level", ""), f"{e.get('source', '')}: {text}"))
+                where = f" ({e['url']})" if e.get("url") else ""
+                self.log.append((e.get("level", ""), f"{e.get('source', '')}: {text}{where}"))
+        elif method == "Network.requestWillBeSent":
+            self.urls[p.get("requestId", "")] = p.get("request", {}).get("url", "")
         elif method == "Network.responseReceived":
             r = p.get("response", {})
             self.network.append((r.get("status"), r.get("url", "")))
         elif method == "Network.loadingFailed":
             if not p.get("canceled"):
                 reason = p.get("blockedReason") or ""
-                self.failed.append(f"{p.get('errorText', '')} {reason}".strip())
+                url = self.urls.get(p.get("requestId", ""), "")
+                self.failed.append(" ".join(x for x in (p.get("errorText", ""), reason, url) if x))
 
     def issues(self) -> list[str]:
         out = [f"CSP: {t}" for t in self.csp]
@@ -310,26 +319,48 @@ class _WsTransport:
         return data
 
 
+@asynccontextmanager
+async def chrome_page(http: aiohttp.ClientSession, chrome: Path) -> AsyncIterator[Transport]:
+    """Свежий Chrome (временный профиль), одна вкладка — транспорт DevTools."""
+    with fresh_profile() as profile:
+        proc = subprocess.Popen(chrome_command(chrome, profile),
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            port = await _devtools_port(profile, proc)
+            async with http.put(f"http://{LOCALHOST}:{port}/json/new?about:blank") as r:
+                target = await r.json()
+            ws_url = require_localhost(target["webSocketDebuggerUrl"])
+            async with http.ws_connect(ws_url, max_msg_size=0) as ws:
+                yield _WsTransport(ws)
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(10)
+
+
 async def check(url: str, chrome: Path, wait: float, symbol: str | None = None) -> Report:
     async with aiohttp.ClientSession() as http:
         await stand_answers(http, url)
-        with fresh_profile() as profile:
-            proc = subprocess.Popen(chrome_command(chrome, profile),
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            try:
-                port = await _devtools_port(profile, proc)
-                async with http.put(f"http://{LOCALHOST}:{port}/json/new?about:blank") as r:
-                    target = await r.json()
-                ws_url = require_localhost(target["webSocketDebuggerUrl"])
-                async with http.ws_connect(ws_url, max_msg_size=0) as ws:
-                    return await run_check(_WsTransport(ws), url, wait, symbol=symbol)
-            finally:
-                proc.terminate()
-                try:
-                    proc.wait(10)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait(10)
+        async with chrome_page(http, chrome) as transport:
+            return await run_check(transport, url, wait, symbol=symbol)
+
+
+async def check_scenarios(url: str, chrome: Path, items: list[Any]) -> list[tuple[Any, Any]]:
+    """Сценарии по очереди, каждый — свой Chrome (один браузер за раз — память)."""
+    from scripts import miniapp_scenarios as ms
+
+    out: list[tuple[Any, Any]] = []
+    async with aiohttp.ClientSession() as http:
+        await stand_answers(http, url)
+        for item in items:
+            async with chrome_page(http, chrome) as transport:
+                page = await ms.run_one(transport, url, item)
+            out.append((item, page))
+            print(ms.render(item, page), flush=True)
+    return out
 
 
 def render(report: Report) -> str:
@@ -349,6 +380,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--wait", type=float, default=DEFAULT_WAIT)
     parser.add_argument("--symbol", default=None,
                         help="монета экрана рынка (localStorage стенда), напр. XRP-USDT")
+    parser.add_argument("--scenario", default=None,
+                        help="сценарий браузера (scripts/miniapp_scenarios.py) или all")
     return parser.parse_args(argv)
 
 
@@ -361,11 +394,23 @@ def main(argv: list[str] | None = None) -> int:
     try:
         url = require_localhost(args.url)
         symbol = None if args.symbol is None else require_symbol(args.symbol)
-        chrome = chrome_path(args.chrome)
-        report = asyncio.run(check(url, chrome, args.wait, symbol))
+        if args.scenario is not None:
+            from scripts import miniapp_scenarios as ms
+
+            items = ms.select(args.scenario)
+            chrome = chrome_path(args.chrome)
+            results = asyncio.run(check_scenarios(url, chrome, items))
+        else:
+            chrome = chrome_path(args.chrome)
+            report = asyncio.run(check(url, chrome, args.wait, symbol))
     except EnvironmentNotReadyError as exc:
         print(f"✗ Проверка не проведена: {exc}", file=sys.stderr)
         return 2
+    if args.scenario is not None:
+        failed = [item.name for item, page in results if page.issues()]
+        print(f"сценариев {len(results)}, с замечаниями {len(failed)}"
+              + (f": {', '.join(failed)}" if failed else ""))
+        return 1 if failed else 0
     print(render(report))
     return 1 if report.issues else 0
 
