@@ -22,6 +22,7 @@ from app.api import ratelimit
 from app.api.deps import ApiState
 from app.core.config import Settings
 from app.database.models.execution_callback import ExecutionCallback
+from app.database.models.trade import Trade
 from app.database.models.trade_opening import TradeOpening
 from app.database.models.user import User
 from app.database.repositories.strategy import MistakeTypeRepository, StrategyRepository
@@ -354,6 +355,30 @@ async def test_parallel_confirms_one_post(ctx, monkeypatch) -> None:  # type: ig
     assert runs == [1]                                # второй ждёт ту же задачу
     assert first == second and first is not None and first.status is OpeningStatus.DONE
     assert _market_posts(ctx) == ["post_market"] and len(ctx.sent) == 1
+
+
+async def test_repeat_confirm_same_id_one_opening(ctx) -> None:  # type: ignore[no-untyped-def]
+    """2.5: обрыв сети на /confirm — Mini App опрашивает GET; CARD (POST не дошёл) —
+    повтор /confirm по тому же id. Дошёл первый или нет — открытие одно: второй
+    /confirm после итога не шлёт вход, не пишет сделку и не дублирует итог в чат."""
+    oid = (await _open(ctx))["opening_id"]
+    assert (await ctx.client.get(f"/api/open/{oid}", headers=ctx.h)).json()["status"] == "CARD"
+    first = (await ctx.client.post(f"/api/open/{oid}/confirm", json={}, headers=ctx.h)).json()
+    assert first["opening"]["status"] == "DONE" and first["final"] is True
+    ctx.tick()
+    again = await ctx.client.post(f"/api/open/{oid}/confirm", json={}, headers=ctx.h)
+    assert again.status_code == 200, again.text
+    second = again.json()
+    # Итог уже показан первым: ответ — подсказка, открытие то же, итоговое.
+    assert second["final"] is False and second["text"] == "Сделка уже открыта."
+    assert second["opening"]["status"] == "DONE" and second["opening"]["final"] is True
+    assert second["opening"]["trade_id"] == first["opening"]["trade_id"]
+    assert _market_posts(ctx) == ["post_market"]
+    assert len(ctx.sent) == 1                                    # итог в чат — один
+    assert await ctx.count(TradeOpening) == 1
+    trades = await ctx.session.scalar(
+        select(func.count()).select_from(Trade).where(Trade.user_id == ctx.uid))
+    assert trades == 1                                           # сделка в журнале — одна
 
 
 async def test_parallel_confirm_chat_and_miniapp_one_post(ctx) -> None:  # type: ignore[no-untyped-def]

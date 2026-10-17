@@ -172,3 +172,70 @@ def test_tests_never_touch_stand_user() -> None:
             assert len(match.group(2).split(",")) == arity[match.group(1)], (
                 path.name, match.group(0))
     assert calls >= 2
+
+
+@needs_db
+async def test_reset_gives_clean_stand(unique_telegram_id) -> None:  # type: ignore[no-untyped-def]
+    """POST /dev/reset (сценарии --scenario): пользователь стенда заново, новая фейковая
+    биржа, пустой кэш — позиция прошлого сценария не даёт BLOCK следующему."""
+    settings = _settings(database_url=os.environ["DATABASE_URL"])
+    db = Database(settings)
+    tid = unique_telegram_id()
+    stand_before = await _stand_user_id(db)
+    try:
+        old_id = await stand.ensure_dev_user(db, settings, tid)
+        state = _state(db, settings)
+        old_exchange = state.factory.exchange
+        state.market_cache.set("api:price:XRP-USDT", 1, 60)
+        app = stand.build_app(state, tid)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+            r = await client.post("/dev/reset")
+            assert r.status_code == 200 and r.json() == {"ok": True}
+            assert (await client.get("/api/me")).status_code == 200
+        async with db.session() as session:
+            user = await UserRepository(session).get_by_telegram_id(tid)
+        assert user is not None and user.id != old_id
+        assert state.factory.exchange is not old_exchange
+        assert state.market_cache.size == 0
+    finally:
+        await stand.remove_dev_user(db, tid)
+        assert await _stand_user_id(db) == stand_before
+        await db.dispose()
+
+
+def test_reset_lives_only_in_stand() -> None:
+    for path in (_ROOT / "app").rglob("*.py"):
+        assert "/dev/reset" not in path.read_text(encoding="utf-8"), path
+
+
+def test_reset_route_only_in_stand_app() -> None:
+    """/dev/reset — маршрут стенда (build_app), у приложения api (create_app) его нет."""
+    from app.api.main import create_app
+
+    def paths(app: object) -> set[str]:
+        return {getattr(r, "path", "") for r in getattr(app, "routes", [])}
+
+    assert "/dev/reset" not in paths(create_app(_state()))
+    assert not any(p.startswith("/dev") for p in paths(create_app(_state())))
+    assert "/dev/reset" in paths(stand.build_app(_state()))
+
+
+@pytest.mark.parametrize(("kw", "where", "fragment"), [
+    ({"bot_token": "8867032918:AAxx"}, {}, "BOT_TOKEN"),
+    ({"bingx_trading_mode": "live"}, {}, "BINGX_TRADING_MODE"),
+    ({"database_url": "postgresql+asyncpg://test:test@localhost:5432/trading_bot"}, {},
+     "trading_bot_test"),
+    ({}, {"cwd": PurePosixPath("/opt/trading_bot")}, "/opt/trading_bot"),
+])
+def test_refusals_hold_without_dry_run(kw: dict[str, object], where: dict[str, PurePosixPath],
+                                       fragment: str) -> None:
+    """Сценарии 2.5 запускают стенд с EXEC_OPEN_DRY_RUN=false — страховки те же."""
+    settings = _settings(exec_open_dry_run=False, **kw)
+    assert settings.exec_open_dry_run is False
+    with pytest.raises(stand.StandRefusedError, match=fragment):
+        _check(settings, **where)
+
+
+def test_dev_machine_without_dry_run_passes() -> None:
+    _check(_settings(exec_open_dry_run=False))

@@ -193,6 +193,18 @@ def build_app(state: ApiState, telegram_id: int = DEV_TELEGRAM_ID) -> FastAPI:
     app = create_app(state)
     app.dependency_overrides[current_user] = dev_user
 
+    @app.post("/dev/reset")
+    async def dev_reset() -> dict[str, bool]:
+        """Чистый лист для сценариев браузера (--scenario): пользователь стенда заново
+        (без сделок, открытий и лимита сделок за день), новая фейковая биржа (без
+        позиций и ордеров), пустой кэш процесса. Только стенд — в app/ этого нет."""
+        await remove_dev_user(state.db, telegram_id)
+        await ensure_dev_user(state.db, state.settings, telegram_id)
+        if isinstance(state.factory, DevFactory):
+            state.factory.exchange = DevExchange()
+        state.market_cache.invalidate()
+        return {"ok": True}
+
     @app.middleware("http")
     async def security_headers(
         request: Request, call_next: Callable[[Request], Awaitable[Response]],

@@ -401,3 +401,27 @@ main {
 
 .issues { list-style: none; margin: 8px 0 0; padding: 0; }
 .issues li { margin: 4px 0; }
+
+/* --- Экран подтверждения (§5а, экран 3) --- */
+
+.live-warning {
+  margin: 0 0 8px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--live);
+  color: #ffffff;
+  font-weight: 700;
+}
+
+.card-text {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--section);
+  white-space: pre-wrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.confirm-actions { display: flex; flex-direction: column; gap: 8px; margin: 12px 0 var(--gap); }
+
+.button-plain { background: var(--section); color: var(--text); }

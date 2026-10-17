@@ -114,3 +114,45 @@ export function riskHint(card, kind, planRisk) {
   if (planRisk !== null && planRisk !== undefined) parts.push(`по плану ${planRisk}%`);
   return parts.join(" · ");
 }
+
+// --- подтверждение (2.5) ----------------------------------------------------------------
+
+export const LIVE_TEXT = "⚠️ Реальный счёт";
+
+// Вопрос showConfirm перед «Открыть»: сторона, объём, риск $ — строки карточки сервера;
+// реальный счёт — первой строкой (решение владельца 17.10).
+export function confirmQuestion(card, side, symbol, live) {
+  const c = card.calc;
+  const ask = `Открыть ${SIDE_TEXT[side]} ${c.quantity} ${baseAsset(symbol)}, риск ${c.risk_usd} $?`;
+  return live ? `${LIVE_TEXT}\n${ask}` : ask;
+}
+
+export function cancelQuestion(opening, live) {
+  const ask = `Отменить лимит ${opening.symbol} ${SIDE_TEXT[opening.side]} по ${opening.limit_price}?`;
+  return live ? `${LIVE_TEXT}\n${ask}` : ask;
+}
+
+const DIFF_FIELDS = [
+  ["quantity", "объём"], ["entry_price", "вход"], ["risk_usd", "риск $"],
+  ["liq_estimate", "ликвидация ≈"],
+];
+
+// Карточка (свежие данные биржи) разошлась с превью — «было → стало»; сравнение строк
+// сервера, без расчётов.
+export function cardDiff(preview, card) {
+  if (!preview || !preview.calc || !card || !card.calc) return [];
+  return DIFF_FIELDS
+    .filter(([key]) => String(preview.calc[key]) !== String(card.calc[key]))
+    .map(([key, label]) => `${label}: ${text(preview.calc[key])} → ${text(card.calc[key])}`);
+}
+
+// Итог открытия: текст сервера и что стоит на бирже.
+export function resultLines(opening, serverText) {
+  const lines = [serverText || opening.text];
+  if (opening.trade_id) lines.push(`Сделка #${opening.trade_id}`);
+  if (opening.status === "DONE") {
+    lines.push(`Стоп ${opening.stop_placed ? "✓" : "—"} · тейк ${opening.take_placed ? "✓"
+      : opening.take_profit === null ? "нет" : "—"}`);
+  }
+  return lines;
+}

@@ -9,6 +9,9 @@
   правит JSON ответа сервера, обрывает запрос до сервера или держит его без ответа;
 - проверка — состояние страницы (STATE_JS) и журнал запросов к /api (метод, путь, тело).
 
+Перед каждым сценарием стенд сбрасывается (`POST /dev/reset` стенда): новая фейковая
+биржа и пользователь стенда без сделок — сценарии не зависят от порядка.
+
 Замечания сценария = невыполненные ожидания + замечания Collector (CSP, исключения,
 console, HTTP ≥ 400, сбои загрузки); статусы и сбои, вызванные своими правилами,
 замечанием не считаются. Ничего не уходит на биржу: стенд — фейковая биржа.
@@ -77,6 +80,17 @@ STATE_JS = """(() => {
     preview_state: shown('trade-preview-state') ? text('trade-preview-state') : null,
     fallback: shown('fallback-buttons') ? text('fallback-main') : null,
     main_button: tg && tg.MainButton && tg.MainButton.isVisible ? tg.MainButton.text : null,
+    main_active: tg && tg.MainButton ? tg.MainButton.isActive : null,
+    confirm_live: shown('confirm-live'),
+    confirm_title: text('confirm-title'),
+    confirm_card: shown('screen-confirm') ? $('confirm-card').textContent : null,
+    confirm_timer: shown('confirm-timer') ? text('confirm-timer') : null,
+    confirm_status: shown('confirm-status') ? $('confirm-status').textContent : null,
+    confirm_diff: shown('confirm-diff') ? text('confirm-diff') : null,
+    confirm_action: shown('confirm-action') && !$('confirm-action').disabled
+      ? text('confirm-action') : null,
+    confirm_back: shown('confirm-back') ? text('confirm-back') : null,
+    stop: $('trade-stop') ? $('trade-stop').value : null,
     scroll_x: document.documentElement.scrollWidth - document.documentElement.clientWidth,
     chart_box_width: box ? Math.round(box.getBoundingClientRect().width) : null,
     chart_canvas_width: chart ? Math.round(chart.getBoundingClientRect().width) : null,
@@ -86,7 +100,8 @@ STATE_JS = """(() => {
 
 # Что показать в замечании «не дождался» — главное о странице.
 WAIT_KEYS = ("screens", "last", "market_error", "chart_state", "stale", "error_title",
-             "blocked", "lev", "lev_max", "pending", "preview_state")
+             "blocked", "lev", "lev_max", "pending", "preview_state", "confirm_card",
+             "confirm_status", "confirm_action", "main_button")
 
 
 class ScenarioError(Exception):
@@ -95,7 +110,8 @@ class ScenarioError(Exception):
 
 @dataclass
 class Rule:
-    """Подмена сети для запросов, чей адрес содержит `match` (и метод — `method`).
+    """Подмена сети для запросов, чей адрес содержит `match` (exact — путь адреса равен
+    `match`: «/api/open» не ловит «/api/open/preview»), и метод — `method`.
 
     action: "status" — ответ без сервера (status, body); "patch" — ответ сервера,
     JSON правит `patch`; "fail" — обрыв до сервера (net::ERR_INTERNET_DISCONNECTED);
@@ -108,10 +124,12 @@ class Rule:
     patch: Callable[[Any], Any] | None = None
     method: str | None = None
     times: int | None = None
+    exact: bool = False
     hits: int = 0
 
     def applies(self, url: str, method: str) -> bool:
-        if self.match not in url or (self.method and self.method != method):
+        found = urlsplit(url).path == self.match if self.exact else self.match in url
+        if not found or (self.method and self.method != method):
             return False
         return self.times is None or self.hits < self.times
 
@@ -152,6 +170,8 @@ class Page:
         self._seq = 0
         self._by_request: dict[str, Rule] = {}
         self.started = clock()
+        # Сброс стенда (POST /dev/reset) — задаёт запуск; без него (тесты) шаг пропускается.
+        self.reset_stand: Callable[[], Awaitable[None]] | None = None
 
     # --- протокол ---------------------------------------------------------------------
 
@@ -356,6 +376,9 @@ def storage_script(values: dict[str, Any]) -> str:
 
 
 async def open_page(page: Page, url: str, setup: Setup) -> dict[str, Any]:
+    # Чистый стенд: позиции, лимиты и сделки прошлых сценариев не дают BLOCK.
+    if page.reset_stand is not None:
+        await page.reset_stand()
     for method in ("Runtime.enable", "Log.enable", "Network.enable", "Page.enable"):
         await page.call(method)
     await page.call("Network.setCacheDisabled", {"cacheDisabled": True})
@@ -378,10 +401,14 @@ async def open_page(page: Page, url: str, setup: Setup) -> dict[str, Any]:
         return {}
     want = setup.wait_screen
     ready = await page.wait_for(
-        lambda s: want in s["screens"] and (want != "screen-market" or not setup.symbol
-                                            or (s["last"] not in (None, "—")
-                                                and s["market_charts"] == 1)),
+        lambda s: "screen-sdk" in s["screens"]
+        or (want in s["screens"] and (want != "screen-market" or not setup.symbol
+                                      or (s["last"] not in (None, "—")
+                                          and s["market_charts"] == 1))),
         bc.START_TIMEOUT, f"экран {want}")
+    if "screen-sdk" in ready.get("screens", []):
+        # Сеть до telegram.org, не код: дальше сценарий смысла не имеет.
+        raise ScenarioError("SDK telegram.org не загрузился (сеть) — повтори сценарий")
     await page.pump(0.5)
     return ready
 
@@ -803,17 +830,248 @@ async def form_leverr(page: Page, url: str) -> None:
     await blocked_flow(page, LEV_FAIL)
 
 
+# 2.5 — подтверждение и отправка (на стенде — фейковая биржа, бота нет: в чат не уходит)
+
+# showConfirm Telegram в headless не ответить — подменяем: вопрос в __asked, ответ «ОК».
+FAKE_SHOW_CONFIRM = ("window.__asked = []; Telegram.WebApp.showConfirm = (m, cb) => {"
+                     " window.__asked.push(m); setTimeout(() => cb(true), 50); }")
+
+
+def _confirms(page: Page, since: float = 0.0) -> list[ApiRequest]:
+    return [r for r in page.api("/api/open/", method="POST", since=since)
+            if r.path.endswith("/confirm")]
+
+
+def _cards(page: Page, since: float = 0.0) -> list[ApiRequest]:
+    return [r for r in page.api("/api/open", method="POST", since=since) if r.path == "/api/open"]
+
+
+DRY_RUN_TEXT = ("стенд в сухом прогоне — для сценариев 2.5 запусти его с "
+                "EXEC_OPEN_DRY_RUN=false (биржа стенда фейковая)")
+
+
+async def _ready_form(page: Page, native: bool, *, stop: str = "2",
+                      take: str | None = None, entry: str | None = None) -> dict[str, Any]:
+    me = await page.js("fetch('/api/me').then((r) => r.json())")
+    if me["flags"]["dry_run"]:
+        raise ScenarioError(DRY_RUN_TEXT)
+    await _to_form(page, native)
+    if entry == "LIMIT":
+        await page.click('#trade-entry [data-entry="LIMIT"]')
+        await page.click('#trade-stop-kind [data-kind="percent"]')
+        await page.click('#trade-take-kind [data-kind="percent"]')
+    await page.click(f'#trade-stop-chips [data-percent="{stop}"]')
+    if take is not None:
+        await page.click('#trade-take-kind [data-kind="percent"]')
+        await page.type("trade-take", take)
+    return await _settled(page, "превью перед «Открыть»")
+
+
+async def _to_confirm(page: Page, native: bool) -> dict[str, Any]:
+    if native:
+        await page.telegram_event("main_button_pressed")
+    else:
+        await page.click("#fallback-main")
+    return await page.wait_for(lambda s: "screen-confirm" in s["screens"]
+                               and s["confirm_card"] is not None
+                               and not s["confirm_card"].startswith("Готовлю"),
+                               10, "карточка подтверждения")
+
+
+async def _press(page: Page, native: bool) -> None:
+    """Главная кнопка экрана подтверждения; без showConfirm (6.0) — два нажатия."""
+    if native:
+        await page.telegram_event("main_button_pressed")
+    else:
+        await page.click("#confirm-action")
+        await page.pump(0.2)
+        await page.click("#confirm-action")
+
+
+def _done(s: dict[str, Any]) -> bool:
+    return "Сделка #" in (s.get("confirm_card") or "")
+
+
+async def _open_and_confirm(page: Page, native: bool) -> dict[str, Any]:
+    s = await _to_confirm(page, native)
+    page.expect("Карточка действует ещё" in (s.get("confirm_timer") or ""),
+                f"нет отсчёта: {s.get('confirm_timer')!r}")
+    label = s.get("main_button") if native else s.get("confirm_action")
+    page.expect(label in ("Подтвердить", "Открыть всё равно"), f"кнопка карточки: {label!r}")
+    await _press(page, native)
+    return await page.wait_for(_done, 25, "итог «Сделка #N»")
+
+
+@scenario("confirm_market", "2.5: маркет — карточка, отсчёт, два нажатия (6.0) → «Сделка #N»")
+async def confirm_market(page: Page, url: str) -> None:
+    await open_page(page, url, Setup())
+    await _ready_form(page, False)
+    s = await _open_and_confirm(page, False)
+    page.expect(len(_cards(page)) == 1, f"POST /api/open: {len(_cards(page))}, ждали 1")
+    page.expect(len(_confirms(page)) == 1, f"/confirm: {len(_confirms(page))}, ждали 1")
+    page.expect("Стоп ✓" in (s.get("confirm_card") or ""), "в итоге нет «Стоп ✓»")
+    page.expect(s.get("confirm_action") == "Закрыть" and s.get("confirm_back") == "К рынку",
+                f"кнопки итога: {s.get('confirm_action')!r} / {s.get('confirm_back')!r}")
+    await page.click("#confirm-back")
+    await page.wait_for(lambda s: "screen-market" in s["screens"] and s["market_charts"] == 1,
+                        8, "«К рынку»")
+
+
+@scenario("confirm_native", "2.5: нативный MainButton и showConfirm (сторона, объём, риск $)")
+async def confirm_native(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(native=True))
+    await page.js(FAKE_SHOW_CONFIRM)
+    await _ready_form(page, True)
+    await _open_and_confirm(page, True)
+    asked = await page.js("window.__asked")
+    page.expect(len(asked) == 1 and asked[0].startswith("Открыть ЛОНГ ") and " риск " in asked[0],
+                f"showConfirm: {asked!r}")
+    page.expect(not any("Реальный счёт" in a for a in asked), "DEMO, а в вопросе «Реальный счёт»")
+    page.expect(len(_confirms(page)) == 1, f"/confirm: {len(_confirms(page))}, ждали 1")
+
+
+def _live(data: Any) -> Any:
+    data["account_mode"] = "LIVE"
+    return data
+
+
+@scenario("confirm_live", "2.5: LIVE — «⚠️ Реальный счёт» на подтверждении и в showConfirm")
+async def confirm_live(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(native=True, rules=[Rule("/api/me", "patch", patch=_live)]))
+    await page.js(FAKE_SHOW_CONFIRM)
+    await _ready_form(page, True)
+    s = await _to_confirm(page, True)
+    page.expect(s.get("confirm_live") is True, "на подтверждении нет «⚠️ Реальный счёт»")
+    await page.telegram_event("main_button_pressed")
+    await page.pump(0.5)
+    asked = await page.js("window.__asked")
+    page.expect(bool(asked) and asked[0].startswith("⚠️ Реальный счёт\nОткрыть ЛОНГ"),
+                f"showConfirm на LIVE: {asked!r}")
+
+
+@scenario("confirm_retry", "2.5: обрыв до сервера на /confirm → CARD → «Не дошло» → повтор")
+async def confirm_retry(page: Page, url: str) -> None:
+    await open_page(page, url, Setup())
+    page.intercept(Rule("/confirm", "fail", method="POST", times=1))
+    await _ready_form(page, False)
+    await _to_confirm(page, False)
+    await _press(page, False)
+    s = await page.wait_for(lambda s: "Не дошло" in (s["confirm_status"] or ""), 10,
+                            "«Не дошло, нажми ещё раз»")
+    page.expect(s.get("confirm_action") == "Подтвердить", f"кнопка: {s.get('confirm_action')!r}")
+    ids = {r.path for r in _confirms(page)}
+    await _press(page, False)
+    s = await page.wait_for(_done, 25, "итог после повтора")
+    sent = _confirms(page)
+    page.expect(len(sent) == 2 and {r.path for r in sent} == ids,
+                f"/confirm: {[r.path for r in sent]} — ждали 2 по одному id")
+    page.expect(len(_cards(page)) == 1, "повтор создал новую карточку")
+    gets = [r for r in page.requests if r.method == "GET" and r.path.startswith("/api/open/")]
+    page.expect(bool(gets), "после обрыва не было опроса GET /api/open/{id}")
+
+
+@scenario("confirm_warn", "2.5: WARN — «Открыть всё равно» на форме и на карточке → сделка")
+async def confirm_warn(page: Page, url: str) -> None:
+    await open_page(page, url, Setup())
+    s = await _ready_form(page, False, take="0.5")
+    page.expect(s.get("fallback") == "Открыть всё равно", f"форма: {s.get('fallback')!r}")
+    s = await _to_confirm(page, False)
+    page.expect(s.get("confirm_action") == "Открыть всё равно",
+                f"карточка: {s.get('confirm_action')!r}")
+    await _press(page, False)
+    await page.wait_for(_done, 25, "итог после «Открыть всё равно»")
+    sent = _confirms(page)
+    page.expect(bool(sent) and sent[-1].body == {"accept_warnings": True},
+                f"тело /confirm: {sent[-1].body if sent else None}")
+
+
+@scenario("confirm_limit", "2.5: лимит — «⏳ Лимит выставлен», «Отменить лимит» → отменён")
+async def confirm_limit(page: Page, url: str) -> None:
+    await open_page(page, url, Setup())
+    await _to_form(page, False)
+    await page.click('#trade-entry [data-entry="LIMIT"]')
+    await page.type("trade-limit", "1.4000")
+    await page.click('#trade-stop-chips [data-percent="2"]')
+    await _settled(page, "превью лимита")
+    await _to_confirm(page, False)
+    await _press(page, False)
+    s = await page.wait_for(lambda s: "Лимит выставлен" in (s["confirm_card"] or ""), 20,
+                            "«⏳ Лимит выставлен»")
+    page.expect("истекает" in (s.get("confirm_card") or ""), "нет срока лимита")
+    page.expect(s.get("confirm_action") == "Отменить лимит", f"кнопка: {s.get('confirm_action')!r}")
+    await _press(page, False)
+    s = await page.wait_for(lambda s: s["confirm_action"] == "Закрыть", 15, "итог отмены")
+    page.expect(any(r.path.endswith("/cancel") for r in page.api("/api/open/", method="POST")),
+                "не было POST /cancel")
+    page.note(f"итог отмены: {(s.get('confirm_card') or '')[:80]!r}")
+
+
+def _expires_soon(data: Any) -> Any:
+    soon = time.time() + 3
+    data["expires_at"] = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(soon)) + "Z"
+    return data
+
+
+@scenario("confirm_expired", "2.5: отсчёт дошёл до нуля — «Пересчитать» → новая карточка")
+async def confirm_expired(page: Page, url: str) -> None:
+    await open_page(page, url, Setup())
+    page.intercept(Rule("/api/open", "patch", method="POST", patch=_expires_soon, times=1,
+                        exact=True))
+    await _ready_form(page, False)
+    await _to_confirm(page, False)
+    s = await page.wait_for(lambda s: s["confirm_action"] == "Пересчитать", 8, "«Пересчитать»")
+    page.expect("устарела" in (s.get("confirm_status") or ""), "нет «Карточка устарела»")
+    await page.click("#confirm-action")
+    s = await page.wait_for(lambda s: s["confirm_action"] == "Подтвердить", 10, "новая карточка")
+    page.expect(len(_cards(page)) == 2, f"POST /api/open: {len(_cards(page))}, ждали 2")
+    page.expect(not _confirms(page), "истёкшую карточку подтвердили")
+
+
+def _blocked_card(data: Any) -> Any:
+    data["card"]["can_open"] = False
+    return data
+
+
+@scenario("confirm_block", "2.5: BLOCK на свежих данных — кнопки нет, «Назад к форме»")
+async def confirm_block(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(native=True))
+    page.intercept(Rule("/api/open", "patch", method="POST", patch=_blocked_card, exact=True))
+    await _ready_form(page, True)
+    s = await _to_confirm(page, True)
+    page.expect(s.get("main_button") is None, f"кнопка при BLOCK: {s.get('main_button')!r}")
+    page.expect(s.get("confirm_back") == "Назад к форме",
+                f"вторая кнопка: {s.get('confirm_back')!r}")
+
+
+@scenario("confirm_back", "2.5: «Назад к форме» — поля те же (только в сессии)")
+async def confirm_back(page: Page, url: str) -> None:
+    await open_page(page, url, Setup())
+    await _ready_form(page, False, stop="3")
+    await _to_confirm(page, False)
+    await page.click("#confirm-back")
+    s = await page.wait_for(lambda s: "screen-trade" in s["screens"] and s["form_shown"], 8,
+                            "форма после «Назад»")
+    page.expect(s.get("stop") == "3", f"стоп после «Назад»: {s.get('stop')!r}, ждали 3")
+    page.expect(not _confirms(page), "«Назад» отправил /confirm")
+    stored = await page.js("Object.keys(localStorage).filter((k) => /stop|risk|take/.test(k))")
+    page.expect(stored == [], f"поля формы в localStorage: {stored}")
+
+
 SCENARIO_TIMEOUT = 150.0
 
 
-async def run_one(transport: bc.Transport, url: str, item: Scenario) -> Page:
+async def run_one(transport: bc.Transport, url: str, item: Scenario,
+                  reset: Callable[[], Awaitable[None]] | None = None) -> Page:
     page = Page(transport)
+    page.reset_stand = reset
     try:
         await asyncio.wait_for(item.fn(page, url), SCENARIO_TIMEOUT)
     except ScenarioError as exc:
         page.problems.append(f"сценарий прерван: {exc}")
     except TimeoutError:
         page.problems.append(f"сценарий не уложился в {SCENARIO_TIMEOUT:g} с")
+    except Exception as exc:          # ошибка в самом сценарии — замечание, остальные идут
+        page.problems.append(f"сценарий упал: {type(exc).__name__}: {exc}")
     return page
 
 

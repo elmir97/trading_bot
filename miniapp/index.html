@@ -211,7 +211,16 @@
     </section>
 
     <section class="screen" id="screen-confirm" hidden>
-      <p class="muted">Подтверждение — подэтап 2.5.</p>
+      <p class="live-warning" id="confirm-live" hidden>⚠️ Реальный счёт</p>
+      <h1 class="trade-title" id="confirm-title"></h1>
+      <p class="muted small" id="confirm-timer" hidden></p>
+      <p class="card-text" id="confirm-card"></p>
+      <ul class="issues" id="confirm-diff" hidden></ul>
+      <p class="note" id="confirm-status" hidden></p>
+      <div class="confirm-actions">
+        <button type="button" class="button" id="confirm-action" hidden></button>
+        <button type="button" class="button button-plain" id="confirm-back" hidden></button>
+      </div>
     </section>
 
     <section class="screen" id="screen-sdk" hidden>

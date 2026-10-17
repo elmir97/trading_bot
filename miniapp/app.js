@@ -1,10 +1,11 @@
 // Mini App: Telegram WebApp, экраны, шапка счёта.
 // Своей торговой логики нет — только ввод, показ и вызов API (§1). Экран рынка —
-// market.js (2.3), форма сделки — form.js + render.js (2.4); подтверждение — 2.5.
+// market.js (2.3), форма сделки — form.js + render.js (2.4), подтверждение — confirm.js (2.5).
 // Экран с подписками (опрос, график, кнопки Telegram) отдаёт {enter, leave}: show()
 // зовёт leave у прежнего экрана до enter у нового — график снимается при уходе.
 
 import { ApiError, createApi } from "./api.js";
+import { createConfirmScreen } from "./confirm.js";
 import { createTradeScreen } from "./form.js";
 import { createMarketScreen } from "./market.js";
 import { createStorage } from "./storage.js";
@@ -46,6 +47,8 @@ function show(name, { push = true } = {}) {
 }
 
 function back() {
+  // Пока «Открыть» в полёте или идёт проверка итога — с экрана не уходим.
+  if (screens[current] && screens[current].busy && screens[current].busy()) return;
   const previous = history.pop();
   if (previous) {
     show(previous, { push: false });
@@ -94,9 +97,16 @@ function openTrade(side, symbol) {
   show("trade");
 }
 
-// «Открыть» с формы — подтверждение (POST /api/open, showConfirm) — подэтап 2.5.
-function openConfirm() {
+// «Открыть» с формы — подтверждение: тело и ответ последнего превью (2.5).
+function openConfirm(payload) {
+  screens.confirm.start(payload);
   show("confirm");
+}
+
+// С итога — на рынок; история экранов заново (форма и подтверждение позади).
+function toMarket() {
+  history.length = 0;
+  show("market", { push: false });
 }
 
 function openExternal(url) {
@@ -136,6 +146,10 @@ function init() {
     }),
     trade: createTradeScreen({
       api, tg, storage, me: () => me, onOpen: openConfirm,
+      onFatal: (err) => showError(err, start),
+    }),
+    confirm: createConfirmScreen({
+      api, tg, me: () => me, onBack: back, onMarket: toMarket,
       onFatal: (err) => showError(err, start),
     }),
   };

@@ -305,12 +305,14 @@ def test_storage_script_matches_miniapp_keys() -> None:
 
 
 def test_registry_covers_queue_scenarios() -> None:
-    """п.5 очереди handoff: рынок 2.3, свечи 2.3а, SDK 2а, форма 2.4."""
+    """п.5 очереди handoff: рынок 2.3, свечи 2.3а, SDK 2а, форма 2.4; подтверждение 2.5."""
     assert set(ms.SCENARIOS) == {
         "search", "poll", "timeframe", "theme", "widths", "hidden", "leave_return",
         "empty_candles", "load_503", "poll_503", "expired_401", "candles_1m",
         "sdk_block", "sdk_hang",
         "form", "form_native", "form_plan10", "form_planfree", "form_nokey", "form_leverr",
+        "confirm_market", "confirm_native", "confirm_live", "confirm_retry", "confirm_warn",
+        "confirm_limit", "confirm_expired", "confirm_block", "confirm_back",
     }
     assert [s.name for s in ms.select("all")] == list(ms.SCENARIOS)
     assert ms.select("poll") == [ms.SCENARIOS["poll"]]
@@ -370,3 +372,40 @@ def test_scenarios_not_in_docker_image() -> None:
     root = Path(__file__).resolve().parents[1]
     ignored = (root / ".dockerignore").read_text(encoding="utf-8").split()
     assert "scripts/miniapp_scenarios.py" in ignored
+
+
+async def test_exact_rule_matches_path_not_prefix() -> None:
+    rule = ms.Rule("/api/open", "fail", method="POST", exact=True)
+    t, _ = await _intercept(rule,
+                            _paused(URL + "api/open/preview", method="POST", rid="P"),
+                            _paused(URL + "api/open", method="POST", rid="O"))
+    calls = [(m["method"], m["params"]["requestId"]) for m in t.sent
+             if m["method"].startswith("Fetch.")]
+    assert calls == [("Fetch.continueRequest", "P"), ("Fetch.failRequest", "O")]
+
+
+async def test_scenario_crash_is_an_issue_not_a_traceback() -> None:
+    async def crash(page: ms.Page, url: str) -> None:
+        raise KeyError("card")
+
+    page = await ms.run_one(FakeBrowser(), URL, ms.Scenario("x", "проба", crash))
+    assert page.issues() == ["сценарий упал: KeyError: 'card'"]
+
+
+async def test_stand_is_reset_before_page_opens() -> None:
+    t = FakeBrowser()
+    page = ms.Page(t)
+    order: list[str] = []
+
+    async def reset() -> None:
+        order.append(f"reset после {len(t.sent)} команд")
+
+    page.reset_stand = reset
+    await ms.open_page(page, URL, ms.Setup(wait_screen=None))
+    assert order == ["reset после 0 команд"]
+
+
+async def test_sdk_failure_on_open_stops_scenario_as_network() -> None:
+    page = ms.Page(FakeBrowser(evaluate=lambda expr: {"screens": ["screen-sdk"]}))
+    with pytest.raises(ms.ScenarioError, match=r"telegram\.org не загрузился"):
+        await ms.open_page(page, URL, ms.Setup())

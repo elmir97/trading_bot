@@ -161,7 +161,7 @@ def test_open_click_hands_last_preview_to_next_step_without_sending() -> None:
     assert "api." not in click
     app = _js("app.js")
     assert "onOpen: openConfirm" in app
-    assert 'show("confirm");' in _body(app, "function openConfirm()")
+    assert 'show("confirm");' in _body(app, "function openConfirm(payload)")
 
 
 # --- живой пересчёт ------------------------------------------------------------------------
