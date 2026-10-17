@@ -265,6 +265,9 @@ class Settings(BaseSettings):
     miniapp_allowed_telegram_ids: str = ""
     # Срок initData от auth_date; просроченный — «Сессия устарела».
     miniapp_init_data_ttl_seconds: int = Field(default=3600, gt=0)
+    # Адрес Mini App для кнопки меню бота (app/main.py:menu_button). Пусто (по
+    # умолчанию) — кнопка команд, как раньше; задаётся в override прода у bot.
+    miniapp_url: str = ""
 
     # --- Дефолты торгового плана ------------------------------------------
     # Реальные значения хранятся в БД per-user; это лишь начальные значения
@@ -402,6 +405,16 @@ class Settings(BaseSettings):
         bad = [x for x in _split_faults(value) if not x.isdigit()]
         if bad:
             raise ValueError(f"MINIAPP_ALLOWED_TELEGRAM_IDS: не числа: {bad}")
+        return value
+
+    @field_validator("miniapp_url")
+    @classmethod
+    def _miniapp_url_is_https(cls, value: str) -> str:
+        value = value.strip()
+        # Telegram открывает web_app только по https; пробелы — опечатка в override.
+        if value and (not value.startswith("https://") or any(c.isspace() for c in value)
+                      or len(value) <= len("https://")):
+            raise ValueError("MINIAPP_URL: нужен https://-адрес без пробелов или пусто")
         return value
 
     @property

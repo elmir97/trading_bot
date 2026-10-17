@@ -19,7 +19,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import BotCommand, MenuButtonCommands
+from aiogram.types import BotCommand, MenuButtonCommands, MenuButtonWebApp, WebAppInfo
 from pydantic import ValidationError
 from redis.asyncio import Redis
 
@@ -87,14 +87,30 @@ BOT_COMMANDS = [
 ]
 
 
-async def setup_bot_ui(bot: Bot) -> None:
+MINIAPP_BUTTON_TEXT = "Торговля"
+
+
+def menu_button(settings: Settings) -> MenuButtonCommands | MenuButtonWebApp:
+    """MINIAPP_URL задан — кнопка меню открывает Mini App; пусто — список команд,
+    как до Mini App (откат кнопки — пустое значение в override и рестарт)."""
+    if settings.miniapp_url:
+        return MenuButtonWebApp(text=MINIAPP_BUTTON_TEXT,
+                                web_app=WebAppInfo(url=settings.miniapp_url))
+    return MenuButtonCommands()
+
+
+async def setup_bot_ui(bot: Bot, settings: Settings) -> None:
     """Кнопка меню и список команд рядом с полем ввода.
 
     Без этого пользователь каждый раз набирает /start вручную — кнопка
-    открывает то же меню в один тап.
+    открывает то же меню в один тап. Кнопка ставится при каждом старте и
+    перекрывает настройку из BotFather — источник один: MINIAPP_URL.
     """
     await bot.set_my_commands(BOT_COMMANDS)
-    await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+    button = menu_button(settings)
+    await bot.set_chat_menu_button(menu_button=button)
+    logger.info("Кнопка меню бота",
+                extra={"kind": button.type, "url": settings.miniapp_url or None})
 
 
 def build_dispatcher(
@@ -263,7 +279,7 @@ async def run() -> None:
     background_jobs.start()
 
     try:
-        await setup_bot_ui(bot)
+        await setup_bot_ui(bot, settings)
         # Сбрасываем накопившиеся за простой апдейты: обрабатывать команды
         # недельной давности бессмысленно и потенциально вредно.
         await bot.delete_webhook(drop_pending_updates=True)
