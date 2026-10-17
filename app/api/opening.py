@@ -56,6 +56,7 @@ from app.execution.opening.calc import (
     RawOpeningInputs,
     RiskInput,
     RiskKind,
+    take_at_r,
 )
 from app.execution.opening.service import (
     LIMIT_EXPIRY_CHOICES,
@@ -189,6 +190,7 @@ def card_out(outcome: CardOutcome) -> CardOut:
             liq_ratio=money(c.liq_ratio), distance_percent=money(c.distance_percent),
             rr=money(c.rr), max_leverage_for_stop=c.max_leverage_for_stop,
             suggested_leverage=c.suggested_leverage, fills_immediately=c.fills_immediately,
+            take_2r=take_at_r(c.entry_price, i.stop_loss, i.side, 2, pp),
         )
         levels = LevelsOut(
             entry_type=i.entry_type.value, stop_loss=price(i.stop_loss, pp),

@@ -1,10 +1,11 @@
 // Mini App: Telegram WebApp, экраны, шапка счёта.
 // Своей торговой логики нет — только ввод, показ и вызов API (§1). Экран рынка —
-// market.js (2.3); формы и подтверждения — подэтапы 2.4–2.5.
+// market.js (2.3), форма сделки — form.js + render.js (2.4); подтверждение — 2.5.
 // Экран с подписками (опрос, график, кнопки Telegram) отдаёт {enter, leave}: show()
 // зовёт leave у прежнего экрана до enter у нового — график снимается при уходе.
 
 import { ApiError, createApi } from "./api.js";
+import { createTradeScreen } from "./form.js";
 import { createMarketScreen } from "./market.js";
 import { createStorage } from "./storage.js";
 
@@ -21,6 +22,7 @@ const storage = createStorage(telegramId);
 const history = [];
 let current = "loading";
 let screens = {};
+let me = null;               // /api/me: план (риск, max_leverage), сроки лимита, режим маржи
 
 function $(id) {
   return document.getElementById(id);
@@ -86,10 +88,15 @@ function showError(err, retry) {
   show("error", { push: false });
 }
 
-// «Лонг»/«Шорт» с экрана рынка — форма сделки (подэтап 2.4).
+// «Лонг»/«Шорт» с экрана рынка — форма сделки (2.4).
 function openTrade(side, symbol) {
-  $("trade-title").textContent = `${symbol} · ${side === "LONG" ? "Лонг" : "Шорт"}`;
+  screens.trade.open(side, symbol);
   show("trade");
+}
+
+// «Открыть» с формы — подтверждение (POST /api/open, showConfirm) — подэтап 2.5.
+function openConfirm() {
+  show("confirm");
 }
 
 function openExternal(url) {
@@ -104,7 +111,7 @@ async function start() {
   history.length = 0;
   show("loading", { push: false });
   try {
-    const me = await api.get("/api/me");
+    me = await api.get("/api/me");
     renderAccount(me);
     show("market");
   } catch (err) {
@@ -125,6 +132,10 @@ function init() {
   screens = {
     market: createMarketScreen({
       api, tg, storage, onSide: openTrade,
+      onFatal: (err) => showError(err, start),
+    }),
+    trade: createTradeScreen({
+      api, tg, storage, me: () => me, onOpen: openConfirm,
       onFatal: (err) => showError(err, start),
     }),
   };

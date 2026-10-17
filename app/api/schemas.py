@@ -191,6 +191,7 @@ class CalcOut(BaseModel):
     rr: Decimal | None
     max_leverage_for_stop: int
     suggested_leverage: int
+    take_2r: Decimal | None             # тейк на 2R от входа и стопа — чип «2R» формы
     fills_immediately: bool
 
 

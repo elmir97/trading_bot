@@ -10,6 +10,8 @@
 //   themeChanged; размер — autoSize (ResizeObserver библиотеки: поворот экрана, смена
 //   высоты окна). destroy() снимает подписки и зовёт chart.remove().
 // - Числа приходят строкой; Number — только чтобы нарисовать, расчётов здесь нет.
+// - Линии уровней формы (вход, стоп, тейк, ликвидация ≈) — setLines() значениями из
+//   ответа preview, на серии свечей (форма показывает свечи).
 
 const LWC = window.LightweightCharts;
 
@@ -33,7 +35,17 @@ export function themeColors(tg) {
     line: p.link_color || p.button_color || cssVar("--link"),
     up: cssVar("--long"),
     down: cssVar("--short"),
+    liq: cssVar("--liq"),
   };
+}
+
+// Вход — пунктир цветом текста, стоп — красная, тейк — зелёная, ликвидация — оранжевая точками.
+function lineStyle(kind, colors) {
+  const S = LWC.LineStyle;
+  if (kind === "stop") return { color: colors.down, lineStyle: S.Solid };
+  if (kind === "take") return { color: colors.up, lineStyle: S.Solid };
+  if (kind === "liq") return { color: colors.liq, lineStyle: S.Dotted };
+  return { color: colors.text, lineStyle: S.Dashed };
 }
 
 function formatters(interval) {
@@ -71,6 +83,8 @@ export function createPriceChart(container, { tg = null, precision = 4, interval
   let current = formatters(interval);
   let last = null;            // последняя свеча (числа) — её обновляет цена
   let destroyed = false;
+  let levels = [];            // уровни формы: [{kind, price, title}] строками сервера
+  let priceLines = [];
 
   const chart = LWC.createChart(container, {
     autoSize: true,
@@ -116,6 +130,15 @@ export function createPriceChart(container, { tg = null, precision = 4, interval
     candles.applyOptions({ upColor: colors.up, downColor: colors.down,
       wickUpColor: colors.up, wickDownColor: colors.down });
     line.applyOptions({ color: colors.line });
+    drawLines();
+  }
+
+  function drawLines() {
+    for (const priceLine of priceLines) candles.removePriceLine(priceLine);
+    priceLines = levels.map((level) => candles.createPriceLine({
+      price: Number(level.price), title: level.title, lineWidth: 1, axisLabelVisible: true,
+      ...lineStyle(level.kind, colors),
+    }));
   }
 
   // В Telegram тема приходит событием; в браузере стенда — от системной темы.
@@ -160,6 +183,11 @@ export function createPriceChart(container, { tg = null, precision = 4, interval
     },
     lastTime() {
       return last ? last.time : null;
+    },
+    setLines(next) {
+      if (destroyed) return;
+      levels = next;
+      drawLines();
     },
     applyTheme,
     destroy() {

@@ -104,8 +104,110 @@
     </section>
 
     <section class="screen" id="screen-trade" hidden>
-      <h1 class="section-title" id="trade-title"></h1>
-      <p class="muted">Форма сделки — подэтап 2.4.</p>
+      <div class="trade-head">
+        <h1 class="trade-title" id="trade-title"></h1>
+        <span class="trade-last" id="trade-last"></span>
+      </div>
+      <p class="note" id="trade-stale" hidden></p>
+
+      <div class="chart-box chart-compact">
+        <div class="chart" id="trade-chart"></div>
+        <div class="chart-state" id="trade-chart-state">
+          <p id="trade-chart-text">Загрузка…</p>
+        </div>
+      </div>
+
+      <div class="trade-blocked" id="trade-blocked" hidden>
+        <p class="trade-blocked-title" id="trade-blocked-title"></p>
+        <p class="muted small" id="trade-blocked-text"></p>
+        <button type="button" class="button button-small" id="trade-retry">Повторить</button>
+      </div>
+
+      <form class="trade-form" id="trade-form" novalidate>
+        <div class="segmented segmented-wide" id="trade-side" role="group" aria-label="Сторона">
+          <button type="button" data-side="LONG">Лонг</button>
+          <button type="button" data-side="SHORT">Шорт</button>
+        </div>
+
+        <div class="field">
+          <span class="field-label">Вход</span>
+          <div class="segmented" id="trade-entry" role="group" aria-label="Тип входа">
+            <button type="button" data-entry="MARKET">Маркет</button>
+            <button type="button" data-entry="LIMIT">Лимит</button>
+          </div>
+        </div>
+        <div class="field" id="trade-limit-row" hidden>
+          <span class="field-label">Цена</span>
+          <input class="field-input" id="trade-limit" inputmode="decimal" autocomplete="off"
+                 aria-label="Цена лимита">
+          <select class="field-select" id="trade-expiry" aria-label="Срок лимита"></select>
+        </div>
+
+        <div class="field">
+          <span class="field-label">Стоп</span>
+          <input class="field-input" id="trade-stop" inputmode="decimal" autocomplete="off"
+                 aria-label="Стоп">
+          <div class="segmented" id="trade-stop-kind" role="group" aria-label="Стоп: цена или %">
+            <button type="button" data-kind="price">цена</button>
+            <button type="button" data-kind="percent">%</button>
+          </div>
+        </div>
+        <div class="chips" id="trade-stop-chips">
+          <button type="button" data-percent="1">1%</button>
+          <button type="button" data-percent="2">2%</button>
+          <button type="button" data-percent="3">3%</button>
+        </div>
+
+        <div class="field">
+          <span class="field-label">Тейк</span>
+          <input class="field-input" id="trade-take" inputmode="decimal" autocomplete="off"
+                 placeholder="нет" aria-label="Тейк">
+          <div class="segmented" id="trade-take-kind" role="group" aria-label="Тейк: цена или %">
+            <button type="button" data-kind="price">цена</button>
+            <button type="button" data-kind="percent">%</button>
+          </div>
+        </div>
+        <div class="chips" id="trade-take-chips">
+          <button type="button" data-percent="2">2%</button>
+          <button type="button" data-percent="3">3%</button>
+          <button type="button" data-percent="5">5%</button>
+          <button type="button" data-r="2" id="trade-take-2r" disabled>2R</button>
+          <button type="button" data-percent="">нет</button>
+        </div>
+
+        <div class="field">
+          <span class="field-label">Риск</span>
+          <input class="field-input" id="trade-risk" inputmode="decimal" autocomplete="off"
+                 aria-label="Риск">
+          <div class="segmented" id="trade-risk-kind" role="group" aria-label="Риск: $ или %">
+            <button type="button" data-kind="usd">$</button>
+            <button type="button" data-kind="percent">%</button>
+          </div>
+        </div>
+        <p class="field-hint muted small" id="trade-risk-hint"></p>
+
+        <div class="field">
+          <span class="field-label">Плечо</span>
+          <input type="range" class="field-range" id="trade-leverage" min="1" max="1" step="1"
+                 value="1" aria-label="Плечо">
+          <output class="field-value" id="trade-leverage-value" for="trade-leverage"></output>
+        </div>
+        <p class="field-hint muted small" id="trade-leverage-hint"></p>
+      </form>
+
+      <div class="trade-result" id="trade-result">
+        <dl class="details">
+          <dt>Объём</dt><dd id="trade-quantity">—</dd>
+          <dt>Маржа</dt><dd id="trade-margin">—</dd>
+          <dt>Риск с комиссией</dt><dd id="trade-risk-usd">—</dd>
+          <dt>RR</dt><dd id="trade-rr">—</dd>
+          <dt>Ликвидация</dt><dd id="trade-liq">—</dd>
+          <dt>Комиссия</dt><dd id="trade-fee">—</dd>
+        </dl>
+        <p class="muted small" id="trade-rounded" hidden></p>
+        <ul class="issues" id="trade-issues" hidden></ul>
+        <p class="muted small" id="trade-preview-state" hidden></p>
+      </div>
     </section>
 
     <section class="screen" id="screen-confirm" hidden>
@@ -113,7 +215,6 @@
     </section>
 
     <section class="screen" id="screen-sdk" hidden>
-      <h1 class="error-title">Не загрузилось</h1>
       <p>Не загрузилось. Проверь интернет и открой заново из бота.</p>
       <button type="button" class="button" id="sdk-reload">Обновить</button>
     </section>

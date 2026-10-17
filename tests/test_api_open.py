@@ -226,6 +226,27 @@ async def test_preview_writes_nothing_and_equals_wizard_card(ctx) -> None:  # ty
     assert card["levels"]["stop_loss"] == "1.4501" and card["can_open"] is True
 
 
+@pytest.mark.parametrize(("side", "stop", "take_2r"), [
+    ("LONG", "1.4501", "1.5848"),       # 1.4950 + 2·0.0449
+    ("SHORT", "1.5399", "1.4052"),      # 1.4950 − 2·0.0449
+])
+async def test_preview_take_2r_from_server(ctx, side, stop, take_2r) -> None:  # type: ignore[no-untyped-def]
+    """Чип «2R» формы подставляет цену сервера: тейк на 2R от входа и стопа превью;
+    с этим тейком RR = 2.00, «округлено» нет. Без стопа с нужной стороны — null."""
+    body = {**BODY, "side": side, "stop": {"kind": "price", "value": stop}, "take": None}
+    card = (await ctx.client.post("/api/open/preview", json=body, headers=ctx.h)).json()
+    assert card["calc"]["take_2r"] == take_2r
+    ctx.tick()
+    body["take"] = {"kind": "price", "value": take_2r}
+    card = (await ctx.client.post("/api/open/preview", json=body, headers=ctx.h)).json()
+    assert card["calc"]["rr"] == "2.00" and card["rounded"] == []
+    assert card["levels"]["take_profit"] == take_2r
+    ctx.tick()
+    wrong = {**body, "stop": {"kind": "price", "value": take_2r}}       # стоп по ту сторону
+    card = (await ctx.client.post("/api/open/preview", json=wrong, headers=ctx.h)).json()
+    assert card["calc"]["take_2r"] is None
+
+
 async def test_preview_decimals_are_strings(ctx) -> None:  # type: ignore[no-untyped-def]
     body = {**BODY, "stop": {"kind": "percent", "value": "3"},
             "risk": {"kind": "usd", "value": "15"}}

@@ -11,6 +11,7 @@
   --long: #16a34a;
   --short: #dc2626;
   --live: #dc2626;
+  --liq: #f59e0b;
   --gap: 16px;
 }
 
@@ -324,3 +325,79 @@ main {
 }
 
 .search-item .small { margin-left: auto; }
+
+/* --- Экран сделки (§5а, экран 2) --- */
+
+.trade-head { display: flex; align-items: baseline; gap: 8px; }
+
+.trade-title { font-size: 17px; margin: 0; margin-right: auto; }
+
+.trade-last { color: var(--hint); font-variant-numeric: tabular-nums; }
+
+.chart-compact {
+  margin-top: 8px;
+  height: clamp(160px, calc(var(--tg-viewport-stable-height, 100vh) * 0.28), 240px);
+}
+
+.trade-blocked { padding: var(--gap) 0; }
+
+.trade-blocked-title { font-size: 17px; font-weight: 600; margin: 0 0 4px; }
+
+.trade-form { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+
+.segmented-wide { display: flex; }
+.segmented-wide button { flex: 1; min-height: 36px; }
+#trade-side button[data-side="LONG"].selected { color: var(--long); }
+#trade-side button[data-side="SHORT"].selected { color: var(--short); }
+
+.field { display: flex; align-items: center; gap: 8px; }
+
+.field-label { flex: none; width: 48px; color: var(--hint); }
+
+.field-input,
+.field-select {
+  flex: 1;
+  min-width: 0;
+  min-height: 36px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 0 10px;
+  background: var(--section);
+  color: var(--text);
+  font: inherit;
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+}
+
+.field-select { flex: none; }
+
+.field-input.invalid { border-color: var(--short); }
+
+.field-range { flex: 1; min-width: 0; accent-color: var(--button); }
+
+.field-value { flex: none; min-width: 44px; text-align: right; font-weight: 600; }
+
+.field-hint { margin: -4px 0 0 56px; }
+.field-hint:empty { display: none; }
+
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: -2px 0 0 56px; }
+
+.chips button {
+  min-height: 28px;
+  border: 0;
+  border-radius: 6px;
+  padding: 0 10px;
+  background: var(--section);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.chips button:disabled { opacity: 0.4; }
+
+.trade-result { margin: 12px 0 var(--gap); }
+
+.trade-result.pending .details dd { opacity: 0.45; }
+
+.issues { list-style: none; margin: 8px 0 0; padding: 0; }
+.issues li { margin: 4px 0; }

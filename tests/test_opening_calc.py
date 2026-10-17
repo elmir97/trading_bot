@@ -29,6 +29,7 @@ from app.execution.opening.calc import (
     max_leverage_for_stop,
     percent_fields,
     resolve_inputs,
+    take_at_r,
 )
 from app.trading.enums import EntryType, TradeSide
 
@@ -315,3 +316,27 @@ def test_resolve_usd_needs_equity() -> None:
     assert err.value.code == "NON_POSITIVE_EQUITY"
     # риск в % при нулевом equity — не ошибка ввода: блок даст compute
     assert _resolve(RAW, equity=D(0)).risk_percent == D(1)
+
+
+@pytest.mark.parametrize(("entry", "stop", "side", "expected"), [
+    (D("1.4950"), D("1.4501"), TradeSide.LONG, D("1.5848")),     # 1.4950 + 2·0.0449
+    (D("1.4950"), D("1.5399"), TradeSide.SHORT, D("1.4052")),    # 1.4950 − 2·0.0449
+    # Не на шаге — от входа: LONG вверх, SHORT вниз (RR не ниже 2).
+    (D("1.49503"), D("1.4501"), TradeSide.LONG, D("1.5849")),    # 1.58489 → 1.5849
+    (D("1.49503"), D("1.5399"), TradeSide.SHORT, D("1.4052")),   # 1.40529 → 1.4052
+])
+def test_take_at_2r(entry, stop, side, expected) -> None:  # type: ignore[no-untyped-def]
+    assert take_at_r(entry, stop, side, 2, 4) == expected
+
+
+@pytest.mark.parametrize(("stop", "side"), [
+    (D("1.4950"), TradeSide.LONG),       # стоп на входе
+    (D("1.5000"), TradeSide.LONG),       # стоп выше входа у лонга
+    (D("1.4000"), TradeSide.SHORT),      # стоп ниже входа у шорта
+])
+def test_take_at_2r_none_when_stop_wrong_side(stop, side) -> None:  # type: ignore[no-untyped-def]
+    assert take_at_r(D("1.4950"), stop, side, 2, 4) is None
+
+
+def test_take_at_2r_none_below_zero() -> None:
+    assert take_at_r(D("1.0"), D("2.0"), TradeSide.SHORT, 2, 4) is None   # 1 − 2·1 = −1

@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
+from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_FLOOR, ROUND_HALF_UP, Decimal
 from enum import StrEnum
 
 from app.core.numfmt import fmt_amount, fmt_pct, fmt_price, fmt_qty
@@ -249,6 +249,21 @@ def round_inputs(
     return replace(
         inputs, limit_price=limit_price, stop_loss=stop_loss, take_profit=take_profit
     ), tuple(rounded)
+
+
+def take_at_r(
+    entry: Decimal, stop: Decimal, side: TradeSide, r: int, price_precision: int
+) -> Decimal | None:
+    """Цена тейка на r·R от входа и стопа (чип «2R» Mini App): вход + r·(вход − стоп).
+    К шагу цены — от входа (LONG вверх, SHORT вниз): RR не ниже r, а при отправке
+    round_inputs цену уже не сдвигает. Стоп не с той стороны или цена ≤ 0 — None."""
+    distance = (entry - stop) * Decimal(side.direction)
+    if distance <= ZERO:
+        return None
+    value = entry + Decimal(r) * (entry - stop)
+    rounding = ROUND_CEILING if side is TradeSide.LONG else ROUND_FLOOR
+    value = value.quantize(price_step(price_precision), rounding=rounding)
+    return value if value > ZERO else None
 
 
 def lot_step(info: SymbolInfo) -> Decimal:
