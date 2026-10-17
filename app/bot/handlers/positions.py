@@ -250,6 +250,10 @@ async def show_positions(
     settings: Settings,
     cipher: SecretCipher,
 ) -> None:
+    # Откуда экран: команда /open или кнопка (данные кнопки) — экран без заметки
+    # приходит только этими путями (разбор 17.10).
+    trigger = "/open" if isinstance(event, Message) else (event.data or "")
+    logger.info("Экран позиций", extra={"trigger": trigger})
     await _show(event, session, user, settings, cipher)
 
 

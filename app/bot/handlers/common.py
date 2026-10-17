@@ -13,6 +13,7 @@ from app.bot.handlers.positions import open_actions
 from app.bot.keyboards.main import MenuCallback, back_to_main, main_menu
 from app.bot.messaging import edit_or_replace
 from app.core.config import Settings
+from app.core.logging import get_logger
 from app.core.numfmt import fmt_rr
 from app.core.security import SecretCipher
 from app.database.models.trading_plan import TradingPlan
@@ -21,6 +22,7 @@ from app.database.repositories.user import UserRepository
 from app.execution.position_view import parse_start_param
 
 router = Router(name="common")
+logger = get_logger(__name__)
 
 GREETING = (
     "<b>Торговый журнал</b>\n\n"
@@ -47,6 +49,10 @@ async def cmd_start(
     # действий позиции. Любой другой параметр (испорченный, чужой) — только меню,
     # к бирже не ходим.
     ref = parse_start_param(command.args)
+    # Вид параметра, не сам текст: в чате Telegram deep-link выглядит как голый
+    # «/start», по логу видно, что пришло на самом деле (17.10).
+    kind = "нет" if not command.args else ("pos" if ref is not None else "другой")
+    logger.info("Команда /start", extra={"param": kind})
     if ref is not None:
         await open_actions(message, session, user, settings, cipher, *ref)
         return
