@@ -610,6 +610,21 @@ export function createMarketScreen({ api, tg, storage, onSide, onFatal }) {
       }
       loaded = false;
     },
+    // С вкладки «Позиции» (П.1): монета позиции — следующий вход на экран её покажет.
+    setSymbol(next) {
+      if (typeof next !== "string" || !next) return;
+      symbol = next;
+      storage.save("symbol", next);
+      storage.save("recent", [next, ...recent().filter((s) => s !== next)].slice(0, RECENT_LIMIT));
+      if (active) {
+        closeSearch();
+        load();
+      }
+    },
+    // «🔄 Обновить» из меню.
+    refresh() {
+      if (active && symbol && el.search.hidden) load();
+    },
     symbol: () => symbol,
     contract: () => contract,
   };

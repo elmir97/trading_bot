@@ -56,6 +56,9 @@ class Me(BaseModel):
     limit_expiry_minutes: list[int]
     limit_expiry_default: int
     card_ttl_seconds: int
+    # Имя бота для ссылки «⚙️ Действия в чате» (getMe при старте API); не прочитано — None,
+    # кнопки нет.
+    bot_username: str | None = None
 
 
 class Contract(BaseModel):
@@ -252,6 +255,51 @@ def qty(value: Decimal | None, precision: int) -> Decimal | None:
     return price(value, precision)
 
 
+# --- «Позиции» (П.1) -------------------------------------------------------------------
+
+
+class ProtectiveOut(BaseModel):
+    """Стоп или тейк на бирже. close_position — на всю позицию (quantity нет)."""
+
+    price: Decimal
+    close_position: bool
+    quantity: Decimal | None
+
+
+class PositionOut(BaseModel):
+    symbol: str
+    side: str                           # LONG | SHORT
+    quantity: Decimal
+    leverage: int
+    entry_price: Decimal
+    mark_price: Decimal
+    unrealized_pnl: Decimal | None
+    liquidation_price: Decimal | None
+    price_precision: int | None         # контракта нет в списке — цены без округления
+    stops: list[ProtectiveOut]          # от ближнего к цене; несколько — лестница
+    takes: list[ProtectiveOut]
+    trade_id: int | None                # сделка журнала того же счёта; None — «не в журнале»
+    start_param: str                    # t.me/<бот>?start=… — экран действий в чате
+
+
+class JournalTradeOut(BaseModel):
+    """Открытая сделка только в журнале (без позиции на бирже), любого счёта."""
+
+    id: int
+    symbol: str
+    side: str
+    entry_price: Decimal | None
+    account_mode: str | None            # DEMO | LIVE | None — ручная запись без счёта
+
+
+class PositionsOut(BaseModel):
+    account_mode: str                   # счёт Mini App (сервер)
+    bot_account_mode: str               # выбранный в боте — «Позиции» в чате покажут его
+    positions: list[PositionOut]
+    journal_only: list[JournalTradeOut]
+    exchange_error: ErrorBody | None    # NO_KEY / KEY_REJECTED — показан только журнал
+
+
 __all__ = [
     "ActionOut",
     "CalcOut",
@@ -265,6 +313,7 @@ __all__ = [
     "Flags",
     "Health",
     "IssueOut",
+    "JournalTradeOut",
     "LevelIn",
     "LevelsOut",
     "Leverage",
@@ -274,6 +323,9 @@ __all__ = [
     "OpenOut",
     "OpeningOut",
     "Plan",
+    "PositionOut",
+    "PositionsOut",
+    "ProtectiveOut",
     "RefusalOut",
     "RiskIn",
     "RoundedOut",

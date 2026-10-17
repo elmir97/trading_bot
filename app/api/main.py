@@ -67,6 +67,18 @@ async def drain(state: ApiState, timeout: float = CONFIRM_DRAIN_SECONDS) -> None
                        extra={"opening_ids": sorted(state.confirm_tasks)})
 
 
+async def read_bot_username(bot: Bot) -> str | None:
+    """Имя бота для ссылки «⚙️ Действия в чате». Telegram не ответил — API всё
+    равно поднимается: кнопки в Mini App нет, вместо неё подсказка."""
+    try:
+        me = await bot.get_me()
+    except Exception as exc:
+        logger.warning("API Mini App: getMe не прочитан — ссылки в чат не будет",
+                       extra={"error": type(exc).__name__})
+        return None
+    return me.username
+
+
 def create_app(state: ApiState | None = None) -> FastAPI:
     """state — готовое состояние (тесты); иначе собирается из get_settings()
     при старте и закрывается при остановке."""
@@ -81,6 +93,7 @@ def create_app(state: ApiState | None = None) -> FastAPI:
         setup_logging(level=settings.log_level, json_output=settings.log_json,
                       secrets=settings.secret_values, log_file="api.log")
         built, worker = build_state(settings)
+        built.bot_username = await read_bot_username(built.bot)
         app.state.api = built
         logger.info("API Mini App запущен", extra={
             "account_mode": settings.bingx_allowed_exchange_mode.value,
@@ -119,4 +132,4 @@ def create_app(state: ApiState | None = None) -> FastAPI:
     return app
 
 
-__all__ = ["build_state", "create_app", "drain"]
+__all__ = ["build_state", "create_app", "drain", "read_bot_username"]

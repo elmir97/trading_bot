@@ -425,3 +425,56 @@ main {
 .confirm-actions { display: flex; flex-direction: column; gap: 8px; margin: 12px 0 var(--gap); }
 
 .button-plain { background: var(--section); color: var(--text); }
+
+/* --- Вкладка «Позиции» (П.1) --- */
+
+.account-menu { margin-left: auto; padding: 0; }
+
+.positions-state { padding: 24px 0; text-align: center; }
+
+.positions-list, .journal-list { list-style: none; margin: 0; padding: 0; }
+
+.position-card {
+  margin: 0 0 12px;
+  padding: 12px;
+  border-radius: 12px;
+  background: var(--section);
+}
+
+.position-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  padding: 0 0 8px;
+  text-align: left;
+}
+
+.position-symbol { margin-right: auto; }
+
+.position-side {
+  padding: 1px 8px;
+  border-radius: 6px;
+  color: #ffffff;
+  font-size: 12px;
+}
+
+.position-side.long { background: var(--long); }
+.position-side.short { background: var(--short); }
+
+.position-pnl.up { color: var(--long); }
+.position-pnl.down { color: var(--short); }
+
+.position-card .details { margin: 0 0 8px; }
+.details dd.warn { color: var(--liq); }
+
+.position-chat { width: 100%; background: var(--bg); }
+
+.positions-empty { padding: 16px 0; }
+
+.journal-list li { padding: 6px 0; border-bottom: 1px solid var(--section); }

@@ -313,6 +313,8 @@ def test_registry_covers_queue_scenarios() -> None:
         "form", "form_native", "form_plan10", "form_planfree", "form_nokey", "form_leverr",
         "confirm_market", "confirm_native", "confirm_live", "confirm_retry", "confirm_warn",
         "confirm_limit", "confirm_expired", "confirm_block", "confirm_back",
+        "pos_empty", "pos_list", "pos_unlinked", "pos_chat", "pos_no_key", "pos_503",
+        "pos_401", "pos_poll", "pos_to_market", "menu_native",
     }
     assert [s.name for s in ms.select("all")] == list(ms.SCENARIOS)
     assert ms.select("poll") == [ms.SCENARIOS["poll"]]
@@ -405,7 +407,53 @@ async def test_stand_is_reset_before_page_opens() -> None:
     assert order == ["reset после 0 команд"]
 
 
+async def test_stand_positions_seeded_after_reset_before_page() -> None:
+    """Setup.preset (П.1): позиции стенда — после сброса и до первой команды браузера;
+    без preset — не трогаются."""
+    t = FakeBrowser()
+    page = ms.Page(t)
+    order: list[str] = []
+
+    async def reset() -> None:
+        order.append("reset")
+
+    async def seed(preset: str) -> None:
+        order.append(f"seed {preset} после {len(t.sent)} команд")
+
+    page.reset_stand, page.seed_stand = reset, seed
+    await ms.open_page(page, URL, ms.Setup(wait_screen=None, preset="hedge"))
+    assert order == ["reset", "seed hedge после 0 команд"]
+    order.clear()
+    await ms.open_page(page, URL, ms.Setup(wait_screen=None))
+    assert order == ["reset"]
+
+
+def test_presets_of_scenarios_exist_on_stand() -> None:
+    import re
+
+    from scripts import miniapp_dev
+
+    text = Path(ms.__file__).read_text(encoding="utf-8")
+    used = set(re.findall(r'preset="(\w+)"', text))
+    assert used and used <= set(miniapp_dev.PRESETS)
+
+
 async def test_sdk_failure_on_open_stops_scenario_as_network() -> None:
     page = ms.Page(FakeBrowser(evaluate=lambda expr: {"screens": ["screen-sdk"]}))
     with pytest.raises(ms.ScenarioError, match=r"telegram\.org не загрузился"):
         await ms.open_page(page, URL, ms.Setup())
+
+
+def test_module_constants_assigned_once() -> None:
+    """17.10 (П.1): вторая NO_KEY ниже по файлу перезаписала строку сценариев формы 2.4 —
+    form_nokey упал. Имя верхнего уровня присваивается в модуле один раз."""
+    import ast
+    from collections import Counter
+
+    tree = ast.parse(Path(ms.__file__).read_text(encoding="utf-8"))
+    names = Counter(
+        t.id for node in tree.body if isinstance(node, ast.Assign | ast.AnnAssign)
+        for t in (node.targets if isinstance(node, ast.Assign) else [node.target])
+        if isinstance(t, ast.Name)
+    )
+    assert [n for n, c in names.items() if c > 1] == []

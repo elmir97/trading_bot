@@ -10,7 +10,8 @@
 - проверка — состояние страницы (STATE_JS) и журнал запросов к /api (метод, путь, тело).
 
 Перед каждым сценарием стенд сбрасывается (`POST /dev/reset` стенда): новая фейковая
-биржа и пользователь стенда без сделок — сценарии не зависят от порядка.
+биржа и пользователь стенда без сделок — сценарии не зависят от порядка. Позиции
+(«Позиции», линии) — `POST /dev/positions?preset=…` стенда (Setup.preset).
 
 Замечания сценария = невыполненные ожидания + замечания Collector (CSP, исключения,
 console, HTTP ≥ 400, сбои загрузки); статусы и сбои, вызванные своими правилами,
@@ -94,6 +95,23 @@ STATE_JS = """(() => {
     scroll_x: document.documentElement.scrollWidth - document.documentElement.clientWidth,
     chart_box_width: box ? Math.round(box.getBoundingClientRect().width) : null,
     chart_canvas_width: chart ? Math.round(chart.getBoundingClientRect().width) : null,
+    menu_link: shown('account-positions'),
+    settings_button: tg && tg.SettingsButton ? tg.SettingsButton.isVisible : null,
+    account_note: shown('account-note') ? text('account-note') : null,
+    positions_state: shown('positions-state') ? text('positions-state-text') : null,
+    positions_retry: shown('positions-retry'),
+    positions_note: shown('positions-note') ? text('positions-note') : null,
+    positions_stale: shown('positions-stale') ? text('positions-stale') : null,
+    positions_empty: shown('positions-empty') ? text('positions-empty-text') : null,
+    positions: shown('screen-positions')
+      ? [...document.querySelectorAll('#positions-list .position-card')].map((c) => ({
+        id: c.dataset.position,
+        text: c.textContent.replace(/\\s+/g, ' ').trim(),
+        chat: c.querySelector('[data-chat]') ? c.querySelector('[data-chat]').dataset.chat : null,
+      })) : null,
+    journal: shown('positions-journal')
+      ? [...document.querySelectorAll('#positions-journal-list li')]
+        .map((li) => li.textContent.trim()) : null,
   };
 })()"""
 
@@ -101,7 +119,8 @@ STATE_JS = """(() => {
 # Что показать в замечании «не дождался» — главное о странице.
 WAIT_KEYS = ("screens", "last", "market_error", "chart_state", "stale", "error_title",
              "blocked", "lev", "lev_max", "pending", "preview_state", "confirm_card",
-             "confirm_status", "confirm_action", "main_button")
+             "confirm_status", "confirm_action", "main_button", "positions_state",
+             "positions_note", "positions_empty")
 
 
 class ScenarioError(Exception):
@@ -172,6 +191,8 @@ class Page:
         self.started = clock()
         # Сброс стенда (POST /dev/reset) — задаёт запуск; без него (тесты) шаг пропускается.
         self.reset_stand: Callable[[], Awaitable[None]] | None = None
+        # Позиции стенда (POST /dev/positions?preset=…) — так же: задаёт запуск.
+        self.seed_stand: Callable[[str], Awaitable[None]] | None = None
 
     # --- протокол ---------------------------------------------------------------------
 
@@ -367,6 +388,7 @@ class Setup:
     storage: dict[str, Any] = field(default_factory=dict)
     rules: list[Rule] = field(default_factory=list)
     wait_screen: str | None = "screen-market"
+    preset: str | None = None          # позиции стенда (miniapp_dev.PRESETS)
 
 
 def storage_script(values: dict[str, Any]) -> str:
@@ -379,6 +401,8 @@ async def open_page(page: Page, url: str, setup: Setup) -> dict[str, Any]:
     # Чистый стенд: позиции, лимиты и сделки прошлых сценариев не дают BLOCK.
     if page.reset_stand is not None:
         await page.reset_stand()
+    if setup.preset is not None and page.seed_stand is not None:
+        await page.seed_stand(setup.preset)
     for method in ("Runtime.enable", "Log.enable", "Network.enable", "Page.enable"):
         await page.call(method)
     await page.call("Network.setCacheDisabled", {"cacheDisabled": True})
@@ -1057,13 +1081,228 @@ async def confirm_back(page: Page, url: str) -> None:
     page.expect(stored == [], f"поля формы в localStorage: {stored}")
 
 
+# П.1 — вкладка «Позиции» и меню «…»
+
+FAKE_POPUP = ("window.__popups = []; window.__choice = 'positions';"
+              " Telegram.WebApp.showPopup = (p, cb) => {"
+              " window.__popups.push(p); setTimeout(() => cb(window.__choice), 50); }")
+FAKE_TG_LINK = ("window.__links = []; Telegram.WebApp.openTelegramLink = (u) =>"
+                " window.__links.push(u);")
+POSITIONS_NO_KEY = {"code": "NO_KEY",
+                    "message": "🔑 Ключи биржи не подключены — показан только журнал."}
+
+
+def _positions_requests(page: Page, since: float = 0.0) -> list[ApiRequest]:
+    return page.api("/api/positions", since=since)
+
+
+def _loaded(s: dict[str, Any]) -> bool:
+    return ("screen-positions" in s["screens"] and s["positions_state"] is None
+            and s["positions"] is not None)
+
+
+async def _to_positions(page: Page) -> dict[str, Any]:
+    """Своя ссылка «💼 Позиции» (браузер 6.0 — SettingsButton нет)."""
+    await page.click("#account-positions")
+    return await page.wait_for(_loaded, 10, "вкладка «Позиции»")
+
+
+def _card(s: dict[str, Any], side: str) -> dict[str, Any]:
+    found = [c for c in s.get("positions") or [] if c["id"] == f"{SYMBOL}:{side}"]
+    return found[0] if found else {"text": "", "chat": None}
+
+
+@scenario("pos_empty", "П.1: позиций нет — «На DEMO открытых позиций нет» и «Открыть сделку»")
+async def pos_empty(page: Page, url: str) -> None:
+    s = await open_page(page, url, Setup())
+    page.expect(s.get("menu_link") is True and s.get("settings_button") is not True,
+                "6.0: нет своей ссылки «💼 Позиции»")
+    s = await _to_positions(page)
+    page.expect(s.get("positions_empty") == "На DEMO открытых позиций нет.",
+                f"пустая вкладка: {s.get('positions_empty')!r}")
+    page.expect(s.get("journal") is None, "журнал пуст, а блок показан")
+    page.expect(s.get("main_button") is None and s.get("fallback") is None,
+                "на вкладке видны кнопки «Лонг»/«Шорт»")
+    await page.click("#positions-to-market")
+    await page.wait_for(lambda s: "screen-market" in s["screens"] and s["market_charts"] == 1,
+                        8, "рынок по «Открыть сделку»")
+
+
+@scenario("pos_list", "П.1: хедж — лестница стопов, без стопа, журнал, «только в журнале»")
+async def pos_list(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(preset="hedge"))
+    s = await _to_positions(page)
+    long, short = _card(s, "LONG"), _card(s, "SHORT")
+    page.expect(len(s.get("positions") or []) == 2, f"карточек {len(s.get('positions') or [])}")
+    page.expect("2 ордера: 1.4402 (на всю позицию); 1.4100 (на всю позицию)" in long["text"],
+                f"лестница стопов: {long['text']!r}")
+    page.expect("Тейк1.5631 (100)" in long["text"], f"тейк на часть: {long['text']!r}")
+    page.expect("сделка #" in long["text"], "LONG не связан с DEMO-сделкой")
+    page.expect("Стопнет" in short["text"] and "не в журнале" in short["text"],
+                f"SHORT: {short['text']!r}")
+    journal = s.get("journal") or []
+    page.expect(len(journal) == 2 and any("без счёта" in j for j in journal)
+                and any("реальный счёт" in j for j in journal), f"журнал: {journal}")
+    # На стенде бота нет (bot_username=None) — кнопки в чат нет, есть подсказка.
+    page.expect(long["chat"] is None and "в чате бота" in long["text"],
+                "без имени бота — кнопка в чат или нет подсказки")
+
+
+@scenario("pos_unlinked", "П.1: в журнале только ручная (NULL) и LIVE — позиция «не в журнале»")
+async def pos_unlinked(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(preset="unlinked"))
+    s = await _to_positions(page)
+    long = _card(s, "LONG")
+    page.expect("не в журнале" in long["text"] and "сделка #" not in long["text"],
+                f"связалась чужая сделка: {long['text']!r}")
+    journal = s.get("journal") or []
+    page.expect(len(journal) == 2 and all("XRP-USDT LONG" in j for j in journal),
+                f"журнал: {journal}")
+
+
+def _with_bot(data: Any) -> Any:
+    data["bot_username"] = "testbot"
+    return data
+
+
+@scenario("pos_chat", "П.1: «⚙️ Действия в чате» — openTelegramLink t.me/<бот>?start=pos-…")
+async def pos_chat(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(native=True, preset="hedge",
+                                     rules=[Rule("/api/me", "patch", patch=_with_bot)]))
+    await page.js(FAKE_TG_LINK)
+    await page.js(FAKE_POPUP)
+    await page.telegram_event("settings_button_pressed")
+    s = await page.wait_for(_loaded, 10, "вкладка из меню «…»")
+    page.expect(_card(s, "LONG")["chat"] == "https://t.me/testbot?start=pos-XRP-USDT-L",
+                f"ссылка LONG: {_card(s, 'LONG')['chat']!r}")
+    await page.click('[data-position="XRP-USDT:SHORT"] [data-chat]')
+    await page.pump(0.3)
+    links = await page.js("window.__links")
+    page.expect(links == ["https://t.me/testbot?start=pos-XRP-USDT-S"], f"открыто: {links}")
+    page.expect(not page.api("/api/", method="POST"), "вкладка послала POST")
+
+
+@scenario("pos_no_key", "П.1: нет ключа — текст сервера, только журнал, без «позиций нет»")
+async def pos_no_key(page: Page, url: str) -> None:
+    def patch(data: Any) -> Any:
+        return {**data, "positions": [], "exchange_error": POSITIONS_NO_KEY}
+
+    await open_page(page, url, Setup(preset="hedge", rules=[
+        Rule("/api/positions", "patch", patch=patch)]))
+    s = await _to_positions(page)
+    page.expect(POSITIONS_NO_KEY["message"] in (s.get("positions_note") or ""),
+                f"нет текста «нет ключа»: {s.get('positions_note')!r}")
+    page.expect(s.get("positions_empty") is None, "при сбое ключа — «позиций нет»")
+    page.expect(len(s.get("journal") or []) == 2, f"журнал: {s.get('journal')}")
+
+
+@scenario("pos_503", "П.1: 503 при загрузке — «Повторить»; в опросе — пометка, карточки остаются")
+async def pos_503(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(preset="single", rules=[
+        Rule("/api/positions", "status", status=503, body=EXCHANGE_DOWN, times=1)]))
+    await page.click("#account-positions")
+    await page.wait_for(lambda s: s["positions_state"] == EXCHANGE_DOWN["message"]
+                        and s["positions_retry"], 10, "ошибка загрузки с «Повторить»")
+    await page.click("#positions-retry")
+    await page.wait_for(_loaded, 8, "вкладка после «Повторить»")
+    page.intercept(Rule("/api/positions", "status", status=503, body=EXCHANGE_DOWN, times=1))
+    s = await page.wait_for(lambda s: s["positions_stale"] is not None, 12, "пометка в опросе")
+    page.expect(len(s.get("positions") or []) == 1, "карточка пропала при ошибке опроса")
+    page.expect(EXCHANGE_DOWN["message"] in (s.get("positions_stale") or ""),
+                "в пометке нет текста сервера")
+    await page.wait_for(lambda s: s["positions_stale"] is None, 25, "пометка снята")
+
+
+@scenario("pos_401", "П.1: 401 в опросе — «Сессия истекла», опрос встал")
+async def pos_401(page: Page, url: str) -> None:
+    await open_page(page, url, Setup())
+    await _to_positions(page)
+    page.intercept(Rule("/api/positions", "status", status=401,
+                        body={"code": "UNAUTHORIZED", "message": "Сессия устарела"}))
+    await page.wait_for(lambda s: s["error_title"] == "Сессия истекла", 10, "«Сессия истекла»")
+    start = page.now()
+    await page.pump(7)
+    after = [r for r in page.requests if r.at >= start]
+    page.expect(not after, f"после 401 запросов {len(after)}, ждали 0")
+
+
+@scenario("pos_poll", "П.1: опрос не чаще 5 с; скрытая вкладка — 0 запросов; уход — опрос стоит")
+async def pos_poll(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(preset="single", native=True))
+    await page.js(FAKE_POPUP)
+    await page.telegram_event("settings_button_pressed")
+    await page.wait_for(_loaded, 10, "вкладка из меню")
+    start = page.now()
+    await page.pump(11)
+    polled = _positions_requests(page, start)
+    page.expect(1 <= len(polled) <= 3, f"/api/positions за 11 с: {len(polled)}, ждали 2")
+    await page.set_hidden(True)
+    await page.pump(0.5)
+    start = page.now()
+    await page.pump(7)
+    page.expect(not [r for r in page.requests if r.at >= start], "скрытая вкладка — запросы")
+    await page.set_hidden(False)
+    await page.pump(1)
+    page.expect(bool(_positions_requests(page, start)), "вкладка видна — опрос не возобновился")
+    await page.telegram_event("back_button_pressed")
+    await page.wait_for(lambda s: "screen-market" in s["screens"], 8, "«Назад» → рынок")
+    start = page.now()
+    await page.pump(7)
+    page.expect(not _positions_requests(page, start), "ушли с вкладки — опрос позиций идёт")
+
+
+@scenario("pos_to_market", "П.1: карточка → рынок её монеты, «Назад» → снова «Позиции»")
+async def pos_to_market(page: Page, url: str) -> None:
+    # Без монеты (открыт поиск): переход с карточки должен сам выбрать XRP-USDT.
+    await open_page(page, url, Setup(native=True, preset="single", symbol=None,
+                                     wait_screen=None))
+    await page.wait_for(lambda s: s["search"], 10, "поиск монеты")
+    await page.js(FAKE_POPUP)
+    await page.telegram_event("settings_button_pressed")
+    await page.wait_for(_loaded, 10, "вкладка из меню")
+    await page.click('[data-position="XRP-USDT:LONG"] [data-symbol]')
+    await page.wait_for(lambda s: "screen-market" in s["screens"] and s["symbol"] == SYMBOL
+                        and s["market_charts"] == 1, 10, "рынок XRP-USDT")
+    await page.telegram_event("back_button_pressed")
+    await page.wait_for(_loaded, 8, "«Назад» → «Позиции»")
+
+
+@scenario("menu_native", "П.1: SettingsButton (8.0) → showPopup: «Позиции», «Обновить»")
+async def menu_native(page: Page, url: str) -> None:
+    s = await open_page(page, url, Setup(native=True))
+    page.expect(s.get("settings_button") is True, "SettingsButton не показан")
+    page.expect(s.get("menu_link") is False, "при SettingsButton видна своя ссылка")
+    await page.js(FAKE_POPUP)
+    await page.telegram_event("settings_button_pressed")
+    await page.wait_for(_loaded, 10, "«💼 Позиции» из меню")
+    popups = await page.js("window.__popups")
+    page.expect(len(popups) == 1 and [b.get("id") for b in popups[0]["buttons"]]
+                == ["positions", "refresh", None], f"кнопки меню: {popups}")
+    await page.js("window.__choice = 'refresh'")
+    start = page.now()
+    await page.telegram_event("settings_button_pressed")
+    await page.pump(1.5)
+    page.expect(bool(page.api("/api/me", since=start)), "«Обновить» не перечитал счёт")
+    page.expect(bool(_positions_requests(page, start)), "«Обновить» не перечитал позиции")
+    await page.telegram_event("back_button_pressed")
+    await page.wait_for(lambda s: "screen-market" in s["screens"] and s["market_charts"] == 1,
+                        8, "рынок")
+    start = page.now()
+    await page.telegram_event("settings_button_pressed")
+    await page.pump(1.5)
+    page.expect(bool(page.api(f"/api/market/{SYMBOL}?", since=start)),
+                "«Обновить» на рынке не перечитал рынок")
+
+
 SCENARIO_TIMEOUT = 150.0
 
 
 async def run_one(transport: bc.Transport, url: str, item: Scenario,
-                  reset: Callable[[], Awaitable[None]] | None = None) -> Page:
+                  reset: Callable[[], Awaitable[None]] | None = None,
+                  seed: Callable[[str], Awaitable[None]] | None = None) -> Page:
     page = Page(transport)
     page.reset_stand = reset
+    page.seed_stand = seed
     try:
         await asyncio.wait_for(item.fn(page, url), SCENARIO_TIMEOUT)
     except ScenarioError as exc:

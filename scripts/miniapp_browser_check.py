@@ -362,9 +362,15 @@ async def check_scenarios(url: str, chrome: Path, items: list[Any]) -> list[tupl
                 if r.status != 200:
                     raise ms.ScenarioError(f"сброс стенда: HTTP {r.status}")
 
+        async def seed(preset: str) -> None:
+            async with http.post(url + "dev/positions", params={"preset": preset},
+                                 timeout=aiohttp.ClientTimeout(total=10)) as r:
+                if r.status != 200:
+                    raise ms.ScenarioError(f"позиции стенда ({preset}): HTTP {r.status}")
+
         for item in items:
             async with chrome_page(http, chrome) as transport:
-                page = await ms.run_one(transport, url, item, reset)
+                page = await ms.run_one(transport, url, item, reset, seed)
             out.append((item, page))
             print(ms.render(item, page), flush=True)
     return out

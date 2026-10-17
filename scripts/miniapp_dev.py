@@ -33,23 +33,25 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path, PurePath
 from types import SimpleNamespace
+from typing import Any
 
 import uvicorn
 from fakeredis.aioredis import FakeRedis
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.engine import make_url
 
 from app.api.deps import ApiState, Session, current_user
 from app.api.main import create_app
 from app.core.config import Settings, get_settings
+from app.database.models.trade import Trade
 from app.database.models.user import User
 from app.database.repositories.strategy import MistakeTypeRepository, StrategyRepository
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
-from app.exchanges.base import Kline, OpenInterest, PremiumIndex, Ticker
+from app.exchanges.base import Kline, OpenInterest, OpenOrder, Position, PremiumIndex, Ticker
 from app.services.user_service import UserService
-from app.trading.enums import ExchangeKeyMode
+from app.trading.enums import ExchangeKeyMode, TradeSide, TradeSource
 from tests.conftest import cleanup_user
 from tests.opening_fakes import OpeningExchange
 
@@ -182,6 +184,87 @@ async def remove_dev_user(db: Database, telegram_id: int = DEV_TELEGRAM_ID) -> N
         await session.commit()
 
 
+# --- позиции для сценариев «Позиции» и линий (П.1–П.2) ------------------------------------
+
+PRESETS = ("none", "single", "hedge", "unlinked")
+
+
+def _dev_position(exchange: DevExchange, side: TradeSide, qty: int, entry: str) -> Position:
+    sign = 1 if side is TradeSide.LONG else -1
+    entry_price = Decimal(entry)
+    exchange._pid += 1
+    return Position(
+        symbol="XRP-USDT", side=side, quantity=Decimal(qty), entry_price=entry_price,
+        mark_price=exchange.mark, leverage=10,
+        unrealized_pnl=((exchange.mark - entry_price) * qty * sign).quantize(Decimal("0.0001")),
+        liquidation_price=(entry_price * (1 - Decimal("0.09") * sign)).quantize(Decimal("0.0001")),
+        position_id=str(exchange._pid),
+    )
+
+
+def _dev_order(exchange: DevExchange, side: TradeSide, kind: str, price: str,
+               qty: int | None = None) -> OpenOrder:
+    exchange._seq += 1
+    now = datetime.now(UTC)
+    return OpenOrder(
+        order_id=str(exchange._seq), client_order_id="", symbol="XRP-USDT",
+        side="SELL" if side is TradeSide.LONG else "BUY", position_side=side.value,
+        order_type="STOP_MARKET" if kind == "stop" else "TAKE_PROFIT_MARKET",
+        quantity=Decimal(qty or 0), executed_qty=Decimal(0), price=Decimal(0),
+        stop_price=Decimal(price), status="NEW", leverage=10, reduce_only=True,
+        close_position=qty is None, working_type="MARK_PRICE", created_at=now, updated_at=now,
+        take_profit=None, stop_loss=None,
+    )
+
+
+async def seed_positions(state: ApiState, preset: str, telegram_id: int = DEV_TELEGRAM_ID,
+                         ) -> dict[str, Any]:
+    """Позиции и ордера фейковой биржи + открытые сделки журнала пользователя стенда.
+    none — убрать позиции и ордера (сделки журнала остаются); single — XRP LONG со
+    стопом и тейком, в журнале; hedge — XRP LONG (лестница из 2 стопов, тейк на часть,
+    в журнале) + XRP SHORT без стопа и без сделки, «только в журнале» — ручная без счёта
+    и LIVE; unlinked — XRP LONG, в журнале по нему только ручная (NULL) и LIVE."""
+    if preset not in PRESETS:
+        raise ValueError(f"preset {preset!r}: нужен один из {PRESETS}")
+    if not isinstance(state.factory, DevFactory):
+        raise RuntimeError("не стенд: фабрика не DevFactory")
+    ex = state.factory.exchange
+    long, short = TradeSide.LONG, TradeSide.SHORT
+    trades: list[tuple[str, TradeSide, ExchangeKeyMode | None, Decimal]] = []
+    positions: list[Position] = []
+    orders: list[OpenOrder] = []
+    if preset == "single":
+        positions = [_dev_position(ex, long, 195, "1.4810")]
+        orders = [_dev_order(ex, long, "stop", "1.4402"), _dev_order(ex, long, "take", "1.5631")]
+        trades = [("XRP-USDT", long, ExchangeKeyMode.DEMO, Decimal("1.4810"))]
+    elif preset == "hedge":
+        positions = [_dev_position(ex, long, 195, "1.4810"), _dev_position(ex, short, 50, "1.5120")]
+        orders = [_dev_order(ex, long, "stop", "1.4402"), _dev_order(ex, long, "stop", "1.4100"),
+                  _dev_order(ex, long, "take", "1.5631", qty=100)]
+        trades = [("XRP-USDT", long, ExchangeKeyMode.DEMO, Decimal("1.4810")),
+                  ("BTC-USDT", long, None, Decimal("62000")),
+                  ("ETH-USDT", short, ExchangeKeyMode.LIVE, Decimal("2400"))]
+    elif preset == "unlinked":
+        positions = [_dev_position(ex, long, 195, "1.4810")]
+        trades = [("XRP-USDT", long, None, Decimal("1.4700")),
+                  ("XRP-USDT", long, ExchangeKeyMode.LIVE, Decimal("1.4600"))]
+    ex.positions = {f"seed:{p.symbol}:{p.side.value}": p for p in positions}
+    ex.orders = orders
+    async with state.db.session() as session:
+        user = await UserRepository(session).get_by_telegram_id(telegram_id)
+        if user is None:
+            raise RuntimeError("пользователя стенда нет — ensure_dev_user не вызван")
+        for symbol, side, mode, entry in trades:
+            session.add(Trade(
+                user_id=user.id, symbol=symbol, side=side, entry_price=entry, quantity=Decimal(1),
+                source=TradeSource.IMPORTED if mode else TradeSource.MANUAL, account_mode=mode,
+                opened_at=datetime.now(UTC) - timedelta(hours=1),
+            ))
+        await session.commit()
+    state.market_cache.invalidate("api:positions:")
+    return {"positions": len(positions), "orders": len(orders), "trades": len(trades)}
+
+
 def build_app(state: ApiState, telegram_id: int = DEV_TELEGRAM_ID) -> FastAPI:
     async def dev_user(session: Session) -> User:
         """Подмена current_user: initData не проверяется — всегда пользователь стенда."""
@@ -204,6 +287,14 @@ def build_app(state: ApiState, telegram_id: int = DEV_TELEGRAM_ID) -> FastAPI:
             state.factory.exchange = DevExchange()
         state.market_cache.invalidate()
         return {"ok": True}
+
+    @app.post("/dev/positions")
+    async def dev_positions(preset: str) -> dict[str, Any]:
+        """Позиции для сценариев «Позиции»/линий (seed_positions). Только стенд."""
+        try:
+            return await seed_positions(state, preset, telegram_id)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
 
     @app.middleware("http")
     async def security_headers(

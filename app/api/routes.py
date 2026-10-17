@@ -10,6 +10,7 @@ from fastapi import Path as FastPath
 from sqlalchemy import select
 
 from app.api import opening as opening_api
+from app.api import positions as positions_api
 from app.api.deps import ApiError, CurrentUser, Session, State
 from app.api.market import MarketReader, change_from, max_leverage
 from app.api.ratelimit import ACTION_PER_SECOND, PREVIEW_PER_SECOND, limit
@@ -30,6 +31,7 @@ from app.api.schemas import (
     OpeningOut,
     OpenOut,
     Plan,
+    PositionsOut,
     money,
     price,
 )
@@ -119,6 +121,7 @@ async def me(user: CurrentUser, state: State, session: Session) -> Me:
         limit_expiry_minutes=list(LIMIT_EXPIRY_CHOICES),
         limit_expiry_default=settings.exec_open_limit_expiry_minutes,
         card_ttl_seconds=settings.exec_open_card_ttl_seconds,
+        bot_username=state.bot_username,
     )
 
 
@@ -214,6 +217,16 @@ async def candles(
                low=px(k.low), close=px(k.close))
         for k in rows
     ])
+
+
+# --- «Позиции» (П.1) -------------------------------------------------------------------
+
+
+@router.get("/positions")
+async def positions(user: CurrentUser, state: State, session: Session) -> PositionsOut:
+    """Позиции счёта Mini App со стопом/тейком и связью с журналом — только чтение,
+    кэш процесса 5 с на пользователя (app/api/positions.py)."""
+    return await positions_api.positions_out(state, session, user)
 
 
 # --- открытие (§3) ---------------------------------------------------------------------

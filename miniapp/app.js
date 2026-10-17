@@ -1,6 +1,9 @@
 // Mini App: Telegram WebApp, экраны, шапка счёта.
 // Своей торговой логики нет — только ввод, показ и вызов API (§1). Экран рынка —
-// market.js (2.3), форма сделки — form.js + render.js (2.4), подтверждение — confirm.js (2.5).
+// market.js (2.3), форма сделки — form.js + render.js (2.4), подтверждение — confirm.js (2.5),
+// вкладка «Позиции» — positions.js (П.1).
+// Меню «…» (§5а): SettingsButton Telegram (7.0+) → showPopup «💼 Позиции» / «🔄 Обновить»;
+// без SettingsButton — своя ссылка «💼 Позиции» в шапке счёта.
 // Экран с подписками (опрос, график, кнопки Telegram) отдаёт {enter, leave}: show()
 // зовёт leave у прежнего экрана до enter у нового — график снимается при уходе.
 
@@ -8,13 +11,24 @@ import { ApiError, createApi } from "./api.js";
 import { createConfirmScreen } from "./confirm.js";
 import { createTradeScreen } from "./form.js";
 import { createMarketScreen } from "./market.js";
+import { createPositionsScreen } from "./positions.js";
 import { createStorage } from "./storage.js";
 
 const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
 const TV_URL = "https://www.tradingview.com/";
-const SCREENS = ["loading", "market", "trade", "confirm", "error"];
+const SCREENS = ["loading", "market", "trade", "confirm", "positions", "error"];
 // BackButton — с Bot API 6.1; на старом клиенте (и вне Telegram SDK говорит 6.0) не трогаем.
 const backButton = tg && tg.isVersionAtLeast("6.1") ? tg.BackButton : null;
+// Меню «…» — SettingsButton с 7.0, выбор пункта — showPopup (6.2+, у 7.0 есть).
+const settingsButton = tg && tg.isVersionAtLeast("7.0") ? tg.SettingsButton : null;
+const MENU = {
+  message: "Меню",
+  buttons: [
+    { id: "positions", type: "default", text: "💼 Позиции" },
+    { id: "refresh", type: "default", text: "🔄 Обновить" },
+    { type: "cancel" },
+  ],
+};
 const api = createApi(tg ? tg.initData : "");
 const telegramId = tg && tg.initDataUnsafe && tg.initDataUnsafe.user
   ? tg.initDataUnsafe.user.id : null;
@@ -109,6 +123,62 @@ function toMarket() {
   show("market", { push: false });
 }
 
+// Пока «Открыть» в полёте или идёт проверка итога — меню не уводит с экрана.
+function busy() {
+  return Boolean(screens[current] && screens[current].busy && screens[current].busy());
+}
+
+function openPositions() {
+  if (busy() || current === "loading" || current === "error") return;
+  if (current === "positions") {
+    screens.positions.refresh();
+  } else {
+    show("positions");
+  }
+}
+
+// Карточка позиции → рынок этой монеты (линии позиции — П.2); «Назад» — к позициям.
+function openSymbol(symbol) {
+  screens.market.setSymbol(symbol);
+  show("market");
+}
+
+// «🔄 Обновить»: счёт заново и данные текущего экрана (у формы и подтверждения — только счёт).
+async function refresh() {
+  if (busy() || current === "loading") return;
+  if (current === "error") {
+    start();
+    return;
+  }
+  if (screens[current] && screens[current].refresh) screens[current].refresh();
+  try {
+    me = await api.get("/api/me");
+    renderAccount(me);
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) {
+      showError(err, start);
+      return;
+    }
+    if (!(err instanceof ApiError)) console.error(err);
+    const note = $("account-note");
+    note.textContent = `Счёт не обновился: ${err instanceof ApiError ? err.message : "ошибка"}`;
+    note.hidden = false;
+  }
+}
+
+function openMenu() {
+  if (busy()) return;
+  try {
+    tg.showPopup(MENU, (id) => {
+      if (id === "positions") openPositions();
+      else if (id === "refresh") refresh();
+    });
+  } catch (err) {
+    // Попап уже открыт (WebAppPopupOpened) — второго не будет.
+    console.warn(err);
+  }
+}
+
 function openExternal(url) {
   if (tg && typeof tg.openLink === "function") {
     tg.openLink(url);
@@ -152,7 +222,19 @@ function init() {
       api, tg, me: () => me, onBack: back, onMarket: toMarket,
       onFatal: (err) => showError(err, start),
     }),
+    positions: createPositionsScreen({
+      api, tg, me: () => me, onSymbol: openSymbol, onMarket: toMarket,
+      onFatal: (err) => showError(err, start),
+    }),
   };
+  if (settingsButton) {
+    settingsButton.onClick(openMenu);
+    settingsButton.show();
+  } else {
+    const link = $("account-positions");
+    link.hidden = false;
+    link.addEventListener("click", openPositions);
+  }
   $("tv-attribution").addEventListener("click", (event) => {
     event.preventDefault();
     openExternal(TV_URL);

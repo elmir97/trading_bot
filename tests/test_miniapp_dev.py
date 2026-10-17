@@ -204,9 +204,45 @@ async def test_reset_gives_clean_stand(unique_telegram_id) -> None:  # type: ign
         await db.dispose()
 
 
+@needs_db
+async def test_seed_positions_presets(unique_telegram_id) -> None:  # type: ignore[no-untyped-def]
+    """POST /dev/positions?preset=… (сценарии П.1–П.2): позиции фейковой биржи и сделки
+    журнала пользователя стенда — то, что потом отдаёт /api/positions."""
+    settings = _settings(database_url=os.environ["DATABASE_URL"])
+    db = Database(settings)
+    tid = unique_telegram_id()
+    stand_before = await _stand_user_id(db)
+    try:
+        await stand.ensure_dev_user(db, settings, tid)
+        app = stand.build_app(_state(db, settings), tid)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+            seeded = await client.post("/dev/positions", params={"preset": "hedge"})
+            assert seeded.json() == {"positions": 2, "orders": 3, "trades": 3}
+            body = (await client.get("/api/positions")).json()
+            long, short = body["positions"]
+            assert (long["side"], len(long["stops"]), long["trade_id"] is not None) == (
+                "LONG", 2, True)
+            assert (short["side"], short["stops"], short["trade_id"]) == ("SHORT", [], None)
+            assert sorted(str(t["account_mode"]) for t in body["journal_only"]) == ["LIVE", "None"]
+            await client.post("/dev/reset")
+            await client.post("/dev/positions", params={"preset": "unlinked"})
+            body = (await client.get("/api/positions")).json()
+            assert body["positions"][0]["trade_id"] is None and len(body["journal_only"]) == 2
+            await client.post("/dev/positions", params={"preset": "none"})
+            assert (await client.get("/api/positions")).json()["positions"] == []
+            bad = await client.post("/dev/positions", params={"preset": "all"})
+            assert bad.status_code == 422
+    finally:
+        await stand.remove_dev_user(db, tid)
+        assert await _stand_user_id(db) == stand_before
+        await db.dispose()
+
+
 def test_reset_lives_only_in_stand() -> None:
     for path in (_ROOT / "app").rglob("*.py"):
-        assert "/dev/reset" not in path.read_text(encoding="utf-8"), path
+        text = path.read_text(encoding="utf-8")
+        assert "/dev/reset" not in text and "/dev/positions" not in text, path
 
 
 def test_reset_route_only_in_stand_app() -> None:
@@ -218,7 +254,7 @@ def test_reset_route_only_in_stand_app() -> None:
 
     assert "/dev/reset" not in paths(create_app(_state()))
     assert not any(p.startswith("/dev") for p in paths(create_app(_state())))
-    assert "/dev/reset" in paths(stand.build_app(_state()))
+    assert {"/dev/reset", "/dev/positions"} <= paths(stand.build_app(_state()))
 
 
 @pytest.mark.parametrize(("kw", "where", "fragment"), [

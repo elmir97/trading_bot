@@ -14,6 +14,7 @@ orderId и positionId — строкой везде: значения больш
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -128,6 +129,28 @@ def journal_only(open_trades: list[Trade], views: list[PositionView]) -> list[Tr
     закрывают как раньше, вводом цены выхода."""
     linked = {v.trade.id for v in views if v.trade is not None}
     return [t for t in open_trades if t.id not in linked]
+
+
+# --- ссылка «⚙️ Действия в чате» из Mini App ----------------------------------
+
+# Параметр /start (t.me/<бот>?start=pos-XRP-USDT-L): Telegram пропускает только
+# A-Z a-z 0-9 _ - и до 64 символов. Формат один: api строит, бот разбирает.
+START_PREFIX = "pos-"
+_START_SIDE = {TradeSide.LONG: "L", TradeSide.SHORT: "S"}
+_START_RE = re.compile(r"pos-([A-Z0-9]{1,20}-USDT)-([LS])")
+
+
+def start_param(symbol: str, side: TradeSide) -> str:
+    return f"{START_PREFIX}{symbol}-{_START_SIDE[side]}"
+
+
+def parse_start_param(value: str | None) -> tuple[str, TradeSide] | None:
+    """(символ, сторона) или None — параметр не наш или испорчен."""
+    match = _START_RE.fullmatch(value or "")
+    if match is None:
+        return None
+    side = TradeSide.LONG if match.group(2) == "L" else TradeSide.SHORT
+    return match.group(1), side
 
 
 # --- текст -------------------------------------------------------------------

@@ -18,6 +18,9 @@
     <span class="account-money">
       equity <b id="account-equity">—</b> · свободно <b id="account-available">—</b>
     </span>
+    <!-- Меню «…» без SettingsButton (Telegram до 7.0, браузер) — своя ссылка. -->
+    <button type="button" class="link-button account-menu" id="account-positions"
+            hidden>💼 Позиции</button>
     <span class="account-note" id="account-note" hidden></span>
   </header>
 
@@ -220,6 +223,30 @@
       <div class="confirm-actions">
         <button type="button" class="button" id="confirm-action" hidden></button>
         <button type="button" class="button button-plain" id="confirm-back" hidden></button>
+      </div>
+    </section>
+
+    <section class="screen" id="screen-positions" hidden>
+      <h1 class="trade-title">Позиции</h1>
+      <div class="positions-state" id="positions-state">
+        <p id="positions-state-text">Загрузка…</p>
+        <button type="button" class="button button-small" id="positions-retry"
+                hidden>Повторить</button>
+      </div>
+      <div id="positions-body" hidden>
+        <p class="note" id="positions-note" hidden></p>
+        <p class="note" id="positions-stale" hidden></p>
+        <ul class="positions-list" id="positions-list"></ul>
+        <div class="positions-empty" id="positions-empty" hidden>
+          <p id="positions-empty-text"></p>
+          <button type="button" class="button button-small" id="positions-to-market">Открыть
+            сделку</button>
+        </div>
+        <div id="positions-journal" hidden>
+          <h2 class="section-title">Только в журнале</h2>
+          <ul class="journal-list" id="positions-journal-list"></ul>
+          <p class="muted small">Закрыть сделку журнала — в чате бота: «💼 Позиции».</p>
+        </div>
       </div>
     </section>
 

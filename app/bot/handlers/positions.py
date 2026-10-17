@@ -261,12 +261,24 @@ async def show_actions(
     settings: Settings,
     cipher: SecretCipher,
 ) -> None:
-    """Экран действий одной позиции — с биржи заново: позиция могла закрыться."""
     ref = _parse_ref(str(callback.data), PositionsCB.ACTIONS)
     if ref is None:
         await callback.answer("Кнопка устарела — открой «Позиции» заново.", show_alert=True)
         return
-    symbol, side = ref
+    await open_actions(callback, session, user, settings, cipher, *ref)
+
+
+async def open_actions(
+    event: Message | CallbackQuery,
+    session: AsyncSession,
+    user: User,
+    settings: Settings,
+    cipher: SecretCipher,
+    symbol: str,
+    side: TradeSide,
+) -> None:
+    """Экран действий одной позиции — с биржи заново: позиция могла закрыться.
+    Кнопка «⚙️» (правит сообщение) и ссылка из Mini App /start pos-… (новое)."""
     views, exchange_note, _, precision = await _load(session, user, settings, cipher)
     view = next(
         (v for v in views or [] if v.position.symbol == symbol and v.position.side == side),
@@ -274,14 +286,16 @@ async def show_actions(
     )
     if view is None:
         note = exchange_note or f"Позиции {symbol} {side.value} на бирже уже нет."
-        await _show(callback, session, user, settings, cipher, note=note)
+        await _show(event, session, user, settings, cipher, note=note)
         return
-    if isinstance(callback.message, Message):
-        await edit_or_replace(
-            callback.message, render_actions(view, precision.get(symbol)),
-            actions_keyboard(symbol, side),
-        )
-    await callback.answer()
+    text = render_actions(view, precision.get(symbol))
+    keyboard = actions_keyboard(symbol, side)
+    if isinstance(event, CallbackQuery):
+        if isinstance(event.message, Message):
+            await edit_or_replace(event.message, text, keyboard)
+        await event.answer()
+    else:
+        await event.answer(text, reply_markup=keyboard)
 
 
 @router.callback_query(F.data.startswith(PositionsCB.IMPORT))

@@ -135,7 +135,10 @@ def test_own_js_has_no_external_addresses(js: Path) -> None:
     urls = set(re.findall(r"(?:https?:)?//[A-Za-z0-9.-]+\.[A-Za-z]{2,}[^\s\"'`)]*",
                           js.read_text(encoding="utf-8")))
     # boot.js сравнивает src упавшего скрипта с адресом SDK — не загружает его.
-    allowed = {_TV_URL} | ({_TELEGRAM_SDK} if js.name == "boot.js" else set())
+    # positions.js строит ссылку в чат бота (t.me) — её открывает Telegram
+    # (openTelegramLink), страница с этого адреса ничего не грузит, CSP не трогает.
+    allowed = ({_TV_URL} | ({_TELEGRAM_SDK} if js.name == "boot.js" else set())
+               | ({"https://t.me/"} if js.name == "positions.js" else set()))
     assert urls <= allowed, urls
 
 

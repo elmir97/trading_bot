@@ -362,3 +362,65 @@ async def test_partial_stop_shown_with_quantity_and_import_button(env) -> None: 
     text, buttons = await _open(env)
     assert "Стоп: 1.4795 (30)" in text and "1.4795 (на всю позицию)" not in text
     assert any("В журнал" in b for b in buttons)
+
+
+# --- /start pos-… — ссылка «⚙️ Действия в чате» из Mini App (П.1) ------------------------
+
+
+def _command(args: str | None) -> SimpleNamespace:
+    return SimpleNamespace(args=args)
+
+
+async def _start(env, args: str | None) -> MagicMock:  # type: ignore[no-untyped-def]
+    from app.bot.handlers import common
+
+    message = _message()
+    state = SimpleNamespace(clear=AsyncMock())
+    await common.cmd_start(message, _user(), state, _command(args), MagicMock(),  # type: ignore[arg-type]
+                           settings=None, cipher=None)  # type: ignore[arg-type]
+    state.clear.assert_awaited_once()
+    return message
+
+
+async def test_start_link_opens_position_actions(env) -> None:  # type: ignore[no-untyped-def]
+    env.client = _Client([_position(), _position(side=TradeSide.SHORT)], [_stop()])
+    message = await _start(env, "pos-XRP-USDT-S")
+    text = message.answer.await_args.args[0]
+    keyboard = message.answer.await_args.kwargs["reply_markup"]
+    assert "<b>⚙️ Действия · XRP-USDT SHORT</b>" in text
+    buttons = {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
+    assert buttons["❌ Закрыть всё"] == "pa:cf:XRP-USDT:S"
+
+
+async def test_start_link_position_gone(env) -> None:  # type: ignore[no-untyped-def]
+    env.client = _Client([], [])
+    message = await _start(env, "pos-XRP-USDT-L")
+    text = message.answer.await_args.args[0]
+    assert "Позиции XRP-USDT LONG на бирже уже нет." in text and "<b>💼 Позиции · " in text
+
+
+@pytest.mark.parametrize("args", [
+    None, "", "pos-", "pos-XRP-USDT", "pos-XRP-USDT-X", "pos-xrp-usdt-L", "pos-XRP-USDC-L",
+    "pos-XRP-USDT-L-1", "pos-XRP-USDT-LS", "x pos-XRP-USDT-L", "pos-XRP_USDT-L", "abc",
+    "pos-" + "A" * 21 + "-USDT-L",
+])
+async def test_start_garbage_shows_menu_without_exchange(env, monkeypatch, args) -> None:  # type: ignore[no-untyped-def]
+    from app.bot.handlers import common
+
+    class NoExchange:
+        def __init__(self, *a, **kw) -> None:  # type: ignore[no-untyped-def]
+            raise AssertionError("к бирже ходить нельзя")
+
+    monkeypatch.setattr(screen, "ExchangeFactory", NoExchange)
+    message = await _start(env, args)
+    assert message.answer.await_args.args[0] == common.GREETING
+
+
+def test_start_param_roundtrip() -> None:
+    from app.execution.position_view import parse_start_param, start_param
+
+    for symbol in ("XRP-USDT", "1000PEPE-USDT", "BTC-USDT"):
+        for side in TradeSide:
+            param = start_param(symbol, side)
+            assert len(param) <= 64 and parse_start_param(param) == (symbol, side)
+    assert start_param("XRP-USDT", TradeSide.LONG) == "pos-XRP-USDT-L"

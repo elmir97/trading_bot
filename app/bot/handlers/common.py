@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 from aiogram import F, Router
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.formatting import fmt_num
+from app.bot.handlers.positions import open_actions
 from app.bot.keyboards.main import MenuCallback, back_to_main, main_menu
 from app.bot.messaging import edit_or_replace
+from app.core.config import Settings
 from app.core.numfmt import fmt_rr
+from app.core.security import SecretCipher
 from app.database.models.trading_plan import TradingPlan
 from app.database.models.user import User
 from app.database.repositories.user import UserRepository
+from app.execution.position_view import parse_start_param
 
 router = Router(name="common")
 
@@ -26,10 +31,25 @@ GREETING = (
 
 
 @router.message(CommandStart())
-async def cmd_start(message: Message, user: User, state: FSMContext) -> None:
+async def cmd_start(
+    message: Message,
+    user: User,
+    state: FSMContext,
+    command: CommandObject,
+    session: AsyncSession,
+    settings: Settings,
+    cipher: SecretCipher,
+) -> None:
     # Сброс FSM: если пользователь бросил заполнение формы на середине,
     # /start должен возвращать в чистое состояние, а не в середину диалога.
     await state.clear()
+    # «⚙️ Действия в чате» из Mini App: t.me/<бот>?start=pos-XRP-USDT-L — экран
+    # действий позиции. Любой другой параметр (испорченный, чужой) — только меню,
+    # к бирже не ходим.
+    ref = parse_start_param(command.args)
+    if ref is not None:
+        await open_actions(message, session, user, settings, cipher, *ref)
+        return
     await message.answer(GREETING, reply_markup=main_menu())
 
 

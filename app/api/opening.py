@@ -26,6 +26,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from app.api import positions as positions_api
 from app.api.deps import ApiError, ApiState
 from app.api.market import TTL_LEVERAGE, TTL_PRICE, MarketReader
 from app.api.schemas import (
@@ -342,6 +343,8 @@ async def _confirm(
             # открытия — итог виден в Mini App и в «Позициях».
             logger.exception("Итог открытия из Mini App не отправлен в чат",
                              extra={"opening_id": opening_id})
+    # Позиция могла появиться (или закрыться аварийно): «Позиции» и линии — заново.
+    positions_api.forget(state, user_id)
     if outcome.status is OpeningStatus.ALARM and state.alarm_retry is not None:
         # B.1: не ждать цикла бота 15 с; после записи тревоги в журнал —
         # «✅ Решено» ищет её там.
@@ -386,6 +389,7 @@ async def cancel(
     if opening.status is not OpeningStatus.WORKING:
         raise ApiError(409, "NOT_WORKING", _status_text(opening))
     outcome = await service.cancel_limit(opening.id)
+    positions_api.forget(state, opening.user_id)   # лимит мог успеть частично исполниться
     if outcome.final and state.bot is not None:
         try:
             await opening_messages.retire_working(state.bot, state.db, opening.id,

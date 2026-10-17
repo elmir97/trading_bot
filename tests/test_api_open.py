@@ -18,6 +18,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import selectinload
 
 from app.api import opening as opening_api
+from app.api import positions as positions_api
 from app.api import ratelimit
 from app.api.deps import ApiState
 from app.core.config import Settings
@@ -303,10 +304,14 @@ async def test_open_and_confirm_market(ctx) -> None:  # type: ignore[no-untyped-
     row = await _row(ctx, oid)
     assert card["status"] == "CARD" and row.source is OpeningSource.MINIAPP
     assert card["expires_at"] is not None
+    key = positions_api.cache_key(ctx.state, ctx.uid)
+    ctx.state.market_cache.set(key, "до открытия", 60)
     r = await ctx.client.post(f"/api/open/{oid}/confirm", json={}, headers=ctx.h)
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["final"] is True and body["pending"] is False
+    # П.1: позиции после итога — заново с биржи (вкладка и линии без ожидания кэша)
+    assert ctx.state.market_cache.get(key) is None
     view = body["opening"]
     assert view["status"] == "DONE" and view["trade_id"] and view["final"] is True
     assert view["stop_placed"] is True and view["take_placed"] is True
@@ -529,8 +534,11 @@ async def test_limit_active_and_cancel(ctx, monkeypatch) -> None:  # type: ignor
     assert [x["id"] for x in active.json()] == [oid]
     assert active.json()[0]["limit_price"] == "1.4200"
     assert (await ctx.client.get("/api/open", headers=ctx.h)).status_code == 422
+    key = positions_api.cache_key(ctx.state, ctx.uid)
+    ctx.state.market_cache.set(key, "до отмены", 60)
     r = await ctx.client.post(f"/api/open/{oid}/cancel", headers=ctx.h)
     assert r.status_code == 200, r.text
+    assert ctx.state.market_cache.get(key) is None
     assert r.json()["opening"]["status"] == "CANCELLED" and r.json()["final"] is True
     assert [n for n, _ in ctx.exchange.posts()].count("post_cancel") == 1
     assert retired == [(oid, OpeningStatus.CANCELLED)]

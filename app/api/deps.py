@@ -41,6 +41,8 @@ class ApiState:
     redis: Any
     factory: Any                      # ExchangeFactory (в тестах — фейк)
     bot: Any = None                   # aiogram.Bot только для отправки, без поллинга
+    # Имя бота для ссылки t.me/<бот>?start=pos-… (getMe при старте); сбой — None.
+    bot_username: str | None = None
     market_cache: TTLCache = field(default_factory=TTLCache)
     # B.1: быстрые повторы защиты после тревоги (OpeningsWorker.retry_alarm).
     alarm_retry: Callable[[int], None] | None = None
