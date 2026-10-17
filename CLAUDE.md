@@ -449,7 +449,12 @@ PY
 3. `timedatectl` — `System clock synchronized: yes` (иначе подпись BingX
    начнёт отказывать)
 4. `ss -tulpn` — 5432 и 6379 на хосте не слушают; `ufw status`. С Mini App наружу слушают
-   только 22, 80, 443 (+10050 — агент Timeweb); 8000 на хосте нет
+   только 22, 80, 443 (+10050 — агент Timeweb); 8000 на хосте нет. С 17.10 ufw **active**
+   (deny incoming): 22/80/443 tcp всем (v4/v6), 10050/tcp — только `92.53.116.12`, `.111`,
+   `.119` (= `Server=` в `/etc/zabbix/zabbix_agentd.conf`); другое правило или inactive — флаг.
+   Опубликованные порты Docker идут мимо ufw (FORWARD) — главное по-прежнему пункт 4а.
+   Проверка 10050 снаружи — не с этой машины (исходящие перехватываются: «открыт» любой
+   порт); на сервере — `iptables -L ufw-user-input -v -n` и `UFW BLOCK` в `journalctl -k`
 4а. `docker ps --format '{{.Names}} {{.Ports}}'` — порты публикует только `trading_bot_caddy`
    (80, 443/tcp); у db, redis, bot, api — пусто
 5. `stat -c '%a %n' .env docker-compose.override.yml`;
