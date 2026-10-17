@@ -205,7 +205,9 @@ Remote `origin` — приватный резервный репозиторий
    относительный путь.
    GNU tar: `--exclude` — **до** пути (`tar czf X --exclude=trading_bot/logs -C /opt
    trading_bot`); после пути он не действует, и tar выходит с ошибкой (28.09,
-   снапшот пересоздавали)
+   снапшот пересоздавали).
+   С Mini App архив везёт и `miniapp/` (статика) и `deploy/Caddyfile`: в образ они не
+   попадают (`.dockerignore`), Caddy монтирует их с диска — md5 сверять и для них
 3. Сверить md5 изменённых файлов с `git show HEAD:<path>`
 4. **Точка отката — ДО build.** Проверка, а не вера: id обязан
    напечататься, иначе стоп, build не запускать
@@ -217,12 +219,18 @@ Remote `origin` — приватный резервный репозиторий
    Без тега старый образ после сборки становится безымянным и может
    исчезнуть (27.09: `b11e08849a42` пропал между build и stop — отката
    без пересборки не осталось)
-5. `docker compose up -d --build`
+5. `docker compose up -d --build` — до Mini App. С сервисами `api`/`caddy`
+   (подэтап 3): `docker compose build bot && docker compose up -d --no-deps bot api`.
+   `api` — тот же образ `trading_bot-bot:latest`, своей сборки нет: без пересоздания
+   он остаётся на старом образе. `caddy` пересоздаётся только при смене
+   `deploy/Caddyfile` или его сервиса в compose (`up -d --no-deps caddy`); статика
+   `miniapp/` читается с диска — достаточно `git archive`
 6. `alembic upgrade head`
 7. Показать `docker compose ps` и последние 50 строк логов
 
 Откат кода: `docker tag trading_bot-bot:rollback_<ts> trading_bot-bot:latest
-&& docker compose up -d --no-deps bot`. Удалять rollback-тег
+&& docker compose up -d --no-deps bot` (с Mini App — `--no-deps bot api`: один образ).
+Статику `miniapp/` и `deploy/Caddyfile` откатывает снапшот кода шага 1. Удалять rollback-тег
 (`docker rmi trading_bot-bot:rollback_<ts>`) — только после первого
 «Пульс reconciler» без ошибок на новом образе (раз в час; сканера с 02.10.2026
 нет) и с «да» владельца.
@@ -231,6 +239,46 @@ Remote `origin` — приватный резервный репозиторий
 свежий дамп → показать SQL офлайн-режимом alembic (без подключения
 к базе) → дождаться «да» → применять. Если alembic применяет миграцию,
 которой не ждали — остановиться и сказать.
+
+### Деплой Mini App (первый: `api` + `caddy`, подэтап 3)
+
+План — `docs/miniapp-plan.md` §6 и решения 17.10 в handoff. **Каждый шаг — по «да» владельца.**
+Поддомен `app.postfactumtrade.ru` → `147.45.111.10` (A-запись в REG.RU; AAAA и CAA нет).
+
+0. `master` догоняет `miniapp` fast-forward'ом — после сводки «что меняется в боте» и «да».
+   Swap 2 ГБ (§6а) — до деплоя, своим «да» с командами
+1. Чек-ап A–H, плюс только чтение: `getent hosts app.postfactumtrade.ru` = `147.45.111.10`,
+   `ip -4 addr` содержит его; `ss -tlnp '( sport = :80 or sport = :443 )'` и
+   `ss -ulnp 'sport = :443'` — пусто; `ufw status`, `iptables -S INPUT`, `iptables -S
+   DOCKER-USER`, `nft list ruleset` — 80/443 не режутся; `curl -sI
+   https://acme-v02.api.letsencrypt.org/directory` — 200; `sshd -T` (§6а); available ≥ 700 МБ
+   с запасом api ~150 + caddy ~40. Фильтр хостера (панель Timeweb, 80/443) смотрит владелец
+2. «Не нажимай кнопки, перезапускаю» → «ок» владельца
+3. Шаги 1–4 обычного деплоя (umask, дамп, снапшот, архив с `miniapp/` и `deploy/`, md5,
+   `rollback_<ts>` с `docker image inspect`)
+4. Override — своим «да»: переменные исполнения bot и api — **одним якорем** `x-exec-env`
+   (шаблон `deploy/override.example.yml`, значения — из текущего override прода), в якоре
+   `EXEC_OPEN_DRY_RUN: "true"` для обоих; `MINIAPP_ALLOWED_TELEGRAM_IDS: ""` (403 всем) — только
+   api; `MINIAPP_URL` — только bot. Права 600. Проверка: `docker compose config` — у bot и api
+   одинаковые имена и значения EXEC_*/TRADING_* (печатать имена и «совпадает», не значения)
+5. `docker compose build bot && docker compose up -d --no-deps bot` → логи, «бот запущен»
+6. `docker compose up -d --no-deps api` → `docker compose ps` (api healthy), `logs/api.log`
+   («API Mini App запущен», `allowed_ids: 0`), `docker stats --no-stream` (api ≤ 200 МБ)
+7. `docker compose up -d --no-deps caddy` → `docker logs trading_bot_caddy` — выпуск
+   сертификата. **Сбой HTTP-01 (или любой ошибки ACME) — сразу `docker compose stop caddy` и
+   доклад, без повторов**: у Let's Encrypt лимит неудачных проверок; том `caddy_data` не удалять
+8. Снаружи (с сервера по внешнему имени; с этой машины 80/443 перехватываются): `curl -sI
+   https://app.postfactumtrade.ru/` — CSP/HSTS/nosniff/no-referrer как в `deploy/Caddyfile`,
+   без `Server`; `/api/health` — 200; `/api/me` без initData — 401, с поддельной подписью — 401
+9. Id владельца в `MINIAPP_ALLOWED_TELEGRAM_IDS` → `up -d --no-deps --force-recreate api`
+10. `MINIAPP_URL=https://app.postfactumtrade.ru/` у bot → пересоздать bot (снова «не нажимай
+    кнопки») → кнопка меню Mini App. BotFather — шаги владельцу (handoff). Проверка на iPhone
+    (§8) — сухой прогон; живое открытие из Mini App (`EXEC_OPEN_DRY_RUN=false` в якоре,
+    пересоздать bot и api) — отдельным «да»
+
+Откат Mini App: `docker compose stop caddy api` — бот и чат не затронуты; кнопка меню —
+`MINIAPP_URL` пусто в override + пересоздать bot (кнопка команд). Образ — общий откат выше
+(`--no-deps bot api`). Тег отката снимать после пульса reconciler и «да».
 
 ### Деплой с миграцией
 
@@ -391,13 +439,18 @@ PY
 1. `docker compose ps`; для каждого контейнера `docker inspect --format
    '{{.Name}} {{.RestartCount}} {{.State.StartedAt}} {{.State.Health}}'`.
    `RestartCount` > 0 после деплоя — флаг. У `trading_bot` healthcheck
-   нет (`health=none`) — это норма
+   нет (`health=none`) — это норма. С Mini App ещё `trading_bot_api` (health — `healthy`) и
+   `trading_bot_caddy` (healthcheck нет)
 2. `df -h / /opt`, `free -m`, `uptime`; `du -sh /opt/backups
    /opt/trading_bot/logs`; `docker system df`. Диск VPS — 28 ГБ
-   (не 40), RAM ~1.9 ГБ, swap нет
+   (не 40), RAM ~1.9 ГБ, swap нет (после §6а — `swapon --show`: 2 ГБ, used). С Mini App —
+   `docker stats --no-stream`: `api` ≤ 200 МБ, иначе флаг
 3. `timedatectl` — `System clock synchronized: yes` (иначе подпись BingX
    начнёт отказывать)
-4. `ss -tulpn` — 5432 и 6379 на хосте не слушают; `ufw status`
+4. `ss -tulpn` — 5432 и 6379 на хосте не слушают; `ufw status`. С Mini App наружу слушают
+   только 22, 80, 443 (+10050 — агент Timeweb); 8000 на хосте нет
+4а. `docker ps --format '{{.Names}} {{.Ports}}'` — порты публикует только `trading_bot_caddy`
+   (80, 443/tcp); у db, redis, bot, api — пусто
 5. `stat -c '%a %n' .env docker-compose.override.yml`;
    `find /opt/backups -maxdepth 1 -type f ! -perm 600` — и для `.tar.gz`
    из списка `tar tzf | grep -E '(^|/)\.env$'` (есть ли внутри `.env`)
@@ -408,7 +461,8 @@ PY
    посчитать `git -c core.autocrlf=false show <commit>:<path> | md5sum`,
    список передать по stdin в `md5sum -c --quiet -` в `/opt/trading_bot`.
    Плюс сравнить списки файлов (лишние файлы на проде). `<commit>` —
-   последний задеплоенный, его время коммита сверить со `StartedAt`
+   последний задеплоенный, его время коммита сверить со `StartedAt`.
+   С Mini App — так же для `miniapp`, `deploy` и `docker-compose.yml`
 7. `docker compose exec -T bot alembic current` == `alembic heads`
 
 ### C. Конфиг
@@ -430,6 +484,13 @@ PY
    «Троттлинг BingX…» поле `threshold`).
    `bingx_base_url` — только публичный клиент; ключевой клиент в режиме
    demo ходит на `bingx_demo_base_url`
+8а. Override прода (`docker-compose.override.yml`, только имена и значения флагов, не
+   секреты): `EXEC_OPEN_DRY_RUN` — на 08.10 был `"false"` (Т0); **на деплое Mini App у bot и
+   api — `"true"`**, живое открытие из Mini App — отдельное «да». С Mini App: переменные
+   исполнения — якорем `x-exec-env` на оба сервиса; если якоря нет — `docker compose config`:
+   имена и значения EXEC_*/TRADING_* у bot и api совпадают (печатать «совпадает», не значения).
+   Из настроек api — `miniapp_init_data_ttl_seconds` и **число** разрешённых id (сами id не
+   печатать); `miniapp_url` у bot
 
 ### D. Логи за 24 часа
 
@@ -461,6 +522,12 @@ PY
     `ошибок` и `пропущено по локу` — флаг, если не 0. `Лимит BingX после POST`
     (с `e194bb7`) писал путь входа; с этапа 4 — живые действия с позициями
     (при `EXEC_DRY_RUN=true` строк нет)
+
+12а. С Mini App: `logs/api.log` — счётчики по уровням, `Traceback`; `docker logs --since 24h
+   trading_bot_caddy` — ошибки ACME/TLS. Срок сертификата: `echo | openssl s_client -connect
+   app.postfactumtrade.ru:443 -servername app.postfactumtrade.ru 2>/dev/null | openssl x509
+   -noout -enddate` — не меньше 30 дней (Caddy продлевает сам); `curl -sI` — заголовки как в
+   `deploy/Caddyfile`, `Server` нет
 
 ### E. База
 
@@ -569,6 +636,9 @@ mode=ExchangeKeyMode.DEMO)`. Отдельной DEMO-строки в
     `exchange_credentials.permissions_checked_at`
 22. `get_position_mode()` — `dual_side_position`
 23. `get_leverage("BTC-USDT")` — long/short текущее и максимум
+23а. **Перед деплоем (любым, с рестартом бота):** `get_positions()` и `get_open_orders()` —
+   0 позиций и 0 открытых ордеров на демо (печатать только числа). Не 0 — деплой не
+   начинать, доклад владельцу
 
 ### H. Локально на HEAD
 
