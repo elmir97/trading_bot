@@ -129,3 +129,33 @@ def test_legend_markup_and_link_to_positions() -> None:
     assert "onPositions: openPositions" in _js("app.js")
     render = _body(js, "function renderPosition(")
     assert "innerHTML" not in js and "textContent = positionSummary(p)" in render
+
+
+# --- автомасштаб (решение владельца 17.10) ------------------------------------------
+
+
+def test_autoscale_includes_entry_stop_take_not_liq() -> None:
+    js = _js("chart.js")
+    assert 'export const SCALED_KINDS = ["entry", "stop", "take"];' in js
+    scaled = _body(js, "export function scaledRange(")
+    assert "SCALED_KINDS.includes(level.kind)" in scaled
+    assert "if (!range || !range.priceRange) return range;" in scaled     # нет данных — как было
+    assert "Math.min(range.priceRange.minValue, ...prices)" in scaled
+    assert "Math.max(range.priceRange.maxValue, ...prices)" in scaled
+    assert "const autoscaleInfoProvider = (original) => scaledRange(original(), levels);" in js
+    # Обе серии — и свечи, и «линия» (рынок и форма — один модуль).
+    assert js.count("autoscaleInfoProvider,") == 2
+
+
+def test_liquidation_as_text_in_position_block() -> None:
+    summary = _body(_js("market.js"), "export function positionSummary(")
+    assert "p.liquidation_price === null ? \"\" : ` · ликв. ${p.liquidation_price}`" in summary
+    assert "${liq}" in summary
+
+
+def test_levels_in_view_hook_for_scenarios() -> None:
+    js = _js("chart.js")
+    hook = _body(js, "container.levelsInView = () =>")
+    assert 'const host = type === "line" ? line : candles;' in hook
+    assert "chart.paneSize().height" in hook and "host.priceToCoordinate(" in hook
+    assert "delete container.levelsInView;" in _body(js, "destroy() {")

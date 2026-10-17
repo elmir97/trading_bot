@@ -116,11 +116,13 @@ export function positionLevels(positions) {
   return out;
 }
 
+// Ликвидация — строкой здесь: в автомасштаб графика она не входит (chart.js).
 export function positionSummary(p) {
   const side = p.side === "LONG" ? "Лонг" : "Шорт";
   const stop = p.stops.length ? "" : " · ⚠️ без стопа";
+  const liq = p.liquidation_price === null ? "" : ` · ликв. ${p.liquidation_price}`;
   return `${side} ${text(p.quantity)} · вход ${text(p.entry_price)} · `
-    + `${signed(text(p.unrealized_pnl))} $${stop}`;
+    + `${signed(text(p.unrealized_pnl))} $${liq}${stop}`;
 }
 
 // --- экран -----------------------------------------------------------------------------

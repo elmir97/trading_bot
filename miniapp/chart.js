@@ -14,8 +14,28 @@
 //   у рынка — открытой позиции (П.2). Рисуются на видимой серии: скрытая серия
 //   (visible: false) прячет и свои price lines, поэтому setType переносит их на линию и
 //   обратно. Что нарисовано — в data-lines / data-lines-on контейнера (сценарии).
+// - Автомасштаб цены включает вход, стоп и тейк (решение владельца 17.10): уровень за
+//   краем графика не виден. Ликвидацию — нет: она бывает далеко и ужимает график; у рынка
+//   её значение — строкой в блоке «Позиция».
 
 const LWC = window.LightweightCharts;
+
+export const SCALED_KINDS = ["entry", "stop", "take"];
+
+// Диапазон цены серии, расширенный уровнями SCALED_KINDS. Нет данных — как у библиотеки.
+export function scaledRange(range, levels) {
+  if (!range || !range.priceRange) return range;
+  const prices = levels.filter((level) => SCALED_KINDS.includes(level.kind))
+    .map((level) => Number(level.price)).filter(Number.isFinite);
+  if (!prices.length) return range;
+  return {
+    ...range,
+    priceRange: {
+      minValue: Math.min(range.priceRange.minValue, ...prices),
+      maxValue: Math.max(range.priceRange.maxValue, ...prices),
+    },
+  };
+}
 
 const INTERVAL_SECONDS = { "1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400 };
 
@@ -110,15 +130,26 @@ export function createPriceChart(container, { tg = null, precision = 4, interval
     handleScale: { axisPressedMouseMove: { time: true, price: false } },
   });
 
+  const autoscaleInfoProvider = (original) => scaledRange(original(), levels);
   const candles = chart.addSeries(LWC.CandlestickSeries, {
     upColor: colors.up, downColor: colors.down, wickUpColor: colors.up,
-    wickDownColor: colors.down, borderVisible: false,
+    wickDownColor: colors.down, borderVisible: false, autoscaleInfoProvider,
     priceFormat: priceFormat(precision), lastValueVisible: true, priceLineVisible: true,
   });
   const line = chart.addSeries(LWC.LineSeries, {
-    color: colors.line, lineWidth: 2, visible: false,
+    color: colors.line, lineWidth: 2, visible: false, autoscaleInfoProvider,
     priceFormat: priceFormat(precision), lastValueVisible: true, priceLineVisible: true,
   });
+
+  // Для сценариев (--scenario): какие уровни сейчас в видимом диапазоне цены.
+  container.levelsInView = () => {
+    const host = type === "line" ? line : candles;
+    const height = chart.paneSize().height;
+    return levels.map((level) => {
+      const y = host.priceToCoordinate(Number(level.price));
+      return `${level.kind}:${y !== null && y >= 0 && y <= height ? "in" : "out"}`;
+    });
+  };
 
   function applyTheme() {
     if (destroyed) return;
@@ -206,6 +237,7 @@ export function createPriceChart(container, { tg = null, precision = 4, interval
       if (media) media.removeEventListener("change", applyTheme);
       delete container.dataset.lines;
       delete container.dataset.linesOn;
+      delete container.levelsInView;
       chart.remove();
     },
   };

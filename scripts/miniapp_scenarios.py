@@ -115,6 +115,9 @@ STATE_JS = """(() => {
     lines: box && box.dataset.lines !== undefined
       ? box.dataset.lines.split(' ').filter(Boolean) : null,
     lines_on: box ? box.dataset.linesOn || null : null,
+    lines_view: box && box.levelsInView ? box.levelsInView() : null,
+    trade_lines_view: $('trade-chart') && $('trade-chart').levelsInView
+      ? $('trade-chart').levelsInView() : null,
     market_position: shown('market-position')
       ? [...document.querySelectorAll('#market-position-list li')]
         .map((li) => li.textContent.trim()) : null,
@@ -751,6 +754,9 @@ async def form_flow(page: Page, native: bool) -> None:
     await page.click("#trade-take-2r")
     s = await _settled(page, "превью 2R")
     page.expect("RR2.00" in (s.get("result") or "").replace(" ", ""), f"2R: {s.get('result')!r}")
+    # Автомасштаб (17.10): вход, стоп и тейк — в видимом диапазоне графика формы.
+    await page.wait_for(lambda s: _in_view(s.get("trade_lines_view")), 5,
+                        "вход/стоп/тейк формы в видимом диапазоне")
     page.expect(_previews(page)[-1].body.get("take") == {"kind": "price", "value": s.get("take")},
                 "2R: тейк ушёл не ценой сервера")
 
@@ -1315,12 +1321,24 @@ def _lines(s: dict[str, Any]) -> set[str]:
     return set(s.get("lines") or [])
 
 
+def _in_view(view: list[str] | None) -> bool:
+    """Вход, стоп, тейк есть и все в видимом диапазоне цены; ликвидация — любая."""
+    scaled = [v for v in view or [] if v.split(":")[0] in ("entry", "stop", "take")]
+    kinds = {v.split(":")[0] for v in scaled}
+    return kinds == {"entry", "stop", "take"} and all(v.endswith(":in") for v in scaled)
+
+
 @scenario("market_lines", "П.2: хедж — линии входа/стопов/тейка/ликв. на свечах и на «линии», "
                           "закрыта — сняты")
 async def market_lines(page: Page, url: str) -> None:
     await open_page(page, url, Setup(preset="hedge"))
     s = await page.wait_for(lambda s: _lines(s) >= HEDGE_LINES, 10, "линии позиции")
     page.expect(s.get("lines_on") == "candles", f"линии на {s.get('lines_on')!r}, ждали candles")
+    # Автомасштаб: тейк 1.5631 и нижний стоп 1.4100 за краем свечей — график их включает.
+    s = await page.wait_for(lambda s: _in_view(s.get("lines_view")), 5,
+                            "вход/стопы/тейк в видимом диапазоне")
+    legend = s.get("market_position") or []
+    page.expect(all("ликв." in x for x in legend), f"нет ликвидации строкой: {legend}")
     page.expect(sum(x.startswith("liq:") for x in _lines(s)) == 2,
                 f"ликвидаций: {sorted(_lines(s))}")
     legend = s.get("market_position") or []
@@ -1328,7 +1346,8 @@ async def market_lines(page: Page, url: str) -> None:
                 and "без стопа" in legend[1] and "без стопа" not in legend[0],
                 f"блок «Позиция»: {legend}")
     await page.click('#market-types [data-type="line"]')
-    s = await page.wait_for(lambda s: s["lines_on"] == "line", 5, "линии на «линии»")
+    s = await page.wait_for(lambda s: s["lines_on"] == "line" and _in_view(s.get("lines_view")),
+                            5, "линии на «линии», в видимом диапазоне")
     page.expect(_lines(s) >= HEDGE_LINES, f"на «линии» уровни: {s.get('lines')}")
     await page.click('#market-types [data-type="candles"]')
     await page.wait_for(lambda s: s["lines_on"] == "candles" and _lines(s) >= HEDGE_LINES, 5,
