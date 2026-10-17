@@ -11,6 +11,9 @@
 
 from __future__ import annotations
 
+from http.cookiejar import CookieJar, DefaultCookiePolicy
+
+import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,10 +30,57 @@ logger = get_logger(__name__)
 _MODE_LABEL = {ExchangeKeyMode.LIVE: "Реальные", ExchangeKeyMode.DEMO: "Демо"}
 
 
+class SharedHttp:
+    """Один httpx.AsyncClient на хост на весь процесс (api Mini App).
+
+    Без него каждый клиент биржи открывает свой httpx.AsyncClient — свой
+    SSL-контекст и пул соединений — и закрывает его после запроса; в api это
+    почти каждый опрос Mini App (17.10, рост памяти api). Ключи и подпись —
+    в заголовках и строке каждого запроса, клиент их не хранит; cookies не
+    принимаются — общий клиент не несёт состояния между запросами.
+    Закрывает владелец (lifespan api) — close() клиента биржи его не трогает.
+    """
+
+    def __init__(self, timeout: float, transport: httpx.AsyncBaseTransport | None = None) -> None:
+        self._timeout = timeout
+        self._transport = transport        # точка подмены в тестах
+        self._clients: dict[str, httpx.AsyncClient] = {}
+
+    def client(self, base_url: str) -> httpx.AsyncClient:
+        key = base_url.rstrip("/")
+        client = self._clients.get(key)
+        if client is None:
+            client = httpx.AsyncClient(
+                base_url=key,
+                timeout=self._timeout,
+                headers={"User-Agent": "trading-journal-bot/1.0"},
+                cookies=CookieJar(policy=DefaultCookiePolicy(allowed_domains=[])),
+                transport=self._transport,
+            )
+            self._clients[key] = client
+        return client
+
+    async def aclose(self) -> None:
+        clients, self._clients = list(self._clients.values()), {}
+        for client in clients:
+            await client.aclose()
+
+
 class ExchangeFactory:
-    def __init__(self, settings: Settings, cipher: SecretCipher) -> None:
+    def __init__(
+        self, settings: Settings, cipher: SecretCipher, *, http: SharedHttp | None = None
+    ) -> None:
         self._settings = settings
         self._cipher = cipher
+        # None — как раньше: у каждого клиента биржи свой httpx-клиент.
+        self._http = http
+
+    def _shared(self, base_url: str) -> httpx.AsyncClient | None:
+        return None if self._http is None else self._http.client(base_url)
+
+    async def aclose(self) -> None:
+        if self._http is not None:
+            await self._http.aclose()
 
     def public_client(self) -> ExchangeClient:
         """Клиент без ключей — только рыночные данные.
@@ -45,6 +95,8 @@ class ExchangeFactory:
             rate_limit_threshold=self._settings.bingx_rate_limit_threshold,
             private_rate_limit_threshold=self._settings.bingx_private_rate_limit_threshold,
             rate_limit_throttle_enabled=self._settings.bingx_rate_limit_throttle_enabled,
+            client=self._shared(self._settings.bingx_base_url),
+            close_client=self._http is None,
         )
 
     def _base_url(self, mode: ExchangeKeyMode) -> str:
@@ -98,6 +150,8 @@ class ExchangeFactory:
             private_rate_limit_threshold=self._settings.bingx_private_rate_limit_threshold,
             rate_limit_throttle_enabled=self._settings.bingx_rate_limit_throttle_enabled,
             mode=mode,
+            client=self._shared(self._base_url(mode)),
+            close_client=self._http is None,
         )
 
     async def has_credentials(

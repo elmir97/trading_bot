@@ -27,7 +27,7 @@ from app.core.config import Settings, get_settings
 from app.core.logging import get_logger, setup_logging
 from app.core.security import SecretCipher
 from app.database.session import Database
-from app.services.exchange_factory import ExchangeFactory
+from app.services.exchange_factory import ExchangeFactory, SharedHttp
 from app.workers.openings import OpeningsWorker
 
 logger = get_logger(__name__)
@@ -43,7 +43,9 @@ def build_state(settings: Settings) -> tuple[ApiState, OpeningsWorker]:
     cipher = SecretCipher(settings.encryption_key.get_secret_value())
     db = Database(settings)
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
-    factory = ExchangeFactory(settings, cipher)
+    # Один httpx-клиент на хост на весь процесс: и чтения Mini App, и «Открыть».
+    factory = ExchangeFactory(settings, cipher,
+                              http=SharedHttp(timeout=settings.http_timeout_seconds))
     bot = Bot(
         token=settings.bot_token.get_secret_value(),
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
@@ -105,6 +107,7 @@ def create_app(state: ApiState | None = None) -> FastAPI:
             await drain(built)
             await worker.close()   # повторы защиты — дальше цикл бота
             await built.bot.session.close()
+            await built.factory.aclose()
             await built.redis.aclose()
             await built.db.dispose()
 

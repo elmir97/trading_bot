@@ -366,6 +366,7 @@ class BingXClient(ExchangeClient):
         rate_limit_threshold: int = 20,
         private_rate_limit_threshold: int = 2,
         rate_limit_throttle_enabled: bool = True,
+        close_client: bool = True,
     ) -> None:
         self._api_key = api_key
         self._api_secret = api_secret
@@ -397,6 +398,9 @@ class BingXClient(ExchangeClient):
             timeout=timeout,
             headers={"User-Agent": "trading-journal-bot/1.0"},
         )
+        # False — httpx-клиент общий на процесс (SharedHttp фабрики, api Mini
+        # App): close() этого клиента его не закрывает, закрывает владелец.
+        self._close_client = close_client
 
     # --- Подпись -----------------------------------------------------------
 
@@ -671,7 +675,8 @@ class BingXClient(ExchangeClient):
         return payload.get("data", payload)
 
     async def close(self) -> None:
-        await self._client.aclose()
+        if self._close_client:
+            await self._client.aclose()
 
     # --- Публичные данные --------------------------------------------------
 

@@ -303,7 +303,8 @@ async def test_api_starts_when_get_me_fails(api, monkeypatch) -> None:  # type: 
     """Сбой getMe при старте — API поднимается, bot_username=None, кнопки в чат нет."""
     bot = _Bot(ConnectionError("telegram down"))
     built = SimpleNamespace(bot=bot, confirm_tasks={}, bot_username="stale",
-                            redis=SimpleNamespace(aclose=_noop), db=SimpleNamespace(dispose=_noop))
+                            redis=SimpleNamespace(aclose=_noop), db=SimpleNamespace(dispose=_noop),
+                            factory=SimpleNamespace(aclose=_noop))
     worker = SimpleNamespace(close=_noop)
     monkeypatch.setattr(api_main, "get_settings", lambda: api.settings)
     monkeypatch.setattr(api_main, "setup_logging", lambda **kw: None)
