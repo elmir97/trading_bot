@@ -54,9 +54,11 @@ CLAUDE.md, «Скрипты», рядом со стендом. Гейт: pytest 
 `885b606` (docs: хеши и решения), `5b764f9` **2.4 — форма сделки** (живой пересчёт, потолок плеча min(сторона, план), «Подключи ключи
 биржи», «2R» с сервера — `take_2r`, заголовок «Не загрузилось» убран). Подробно — §9а `miniapp-plan.md`. Последний гейт: pytest **1888** /
 0 skipped (exit 0), smoke ×2 exit 0, mypy 60, ruff — только RUF001–003, мутации 14/14, `miniapp_browser_check` exit 0 (с `--symbol` и без).
-Сценарий формы в Chrome — разовый скрипт (`form_scenario.py`, режимы planfree/plan10/nokey/leverr/native), в репозиторий не взят — кандидат в
-п.5. Колонка `trading_plans.max_leverage` NOT NULL (по умолчанию 10): «план без лимита» на стенде — лимит выше максимума стороны. Дальше — 2.5
-(подтверждение: POST /api/open, showConfirm, итог, опрос); п.5 (`--scenario`) не начат.
+Сценарии в Chrome — разовые скрипты вне репозитория, сохранены в `C:\Users\vladz\OneDrive\Desktop\trading\miniapp_scenarios\`:
+`form_scenario.py` (2.4, режимы planfree/plan10/nokey/leverr/native), `sdk_scenario.py` (2а: block/hang/normal), `candles_scenario.py` (2.3а),
+`plan_lev.py` (плечо плана пользователя стенда). Запуск из корня репозитория: `PYTHONPATH=. python <путь> <режим>` при запущенном стенде.
+**Решение владельца 17.10: перенести их в `miniapp_browser_check --scenario` (п.5 очереди) — до 2.5.** Колонка `trading_plans.max_leverage` NOT NULL (по умолчанию 10): «план без лимита» на стенде — лимит выше максимума стороны. Дальше — п.5
+(`--scenario`, сценарии выше), затем 2.5 (подтверждение: POST /api/open, showConfirm, итог, опрос) — сначала план, без кода до «да».
 
 **Очередь после 2.3 (владелец 16.10; порядок — сверху вниз):**
 1. **2.3а — до 2.4, отдельный коммит:** кэш свечей на сервере — TTL не дольше конца текущей свечи (`min(TTL, до границы
