@@ -48,10 +48,15 @@ def test_confirm_posts_once_after_show_confirm() -> None:
     assert 'if (mode !== "card" || asking) return;' in pressed
     assert pressed.index("asking = true;") < asked
     assert "} finally {\n        asking = false;\n      }" in pressed
-    # Старый клиент — синхронно до «sending»: залп нажатий одним скриптом (confirm_double_burst)
-    # иначе отбрасывал второе нажатие — 0 запросов.
+    # Старый клиент — синхронно до «sending» (Д.5) и второе нажатие не раньше SECOND_PRESS_MS
+    # после первого (владелец 18.10): залп быстрее — 0 запросов (confirm_double_burst).
     old = pressed[pressed.index("if (!popup) {"):pressed.index("} else {")]
-    assert "await" not in old and "armed = true;" in old and "armed = false;" in old
+    assert "await" not in old and "if (!secondPress(question)) return;" in old
+    second = _body(confirm, "function secondPress(question)")
+    assert "await" not in second
+    assert "if (now - armedAt < SECOND_PRESS_MS) return false;" in second
+    assert second.index("armedAt = now;") > second.index("if (armed) {")
+    assert "export const SECOND_PRESS_MS = 400;" in confirm
     assert 'mode = "sending";' in pressed
     # Вся отправка — только из confirmPressed / cancelPressed / create.
     posts = re.findall(r"api\.post\(([^,)]+)", confirm)
@@ -64,7 +69,7 @@ def test_show_confirm_or_second_press_without_window_confirm() -> None:
     assert 'const popup = tg && tg.isVersionAtLeast("6.2");' in confirm
     ask = _body(confirm, "function ask(question)")
     assert "tg.showConfirm(question, (ok) => resolve(Boolean(ok)))" in ask
-    assert "if (armed) {" in ask and "armed = true;" in ask
+    assert "return Promise.resolve(secondPress(question));" in ask   # тот же порог, что у confirm
     assert re.search(r"window\.confirm\(|alert\(", confirm) is None
 
 

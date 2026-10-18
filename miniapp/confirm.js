@@ -26,6 +26,10 @@ export const POLL_MS = 2000;
 export const POLL_LIMIT_MS = 180000;
 export const BUSY_RETRY_MS = 2000;
 export const NOT_DELIVERED_TEXT = "Не дошло, нажми ещё раз.";
+// Старый клиент (без showConfirm): второе нажатие засчитывается, только если с первого
+// прошло не меньше SECOND_PRESS_MS (решение владельца 18.10) — быстрый залп (дребезг,
+// двойной тап) не подтверждает: 0 запросов, экран на «Нажми ещё раз».
+export const SECOND_PRESS_MS = 400;
 const SIDE_TEXT = { LONG: "Лонг", SHORT: "Шорт" };
 const clock = new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit" });
 
@@ -61,6 +65,7 @@ export function createConfirmScreen({ api, tg, me, onBack, onMarket, onFatal }) 
   let mode = "idle";         // card | sending | checking | working | result | expired | refused
   let action = null;         // что делает главная кнопка
   let armed = false;         // старый клиент без showConfirm: второе нажатие подтверждает
+  let armedAt = 0;           // когда задан вопрос (первое нажатие) — для SECOND_PRESS_MS
   let asking = false;        // открыт вопрос showConfirm — повторные нажатия не считаются
   let expiresAt = null;      // срок карточки — expires_at сервера
   let gen = 0;
@@ -352,14 +357,23 @@ export function createConfirmScreen({ api, tg, me, onBack, onMarket, onFatal }) 
     if (popup) {
       return new Promise((resolve) => tg.showConfirm(question, (ok) => resolve(Boolean(ok))));
     }
-    // Старый клиент: без window.confirm — второе нажатие той же кнопки.
+    return Promise.resolve(secondPress(question));
+  }
+
+  // Старый клиент: без window.confirm — второе нажатие той же кнопки, не раньше
+  // SECOND_PRESS_MS после первого. Раньше — нажатие не считается (вопрос остаётся, срок
+  // отсчитывается от первого). Синхронно: без await до «sending» (Д.5, confirm_double_burst).
+  function secondPress(question) {
+    const now = Date.now();
     if (armed) {
+      if (now - armedAt < SECOND_PRESS_MS) return false;
       armed = false;
-      return Promise.resolve(true);
+      return true;
     }
     armed = true;
+    armedAt = now;
     status(`${question}\nНажми ещё раз, чтобы подтвердить.`);
-    return Promise.resolve(false);
+    return false;
   }
 
   // Двойное нажатие — один запрос (Д.5): пока открыт вопрос showConfirm, повторные нажатия
@@ -375,12 +389,7 @@ export function createConfirmScreen({ api, tg, me, onBack, onMarket, onFatal }) 
     }
     const question = confirmQuestion(card, body.side, body.symbol, live());
     if (!popup) {
-      if (!armed) {
-        armed = true;
-        status(`${question}\nНажми ещё раз, чтобы подтвердить.`);
-        return;
-      }
-      armed = false;
+      if (!secondPress(question)) return;
     } else {
       asking = true;
       let ok;

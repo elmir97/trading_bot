@@ -160,10 +160,51 @@
   Д.6: 15/15 (8 сервер, 5 браузер, залп, текст), база зелёная, INCONCLUSIVE 0. `--scenario all` 60/60 (6.9 мин), `browser_check`
   exit 0 с `--symbol` и без. Гейт (3.12): pytest **2145** / 0 skipped, smoke ×2, mypy app 60, mypy скриптов чисто, ruff затронутых —
   только RUF001–003 (I001/E501 своих правок поправлены)
+- **Правка Д.5′ (владелец 18.10, «мой критерий был неверным»):** старый клиент — второе нажатие засчитывается только через ≥ 400 мс
+  (`SECOND_PRESS_MS`, `secondPress` — и у «Отменить лимит»); залп быстрее → 0 `/confirm` и экран на «Нажми ещё раз»
+  (`confirm_double_burst`), пауза ≥ 400 мс → ровно 1 (`confirm_double_old`); `showConfirm` — как было. `_press` сценариев 6.0 — пауза
+  0.45 с. Мутации на порог 6/6 (0 мс → залп подтверждает; 1000 мс → осознанное не проходит; срок от последнего нажатия; знак).
+- **Д.7 сделан 18.10:** снимки «после» — `C:\Users\vladz\OneDrive\Desktop\trading\miniapp_shots\after\` (16), сверка с макетом и
+  список осознанных отступлений — §9а «Д.7 — итог». `--scenario all` 60/60 (7 мин), `browser_check` exit 0 с `--symbol` и без.
 - **Деплой — один общий после Д.7 (решение владельца 18.10), api отдельно НЕ деплоить:** в `miniapp` копятся статика (Д.1–Д.7),
   api (Д.6: `bar`, `pnl_*`, вход журнала) и бот (приветствие `/start` `5a9e2e3`). Деплой — по «да» владельца, по шагам CLAUDE.md
   (bot и api — один образ, `--no-deps bot api`; статика — `git archive` + `chmod -R go-w`); в проверку после деплоя — `curl -sI` к
   woff2 (`font/woff2`, `immutable`) и `python -V` в bot и api (сравнить с локальным 3.12.10)
+- **План общего деплоя (18.10, НЕ выполнен — только по «да» владельца; каждый шаг с записью/рестартом — отдельным «да»):**
+  - *Состав* (`ed2242d` прод → HEAD `miniapp`): **статика** `miniapp/` (24 файла: Д.1–Д.7, шрифты `vendor/fonts/*-5.3.0`, `fonts.css`,
+    `theme.js`); **api** — `app/api/positions.py`, `schemas.py` (Д.6: `bar`, `pnl_text/pnl_sign`, вход журнала); **бот** —
+    `app/bot/handlers/common.py` (приветствие `/start`, `5a9e2e3`). bot и api — один образ. **Миграций нет:** `git diff
+    ed2242d..HEAD -- alembic/ alembic.ini` пусто — на проде `alembic current` = `fcf50d29396e` до и после, `upgrade` не запускаем.
+    Dockerfile/requirements/compose/`deploy/` (Caddyfile) — без изменений: caddy не пересоздаём; `.dockerignore` — только исключение
+    скриптов стенда (`miniapp_shots.py`, `stand_sdk/`)
+  - *0. ff `master`* — после сводки владельцу и «да»: `git checkout master && git merge --ff-only miniapp && git push origin master`
+    (`master` = `origin/master` = `ed2242d` — предок `miniapp`, ff возможен; проверено 18.10). Деплой — из `master` HEAD. Ветка
+    `miniapp` дальше — B.9 и экран 5
+  - *1. Чек-ап A–H* (только чтение, CLAUDE.md) + **проверка перед стартом** (B.9 ещё нет — рестарт посреди «Да» оставляет CARD/PENDING):
+    БД (READ ONLY): `trade_openings` в CARD с `expires_at > now()`, CONFIRMED/SUBMITTING/UNKNOWN/FILLED/PROTECTED, WORKING — 0;
+    `position_actions` в CARD — 0 живых (известный #40 EXPIRED — не в счёт); `execution_orders` PENDING/UNKNOWN — только 210 (#40);
+    Redis `exec:lock:*` и `exec:close_wanted:*` — 0; демо (23а) — 0 позиций, 0 ордеров. **Python образа:** `docker compose exec -T bot
+    python -V` и то же у api — записать (сравнение с 3.12.10 локально). Не 0 / не так — стоп и доклад
+  - *2.* «Не нажимай кнопки, перезапускаю» → «ок» владельца (рестарт бота). Перед `up` — повтор проверки «живых карточек» (секунды)
+  - *3. Бэкап и код* (шаги 1–3 «Деплой»): `umask 077`, дамп + снапшот `/opt/backups/trading_bot_pre_deploy_<ts>.{sql.gz,tar.gz}` (600,
+    `gzip -t`), `git -c core.autocrlf=false archive master` → `/opt/trading_bot` (с `miniapp/`, `deploy/`), md5 всех файлов архива =
+    коммит, `chmod -R go-w deploy miniapp` (`find -perm /022` — пусто)
+  - *4. Точка отката — до build:* `TS=$(date -u +%Y%m%d_%H%M%S); docker tag trading_bot-bot:latest trading_bot-bot:rollback_$TS;
+    docker image inspect trading_bot-bot:rollback_$TS --format '{{.Id}}'` — id обязан напечататься (сейчас `latest` = `e6a755b026b8`)
+  - *5. Сборка и старт:* `docker compose build bot` (при работающем боте) → `docker compose up -d --no-deps bot api` (точная строка —
+    временное allow-правило только по «да», удалить сразу после — память «Prod up»). caddy не трогаем
+  - *6. Проверки после:* `docker compose ps` (restarts 0, api healthy), логи bot/api — «Start polling», «API Mini App запущен»
+    `allowed_ids=1`, W/E/Traceback/Conflict 0; `alembic current` = `fcf50d29396e`; **`python -V`** в bot и api; **`curl -sI
+    https://app.postfactumtrade.ru/vendor/fonts/golos-text-5.3.0/golos-text-latin-wght-normal.woff2`** — 200, `font/woff2`,
+    `immutable`; `curl -sI …/fonts.css` и `…/theme.js` — 200, `no-cache`; CSP/HSTS как в Caddyfile; `/api/health` 200,
+    `/api/me` без initData 401; **память api** — `docker stats --no-stream` сразу, после проверки владельца и через ~час (порог
+    доклада 230 МиБ)
+  - *7. Владелец на iPhone:* `/start` — новое приветствие; Mini App в **светлой и тёмной** теме Telegram (рынок, форма, подтверждение
+    в сухом прогоне, позиции) — шапка Telegram в цвет бумаги, шрифты, полоска у позиции; `EXEC_OPEN_DRY_RUN` у bot и api — `"true"`
+    (как сейчас, live-открытие из Mini App — отдельное «да»)
+  - *Откат:* `docker tag trading_bot-bot:rollback_<ts> trading_bot-bot:latest && docker compose up -d --no-deps bot api` (снова «не
+    нажимай кнопки»); статика `miniapp/` — из снапшота шага 3 (+ `chmod -R go-w`); миграций нет — БД не трогаем. Тег отката снимать
+    после пульса reconciler без ошибок и «да»
 
 **17.10.2026: прод — Mini App задеплоен (шаги 1–10 «Деплой Mini App» в CLAUDE.md, каждый по «да»; подробно — блоки «Шаг 1…10»
 ниже). Прод = образ `trading_bot-bot:latest` `5d4e95b74519` из `fbbeb02` (bot и api) + статика `miniapp/` и код на диске `caac158`

@@ -995,12 +995,13 @@ async def _to_confirm(page: Page, native: bool) -> dict[str, Any]:
 
 
 async def _press(page: Page, native: bool) -> None:
-    """Главная кнопка экрана подтверждения; без showConfirm (6.0) — два нажатия."""
+    """Главная кнопка экрана подтверждения; без showConfirm (6.0) — два нажатия, второе не
+    раньше SECOND_PRESS_MS (400 мс) после первого."""
     if native:
         await page.telegram_event("main_button_pressed")
     else:
         await page.click("#confirm-action")
-        await page.pump(0.2)
+        await page.pump(SECOND_PRESS)
         await page.click("#confirm-action")
 
 
@@ -1946,6 +1947,9 @@ async def design_form(page: Page, url: str) -> None:
 
 # Д.5 — «ЗАПИСЬ» подтверждения: номер, строки и «было → стало» — только строки сервера
 
+# Старый клиент: второе нажатие — не раньше SECOND_PRESS_MS (confirm.js) после первого.
+SECOND_PRESS = 0.45
+
 # Объём карточки ≠ объёма превью (TAP_QUANTITY) — «было → стало».
 CARD_QUANTITY = "86510"
 
@@ -2075,32 +2079,37 @@ async def confirm_double(page: Page, url: str) -> None:
     page.expect(len(_confirms(page)) == 1, f"/confirm: {len(_confirms(page))}, ждали 1")
 
 
-@scenario("confirm_double_old", "Д.5: старый клиент (6.0) — три быстрых нажатия: первое "
-                                "спрашивает, второе подтверждает, третье ничего — один /confirm")
+@scenario("confirm_double_old", "Д.5: старый клиент (6.0) — второе нажатие через ≥ 400 мс "
+                                "подтверждает, третье сразу за ним — ничего: один /confirm")
 async def confirm_double_old(page: Page, url: str) -> None:
     await open_page(page, url, Setup())
     await _ready_form(page, False)
     await _to_confirm(page, False)
-    # Касания — отдельными событиями с паузой (как пальцем): второе подтверждает, третье
-    # сразу за ним — уже в отправке и ничего не шлёт.
+    # Осознанное второе нажатие — через SECOND_PRESS (≥ 400 мс); третье сразу за ним — уже в
+    # отправке и ничего не шлёт.
     await page.click("#confirm-action")
-    await page.pump(0.1)
+    await page.pump(SECOND_PRESS)
     await page.js("const b = document.getElementById('confirm-action'); b.click();"
                   " setTimeout(() => b.click(), 30);")
     await page.wait_for(_done, 25, "итог «Сделка #N»")
     page.expect(len(_confirms(page)) == 1, f"/confirm: {len(_confirms(page))}, ждали 1")
 
 
-@scenario("confirm_double_burst", "Д.5: старый клиент (6.0) — залп из трёх нажатий одним скриптом "
-                                  "без пауз — ровно один /confirm, без ошибок")
+@scenario("confirm_double_burst", "Д.5: старый клиент (6.0) — залп из трёх нажатий быстрее 400 мс "
+                                  "— 0 /confirm, экран на «Нажми ещё раз», без ошибок")
 async def confirm_double_burst(page: Page, url: str) -> None:
     await open_page(page, url, Setup())
     await _ready_form(page, False)
     await _to_confirm(page, False)
     await page.js("const b = document.getElementById('confirm-action'); b.click(); b.click();"
-                  " b.click();")
-    await page.wait_for(_done, 25, "итог «Сделка #N»")
-    page.expect(len(_confirms(page)) == 1, f"/confirm: {len(_confirms(page))}, ждали 1")
+                  " setTimeout(() => b.click(), 100);")
+    await page.pump(2)
+    s = await page.state()
+    page.expect(not _confirms(page), f"/confirm: {len(_confirms(page))}, ждали 0 (залп)")
+    page.expect("Нажми ещё раз" in (s.get("confirm_status") or ""),
+                f"экран после залпа: {s.get('confirm_status')!r}")
+    page.expect(s.get("confirm_action") == "Подтвердить" and not _done(s),
+                f"кнопка после залпа: {s.get('confirm_action')!r}")
 
 
 

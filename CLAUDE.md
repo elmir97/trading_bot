@@ -184,8 +184,8 @@ python -m scripts.miniapp_dev [--port 8765]
   — Plex недоступен, рынок и цена показаны (`Setup.intercept_fonts`); `design_form` — квитанция и «Открыть лонг · N XRP» = строки
   ответа preview (объём подменён на «86482», `PreviewTap`), только разряды; `design_confirm`/`design_confirm_refused` — «ЗАПИСЬ
   № opening_id» (без него — без номера), строки = карточка сервера, «было → стало» из превью и карточки (`CardTap`), таймер
-  «действует M:SS»; `confirm_double`/`confirm_double_old`/`confirm_double_burst` — двойное нажатие (8.0; 6.0 касаниями с паузой;
-  6.0 залпом одним скриптом) = один `/confirm`; `design_positions`/`design_positions_bar` — PnL и полоска позиций по ответу
+  «действует M:SS»; `confirm_double`/`confirm_double_old`/`confirm_double_burst` — 8.0: двойное нажатие = один `/confirm`; 6.0: второе
+  нажатие через ≥ 400 мс = один, залп быстрее = 0 (экран на «Нажми ещё раз»); `design_positions`/`design_positions_bar` — PnL и полоска позиций по ответу
   сервера (`bar`, `pnl_sign`), без стопа — красная рамка; `sdk_real` — настоящий SDK
   telegram.org, sha256 сверяется с копией стенда (расхождение — `WARN:` строкой отчёта, не замечание).
   **SDK telegram.org на стенде — копия `scripts/stand_sdk/telegram-web-app.js` по умолчанию** (Fetch подставляет её вместо сети:
