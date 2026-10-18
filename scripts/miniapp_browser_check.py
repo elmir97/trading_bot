@@ -53,6 +53,7 @@ CHROME_ENV = "MINIAPP_CHROME"
 DEFAULT_WAIT = 8.0
 STATE_TIMEOUT = 5.0
 START_TIMEOUT = 15.0
+CHART_POLL = 0.5                 # --symbol: дочитывание состояния, пока график не появился
 
 # До любого скрипта страницы: нарушение CSP — строкой в console.error.
 CSP_MARK = "CSP-VIOLATION"
@@ -292,12 +293,24 @@ async def run_check(transport: Transport, url: str, wait: float, *, symbol: str 
         await call("Page.addScriptToEvaluateOnNewDocument", {"source": seed_script(symbol)})
     await call("Page.navigate", {"url": page_url(url)})
     await pump(wait)
-    eval_id = await call("Runtime.evaluate", {"expression": STATE_EXPR, "returnByValue": True})
-    await pump(STATE_TIMEOUT, lambda: eval_id in collector.responses)
-    reply = collector.responses.get(eval_id)
-    state = None
-    if reply is not None and "error" not in reply:
-        state = reply.get("result", {}).get("result", {}).get("value")
+
+    async def read_state() -> Any:
+        eval_id = await call("Runtime.evaluate", {"expression": STATE_EXPR, "returnByValue": True})
+        await pump(STATE_TIMEOUT, lambda: eval_id in collector.responses)
+        reply = collector.responses.get(eval_id)
+        if reply is None or "error" in reply:
+            return None
+        return reply.get("result", {}).get("result", {}).get("value")
+
+    state = await read_state()
+    # С --symbol график обязан появиться: полное ожидание wait уже прошло (замечания console
+    # собраны), но после тяжёлого прогона (--scenario all) первая загрузка иногда дольше 8 с —
+    # дочитываем состояние до START_TIMEOUT. Не появился и тогда — замечание, как раньше.
+    deadline = clock() + START_TIMEOUT
+    while (symbol is not None and isinstance(state, dict) and state.get("charts") != 1
+           and clock() < deadline):
+        await pump(CHART_POLL)
+        state = await read_state()
     return Report(collector, state, expect_chart=symbol is not None)
 
 

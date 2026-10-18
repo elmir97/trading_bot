@@ -241,10 +241,25 @@
 
     <section class="screen" id="screen-confirm" hidden>
       <p class="live-warning" id="confirm-live" hidden>⚠️ Реальный счёт</p>
-      <h1 class="trade-title" id="confirm-title"></h1>
-      <p class="muted small" id="confirm-timer" hidden></p>
-      <p class="card-text" id="confirm-card"></p>
-      <ul class="issues" id="confirm-diff" hidden></ul>
+      <!-- «ЗАПИСЬ» (макет «Подтверждение», Д.5): номер — opening_id сервера, таймер — до
+           expires_at сервера; строки — значения карточки сервера, только разряды. -->
+      <article class="record card" id="confirm-record">
+        <div class="record-head">
+          <span id="confirm-number">ЗАПИСЬ</span>
+          <span class="record-timer" id="confirm-timer" hidden></span>
+        </div>
+        <div class="record-title">
+          <h1 class="trade-title" id="confirm-title"></h1>
+          <p class="record-sub" id="confirm-sub"></p>
+        </div>
+        <div class="card-text" id="confirm-card"></div>
+        <ul class="issues record-notes" id="confirm-notes" hidden></ul>
+        <div class="record-diff" id="confirm-diff-box" hidden>
+          <p class="hand">пересчитано по свежим данным биржи</p>
+          <ul class="record-diff-list" id="confirm-diff"></ul>
+        </div>
+        <p class="record-dry" id="confirm-dry" hidden>сухой прогон — на биржу не уйдёт</p>
+      </article>
       <p class="note" id="confirm-status" hidden></p>
       <div class="confirm-actions">
         <button type="button" class="button" id="confirm-action" hidden></button>

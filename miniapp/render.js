@@ -162,13 +162,77 @@ const DIFF_FIELDS = [
   ["liq_estimate", "ликвидация ≈"],
 ];
 
-// Карточка (свежие данные биржи) разошлась с превью — «было → стало»; сравнение строк
-// сервера, без расчётов.
+// Карточка (свежие данные биржи) разошлась с превью — «было → стало»: оба значения —
+// строки сервера (ответ preview и ответ /api/open), сравнение строк и разряды, без расчётов
+// (решение владельца 18.10, Д.5).
 export function cardDiff(preview, card) {
   if (!preview || !preview.calc || !card || !card.calc) return [];
   return DIFF_FIELDS
     .filter(([key]) => String(preview.calc[key]) !== String(card.calc[key]))
-    .map(([key, label]) => `${label}: ${text(preview.calc[key])} → ${text(card.calc[key])}`);
+    .map(([key, label]) => `${label}: ${digitsOrDash(preview.calc[key])} → `
+      + `${digitsOrDash(card.calc[key])}`);
+}
+
+function digitsOrDash(value) {
+  return value === null || value === undefined ? "—" : groupDigits(value);
+}
+
+// --- «ЗАПИСЬ» подтверждения (Д.5, макет «Подтверждение») -------------------------------
+
+const ENTRY_TEXT = { MARKET: "маркет", LIMIT: "лимит" };
+
+// Номер записи — только реальный id открытия с сервера (opening_id); нет — без номера
+// (решение владельца 18.10: не выдумывать и не нумеровать на фронте).
+export function recordNumber(openingId) {
+  return Number.isInteger(openingId) && openingId > 0 ? `ЗАПИСЬ № ${openingId}` : "ЗАПИСЬ";
+}
+
+// «маркет ≈ 1.4950 · изол. 10×» — тип входа, цена (calc.entry_price / levels.limit_price),
+// маржа и плечо из карточки сервера.
+export function recordSubtitle(card, marginType) {
+  if (!card || !card.calc || !card.levels) return "";
+  const lv = card.levels;
+  const price = lv.entry_type === "LIMIT" ? digitsOrDash(lv.limit_price)
+    : `≈ ${digitsOrDash(card.calc.entry_price)}`;
+  const margin = MARGIN_TEXT[marginType] ? `${MARGIN_TEXT[marginType]} ` : "";
+  return `${ENTRY_TEXT[lv.entry_type] || lv.entry_type} ${price} · ${margin}${lv.leverage}×`;
+}
+
+// Строки записи: [подпись, значение, класс подписи, класс значения]. Все числа — строки
+// карточки сервера; здесь только разряды, единицы и подписи.
+export function recordRows(card, symbol) {
+  if (!card || !card.calc || !card.levels) return [];
+  const c = card.calc;
+  const lv = card.levels;
+  const stopTail = c.distance_percent === null || c.distance_percent === undefined ? ""
+    : ` · ${c.distance_percent}%`;
+  return [
+    ["объём", `${groupDigits(c.quantity)} ${baseAsset(symbol)}`, "", "strong"],
+    ["стоп", `${groupDigits(lv.stop_loss)}${stopTail}`, "text-red", ""],
+    ["тейк", lv.take_profit === null ? "нет" : groupDigits(lv.take_profit), "text-blue", ""],
+    ["риск с комиссией", `${usd(c.risk_usd)} · ${c.risk_percent}%`, "", "text-red strong"],
+    ["RR", c.rr === null || c.rr === undefined ? "—" : `1 : ${c.rr}`, "", "text-blue strong"],
+    ["ликвидация", c.liq_estimate === null ? "—" : `≈ ${groupDigits(c.liq_estimate)}`, "", ""],
+    ["комиссия", `≈ ${usd(c.fee_usd)}`, "", ""],
+  ];
+}
+
+// Нарушения и округления карточки — строками (как в форме).
+export function recordNotes(card) {
+  if (!card) return [];
+  const notes = [];
+  if (card.refusal) notes.push(`🚫 ${card.refusal.message}`);
+  for (const issue of card.issues) {
+    notes.push(`${issue.level === "BLOCK" ? "🚫" : "⚠️"} ${issue.message}`);
+  }
+  for (const r of card.rounded) notes.push(`ℹ️ ${r.label} округлён с ${r.before} до ${r.after}`);
+  return notes;
+}
+
+// Отсчёт «1:57» до expires_at сервера; left — целые секунды.
+export function clockLeft(left) {
+  const s = Math.max(0, left);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
 // Итог открытия: текст сервера и что стоит на бирже.

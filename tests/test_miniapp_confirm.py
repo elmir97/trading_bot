@@ -38,13 +38,16 @@ def _body(text: str, start: str) -> str:
 def test_confirm_posts_once_after_show_confirm() -> None:
     confirm = _js("confirm.js")
     pressed = _body(confirm, "async function confirmPressed()")
-    asked = pressed.index("await ask(confirmQuestion(card, body.side, body.symbol, live()))")
+    asked = pressed.index("ok = await ask(confirmQuestion(card, body.side, body.symbol, live()));")
     post = pressed.index("api.post(`/api/open/${openingId}/confirm`")
     assert asked < post
     assert pressed.count("api.post(") == 1
     assert "{ accept_warnings: Boolean(card.has_warnings) }" in pressed
-    # Повторное нажатие во время отправки ничего не шлёт.
-    assert 'if (mode !== "card") return;' in pressed
+    # Повторное нажатие во время вопроса и отправки ничего не шлёт (Д.5: двойное нажатие —
+    # один запрос, сценарий confirm_double).
+    assert 'if (mode !== "card" || asking) return;' in pressed
+    assert pressed.index("asking = true;") < asked
+    assert "} finally {\n      asking = false;\n    }" in pressed
     assert 'mode = "sending";' in pressed
     # Вся отправка — только из confirmPressed / cancelPressed / create.
     posts = re.findall(r"api\.post\(([^,)]+)", confirm)
@@ -102,10 +105,17 @@ def test_block_or_refusal_has_no_open_button() -> None:
 
 def test_countdown_from_server_and_expired_recalculates() -> None:
     confirm = _js("confirm.js")
-    countdown = _body(confirm, "function countdown(expiresAt)")
-    assert "Date.parse(expiresAt) - Date.now()" in countdown
+    countdown = _body(confirm, "function countdown()")
+    assert "const left = secondsLeft();" in countdown
+    assert "Date.parse(expiresAt) - Date.now()" in _body(confirm, "function secondsLeft()")
     assert "expired(" in countdown
-    assert "countdown(next.expires_at);" in _body(confirm, "function showCard(next)")
+    show = _body(confirm, "function showCard(next)")
+    assert "expiresAt = next.expires_at;" in show and "countdown();" in show
+    # Д.5: истёк срок — нажатие «Подтвердить» не отправляет, а уводит в «Пересчитать»
+    # (до вопроса и после него — таймер мог не успеть).
+    pressed = _body(confirm, "async function confirmPressed()")
+    assert pressed.count("if (expiresAt && secondsLeft() <= 0) {") == 2
+    assert pressed.index("secondsLeft() <= 0") < pressed.index("api.post(")
     assert 'setAction("Пересчитать", recalc);' in _body(confirm, "function expired(message)")
     assert "create();" in _body(confirm, "function recalc()")
     create = _body(confirm, "async function create()")
@@ -155,3 +165,31 @@ def test_card_diff_compares_server_strings_only() -> None:
     diff = _body(_js("render.js"), "export function cardDiff(")
     assert "String(preview.calc[key]) !== String(card.calc[key])" in diff
     assert "Number(" not in diff
+
+
+# --- Д.5: «ЗАПИСЬ» подтверждения -----------------------------------------------------------
+
+
+def test_record_number_only_from_server_opening_id() -> None:
+    """Владелец 18.10: «ЗАПИСЬ № N» — только реальный opening_id сервера; нет — без номера,
+    на фронте не нумеруем."""
+    render = _js("render.js")
+    number = _body(render, "export function recordNumber(openingId)")
+    assert "Number.isInteger(openingId) && openingId > 0" in number
+    assert '"ЗАПИСЬ"' in number
+    confirm = _js("confirm.js")
+    assert confirm.count("recordNumber(") == 2       # из ответа сервера и «без номера» при загрузке
+    assert "recordNumber(next.opening_id)" in confirm and "recordNumber(null)" in confirm
+    assert "++" not in number and "count" not in number
+
+
+def test_record_and_diff_only_format_server_strings() -> None:
+    render = _js("render.js")
+    for name in ("export function recordRows(", "export function recordSubtitle(",
+                 "export function cardDiff(", "function digitsOrDash("):
+        body = _body(render, name)
+        for banned in ("Number(", "parseFloat", "toFixed", "Math."):
+            assert banned not in body, (name, banned)
+        assert re.search(r"\b(?:c|lv|calc)\.\w+\s*[-+*/%]\s*[\w(]", body) is None, name
+    diff = _body(render, "export function cardDiff(")
+    assert "digitsOrDash(preview.calc[key])" in diff and "digitsOrDash(card.calc[key])" in diff

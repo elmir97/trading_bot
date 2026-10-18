@@ -341,7 +341,8 @@ def test_registry_covers_queue_scenarios() -> None:
         "market_lines", "market_lines_none", "confirm_lines",
         "no_init_data", "me_502",
         "design_fonts", "design_theme", "design_market", "design_live", "design_font_swap",
-        "sdk_real", "design_font_404", "design_font_hang", "design_form",
+        "sdk_real", "design_font_404", "design_font_hang", "design_form", "design_confirm",
+        "design_confirm_refused", "confirm_double", "confirm_double_old",
     }
     assert [s.name for s in ms.select("all")] == list(ms.SCENARIOS)
     assert ms.select("poll") == [ms.SCENARIOS["poll"]]
@@ -518,3 +519,11 @@ async def test_sdk_rule_fulfills_with_stand_copy() -> None:
     sent = t.last("Fetch.fulfillRequest")
     assert sent["requestId"] == "S1"
     assert base64.b64decode(sent["body"]) == bc.STAND_SDK.read_bytes()
+
+def test_sdk_real_report_warns_on_mismatch_only() -> None:
+    """Д.5 (владелец 18.10): sdk_real сверяет sha256 настоящего SDK с копией стенда —
+    расхождение — WARN строкой отчёта (note), не замечание: гейт не валит."""
+    same = ms.sdk_compare("a" * 64, "a" * 64)
+    assert same.startswith("SDK telegram.org = копия стенда") and "WARN" not in same
+    diff = ms.sdk_compare("a" * 64, "b" * 64)
+    assert diff.startswith("WARN:") and "scripts/stand_sdk/telegram-web-app.js" in diff

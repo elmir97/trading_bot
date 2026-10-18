@@ -417,3 +417,30 @@ def test_main_real_sdk_flag(monkeypatch: pytest.MonkeyPatch, chrome_exe: Path) -
     assert bc.main(["--chrome", str(chrome_exe)]) == 0
     assert bc.main(["--chrome", str(chrome_exe), "--real-sdk"]) == 0
     assert seen == [True, False]
+
+
+class _SeqTransport(FakeTransport):
+    """evaluate отдаёт состояния по очереди (последнее — дальше всегда)."""
+
+    def __init__(self, states: list[Any]) -> None:
+        super().__init__([])
+        self.states = states
+
+    async def send(self, msg: dict[str, Any]) -> None:
+        if msg["method"] == "Runtime.evaluate":
+            self.state = self.states.pop(0) if len(self.states) > 1 else self.states[0]
+        await super().send(msg)
+
+
+@pytest.mark.parametrize(("charts", "issue"), [([0, 0, 1], False), ([0], True)])
+async def test_symbol_check_rereads_until_chart(monkeypatch: pytest.MonkeyPatch,
+                                                charts: list[int], issue: bool) -> None:
+    """Д.5: после тяжёлого прогона график иногда появляется позже --wait — дочитываем до
+    START_TIMEOUT; не появился и тогда — замечание «графиков 0»."""
+    monkeypatch.setattr(bc, "START_TIMEOUT", 0.6)
+    monkeypatch.setattr(bc, "CHART_POLL", 0.05)
+    t = _SeqTransport([_loaded(charts=n) for n in charts])
+    report = await bc.run_check(t, "http://127.0.0.1:8765/", 0.01, symbol="XRP-USDT")
+    assert any("графиков на странице 0" in i for i in report.issues) is issue
+    if not issue:
+        assert report.state["charts"] == 1

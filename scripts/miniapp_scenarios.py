@@ -22,8 +22,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import itertools
 import json
+import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -1008,7 +1010,7 @@ def _done(s: dict[str, Any]) -> bool:
 
 async def _open_and_confirm(page: Page, native: bool) -> dict[str, Any]:
     s = await _to_confirm(page, native)
-    page.expect("Карточка действует ещё" in (s.get("confirm_timer") or ""),
+    page.expect((s.get("confirm_timer") or "").startswith("действует "),
                 f"нет отсчёта: {s.get('confirm_timer')!r}")
     label = s.get("main_button") if native else s.get("confirm_action")
     page.expect(label in ("Подтвердить", "Открыть всё равно"), f"кнопка карточки: {label!r}")
@@ -1515,6 +1517,24 @@ async def sdk_real(page: Page, url: str) -> None:
     page.expect(s.get("market_charts") == 1, f"рынок с настоящим SDK: {s.get('screens')}")
     sdk = [u for st, u in page.collector.network if u == bc.SDK_URL and st == 200]
     page.expect(bool(sdk), "SDK не пришёл с telegram.org")
+    # Копия стенда = настоящий SDK? Расхождение — WARN в отчёте, гейт не валит (владелец 18.10).
+    rid = next((r for r, u in page.collector.urls.items() if u == bc.SDK_URL), None)
+    if rid is None:
+        page.note("WARN: SDK не сверен с копией стенда — запрос не найден")
+        return
+    got = await page.call("Network.getResponseBody", {"requestId": rid})
+    raw = got.get("body", "")
+    real = base64.b64decode(raw) if got.get("base64Encoded") else raw.encode("utf-8")
+    page.note(sdk_compare(hashlib.sha256(real).hexdigest(),
+                          hashlib.sha256(bc.STAND_SDK.read_bytes()).hexdigest()))
+
+
+def sdk_compare(real: str, copy: str) -> str:
+    """Строка отчёта sdk_real: совпала копия стенда с telegram.org или нет (WARN)."""
+    if real == copy:
+        return f"SDK telegram.org = копия стенда (sha256 {copy[:12]}…)"
+    return (f"WARN: SDK telegram.org ({real[:12]}…) ≠ копия стенда ({copy[:12]}…) — обновить "
+            "scripts/stand_sdk/telegram-web-app.js и sha256 в tests/test_miniapp_browser_check.py")
 
 
 # Д — дизайн Mini App (§9а «Дизайн Mini App»)
@@ -1921,6 +1941,154 @@ async def design_form(page: Page, url: str) -> None:
     await page.pump(1)
     g = await _form_design(page)
     page.expect(g["scroll_x"] == 0, f"форма 320 px: прокрутка {g['scroll_x']}")
+
+
+
+# Д.5 — «ЗАПИСЬ» подтверждения: номер, строки и «было → стало» — только строки сервера
+
+# Объём карточки ≠ объёма превью (TAP_QUANTITY) — «было → стало».
+CARD_QUANTITY = "86510"
+
+
+class CardTap:
+    """Ответ POST /api/open (правило «patch»): объём карточки — CARD_QUANTITY; ответ
+    сохраняется — эталон номера записи, срока и строк."""
+
+    def __init__(self, change: Callable[[dict[str, Any]], None] | None = None) -> None:
+        self.seen: list[dict[str, Any]] = []
+        self.change = change
+
+    def __call__(self, data: Any) -> Any:
+        if isinstance(data, dict):
+            card = data.get("card") or {}
+            if isinstance(card.get("calc"), dict):
+                card["calc"]["quantity"] = CARD_QUANTITY
+            if self.change is not None:
+                self.change(data)
+            self.seen.append(data)
+        return data
+
+    @property
+    def last(self) -> dict[str, Any]:
+        if not self.seen:
+            raise ScenarioError("ответ /api/open не пойман")
+        return self.seen[-1]
+
+
+RECORD_JS = """(() => {
+  const $ = (id) => document.getElementById(id);
+  const t = (id) => $(id).textContent.replace(/\\s+/g, ' ').trim();
+  const rows = [...document.querySelectorAll('#confirm-card .receipt-row')]
+    .map((r) => [...r.children].map((c) => c.textContent.replace(/\\s+/g, ' ').trim()));
+  return {
+    number: t('confirm-number'), sub: t('confirm-sub'), title: t('confirm-title'),
+    timer: $('confirm-timer').hidden ? null : t('confirm-timer'),
+    rows,
+    diff: $('confirm-diff-box').hidden ? null
+      : [...document.querySelectorAll('#confirm-diff li')].map((li) => li.textContent
+        .replace(/\\s+/g, ' ').trim()),
+    dry: !$('confirm-dry').hidden,
+    hands: [...document.querySelectorAll('#screen-confirm .hand')]
+      .filter((e) => e.offsetParent).length,
+  };
+})()"""
+
+
+def _record_want(card: dict[str, Any], margin_type: str) -> tuple[str, list[list[str]]]:
+    """Подзаголовок и строки записи из карточки сервера — только разряды и подписи."""
+    g = _grouped
+    c, lv = card["calc"], card["levels"]
+    margin = {"ISOLATED": "изол. ", "CROSSED": "кросс "}.get(margin_type, "")
+    price = g(lv["limit_price"]) if lv["entry_type"] == "LIMIT" else f"≈ {g(c['entry_price'])}"
+    kind = {"MARKET": "маркет", "LIMIT": "лимит"}[lv["entry_type"]]
+    sub = f"{kind} {price} · {margin}{lv['leverage']}×"
+    stop_tail = "" if c["distance_percent"] is None else f" · {c['distance_percent']}%"
+    rows = [
+        ["объём", f"{g(c['quantity'])} XRP"],
+        ["стоп", f"{g(lv['stop_loss'])}{stop_tail}"],
+        ["тейк", "нет" if lv["take_profit"] is None else g(lv["take_profit"])],
+        ["риск с комиссией", f"{g(c['risk_usd'])} $ · {c['risk_percent']}%"],
+        ["RR", "—" if c["rr"] is None else f"1 : {c['rr']}"],
+        ["ликвидация", "—" if c["liq_estimate"] is None else f"≈ {g(c['liq_estimate'])}"],
+        ["комиссия", f"≈ {g(c['fee_usd'])} $"],
+    ]
+    return sub, rows
+
+
+@scenario("design_confirm", "Д.5: «ЗАПИСЬ № opening_id», строки = карточка сервера, «было → стало» "
+                            "из превью и карточки (только разряды), таймер «действует M:SS»")
+async def design_confirm(page: Page, url: str) -> None:
+    tap, card_tap = PreviewTap(), CardTap()
+    await open_page(page, url, Setup(native=True, rules=[
+        Rule("/api/open/preview", "patch", patch=tap, method="POST"),
+        Rule("/api/open", "patch", patch=card_tap, method="POST", exact=True)]))
+    me = await page.js("fetch('/api/me').then((r) => r.json())")
+    await _ready_form(page, True)
+    await _to_confirm(page, True)
+    await page.pump(0.3)
+    got = await page.js(RECORD_JS)
+    res = card_tap.last
+    page.expect(got["number"] == f"ЗАПИСЬ № {res['opening_id']}",
+                f"номер записи {got['number']!r}, opening_id {res['opening_id']}")
+    sub, rows = _record_want(res["card"], me["margin_type"])
+    page.expect(got["sub"] == sub, f"подзаголовок {got['sub']!r} ≠ {sub!r}")
+    page.expect(got["rows"] == rows, f"строки записи {got['rows']} ≠ сервер {rows}")
+    page.expect(got["diff"] == ["объём: 86 482 → 86 510"], f"было → стало: {got['diff']}")
+    page.expect(got["hands"] == 1, f"пометок «от руки» {got['hands']}, ждали 1 (пересчёт)")
+    page.expect(bool(re.fullmatch(r"действует \d+:\d\d", got["timer"] or "")),
+                f"таймер {got['timer']!r}")
+    page.expect(got["dry"] == bool(me["flags"]["dry_run"]), f"строка сухого прогона {got['dry']}")
+
+
+def _refused(data: dict[str, Any]) -> None:
+    data["opening_id"] = None
+    data["status"] = "REFUSED"
+    data["expires_at"] = None
+    data["card"]["can_open"] = False
+
+
+@scenario("design_confirm_refused", "Д.5: отказ (opening_id нет) — «ЗАПИСЬ» без номера, кнопки нет")
+async def design_confirm_refused(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(native=True, rules=[
+        Rule("/api/open", "patch", patch=CardTap(_refused), method="POST", exact=True)]))
+    await _ready_form(page, True)
+    s = await _to_confirm(page, True)
+    got = await page.js(RECORD_JS)
+    page.expect(got["number"] == "ЗАПИСЬ", f"номер без opening_id: {got['number']!r}")
+    page.expect(s.get("main_button") is None, f"кнопка при отказе: {s.get('main_button')!r}")
+    page.expect(got["timer"] is None, f"таймер при отказе: {got['timer']!r}")
+
+
+@scenario("confirm_double", "Д.5: двойное нажатие «Подтвердить» (8.0, showConfirm) — один вопрос, "
+                            "один /confirm, одна сделка")
+async def confirm_double(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(native=True))
+    await page.js(FAKE_SHOW_CONFIRM)
+    await _ready_form(page, True)
+    await _to_confirm(page, True)
+    await page.js("Telegram.WebView.receiveEvent('main_button_pressed');"
+                  " Telegram.WebView.receiveEvent('main_button_pressed');")
+    await page.wait_for(_done, 25, "итог «Сделка #N»")
+    await page.pump(1)
+    asked = await page.js("window.__asked")
+    page.expect(len(asked) == 1, f"showConfirm спрошен {len(asked)} раз")
+    page.expect(len(_confirms(page)) == 1, f"/confirm: {len(_confirms(page))}, ждали 1")
+
+
+@scenario("confirm_double_old", "Д.5: старый клиент (6.0) — три быстрых нажатия: первое "
+                                "спрашивает, второе подтверждает, третье ничего — один /confirm")
+async def confirm_double_old(page: Page, url: str) -> None:
+    await open_page(page, url, Setup())
+    await _ready_form(page, False)
+    await _to_confirm(page, False)
+    # Касания — отдельными событиями с паузой (как пальцем): второе подтверждает, третье
+    # сразу за ним — уже в отправке и ничего не шлёт.
+    await page.click("#confirm-action")
+    await page.pump(0.1)
+    await page.js("const b = document.getElementById('confirm-action'); b.click();"
+                  " setTimeout(() => b.click(), 30);")
+    await page.wait_for(_done, 25, "итог «Сделка #N»")
+    page.expect(len(_confirms(page)) == 1, f"/confirm: {len(_confirms(page))}, ждали 1")
 
 
 SCENARIO_TIMEOUT = 150.0

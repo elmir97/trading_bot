@@ -162,7 +162,8 @@ python -m scripts.miniapp_dev [--port 8765]
   догрузилась (нет видимого экрана, SDK Telegram или библиотеки графиков) — тоже замечание: SDK с telegram.org
   в headless иногда не успевает за `--wait` (16.10 — примерно раз из трёх) → повторить или `--wait 15`. Со
   свежим профилем монеты нет — открывается поиск, графика нет; **`--symbol` кладёт монету в localStorage до
-  скриптов страницы → экран рынка, ровно один график обязателен** (проверка 2.3 — с ним). Путь к Chrome — `--chrome` или
+  скриптов страницы → экран рынка, ровно один график обязателен** (проверка 2.3 — с ним; график позже `--wait` — состояние
+  дочитывается до 15 с, не появился — замечание). Путь к Chrome — `--chrome` или
   `MINIAPP_CHROME` (в скрипте не зашит). Только 127.0.0.1 (страница и DevTools). Exit 0 — чисто, 1 — замечания
   списком, 2 — окружение не готово (нет Chrome, стенд не отвечает, URL не 127.0.0.1). **Каждый запуск — свежий
   временный профиль, удаляется после**: со старым профилем Chrome исполняет закэшированный ES-модуль (15.10 так
@@ -181,7 +182,10 @@ python -m scripts.miniapp_dev [--port 8765]
   `design_font_swap` — подмена `--mono` не двигает рынок по вертикали, Plex запрошен между `/api/me` и `/api/market`). Ссылка
   «💼 Позиции» без SettingsButton — в деталях плашки (`#account-plate` → `#account-positions`); `design_font_404`/`design_font_hang`
   — Plex недоступен, рынок и цена показаны (`Setup.intercept_fonts`); `design_form` — квитанция и «Открыть лонг · N XRP» = строки
-  ответа preview (объём подменён на «86482», `PreviewTap`), только разряды; `sdk_real` — настоящий SDK telegram.org.
+  ответа preview (объём подменён на «86482», `PreviewTap`), только разряды; `design_confirm`/`design_confirm_refused` — «ЗАПИСЬ
+  № opening_id» (без него — без номера), строки = карточка сервера, «было → стало» из превью и карточки (`CardTap`), таймер
+  «действует M:SS»; `confirm_double`/`confirm_double_old` — двойное нажатие = один `/confirm`; `sdk_real` — настоящий SDK
+  telegram.org, sha256 сверяется с копией стенда (расхождение — `WARN:` строкой отчёта, не замечание).
   **SDK telegram.org на стенде — копия `scripts/stand_sdk/telegram-web-app.js` по умолчанию** (Fetch подставляет её вместо сети:
   сценарии, `--shots`, обычная проверка; `--real-sdk` у обычной проверки и `Setup(real_sdk=True)` — настоящий). Прод и `index.html`
   не меняются. Обновление копии — новый файл и sha256 в `tests/test_miniapp_browser_check.py`. **Для `confirm_*` стенд — с `EXEC_OPEN_DRY_RUN=false`** (биржа стенда
@@ -190,7 +194,7 @@ python -m scripts.miniapp_dev [--port 8765]
   подменяется через `Fetch` (свой статус, правка ответа, обрыв, зависание, `exact` — путь целиком) — следы своих
   правил замечанием не считаются. SDK с telegram.org не загрузился (сеть) — сценарий прерывается с этим текстом,
   повторить; так же `wait_for`, если посреди сценария показан `screen-sdk`. Стенд вне Telegram — initData-заглушка в хеше (`#tgWebAppData=…`, `page_url`), без неё — экран «Открой Mini
-  App из бота» (`no_init_data`, `Setup(init_data=False)`); `me_502` — прокси без api (502 без JSON). `all` (53) ≈ 6.5 мин; exit 0/1/2 как выше. Новый экран — новый сценарий там же
+  App из бота» (`no_init_data`, `Setup(init_data=False)`); `me_502` — прокси без api (502 без JSON). `all` (57) ≈ 7 мин; exit 0/1/2 как выше. Новый экран — новый сценарий там же
 - снимки экранов — `--shots <папка> [--shot market|form|confirm|positions|all]` (`scripts/miniapp_shots.py`, при
   запущенном стенде; подэтап «Дизайн Mini App»): экраны 1–4 × светлая/тёмная (themeParams клиента в хеше +
   `prefers-color-scheme`, `Setup.theme`) × 390/320 px, страница целиком, масштаб 2, свои кнопки (браузер 6.0).

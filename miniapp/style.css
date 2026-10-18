@@ -703,7 +703,79 @@ main {
   font-variant-numeric: tabular-nums;
 }
 
-.confirm-actions { display: flex; flex-direction: column; gap: 8px; margin: 12px 0 var(--gap); }
+/* «ЗАПИСЬ № N» (Д.5, макет «Подтверждение»): карточка-запись с тенью 6px. */
+.record { margin: 4px 0 0; box-shadow: 6px 6px 0 var(--shadow); }
+
+.record-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: var(--border);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.record-timer { color: var(--ink); font-weight: 600; }
+
+.record-title { padding: 14px 16px 4px; }
+.record-title .trade-title { font-size: 24px; }
+
+.record-sub {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+.record-rows { padding: 6px 16px 12px; font-size: 15px; }
+.record-rows .receipt-row { padding: 8px 0; }
+.record-rows .receipt-row > :first-child { white-space: nowrap; }
+.record-rows .receipt-row > :last-child { text-align: right; }
+.record-rows .receipt-row > .text-red:first-child { color: var(--red-text); }
+.record-rows .receipt-row > .text-blue:first-child { color: var(--blue); }
+
+/* Текст сервера внутри записи (отказ, итог, лимит) — без второй рамки. */
+.record .card-text {
+  margin: 0;
+  padding: 10px 16px 14px;
+  border: 0;
+  box-shadow: none;
+  background: transparent;
+}
+
+.record-notes { padding: 0 16px; margin: 0 0 10px; }
+
+.record-diff {
+  padding: 10px 16px 14px;
+  border-top: 1px solid var(--rule);
+}
+
+.record-diff .hand { margin: 0; }
+
+.record-diff-list {
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+.record-dry {
+  margin: 0;
+  padding: 0 16px 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+@media (max-width: 359px) {
+  .record-rows { font-size: 13px; }
+}
+
+.confirm-actions { display: flex; flex-direction: column; gap: 8px; margin: 18px 0 var(--gap); }
 
 .button-plain { background: var(--card); color: var(--ink); border: var(--border); }
 

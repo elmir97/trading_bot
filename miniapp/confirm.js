@@ -17,7 +17,8 @@
 
 import { ApiError } from "./api.js";
 import {
-  cancelQuestion, cardDiff, confirmQuestion, LIVE_TEXT, resultLines,
+  cancelQuestion, cardDiff, clockLeft, confirmQuestion, LIVE_TEXT, recordNotes, recordNumber,
+  recordRows, recordSubtitle, resultLines,
 } from "./render.js";
 import { paintButton } from "./theme.js";
 
@@ -38,9 +39,14 @@ export function createConfirmScreen({ api, tg, me, onBack, onMarket, onFatal }) 
   const el = {
     live: $("confirm-live"),
     title: $("confirm-title"),
+    number: $("confirm-number"),
+    sub: $("confirm-sub"),
     timer: $("confirm-timer"),
     card: $("confirm-card"),
+    notes: $("confirm-notes"),
+    diffBox: $("confirm-diff-box"),
     diff: $("confirm-diff"),
+    dry: $("confirm-dry"),
     status: $("confirm-status"),
     action: $("confirm-action"),
     back: $("confirm-back"),
@@ -55,6 +61,8 @@ export function createConfirmScreen({ api, tg, me, onBack, onMarket, onFatal }) 
   let mode = "idle";         // card | sending | checking | working | result | expired | refused
   let action = null;         // что делает главная кнопка
   let armed = false;         // старый клиент без showConfirm: второе нажатие подтверждает
+  let asking = false;        // открыт вопрос showConfirm — повторные нажатия не считаются
+  let expiresAt = null;      // срок карточки — expires_at сервера
   let gen = 0;
   let timer = null;
   let pollTimer = null;
@@ -117,20 +125,66 @@ export function createConfirmScreen({ api, tg, me, onBack, onMarket, onFatal }) 
     controller = null;
   }
 
-  // Отсчёт до expires_at сервера; дошёл до нуля — «Пересчитать».
-  function countdown(expiresAt) {
-    const left = Math.ceil((Date.parse(expiresAt) - Date.now()) / 1000);
+  // Отсчёт до expires_at сервера (Д.5: «действует 1:57» в шапке записи); дошёл до нуля —
+  // «Пересчитать», подтверждать нельзя.
+  const EXPIRED_TEXT = "⌛ Карточка устарела — цены могли уйти. Пересчитай.";
+
+  function secondsLeft() {
+    return Math.ceil((Date.parse(expiresAt) - Date.now()) / 1000);
+  }
+
+  function countdown() {
+    const left = secondsLeft();
     if (!Number.isFinite(left)) {
       el.timer.hidden = true;
       return;
     }
     if (left <= 0) {
-      expired("⌛ Карточка устарела — цены могли уйти. Пересчитай.");
+      expired(EXPIRED_TEXT);
       return;
     }
-    el.timer.textContent = `Карточка действует ещё ${left} с`;
+    el.timer.textContent = `действует ${clockLeft(left)}`;
     el.timer.hidden = false;
-    timer = setTimeout(() => countdown(expiresAt), 1000);
+    timer = setTimeout(countdown, 1000);
+  }
+
+  // Текст сервера вместо строк записи (отказ, итог, лимит, загрузка).
+  function showText(value) {
+    el.card.className = "card-text";
+    el.card.textContent = value;
+    el.notes.hidden = true;
+    el.dry.hidden = true;
+  }
+
+  function showRecord(next) {
+    el.number.textContent = recordNumber(next.opening_id);
+    el.sub.textContent = recordSubtitle(card, me().margin_type);
+    const rows = recordRows(card, body.symbol);
+    if (!rows.length) {
+      showText(card.text);
+    } else {
+      el.card.className = "record-rows";
+      el.card.replaceChildren(...rows.map(([label, value, labelClass, valueClass]) => {
+        const row = document.createElement("div");
+        row.className = "receipt-row";
+        const a = document.createElement("span");
+        a.textContent = label;
+        if (labelClass) a.className = labelClass;
+        const b = document.createElement("span");
+        b.textContent = value;
+        if (valueClass) b.className = valueClass;
+        row.append(a, b);
+        return row;
+      }));
+      el.dry.hidden = !(me().flags && me().flags.dry_run);
+    }
+    const notes = recordNotes(card);
+    el.notes.replaceChildren(...notes.map((line) => {
+      const item = document.createElement("li");
+      item.textContent = line;
+      return item;
+    }));
+    el.notes.hidden = notes.length === 0;
   }
 
   // --- состояния -----------------------------------------------------------------------
@@ -138,14 +192,15 @@ export function createConfirmScreen({ api, tg, me, onBack, onMarket, onFatal }) 
   function showCard(next) {
     card = next.card;
     openingId = next.opening_id;
-    el.card.textContent = card.text;
+    expiresAt = next.expires_at;
+    showRecord(next);
     const diff = cardDiff(preview, card);
     el.diff.replaceChildren(...diff.map((line) => {
       const item = document.createElement("li");
-      item.textContent = `Карточка разошлась с превью — ${line}`;
+      item.textContent = line;
       return item;
     }));
-    el.diff.hidden = diff.length === 0;
+    el.diffBox.hidden = diff.length === 0;
     if (!openingId || next.status !== "CARD" || !card.can_open) {
       // Отказ или BLOCK на свежих данных — кнопки нет (решение 05.10).
       mode = "refused";
@@ -158,7 +213,7 @@ export function createConfirmScreen({ api, tg, me, onBack, onMarket, onFatal }) 
     status("");
     setAction(confirmLabel(), confirmPressed);
     secondary("Назад к форме", onBack);
-    countdown(next.expires_at);
+    countdown();
   }
 
   function expired(message) {
@@ -176,8 +231,8 @@ export function createConfirmScreen({ api, tg, me, onBack, onMarket, onFatal }) 
     mode = "result";
     opening = view;
     el.timer.hidden = true;
-    el.diff.hidden = true;
-    el.card.textContent = resultLines(view, serverText).join("\n");
+    el.diffBox.hidden = true;
+    showText(resultLines(view, serverText).join("\n"));
     status("");
     if (tg && tg.HapticFeedback && tg.isVersionAtLeast("6.1")) {
       tg.HapticFeedback.notificationOccurred(view.status === "DONE" ? "success" : "error");
@@ -193,8 +248,9 @@ export function createConfirmScreen({ api, tg, me, onBack, onMarket, onFatal }) 
     opening = view;
     el.timer.hidden = true;
     const until = view.expires_at ? new Date(view.expires_at) : null;
-    el.card.textContent = [serverText || view.text,
-      `⏳ Лимит выставлен${until ? `, истекает ${clock.format(until)}` : ""}`].join("\n");
+    el.diffBox.hidden = true;
+    showText([serverText || view.text,
+      `⏳ Лимит выставлен${until ? `, истекает ${clock.format(until)}` : ""}`].join("\n"));
     status("");
     setAction("Отменить лимит", cancelPressed);
     secondary("К рынку", onMarket);
@@ -306,10 +362,27 @@ export function createConfirmScreen({ api, tg, me, onBack, onMarket, onFatal }) 
     return Promise.resolve(false);
   }
 
+  // Двойное нажатие — один запрос (Д.5): пока открыт вопрос showConfirm, повторные нажатия
+  // не считаются; после ответа режим уже «sending». Срок карточки истёк — не подтверждаем
+  // (таймер мог не успеть сработать), сразу «Пересчитать».
   async function confirmPressed() {
-    if (mode !== "card") return;
-    if (!(await ask(confirmQuestion(card, body.side, body.symbol, live())))) return;
-    if (!active || mode !== "card") return;
+    if (mode !== "card" || asking) return;
+    if (expiresAt && secondsLeft() <= 0) {
+      expired(EXPIRED_TEXT);
+      return;
+    }
+    asking = true;
+    let ok;
+    try {
+      ok = await ask(confirmQuestion(card, body.side, body.symbol, live()));
+    } finally {
+      asking = false;
+    }
+    if (!ok || !active || mode !== "card") return;
+    if (expiresAt && secondsLeft() <= 0) {
+      expired(EXPIRED_TEXT);
+      return;
+    }
     stopTimers();
     mode = "sending";
     status("Отправляю…");
@@ -371,11 +444,14 @@ export function createConfirmScreen({ api, tg, me, onBack, onMarket, onFatal }) 
     pollUntil = 0;
     card = null;
     openingId = null;
+    expiresAt = null;
     el.live.hidden = !live();
     el.live.textContent = LIVE_TEXT;
     el.title.textContent = `${body.symbol} · ${SIDE_TEXT[body.side]}`;
-    el.card.textContent = "Готовлю карточку на свежих данных биржи…";
-    el.diff.hidden = true;
+    el.number.textContent = recordNumber(null);
+    el.sub.textContent = "";
+    showText("Готовлю карточку на свежих данных биржи…");
+    el.diffBox.hidden = true;
     el.timer.hidden = true;
     status("");
     setAction(null);
@@ -388,7 +464,7 @@ export function createConfirmScreen({ api, tg, me, onBack, onMarket, onFatal }) 
     } catch (err) {
       if (myGen !== gen) return;
       if (fatal(err)) return;
-      el.card.textContent = err instanceof ApiError ? err.message : "Карточка не получилась.";
+      showText(err instanceof ApiError ? err.message : "Карточка не получилась.");
       setAction("Повторить", create);
     }
   }
