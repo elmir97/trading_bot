@@ -79,6 +79,12 @@
   в образе); (3) гейт — pytest, smoke ×2, mypy на 3.12 (`…\trading_bot-312\Scripts\python -m pytest …`), 3.14 — не нужен; стенд и
   Chrome-сценарии можно оставить на любом; (4) первый прогон 3.12 — сравнить счёт с 2070 / 0 skipped, расхождения — доклад, не
   чинить на ходу; (5) CLAUDE.md «Локальный прогон» — путь к интерпретатору 3.12
+- **Гейт на 3.12 — сделано 18.10 по «да» владельца:** `py install 3.12` → CPython **3.12.10**
+  (`AppData\Local\Python\pythoncore-3.12-64`), venv `C:\Users\vladz\venvs\trading_bot-312`, `pip install -r requirements-dev.txt`,
+  `pip check` чисто. Прогон на HEAD `8636b4c`: pytest **2070 passed / 0 skipped** (exit 0, 5:39) — совпало с 3.14; smoke ×2 exit 0;
+  mypy app 60 и `ruff check .` 4116 — вывод **строка в строку** как у 3.14 (рост ruff с 4106 на Д.0 — RUF001–003 новых файлов Д.1).
+  Дальше гейт — только на 3.12 (CLAUDE.md «Локальный прогон»). Остаётся разница патч-версии: образ — последний `3.12-slim` на день
+  сборки, локально 3.12.10; точную версию прода можно снять чек-апом (`docker compose exec -T bot python -V`, только чтение)
 
 **17.10.2026: прод — Mini App задеплоен (шаги 1–10 «Деплой Mini App» в CLAUDE.md, каждый по «да»; подробно — блоки «Шаг 1…10»
 ниже). Прод = образ `trading_bot-bot:latest` `5d4e95b74519` из `fbbeb02` (bot и api) + статика `miniapp/` и код на диске `caac158`

@@ -10,6 +10,18 @@ Telegram-бот журнала сделок и поиска сетапов на 
 Docker на этой машине **не работает** (виртуализация выключена в BIOS).
 Docker Desktop не запускать, профиль `test` из compose не поднимать.
 
+**Интерпретатор гейта — Python 3.12, как в образе (`python:3.12-slim`), с 18.10.2026:**
+
+```
+C:\Users\vladz\venvs\trading_bot-312\Scripts\python.exe
+```
+
+venv вне OneDrive и репозитория, CPython 3.12.10 (`py install 3.12`), пакеты — `pip install -r requirements-dev.txt`
+(те же пины, что в образе). pytest, smoke, mypy, ruff, стенд и сценарии — им. Смена `requirements*.txt` — тот же
+`pip install` в этот venv до гейта. `python` в PATH — заглушка WindowsApps (exit 49), не использовать; 3.14
+(`AppData\Local\Python\pythoncore-3.14-64`) — до 18.10 гейт шёл на нём, переход сверен: на `8636b4c` оба дали
+pytest 2070 / 0 skipped, smoke ×2 exit 0, вывод mypy и ruff — строка в строку.
+
 Тестовая БД — нативный PostgreSQL 18, служба `postgresql-x64-18`:
 
 ```
@@ -21,7 +33,8 @@ DATABASE_URL=postgresql+asyncpg://test:test@localhost:5432/trading_bot_test
 
 Нужны: `DATABASE_URL`, `BOT_TOKEN`, `ENCRYPTION_KEY`,
 `TRADING_EXECUTION_ENABLED=true`. Для `smoke_check.py` на Windows-консоли
-ещё `PYTHONUTF8=1`.
+ещё `PYTHONUTF8=1`. `ENCRYPTION_KEY` тестовой базы — свежий Fernet на прогон
+(`Fernet.generate_key()`), нигде не хранится.
 
 Из сессии Claude Code pytest запускать с `--capture=sys`: при захвате по fd у дочерних процессов
 невалидный stdin, и 45 тестов `test_rehearse_migration_script.py` падают на `subprocess` (WinError 50/6) — это среда,
