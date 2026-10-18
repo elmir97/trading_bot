@@ -76,24 +76,23 @@ def test_tick_formatter_never_falls_back_to_utc() -> None:
     assert formatter.rstrip("}").rstrip().endswith("return clock.format(date);")
 
 
-def test_chart_colors_from_theme_params_and_follow_theme_changes() -> None:
+def test_chart_colors_from_tokens_and_follow_theme_changes() -> None:
+    """Д.2: цвета — токены style.css (theme.js), не themeParams; смену темы шлёт theme.js."""
     chart = _js("chart.js")
-    colors = _body(chart, "export function themeColors(tg)")
-    assert "tg.themeParams" in colors
-    for key in ("bg_color", "hint_color"):
-        assert f"p.{key}" in colors
-    assert 'tg.onEvent("themeChanged", applyTheme)' in chart
-    assert 'media.addEventListener("change", applyTheme)' in chart
+    colors = _body(chart, "export function themeColors()")
+    assert "themeParams" not in colors
+    for name in ("--card", "--muted", "--chart-grid", "--ink", "--red", "--blue"):
+        assert f'token("{name}")' in colors
+    assert "document.addEventListener(THEME_EVENT, applyTheme)" in chart
     apply = _body(chart, "function applyTheme()")
-    assert "themeColors(tg)" in apply
+    assert "themeColors()" in apply
     assert "chart.applyOptions" in apply
 
 
 def test_chart_destroy_unsubscribes_and_removes() -> None:
     chart = _js("chart.js")
     destroy = _body(chart, "destroy() {")
-    assert 'tg.offEvent("themeChanged", applyTheme)' in destroy
-    assert 'media.removeEventListener("change", applyTheme)' in destroy
+    assert "document.removeEventListener(THEME_EVENT, applyTheme)" in destroy
     assert "chart.remove()" in destroy
     # Каждой подписке — отписка.
     assert chart.count("onEvent(") == chart.count("offEvent(")

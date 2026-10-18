@@ -275,3 +275,12 @@ def test_refusals_hold_without_dry_run(kw: dict[str, object], where: dict[str, P
 
 def test_dev_machine_without_dry_run_passes() -> None:
     _check(_settings(exec_open_dry_run=False))
+
+
+def test_stand_serves_fonts_as_woff2() -> None:
+    """Д.1/Д.2: на Python 3.12 (гейт с 18.10) mimetypes не знает .woff2 — стенд регистрирует
+    тип сам, иначе шрифты уходят application/octet-stream (сценарий design_fonts)."""
+    import mimetypes
+
+    assert stand.MINIAPP_DIR.is_dir()
+    assert mimetypes.guess_type("vendor/fonts/x.woff2")[0] == "font/woff2"

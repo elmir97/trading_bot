@@ -13,6 +13,7 @@ import { createTradeScreen } from "./form.js";
 import { createMarketScreen } from "./market.js";
 import { createPositionsScreen } from "./positions.js";
 import { createStorage } from "./storage.js";
+import { initTheme } from "./theme.js";
 
 const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
 const TV_URL = "https://www.tradingview.com/";
@@ -211,6 +212,8 @@ function showOutsideTelegram() {
 }
 
 function init() {
+  // Тема — первой: и экран «Открой из бота», и шапка Telegram — уже в цвет бумаги.
+  initTheme(tg);
   // Без SDK запасного режима нет (без initData нет авторизации): экран boot.js.
   if (!tg || window.maBoot.failed()) {
     window.maBoot.fail();

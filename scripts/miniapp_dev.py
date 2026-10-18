@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import mimetypes
 import os
 import random
 import sys
@@ -61,6 +62,10 @@ DEV_TELEGRAM_ID = 434343
 REQUIRED_DB_NAME = "trading_bot_test"
 PROD_ROOT = "/opt/trading_bot"
 MINIAPP_DIR = Path(__file__).resolve().parents[1] / "miniapp"
+
+# Шрифты Mini App (Д.1): в mimetypes Python 3.12 нет .woff2 — без этого стенд отдаёт их
+# application/octet-stream (на 3.14 тип есть; Caddy берёт свой — проверка на деплое).
+mimetypes.add_type("font/woff2", ".woff2")
 
 # Как в Caddyfile (§5, §6); HSTS — только на HTTPS, у стенда его нет.
 CSP = (

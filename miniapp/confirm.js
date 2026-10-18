@@ -19,6 +19,7 @@ import { ApiError } from "./api.js";
 import {
   cancelQuestion, cardDiff, confirmQuestion, LIVE_TEXT, resultLines,
 } from "./render.js";
+import { paintButton } from "./theme.js";
 
 export const POLL_MS = 2000;
 export const POLL_LIMIT_MS = 180000;
@@ -70,9 +71,8 @@ export function createConfirmScreen({ api, tg, me, onBack, onMarket, onFatal }) 
       if (!textValue) {
         tg.MainButton.setParams({ is_visible: false });
       } else {
-        tg.MainButton.setParams({ text: textValue, is_active: !progress, is_visible: true,
-          color: live() ? getComputedStyle(document.documentElement)
-            .getPropertyValue("--live").trim() : tg.themeParams.button_color || undefined });
+        paintButton(tg.MainButton, live() ? "live" : "main",
+          { text: textValue, is_active: !progress, is_visible: true });
       }
       tg.SecondaryButton.setParams({ is_visible: false });
     } else {

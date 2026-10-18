@@ -340,7 +340,7 @@ def test_registry_covers_queue_scenarios() -> None:
         "pos_401", "pos_poll", "pos_to_market", "menu_native",
         "market_lines", "market_lines_none", "confirm_lines",
         "no_init_data", "me_502",
-        "design_fonts",
+        "design_fonts", "design_theme",
     }
     assert [s.name for s in ms.select("all")] == list(ms.SCENARIOS)
     assert ms.select("poll") == [ms.SCENARIOS["poll"]]

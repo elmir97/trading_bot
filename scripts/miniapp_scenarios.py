@@ -544,17 +544,44 @@ async def timeframe(page: Page, url: str) -> None:
     page.expect(s.get("charts") == 1, f"графиков {s.get('charts')}, ждали 1")
 
 
-@scenario("theme", "2.3: theme_changed — фон графика перекрашен в bg_color Telegram")
+# Пиксель графика — через копию в свой холст 1×1: несколько getImageData с холста библиотеки
+# Chrome отмечает предупреждением (willReadFrequently), а оно — замечание сценария.
+THEME_STATE_JS = """(() => {
+  const c = document.querySelector('#market-chart canvas');
+  let d = [];
+  if (c) {
+    const one = document.createElement('canvas');
+    one.width = 1;
+    one.height = 1;
+    const ctx = one.getContext('2d');
+    ctx.drawImage(c, 3, 3, 1, 1, 0, 0, 1, 1);
+    d = ctx.getImageData(0, 0, 1, 1).data;
+  }
+  return { theme: document.documentElement.dataset.theme || null,
+           body: getComputedStyle(document.body).backgroundColor,
+           pixel: [d[0], d[1], d[2]] };
+})()"""
+# Бумага и карточка набора (style.css, таблица §9а): фон страницы и фон графика.
+THEME_RGB = {"light": ("rgb(246, 246, 242)", [255, 255, 255]),
+             "dark": ("rgb(20, 22, 26)", [27, 30, 36])}
+
+
+async def _expect_theme(page: Page, want: str) -> None:
+    got = await page.js(THEME_STATE_JS)
+    body, pixel = THEME_RGB[want]
+    page.expect(got["theme"] == want, f"data-theme {got['theme']!r}, ждали {want}")
+    page.expect(got["body"] == body, f"{want}: фон страницы {got['body']}, ждали {body}")
+    page.expect(got["pixel"] == pixel, f"{want}: фон графика {got['pixel']}, ждали {pixel}")
+
+
+@scenario("theme", "Д.2: theme_changed — страница и график в наборе colorScheme (светлая ↔ тёмная)")
 async def theme(page: Page, url: str) -> None:
-    await open_page(page, url, Setup(native=True))
-    pixel = ("(() => { const c = document.querySelector('#market-chart canvas');"
-             " const d = c.getContext('2d').getImageData(3, 3, 1, 1).data;"
-             " return [d[0], d[1], d[2]]; })()")
-    await page.telegram_event("theme_changed", {"theme_params": {
-        "bg_color": "#0e1621", "text_color": "#f5f5f5", "hint_color": "#708499"}})
-    await page.pump(1)
-    got = await page.js(pixel)
-    page.expect(got == [14, 22, 33], f"фон графика {got}, ждали [14, 22, 33] (#0e1621)")
+    await open_page(page, url, Setup(native=True, theme="light"))
+    await _expect_theme(page, "light")
+    for want in ("dark", "light"):
+        await page.telegram_event("theme_changed", {"theme_params": THEME_PARAMS[want]})
+        await page.pump(1)
+        await _expect_theme(page, want)
 
 
 @scenario("widths", "2.3/2.4: 320 и 390 px без прокрутки вбок, поворот — график по ширине")
@@ -1483,6 +1510,54 @@ async def design_fonts(page: Page, url: str) -> None:
     page.note(f"woff2 загружено: {len(fonts)}")
     page.expect(bool(fonts) and all(s == 200 and u.startswith(url) for s, u in fonts),
                 f"woff2 не свои или не 200: {fonts}")
+
+
+# События клиенту Telegram (postEvent) — в window.__events, до смены темы.
+RECORD_EVENTS = ("window.__events = []; const post = Telegram.WebView.postEvent;"
+                 " Telegram.WebView.postEvent = (type, cb, data) => {"
+                 " window.__events.push([type, data || null]); return post(type, cb, data); }")
+DESIGN_JS = """(async () => {
+  const { groupDigits } = await import('./render.js');
+  const tg = Telegram.WebApp;
+  const last = (type) => {
+    const found = window.__events.filter((e) => e[0] === type);
+    return found.length ? found[found.length - 1][1] : null;
+  };
+  const hands = [...document.querySelectorAll('.hand')].filter((e) => e.offsetParent).length;
+  return {
+    header: last('web_app_set_header_color'),
+    background: last('web_app_set_background_color'),
+    bottom: last('web_app_set_bottom_bar_color'),
+    main: [tg.MainButton.color, tg.MainButton.textColor],
+    secondary: [tg.SecondaryButton.color, tg.SecondaryButton.textColor],
+    price_font: getComputedStyle(document.getElementById('market-last')).fontFamily,
+    hands,
+    digits: ['84172.35', '1683.45', '-1683.45', '956', '1234567', '—', null, '1.2974',
+             '12a'].map(groupDigits),
+  };
+})()"""
+NB = chr(160)                     # неразрывный пробел groupDigits
+DIGITS = ["84" + NB + "172.35", "1" + NB + "683.45", "-1" + NB + "683.45", "956",
+          "1" + NB + "234" + NB + "567", "—", "", "1.2974", "12a"]
+
+
+@scenario("design_theme", "Д.2: шапка/фон/нижняя полоса Telegram и нативные кнопки — в цветах "
+                          "набора; разряды; цена моноширинным")
+async def design_theme(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(native=True, theme="light"))
+    await page.js(RECORD_EVENTS)
+    for want, paper, ink, red in (("dark", "#14161a", "#ece9e1", "#ff6b5e"),
+                                  ("light", "#f6f6f2", "#16181d", "#d43329")):
+        await page.telegram_event("theme_changed", {"theme_params": THEME_PARAMS[want]})
+        await page.pump(1)
+        got = await page.js(DESIGN_JS)
+        for key in ("header", "background", "bottom"):
+            page.expect(got[key] == {"color": paper}, f"{want}: {key} {got[key]!r}, ждали {paper}")
+        page.expect(got["main"] == [ink, paper], f"{want}: MainButton {got['main']}")
+        page.expect(got["secondary"] == [paper, red], f"{want}: SecondaryButton {got['secondary']}")
+    page.expect(got["price_font"].startswith('"IBM Plex Mono"'), f"цена: {got['price_font']!r}")
+    page.expect(got["hands"] <= 1, f"пометок «от руки» на экране {got['hands']}")
+    page.expect(got["digits"] == DIGITS, f"groupDigits: {got['digits']}")
 
 
 SCENARIO_TIMEOUT = 150.0

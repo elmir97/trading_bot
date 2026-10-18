@@ -1,43 +1,105 @@
-/* Тема — переменные Telegram (--tg-theme-*, их ставит telegram-web-app.js);
-   запасные значения — для браузера без Telegram (стенд). */
-:root {
-  --bg: var(--tg-theme-bg-color, #ffffff);
-  --text: var(--tg-theme-text-color, #0f1419);
-  --hint: var(--tg-theme-hint-color, #6b7280);
-  --link: var(--tg-theme-link-color, #2481cc);
-  --button: var(--tg-theme-button-color, #2481cc);
-  --button-text: var(--tg-theme-button-text-color, #ffffff);
-  --section: var(--tg-theme-secondary-bg-color, #f2f3f5);
-  --long: #16a34a;
-  --short: #dc2626;
-  --live: #dc2626;
-  --liq: #f59e0b;
-  --gap: 16px;
+/* Тема «разворот журнала» (§9а «Дизайн Mini App»). Цвета — только токены ниже: светлый и
+   тёмный набор, выбор — data-theme у <html> (theme.js по colorScheme Telegram); до него и
+   без SDK — системная prefers-color-scheme (тот же тёмный набор). Hex вне блоков токенов
+   не пишем — tests/test_miniapp_design.py.
+   --red — линии, рамки, свечи падения; --red-text — красный текст и заливка под текстом
+   (≥ 4.5:1 на бумаге и на карточке; яркий красный на бумаге — 4.35). */
+:root,
+html[data-theme="light"] {
+  --paper: #f6f6f2;
+  --grid-h: #e6e6df;
+  --grid-v: #ecece6;
+  --ink: #16181d;
+  --muted: #5c606a;
+  --rule: #d9d9d2;
+  --card: #ffffff;
+  --shadow: #16181d;
+  --red: #d7362b;
+  --red-text: #d43329;
+  --blue: #1f4fd8;
+  --chip-line: #b9bcc2;
+  --chart-grid: #ecece6;
+  --danger-rule: #f0c9c5;
+  --danger-shadow: #d7362b;
+}
+
+html[data-theme="dark"] {
+  --paper: #14161a;
+  --grid-h: #1d2026;
+  --grid-v: #1a1d22;
+  --ink: #ece9e1;
+  --muted: #8d929b;
+  --rule: #2a2e36;
+  --card: #1b1e24;
+  --shadow: #3a3f48;
+  --red: #ff6b5e;
+  --red-text: #ff6b5e;
+  --blue: #7aa2ff;
+  --chip-line: #3a3f48;
+  --chart-grid: #262a31;
+  --danger-rule: #3a2a2a;
+  --danger-shadow: #5a2622;
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
-    --bg: var(--tg-theme-bg-color, #17212b);
-    --text: var(--tg-theme-text-color, #f5f5f5);
-    --hint: var(--tg-theme-hint-color, #8b9398);
-    --section: var(--tg-theme-secondary-bg-color, #232e3c);
+  html:not([data-theme]) {
+    --paper: #14161a;
+    --grid-h: #1d2026;
+    --grid-v: #1a1d22;
+    --ink: #ece9e1;
+    --muted: #8d929b;
+    --rule: #2a2e36;
+    --card: #1b1e24;
+    --shadow: #3a3f48;
+    --red: #ff6b5e;
+    --red-text: #ff6b5e;
+    --blue: #7aa2ff;
+    --chip-line: #3a3f48;
+    --chart-grid: #262a31;
+    --danger-rule: #3a2a2a;
+    --danger-shadow: #5a2622;
   }
+}
+
+:root {
+  --sans: "Golos Text", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+  --hand: "Caveat", cursive;
+  --radius: 4px;
+  --border: 1.5px solid var(--ink);
+  --gap: 16px;
 }
 
 * { box-sizing: border-box; }
 
+html {
+  background: var(--paper);
+  color-scheme: light;
+}
+
+html[data-theme="dark"] { color-scheme: dark; }
+
+@media (prefers-color-scheme: dark) {
+  html:not([data-theme]) { color-scheme: dark; }
+}
+
 html, body {
   margin: 0;
-  background: var(--bg);
-  color: var(--text);
-  font: 15px/1.4 "Golos Text", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  color: var(--ink);
+  font: 15px/1.4 var(--sans);
   -webkit-text-size-adjust: 100%;
 }
 
+/* Клетка тетради 24px — два градиента, без картинок (CSP img-src не трогаем). */
 body {
   display: flex;
   flex-direction: column;
   min-height: 100vh;
+  background-color: var(--paper);
+  background-image:
+    linear-gradient(var(--grid-h) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-v) 1px, transparent 1px);
+  background-size: 24px 24px;
 }
 
 main {
@@ -47,7 +109,58 @@ main {
 
 [hidden] { display: none !important; }
 
-.muted { color: var(--hint); }
+.muted { color: var(--muted); }
+
+/* --- Общие компоненты (Д.2) --- */
+
+/* Числа, таблицы, подписи — моноширинным. */
+.num {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Пометка «от руки» — не больше одной на экран (тест сценария). */
+.hand {
+  font-family: var(--hand);
+  font-weight: 600;
+  font-size: 20px;
+  line-height: 1.15;
+  color: var(--blue);
+}
+
+.hand.red { color: var(--red-text); }
+
+/* Карточка-запись: рамка чернилами и тень смещением. */
+.card {
+  background: var(--card);
+  border: var(--border);
+  border-radius: var(--radius);
+  box-shadow: 4px 4px 0 var(--shadow);
+}
+
+.card.danger {
+  border-color: var(--red);
+  box-shadow: 4px 4px 0 var(--danger-shadow);
+}
+
+/* Строка квитанции: подпись слева, значение справа, пунктир снизу. */
+.receipt-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--rule);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.receipt-row:last-child { border-bottom: 0; }
+.receipt-row > :first-child { color: var(--muted); }
+
+.text-red { color: var(--red-text); }
+.text-blue { color: var(--blue); }
+
+/* --- Шапка счёта --- */
 
 .account {
   display: flex;
@@ -55,45 +168,57 @@ main {
   align-items: center;
   gap: 8px;
   padding: 10px var(--gap);
-  background: var(--section);
+  background: var(--paper);
+  border-bottom: 1px solid var(--rule);
   font-size: 13px;
 }
 
 .badge {
-  padding: 2px 8px;
-  border-radius: 6px;
-  background: var(--button);
-  color: var(--button-text);
+  padding: 2px 6px;
+  border-radius: 2px;
+  background: var(--ink);
+  color: var(--paper);
+  font-family: var(--mono);
+  font-size: 11px;
   font-weight: 600;
 }
 
-.account.live .badge { background: var(--live); }
-.account.live { box-shadow: inset 0 -2px 0 var(--live); }
+.account.live .badge { background: var(--red-text); color: var(--paper); }
+.account.live { box-shadow: inset 0 -2px 0 var(--red); }
 
-.account-note { width: 100%; color: var(--hint); }
+.account-note { width: 100%; color: var(--muted); }
 
 .screen { padding: var(--gap) 0; }
 
 .error-title { font-size: 18px; margin: 0 0 8px; }
 
+/* --- Кнопки: главная — заливка чернилами, «Шорт» — красный контур --- */
+
 .button {
   width: 100%;
   min-height: 44px;
   border: 0;
-  border-radius: 10px;
-  background: var(--button);
-  color: var(--button-text);
+  border-radius: var(--radius);
+  background: var(--ink);
+  color: var(--paper);
   font: inherit;
-  font-weight: 600;
+  font-weight: 700;
 }
 
-.button-long { background: var(--long); color: #ffffff; }
-.button-short { background: var(--short); color: #ffffff; }
+.button-long { background: var(--ink); color: var(--paper); }
+
+.button-short {
+  background: var(--card);
+  color: var(--red-text);
+  border: 2px solid var(--red);
+}
 
 .fallback-buttons {
   display: flex;
   gap: 8px;
-  padding: 8px var(--gap) calc(8px + env(safe-area-inset-bottom));
+  padding: 12px var(--gap) calc(12px + env(safe-area-inset-bottom));
+  background: var(--paper);
+  border-top: 2px solid var(--ink);
 }
 
 .attribution {
@@ -102,7 +227,7 @@ main {
   text-align: center;
 }
 
-.attribution a { color: var(--hint); }
+.attribution a { color: var(--muted); }
 
 .small { font-size: 12px; }
 
@@ -111,7 +236,7 @@ main {
 .link-button {
   border: 0;
   background: none;
-  color: var(--link);
+  color: var(--blue);
   font: inherit;
   padding: 8px 0 8px 8px;
 }
@@ -130,10 +255,10 @@ main {
   gap: 8px;
   border: 0;
   background: none;
-  color: var(--text);
+  color: var(--ink);
   font: inherit;
   font-size: 17px;
-  font-weight: 600;
+  font-weight: 700;
   padding: 4px 0;
   margin-right: auto;
   min-width: 0;
@@ -146,7 +271,7 @@ main {
   .chip-kind { display: none; }
 }
 
-.caret { color: var(--hint); font-size: 13px; }
+.caret { color: var(--muted); font-size: 13px; }
 
 .coin {
   display: inline-flex;
@@ -155,8 +280,9 @@ main {
   width: 28px;
   height: 28px;
   border-radius: 50%;
-  background: var(--section);
-  color: var(--text);
+  border: var(--border);
+  background: var(--card);
+  color: var(--ink);
   font-size: 13px;
   font-weight: 700;
   flex: none;
@@ -165,9 +291,11 @@ main {
 .chip {
   flex: none;
   padding: 2px 8px;
-  border-radius: 6px;
-  background: var(--section);
-  color: var(--hint);
+  border-radius: var(--radius);
+  border: 1px solid var(--chip-line);
+  background: var(--card);
+  color: var(--muted);
+  font-family: var(--mono);
   font-size: 12px;
 }
 
@@ -175,46 +303,50 @@ main {
   flex: none;
   border: 0;
   background: none;
-  color: var(--hint);
+  color: var(--muted);
   font-size: 20px;
   line-height: 1;
   padding: 4px;
 }
 
-.star[aria-pressed="true"] { color: #f5a524; }
+.star[aria-pressed="true"] { color: var(--blue); }
 
 .market-price { margin: 8px 0 12px; }
 
 .price {
+  font-family: var(--mono);
   font-size: 30px;
-  font-weight: 700;
+  font-weight: 600;
   letter-spacing: -0.01em;
   font-variant-numeric: tabular-nums;
 }
 
-.change { margin: 2px 0; color: var(--hint); font-variant-numeric: tabular-nums; }
+.change {
+  margin: 2px 0;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
 
 .pill {
   display: inline-block;
-  padding: 1px 6px;
-  border-radius: 6px;
-  background: var(--section);
-  color: var(--hint);
+  color: var(--muted);
   font-weight: 600;
 }
 
-.pill.up { background: rgba(22, 163, 74, 0.15); color: var(--long); }
-.pill.down { background: rgba(220, 38, 38, 0.15); color: var(--short); }
+.pill.up { color: var(--blue); }
+.pill.down { color: var(--red-text); }
 
-.details .up { color: var(--long); }
-.details .down { color: var(--short); }
+.details .up { color: var(--blue); }
+.details .down { color: var(--red-text); }
 
 .note {
   margin: 6px 0 0;
   padding: 6px 10px;
-  border-radius: 8px;
-  background: var(--section);
-  color: var(--hint);
+  border-radius: var(--radius);
+  border: 1px solid var(--rule);
+  background: var(--card);
+  color: var(--muted);
   font-size: 12px;
 }
 
@@ -237,8 +369,8 @@ main {
   justify-content: center;
   gap: 8px;
   padding: 0 var(--gap);
-  background: var(--bg);
-  color: var(--hint);
+  background: var(--card);
+  color: var(--muted);
   text-align: center;
 }
 
@@ -252,31 +384,37 @@ main {
   margin: 8px 0 4px;
 }
 
+/* Сегмент: рамка чернилами, выбранное — заливка чернилами. */
 .segmented {
   display: inline-flex;
-  gap: 2px;
-  padding: 2px;
-  border-radius: 8px;
-  background: var(--section);
+  border: var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--card);
 }
 
 .segmented button {
   min-width: 34px;
-  min-height: 30px;
+  min-height: 32px;
   border: 0;
-  border-radius: 6px;
+  border-radius: 0;
   background: none;
-  color: var(--hint);
+  color: var(--ink);
   font: inherit;
   font-size: 13px;
-  padding: 0 6px;
+  padding: 0 8px;
 }
 
 .segmented button.selected {
-  background: var(--bg);
-  color: var(--text);
+  background: var(--ink);
+  color: var(--paper);
   font-weight: 600;
 }
+
+#market-intervals,
+#trade-stop-kind,
+#trade-take-kind,
+#trade-risk-kind { font-family: var(--mono); }
 
 .section-title { font-size: 15px; margin: 16px 0 6px; }
 
@@ -287,8 +425,14 @@ main {
   margin: 0;
 }
 
-.details dt { color: var(--hint); }
-.details dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+.details dt { color: var(--muted); }
+
+.details dd {
+  margin: 0;
+  text-align: right;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
 
 .market-error { padding: var(--gap) 0; }
 
@@ -297,11 +441,11 @@ main {
 .search-bar input {
   flex: 1;
   min-height: 40px;
-  border: 0;
-  border-radius: 10px;
+  border: var(--border);
+  border-radius: var(--radius);
   padding: 0 12px;
-  background: var(--section);
-  color: var(--text);
+  background: var(--card);
+  color: var(--ink);
   font: inherit;
   font-size: 16px;
 }
@@ -317,8 +461,9 @@ main {
   width: 100%;
   min-height: 44px;
   border: 0;
+  border-bottom: 1px solid var(--rule);
   background: none;
-  color: var(--text);
+  color: var(--ink);
   font: inherit;
   text-align: left;
   padding: 4px 0;
@@ -332,7 +477,7 @@ main {
 
 .trade-title { font-size: 17px; margin: 0; margin-right: auto; }
 
-.trade-last { color: var(--hint); font-variant-numeric: tabular-nums; }
+.trade-last { color: var(--muted); font-family: var(--mono); font-variant-numeric: tabular-nums; }
 
 .chart-compact {
   margin-top: 8px;
@@ -346,36 +491,44 @@ main {
 .trade-form { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
 
 .segmented-wide { display: flex; }
-.segmented-wide button { flex: 1; min-height: 36px; }
-#trade-side button[data-side="LONG"].selected { color: var(--long); }
-#trade-side button[data-side="SHORT"].selected { color: var(--short); }
+.segmented-wide button { flex: 1; min-height: 40px; font-weight: 600; }
+#trade-side button[data-side="SHORT"].selected { background: var(--red-text); color: var(--paper); }
 
 .field { display: flex; align-items: center; gap: 8px; }
 
-.field-label { flex: none; width: 48px; color: var(--hint); }
+.field-label { flex: none; width: 48px; color: var(--muted); }
 
+/* Поле — подчёркивание: стоп — красным, тейк — синим, остальное — чернилами. */
 .field-input,
 .field-select {
   flex: 1;
   min-width: 0;
-  min-height: 36px;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  padding: 0 10px;
-  background: var(--section);
-  color: var(--text);
-  font: inherit;
-  font-size: 16px;
+  min-height: 40px;
+  border: 0;
+  border-bottom: 2px solid var(--ink);
+  border-radius: 0;
+  padding: 0 4px;
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 18px;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 
-.field-select { flex: none; }
+.field-select { flex: none; font-size: 15px; }
 
-.field-input.invalid { border-color: var(--short); }
+#trade-stop { border-bottom-color: var(--red); }
+#trade-take { border-bottom-color: var(--blue); }
 
-.field-range { flex: 1; min-width: 0; accent-color: var(--button); }
+.field-input.invalid {
+  border-bottom: 2px dashed var(--red);
+  color: var(--red-text);
+}
 
-.field-value { flex: none; min-width: 44px; text-align: right; font-weight: 600; }
+.field-range { flex: 1; min-width: 0; accent-color: var(--ink); }
+
+.field-value { flex: none; min-width: 44px; text-align: right; font-family: var(--mono); font-weight: 600; }
 
 .field-hint { margin: -4px 0 0 56px; }
 .field-hint:empty { display: none; }
@@ -383,13 +536,13 @@ main {
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: -2px 0 0 56px; }
 
 .chips button {
-  min-height: 28px;
-  border: 0;
-  border-radius: 6px;
+  min-height: 30px;
+  border: 1px solid var(--chip-line);
+  border-radius: var(--radius);
   padding: 0 10px;
-  background: var(--section);
-  color: var(--text);
-  font: inherit;
+  background: var(--card);
+  color: var(--ink);
+  font-family: var(--mono);
   font-size: 13px;
 }
 
@@ -407,24 +560,26 @@ main {
 .live-warning {
   margin: 0 0 8px;
   padding: 6px 10px;
-  border-radius: 8px;
-  background: var(--live);
-  color: #ffffff;
+  border-radius: var(--radius);
+  background: var(--red-text);
+  color: var(--paper);
   font-weight: 700;
 }
 
 .card-text {
   margin: 8px 0;
   padding: 10px 12px;
-  border-radius: 10px;
-  background: var(--section);
+  background: var(--card);
+  border: var(--border);
+  border-radius: var(--radius);
+  box-shadow: 4px 4px 0 var(--shadow);
   white-space: pre-wrap;
   font-variant-numeric: tabular-nums;
 }
 
 .confirm-actions { display: flex; flex-direction: column; gap: 8px; margin: 12px 0 var(--gap); }
 
-.button-plain { background: var(--section); color: var(--text); }
+.button-plain { background: var(--card); color: var(--ink); border: var(--border); }
 
 /* --- Вкладка «Позиции» (П.1) --- */
 
@@ -435,10 +590,12 @@ main {
 .positions-list, .journal-list { list-style: none; margin: 0; padding: 0; }
 
 .position-card {
-  margin: 0 0 12px;
+  margin: 0 0 14px;
   padding: 12px;
-  border-radius: 12px;
-  background: var(--section);
+  background: var(--card);
+  border: var(--border);
+  border-radius: var(--radius);
+  box-shadow: 4px 4px 0 var(--shadow);
 }
 
 .position-head {
@@ -448,9 +605,9 @@ main {
   width: 100%;
   border: 0;
   background: none;
-  color: var(--text);
+  color: var(--ink);
   font: inherit;
-  font-weight: 600;
+  font-weight: 700;
   padding: 0 0 8px;
   text-align: left;
 }
@@ -459,25 +616,26 @@ main {
 
 .position-side {
   padding: 1px 8px;
-  border-radius: 6px;
-  color: #ffffff;
+  border-radius: 2px;
+  color: var(--paper);
   font-size: 12px;
 }
 
-.position-side.long { background: var(--long); }
-.position-side.short { background: var(--short); }
+.position-side.long { background: var(--ink); }
+.position-side.short { background: var(--red-text); }
 
-.position-pnl.up { color: var(--long); }
-.position-pnl.down { color: var(--short); }
+.position-pnl { font-family: var(--mono); }
+.position-pnl.up { color: var(--blue); }
+.position-pnl.down { color: var(--red-text); }
 
 .position-card .details { margin: 0 0 8px; }
-.details dd.warn { color: var(--liq); }
+.details dd.warn { color: var(--red-text); font-weight: 600; }
 
-.position-chat { width: 100%; background: var(--bg); }
+.position-chat { width: 100%; }
 
 .positions-empty { padding: 16px 0; }
 
-.journal-list li { padding: 6px 0; border-bottom: 1px solid var(--section); }
+.journal-list li { padding: 6px 0; border-bottom: 1px dashed var(--rule); }
 
 /* Блок «Позиция» на экране рынка (П.2) */
 
@@ -485,8 +643,8 @@ main {
 
 .market-position-list li {
   padding: 6px 0 6px 10px;
-  border-left: 3px solid var(--section);
+  border-left: 3px solid var(--rule);
 }
 
-.market-position-list li.long { border-left-color: var(--long); }
-.market-position-list li.short { border-left-color: var(--short); }
+.market-position-list li.long { border-left-color: var(--ink); }
+.market-position-list li.short { border-left-color: var(--red); }

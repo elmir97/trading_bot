@@ -20,6 +20,7 @@
 import { ApiError } from "./api.js";
 import { createPriceChart, intervalSeconds } from "./chart.js";
 import { candlesDue, INTERVALS, MAX_BACKOFF_MS, PRICE_POLL_MS } from "./market.js";
+import { paintButton } from "./theme.js";
 import {
   chartLines, clampLeverage, leverageCap, leverageHint, NO_KEY_TEXT, openAction, parseAmount,
   renderPreview, riskHint,
@@ -120,12 +121,13 @@ export function createTradeScreen({ api, tg, storage, me, onOpen, onFatal }) {
   function openButton() {
     const action = pending || !cap ? { visible: false } : openAction(card, side, symbol);
     if (native) {
-      const color = getComputedStyle(document.documentElement)
-        .getPropertyValue(side === "LONG" ? "--long" : "--short").trim();
       tg.SecondaryButton.setParams({ is_visible: false });
-      tg.MainButton.setParams(action.visible
-        ? { text: action.text, color, text_color: "#ffffff", is_active: true, is_visible: true }
-        : { is_visible: false });
+      if (action.visible) {
+        paintButton(tg.MainButton, side === "SHORT" ? "short" : "main",
+          { text: action.text, is_active: true, is_visible: true });
+      } else {
+        tg.MainButton.setParams({ is_visible: false });
+      }
     } else {
       el.fallbackMain.textContent = action.visible ? action.text : "";
       el.fallbackSecondary.hidden = true;
@@ -481,7 +483,7 @@ export function createTradeScreen({ api, tg, storage, me, onOpen, onFatal }) {
     }
     if (myGen !== gen) return;
     showMarket(m);
-    if (!chart) chart = createPriceChart(el.chart, { tg, interval });
+    if (!chart) chart = createPriceChart(el.chart, { interval });
     chart.setTimeframe(interval);
     chart.setPrecision(m.contract.price_precision);
     chart.setType("candles");

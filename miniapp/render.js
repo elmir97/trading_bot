@@ -13,6 +13,18 @@ function text(value) {
   return value === null || value === undefined ? "—" : String(value);
 }
 
+// Разряды — только в показе (решение 17.10, шапка B): строка сервера «84172.35» →
+// «84 172.35» (неразрывный пробел), число не пересчитывается и не округляется. Не число
+// («—», текст) — как есть.
+const NBSP = String.fromCharCode(160);
+
+export function groupDigits(value) {
+  const raw = value === null || value === undefined ? "" : String(value);
+  const m = /^([+\-−]?)(\d+)(\.\d+)?$/.exec(raw);
+  if (!m) return raw;
+  return m[1] + m[2].replace(/\B(?=(\d{3})+(?!\d))/g, NBSP) + (m[3] || "");
+}
+
 // Ввод пользователя: «1,5» с русской клавиатуры iOS → «1.5»; не число или ≤ 0 — null
 // (подсветка у поля, запрос не уходит). Значение уходит на сервер строкой.
 export function parseAmount(raw) {

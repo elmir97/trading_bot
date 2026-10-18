@@ -166,8 +166,9 @@ def test_preloaded_fonts_are_used_and_cors() -> None:
         assert 'as="font"' in flat and 'type="font/woff2"' in flat
         assert re.search(r"\bcrossorigin\b", flat), flat
         assert href.group(1).startswith(_GOLOS), "preload вне Golos — не на body (Д.1)"
-    body = (_MINIAPP / "style.css").read_text(encoding="utf-8")
-    assert re.search(r'font:\s*[^;]*"Golos Text"', body)
+    css = (_MINIAPP / "style.css").read_text(encoding="utf-8")
+    assert re.search(r'--sans:\s*"Golos Text"', css)
+    assert re.search(r"html, body \{[^}]*font: 15px/1\.4 var\(--sans\);", css)
 
 
 def test_csp_takes_fonts_from_self_only() -> None:

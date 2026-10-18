@@ -6,9 +6,9 @@
 // - Время свечей приходит в UTC (unix-секунды) и в серию идёт как есть; на оси и в
 //   перекрестье — локальное время пользователя через форматтеры, данные не сдвигаются.
 //   Метки дат библиотека ставит по суткам UTC, подпись у них — локальная дата.
-// - Цвета — из Telegram themeParams (запасные — переменные style.css), перекраска по
-//   themeChanged; размер — autoSize (ResizeObserver библиотеки: поворот экрана, смена
-//   высоты окна). destroy() снимает подписки и зовёт chart.remove().
+// - Цвета — токены style.css текущей темы (theme.js), перекраска по THEME_EVENT; размер —
+//   autoSize (ResizeObserver библиотеки: поворот экрана, смена высоты окна). destroy()
+//   снимает подписки и зовёт chart.remove().
 // - Числа приходят строкой; Number — только чтобы нарисовать, расчётов здесь нет.
 // - Линии уровней (вход, стоп, тейк, ликвидация) — setLines(): у формы значения превью,
 //   у рынка — открытой позиции (П.2). Рисуются на видимой серии: скрытая серия
@@ -18,7 +18,16 @@
 //   краем графика не виден. Ликвидацию — нет: она бывает далеко и ужимает график; у рынка
 //   её значение — строкой в блоке «Позиция».
 
+import { THEME_EVENT, token } from "./theme.js";
+
 const LWC = window.LightweightCharts;
+// Подписи осей — моноширинным, как числа страницы (fonts.css; до загрузки — системный).
+const MONO = '"IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace';
+
+function candleColors(colors) {
+  return { upColor: colors.ink, downColor: colors.red, wickUpColor: colors.ink,
+    wickDownColor: colors.red };
+}
 
 export const SCALED_KINDS = ["entry", "stop", "take"];
 
@@ -43,31 +52,27 @@ export function intervalSeconds(interval) {
   return INTERVAL_SECONDS[interval] ?? 300;
 }
 
-function cssVar(name) {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-}
-
-// themeParams Telegram (bg_color, text_color, …); вне Telegram — переменные style.css.
-export function themeColors(tg) {
-  const p = (tg && tg.themeParams) || {};
+// Цвета — токены style.css текущей темы (theme.js): график на карточке, рост — чернилами,
+// падение — красным (макет «Рынок»).
+export function themeColors() {
   return {
-    background: p.bg_color || cssVar("--bg"),
-    text: p.hint_color || cssVar("--hint"),
-    grid: p.section_separator_color || p.secondary_bg_color || cssVar("--section"),
-    line: p.link_color || p.button_color || cssVar("--link"),
-    up: cssVar("--long"),
-    down: cssVar("--short"),
-    liq: cssVar("--liq"),
+    background: token("--card"),
+    text: token("--muted"),
+    grid: token("--chart-grid"),
+    border: token("--rule"),
+    ink: token("--ink"),
+    red: token("--red"),
+    blue: token("--blue"),
   };
 }
 
-// Вход — пунктир цветом текста, стоп — красная, тейк — зелёная, ликвидация — оранжевая точками.
+// Вход — пунктир чернилами, стоп — красная, тейк — синяя, ликвидация — серая точками.
 function lineStyle(kind, colors) {
   const S = LWC.LineStyle;
-  if (kind === "stop") return { color: colors.down, lineStyle: S.Solid };
-  if (kind === "take") return { color: colors.up, lineStyle: S.Solid };
-  if (kind === "liq") return { color: colors.liq, lineStyle: S.Dotted };
-  return { color: colors.text, lineStyle: S.Dashed };
+  if (kind === "stop") return { color: colors.red, lineStyle: S.Solid };
+  if (kind === "take") return { color: colors.blue, lineStyle: S.Solid };
+  if (kind === "liq") return { color: colors.text, lineStyle: S.Dotted };
+  return { color: colors.ink, lineStyle: S.Dashed };
 }
 
 function formatters(interval) {
@@ -100,8 +105,8 @@ function priceFormat(precision) {
   return { type: "price", precision, minMove: Number(`1e-${precision}`) };
 }
 
-export function createPriceChart(container, { tg = null, precision = 4, interval = "5m" } = {}) {
-  let colors = themeColors(tg);
+export function createPriceChart(container, { precision = 4, interval = "5m" } = {}) {
+  let colors = themeColors();
   let current = formatters(interval);
   let last = null;            // последняя свеча (числа) — её обновляет цена
   let destroyed = false;
@@ -116,11 +121,12 @@ export function createPriceChart(container, { tg = null, precision = 4, interval
       background: { type: LWC.ColorType.Solid, color: colors.background },
       textColor: colors.text,
       fontSize: 11,
+      fontFamily: MONO,
     },
     grid: { vertLines: { color: colors.grid }, horzLines: { color: colors.grid } },
-    rightPriceScale: { borderColor: colors.grid },
+    rightPriceScale: { borderColor: colors.border },
     timeScale: {
-      borderColor: colors.grid, timeVisible: interval !== "1d", secondsVisible: false,
+      borderColor: colors.border, timeVisible: interval !== "1d", secondsVisible: false,
       tickMarkFormatter: (time, type) => current.tickMarkFormatter(time, type),
     },
     localization: {
@@ -132,12 +138,11 @@ export function createPriceChart(container, { tg = null, precision = 4, interval
 
   const autoscaleInfoProvider = (original) => scaledRange(original(), levels);
   const candles = chart.addSeries(LWC.CandlestickSeries, {
-    upColor: colors.up, downColor: colors.down, wickUpColor: colors.up,
-    wickDownColor: colors.down, borderVisible: false, autoscaleInfoProvider,
+    ...candleColors(colors), borderVisible: false, autoscaleInfoProvider,
     priceFormat: priceFormat(precision), lastValueVisible: true, priceLineVisible: true,
   });
   const line = chart.addSeries(LWC.LineSeries, {
-    color: colors.line, lineWidth: 2, visible: false, autoscaleInfoProvider,
+    color: colors.ink, lineWidth: 2, visible: false, autoscaleInfoProvider,
     priceFormat: priceFormat(precision), lastValueVisible: true, priceLineVisible: true,
   });
 
@@ -153,17 +158,16 @@ export function createPriceChart(container, { tg = null, precision = 4, interval
 
   function applyTheme() {
     if (destroyed) return;
-    colors = themeColors(tg);
+    colors = themeColors();
     chart.applyOptions({
       layout: { background: { type: LWC.ColorType.Solid, color: colors.background },
         textColor: colors.text },
       grid: { vertLines: { color: colors.grid }, horzLines: { color: colors.grid } },
-      rightPriceScale: { borderColor: colors.grid },
-      timeScale: { borderColor: colors.grid },
+      rightPriceScale: { borderColor: colors.border },
+      timeScale: { borderColor: colors.border },
     });
-    candles.applyOptions({ upColor: colors.up, downColor: colors.down,
-      wickUpColor: colors.up, wickDownColor: colors.down });
-    line.applyOptions({ color: colors.line });
+    candles.applyOptions(candleColors(colors));
+    line.applyOptions({ color: colors.ink });
     drawLines();
   }
 
@@ -178,10 +182,9 @@ export function createPriceChart(container, { tg = null, precision = 4, interval
     container.dataset.linesOn = host === line ? "line" : "candles";   // где нарисованы на деле
   }
 
-  // В Telegram тема приходит событием; в браузере стенда — от системной темы.
-  const media = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
-  if (tg) tg.onEvent("themeChanged", applyTheme);
-  if (media) media.addEventListener("change", applyTheme);
+  // Смену темы (Telegram или системную) разбирает theme.js и шлёт THEME_EVENT — data-theme
+  // к этому моменту уже стоит, токены новые.
+  document.addEventListener(THEME_EVENT, applyTheme);
 
   return {
     setTimeframe(next) {
@@ -233,8 +236,7 @@ export function createPriceChart(container, { tg = null, precision = 4, interval
     destroy() {
       if (destroyed) return;
       destroyed = true;
-      if (tg) tg.offEvent("themeChanged", applyTheme);
-      if (media) media.removeEventListener("change", applyTheme);
+      document.removeEventListener(THEME_EVENT, applyTheme);
       delete container.dataset.lines;
       delete container.dataset.linesOn;
       delete container.levelsInView;

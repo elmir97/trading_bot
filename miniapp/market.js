@@ -25,6 +25,7 @@
 
 import { ApiError } from "./api.js";
 import { createPriceChart, intervalSeconds } from "./chart.js";
+import { paintButton } from "./theme.js";
 
 export const INTERVALS = ["1m", "5m", "15m", "1h", "4h", "1d"];
 export const PRICE_POLL_MS = 3000;
@@ -200,12 +201,10 @@ export function createMarketScreen({ api, tg, storage, onSide, onPositions, onFa
 
   function sideButtons(visible) {
     if (native) {
-      const long = getComputedStyle(document.documentElement).getPropertyValue("--long").trim();
-      const short = getComputedStyle(document.documentElement).getPropertyValue("--short").trim();
-      tg.MainButton.setParams({ text: "↗ Лонг", color: long, text_color: "#ffffff",
+      paintButton(tg.MainButton, "main", { text: "↗ Лонг", is_active: true,
+        is_visible: visible });
+      paintButton(tg.SecondaryButton, "short", { text: "↘ Шорт", position: "right",
         is_active: true, is_visible: visible });
-      tg.SecondaryButton.setParams({ text: "↘ Шорт", color: short, text_color: "#ffffff",
-        position: "right", is_active: true, is_visible: visible });
     } else {
       el.fallbackMain.textContent = "↗ Лонг";
       el.fallbackSecondary.textContent = "↘ Шорт";
@@ -382,7 +381,7 @@ export function createMarketScreen({ api, tg, storage, onSide, onPositions, onFa
       return;
     }
     if (myGen !== gen) return;
-    if (!chart) chart = createPriceChart(el.chart, { tg, interval });
+    if (!chart) chart = createPriceChart(el.chart, { interval });
     chart.setTimeframe(interval);
     chart.setPrecision(m.contract.price_precision);
     chart.setType(chartType);
