@@ -56,7 +56,29 @@
   `C:\Users\vladz\AppData\Local\Python\pythoncore-3.14-64\python.exe`; `ENCRYPTION_KEY` для тестовой базы — свежий Fernet на прогон
 - **Находка (снимок «до», не правил):** «Только в журнале» показывает вход сырым Decimal — «вход 2400.000000000000»
   (`JournalTradeOut.entry_price` = `trade.entry_price` без форматирования). Правка — сервер (`app/api/positions.py`), значит деплой
-  api; предложение — в Д.6 вместе с экраном позиций, по «да»
+  api. **Решение владельца 18.10: чинить в Д.6, деплой api — по его «да»**
+- **Д.1 сделан 18.10 (шрифты):** npm `@fontsource-variable/golos-text`, `@fontsource/ibm-plex-mono`, `@fontsource/caveat` 5.3.0
+  (опубликованы 19.07.2026, sha512 tarball = реестр); 10 woff2 (latin + cyrillic; Golos переменный 400–900, Plex 400/500/600,
+  Caveat 600) + OFL каждого, 242 КБ, в `miniapp/vendor/fonts/<семейство>-5.3.0/`; `miniapp/fonts.css` (вне vendor); body — Golos;
+  preload только Golos (Plex — в Д.2). CSP не менялся (`font-src` нет → `default-src 'self'`, тест). Сценарий `design_fonts` (все
+  начертания загружены, 10 woff2 свои и 200, `font/woff2` на стенде), `all` 45/45, `browser_check` exit 0 с `--symbol` и без. Мутации:
+  тесты 11/11, браузер 3/3 (битый путь, body без Golos, preload без `crossorigin` → предупреждение Chrome). Гейт: pytest **2070** /
+  0 skipped (exit 0), smoke ×2, mypy 60, ruff затронутых — только RUF001–003. **На деплое:** `curl -sI
+  https://app.postfactumtrade.ru/vendor/fonts/golos-text-5.3.0/golos-text-latin-wght-normal.woff2` — `font/woff2`, `immutable`
+  (в `caddy:alpine` таблица типов — `mailcap`; шрифт браузер грузит и при неточном типе). На снимке рынка 390 px Golos шире —
+  «💼 Позиции» в старой шапке уходит на вторую строку; шапку заменяет Д.3
+- **Версия Python гейта ≠ прод (проверено 18.10, кода не трогали):** образ — `python:3.12-slim`, `pyproject` — ruff `py312`, mypy
+  `python_version = "3.12"`; локальный гейт **всегда шёл на 3.14.7** (`pythoncore-3.14-64`; так же в записях 10.10 и 15.10) —
+  другого Python на машине нет (`py -0p` — только 3.14; `Programs\Python\Python313` — пустой остаток без `python.exe`). Пакеты те же
+  (requirements закреплены `==`; в 3.14 стоят ровно они). mypy/ruff ловят синтаксис и типы 3.12, но не поведение рантайма: 3.14
+  откладывает вычисление аннотаций (PEP 649) — код, который на 3.12 упал бы на аннотации без `from __future__ import annotations`,
+  на 3.14 проходит; другие отличия asyncio/stdlib тоже не видны. Прод на 3.12 до сих пор не падал — риск невысокий, но гейт его не
+  закрывает. **Предложение (по «да»):** (1) `py install 3.12` — Python install manager 26.3 уже стоит (ставит CPython 3.12 с
+  python.org в профиль пользователя, без прав администратора); (2) venv вне OneDrive и репозитория:
+  `py -V:3.12 -m venv C:\Users\vladz\venvs\trading_bot-312`, `…\Scripts\python -m pip install -r requirements-dev.txt` (те же пины, что
+  в образе); (3) гейт — pytest, smoke ×2, mypy на 3.12 (`…\trading_bot-312\Scripts\python -m pytest …`), 3.14 — не нужен; стенд и
+  Chrome-сценарии можно оставить на любом; (4) первый прогон 3.12 — сравнить счёт с 2070 / 0 skipped, расхождения — доклад, не
+  чинить на ходу; (5) CLAUDE.md «Локальный прогон» — путь к интерпретатору 3.12
 
 **17.10.2026: прод — Mini App задеплоен (шаги 1–10 «Деплой Mini App» в CLAUDE.md, каждый по «да»; подробно — блоки «Шаг 1…10»
 ниже). Прод = образ `trading_bot-bot:latest` `5d4e95b74519` из `fbbeb02` (bot и api) + статика `miniapp/` и код на диске `caac158`

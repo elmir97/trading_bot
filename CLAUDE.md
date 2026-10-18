@@ -162,13 +162,14 @@ python -m scripts.miniapp_dev [--port 8765]
   истечение, BLOCK, «Назад к форме»), «Позиции» П.1 (`pos_*`: пусто, хедж и лестница, NULL/LIVE не связываются, ссылка
   в чат, нет ключа, 503, 401, опрос/скрытая вкладка, карточка → рынок; `menu_native` — меню «…»), линии позиции П.2
   (`market_lines` — хедж на свечах и «линии», закрыта → сняты; `market_lines_none`; `confirm_lines` — после итога; позиции стенда —
-  `POST /dev/positions?preset=…`, `Setup.preset`). **Для `confirm_*` стенд — с `EXEC_OPEN_DRY_RUN=false`** (биржа стенда
+  `POST /dev/positions?preset=…`, `Setup.preset`), дизайн Д (`design_fonts` — все начертания Golos/Plex Mono/Caveat загружены из
+  `vendor/fonts`, body — Golos, `font/woff2`). **Для `confirm_*` стенд — с `EXEC_OPEN_DRY_RUN=false`** (биржа стенда
   фейковая; в сухом прогоне сценарий скажет об этом). Перед каждым сценарием — `POST /dev/reset` стенда (новая
   фейковая биржа, пользователь стенда заново; только в `miniapp_dev.py`). Каждый — свой свежий Chrome; сеть
   подменяется через `Fetch` (свой статус, правка ответа, обрыв, зависание, `exact` — путь целиком) — следы своих
   правил замечанием не считаются. SDK с telegram.org не загрузился (сеть) — сценарий прерывается с этим текстом,
   повторить. Стенд вне Telegram — initData-заглушка в хеше (`#tgWebAppData=…`, `page_url`), без неё — экран «Открой Mini
-  App из бота» (`no_init_data`, `Setup(init_data=False)`); `me_502` — прокси без api (502 без JSON). `all` (44) ≈ 8 мин; exit 0/1/2 как выше. Новый экран — новый сценарий там же
+  App из бота» (`no_init_data`, `Setup(init_data=False)`); `me_502` — прокси без api (502 без JSON). `all` (45) ≈ 8 мин; exit 0/1/2 как выше. Новый экран — новый сценарий там же
 - снимки экранов — `--shots <папка> [--shot market|form|confirm|positions|all]` (`scripts/miniapp_shots.py`, при
   запущенном стенде; подэтап «Дизайн Mini App»): экраны 1–4 × светлая/тёмная (themeParams клиента в хеше +
   `prefers-color-scheme`, `Setup.theme`) × 390/320 px, страница целиком, масштаб 2, свои кнопки (браузер 6.0).

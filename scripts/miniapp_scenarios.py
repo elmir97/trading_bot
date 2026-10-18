@@ -1451,6 +1451,40 @@ async def me_502(page: Page, url: str) -> None:
 
 
 
+# Д — дизайн Mini App (§9а «Дизайн Mini App»)
+
+FONT_FACES = (("Golos Text", "400", "Жж"), ("Golos Text", "800", "Az"),
+              ("IBM Plex Mono", "400", "1.2974 объём"), ("IBM Plex Mono", "500", "Az Жж"),
+              ("IBM Plex Mono", "600", "1 683.45 $"), ("Caveat", "600", "как в плане 1:2"))
+FONTS_JS = """(async () => {
+  const faces = %s;
+  const out = {};
+  for (const [family, weight, text] of faces) {
+    const spec = weight + ' 16px "' + family + '"';
+    const loaded = await document.fonts.load(spec, text);
+    out[family + ' ' + weight] = loaded.length > 0 && document.fonts.check(spec, text);
+  }
+  const r = await fetch('vendor/fonts/ibm-plex-mono-5.3.0/ibm-plex-mono-latin-400-normal.woff2');
+  return { faces: out, body: getComputedStyle(document.body).fontFamily,
+           woff2_type: r.headers.get('content-type'), woff2_status: r.status };
+})()"""
+
+
+@scenario("design_fonts", "Д.1: шрифты Golos/Plex Mono/Caveat — из vendor, body — Golos")
+async def design_fonts(page: Page, url: str) -> None:
+    await open_page(page, url, Setup())
+    got = await page.js(FONTS_JS % json.dumps(FONT_FACES))
+    missing = [k for k, ok in got["faces"].items() if not ok]
+    page.expect(not missing, f"шрифты не загрузились: {missing}")
+    page.expect(got["body"].startswith('"Golos Text"'), f"body: {got['body']!r}")
+    page.expect(got["woff2_status"] == 200 and got["woff2_type"] == "font/woff2",
+                f"woff2: {got['woff2_status']} {got['woff2_type']!r}")
+    fonts = [(s, u) for s, u in page.collector.network if u.endswith(".woff2")]
+    page.note(f"woff2 загружено: {len(fonts)}")
+    page.expect(bool(fonts) and all(s == 200 and u.startswith(url) for s, u in fonts),
+                f"woff2 не свои или не 200: {fonts}")
+
+
 SCENARIO_TIMEOUT = 150.0
 
 
