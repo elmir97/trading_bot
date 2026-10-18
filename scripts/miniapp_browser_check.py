@@ -3,6 +3,7 @@
     python -m scripts.miniapp_browser_check [--url http://127.0.0.1:8765/]
         [--chrome <путь к Chrome>] [--wait 8] [--symbol XRP-USDT]
     python -m scripts.miniapp_browser_check --scenario <имя>|all [--url …] [--chrome …]
+    python -m scripts.miniapp_browser_check --shots <папка вне репозитория> [--shot <экран>|all]
 
 `--scenario` — сценарии браузера (scripts/miniapp_scenarios.py: рынок, SDK, свечи,
 форма сделки): каждый — свой свежий Chrome, итог по сценарию, exit 1 — есть замечания.
@@ -67,13 +68,17 @@ STORAGE_SYMBOL_KEY = "ma:anon:symbol"
 STAND_INIT_DATA = "query_id=stand&auth_date=0&hash=stand"
 
 
-def page_url(url: str, *, version: str | None = None, init_data: bool = True) -> str:
-    """Адрес страницы стенда с параметрами Telegram в хеше."""
+def page_url(url: str, *, version: str | None = None, init_data: bool = True,
+             theme_params: dict[str, str] | None = None) -> str:
+    """Адрес страницы стенда с параметрами Telegram в хеше. theme_params — как у клиента
+    Telegram (SDK берёт их из хеша и по bg_color решает colorScheme)."""
     params = []
     if init_data:
         params.append("tgWebAppData=" + quote(STAND_INIT_DATA, safe=""))
     if version is not None:
         params.append(f"tgWebAppVersion={version}")
+    if theme_params is not None:
+        params.append("tgWebAppThemeParams=" + quote(json.dumps(theme_params), safe=""))
     return url + ("#" + "&".join(params) if params else "")
 SYMBOL_RE = re.compile(r"^[A-Z0-9]{1,24}-USDT$")
 STATE_EXPR = """(() => ({
@@ -390,6 +395,37 @@ async def check_scenarios(url: str, chrome: Path, items: list[Any]) -> list[tupl
     return out
 
 
+async def check_shots(url: str, chrome: Path, items: list[Any],
+                      directory: Path) -> list[tuple[Any, str, Any, list[Path]]]:
+    """Снимки экранов (scripts/miniapp_shots.py): экран × тема — свой Chrome."""
+    from scripts import miniapp_shots as mshots
+
+    out: list[tuple[Any, str, Any, list[Path]]] = []
+    async with aiohttp.ClientSession() as http:
+        await stand_answers(http, url)
+
+        async def reset() -> None:
+            async with http.post(url + "dev/reset",
+                                 timeout=aiohttp.ClientTimeout(total=10)) as r:
+                if r.status != 200:
+                    raise EnvironmentNotReadyError(f"сброс стенда: HTTP {r.status}")
+
+        async def seed(preset: str) -> None:
+            async with http.post(url + "dev/positions", params={"preset": preset},
+                                 timeout=aiohttp.ClientTimeout(total=10)) as r:
+                if r.status != 200:
+                    raise EnvironmentNotReadyError(f"позиции стенда ({preset}): HTTP {r.status}")
+
+        for item in items:
+            for theme in mshots.THEMES:
+                async with chrome_page(http, chrome) as transport:
+                    page, saved = await mshots.run_shot(transport, url, item, theme, directory,
+                                                        reset, seed)
+                out.append((item, theme, page, saved))
+                print(mshots.render(item, theme, page, saved), flush=True)
+    return out
+
+
 def render(report: Report) -> str:
     c = report.collector
     lines = [f"запросы: {len(c.network)}, console: {len(c.console)}, CSP: {len(c.csp)}, "
@@ -409,6 +445,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         help="монета экрана рынка (localStorage стенда), напр. XRP-USDT")
     parser.add_argument("--scenario", default=None,
                         help="сценарий браузера (scripts/miniapp_scenarios.py) или all")
+    parser.add_argument("--shots", default=None,
+                        help="папка снимков экранов (вне репозитория), scripts/miniapp_shots.py")
+    parser.add_argument("--shot", default="all", help="экран для --shots или all")
     return parser.parse_args(argv)
 
 
@@ -421,6 +460,20 @@ def main(argv: list[str] | None = None) -> int:
     try:
         url = require_localhost(args.url)
         symbol = None if args.symbol is None else require_symbol(args.symbol)
+        if args.shots is not None:
+            from scripts import miniapp_shots as mshots
+
+            if args.scenario is not None:
+                raise EnvironmentNotReadyError("--shots и --scenario — по отдельности")
+            shots = mshots.select(args.shot)
+            directory = mshots.out_dir(args.shots)
+            chrome = chrome_path(args.chrome)
+            taken = asyncio.run(check_shots(url, chrome, shots, directory))
+            failed = [f"{item.name}-{theme}" for item, theme, page, saved in taken
+                      if page.issues() or len(saved) != len(mshots.WIDTHS)]
+            print(f"снимков {sum(len(s) for *_, s in taken)} в {directory}, с замечаниями "
+                  f"{len(failed)}" + (f": {', '.join(failed)}" if failed else ""))
+            return 1 if failed else 0
         if args.scenario is not None:
             from scripts import miniapp_scenarios as ms
 

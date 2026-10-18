@@ -48,6 +48,15 @@
 - **Дизайн Mini App — план Д.0–Д.7 принят 18.10** (§9а `miniapp-plan.md`, «Дизайн Mini App»): токены обеих тем, `--red-text`
   `#d43329` (≥ 4.5:1 на бумаге; яркий `#d7362b` — линии и рамки), 🧪 в плашке нет, тёмная — сразу в Д.2, «ЗАПИСЬ № N» = `opening_id`.
   Холст прочитан (7 артбордов, тёмные «Рынок» и «Позиции» есть). Начато с Д.0
+- **Д.0 сделан 18.10:** `--shots DIR` (`scripts/miniapp_shots.py`, запуск — CLAUDE.md «Скрипты»); снимки «до» — 16/16 в
+  `C:\Users\vladz\OneDrive\Desktop\trading\miniapp_shots\before\` (стенд в сухом прогоне). Гейт: pytest **2064** / 0 skipped
+  (exit 0), smoke ×2 exit 0, mypy app 60 (скрипты — `mypy -m scripts.…` чисто), ruff затронутых — только RUF001–003, мутации 12/12,
+  `--scenario all` 44/44, `browser_check` без монеты exit 0, с `--symbol` — первый прогон «графиков 0» за 8 с (медленная первая
+  загрузка), повторы ×2 и `--wait 15` — exit 0. Среда: `python` в PATH — заглушка WindowsApps (exit 49), интерпретатор —
+  `C:\Users\vladz\AppData\Local\Python\pythoncore-3.14-64\python.exe`; `ENCRYPTION_KEY` для тестовой базы — свежий Fernet на прогон
+- **Находка (снимок «до», не правил):** «Только в журнале» показывает вход сырым Decimal — «вход 2400.000000000000»
+  (`JournalTradeOut.entry_price` = `trade.entry_price` без форматирования). Правка — сервер (`app/api/positions.py`), значит деплой
+  api; предложение — в Д.6 вместе с экраном позиций, по «да»
 
 **17.10.2026: прод — Mini App задеплоен (шаги 1–10 «Деплой Mini App» в CLAUDE.md, каждый по «да»; подробно — блоки «Шаг 1…10»
 ниже). Прод = образ `trading_bot-bot:latest` `5d4e95b74519` из `fbbeb02` (bot и api) + статика `miniapp/` и код на диске `caac158`

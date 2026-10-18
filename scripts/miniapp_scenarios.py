@@ -406,6 +406,19 @@ class Setup:
     wait_screen: str | None = "screen-market"
     init_data: bool = True             # заглушка tgWebAppData; False — как Safari по ссылке
     preset: str | None = None          # позиции стенда (miniapp_dev.PRESETS)
+    theme: str | None = None           # "light" | "dark": themeParams в хеше + prefers-color-scheme
+
+
+# Тема клиента Telegram (стандартные цвета светлой и тёмной); вне Telegram страница видит
+# только prefers-color-scheme — open_page задаёт и его, чтобы обе ветки совпадали.
+THEME_PARAMS: dict[str, dict[str, str]] = {
+    "light": {"bg_color": "#ffffff", "text_color": "#000000", "hint_color": "#999999",
+              "link_color": "#2481cc", "button_color": "#2481cc",
+              "button_text_color": "#ffffff", "secondary_bg_color": "#efeff3"},
+    "dark": {"bg_color": "#17212b", "text_color": "#f5f5f5", "hint_color": "#708499",
+             "link_color": "#6ab3f3", "button_color": "#5288c1",
+             "button_text_color": "#ffffff", "secondary_bg_color": "#232e3c"},
+}
 
 
 def storage_script(values: dict[str, Any]) -> str:
@@ -431,6 +444,9 @@ async def open_page(page: Page, url: str, setup: Setup) -> dict[str, Any]:
         await page.call("Page.addScriptToEvaluateOnNewDocument",
                         {"source": storage_script(values)})
     await page.viewport(setup.width, setup.height)
+    if setup.theme is not None:
+        await page.call("Emulation.setEmulatedMedia", {"features": [
+            {"name": "prefers-color-scheme", "value": setup.theme}]})
     for rule in setup.rules:
         page.intercept(rule)
     await page.call("Fetch.enable", {"patterns": [
@@ -438,7 +454,8 @@ async def open_page(page: Page, url: str, setup: Setup) -> dict[str, Any]:
         {"urlPattern": "*telegram.org*", "requestStage": "Request"},
     ]})
     await page.call("Page.navigate", {"url": bc.page_url(
-        url, version=NATIVE_VERSION if setup.native else None, init_data=setup.init_data)})
+        url, version=NATIVE_VERSION if setup.native else None, init_data=setup.init_data,
+        theme_params=None if setup.theme is None else THEME_PARAMS[setup.theme])})
     if setup.wait_screen is None:
         return {}
     want = setup.wait_screen

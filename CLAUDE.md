@@ -169,6 +169,12 @@ python -m scripts.miniapp_dev [--port 8765]
   правил замечанием не считаются. SDK с telegram.org не загрузился (сеть) — сценарий прерывается с этим текстом,
   повторить. Стенд вне Telegram — initData-заглушка в хеше (`#tgWebAppData=…`, `page_url`), без неё — экран «Открой Mini
   App из бота» (`no_init_data`, `Setup(init_data=False)`); `me_502` — прокси без api (502 без JSON). `all` (44) ≈ 8 мин; exit 0/1/2 как выше. Новый экран — новый сценарий там же
+- снимки экранов — `--shots <папка> [--shot market|form|confirm|positions|all]` (`scripts/miniapp_shots.py`, при
+  запущенном стенде; подэтап «Дизайн Mini App»): экраны 1–4 × светлая/тёмная (themeParams клиента в хеше +
+  `prefers-color-scheme`, `Setup.theme`) × 390/320 px, страница целиком, масштаб 2, свои кнопки (браузер 6.0).
+  Файл `<экран>-<тема>-<ширина>.png`; **папка внутри репозитория — отказ (exit 2)**: снимки «до» —
+  `C:\Users\vladz\OneDrive\Desktop\trading\miniapp_shots\before\`, «после» — `…\after\`. Каждый экран × тема — свой
+  Chrome, 16 снимков ≈ 2 мин; замечания — exit 1
 
 `scripts/check_redis.py` — PING и цикл проверок лока, запускать на проде:
 
