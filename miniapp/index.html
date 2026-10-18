@@ -18,16 +18,26 @@
   <script type="module" src="app.js"></script>
 </head>
 <body>
-  <header class="account" id="account" hidden>
-    <span class="badge" id="account-mode"></span>
-    <span class="account-money">
-      equity <b id="account-equity">—</b> · свободно <b id="account-available">—</b>
-    </span>
-    <!-- Меню «…» без SettingsButton (Telegram до 7.0, браузер) — своя ссылка. -->
-    <button type="button" class="link-button account-menu" id="account-positions"
-            hidden>💼 Позиции</button>
-    <span class="account-note" id="account-note" hidden></span>
-  </header>
+  <!-- Шапка B (Д.3): плашка счёта — одна; на рынке app.js ставит её в строку монеты,
+       на остальных экранах — в верхнюю строку. Нажатие — детали счёта. -->
+  <header class="topbar" id="topbar" hidden></header>
+  <div class="account" id="account" hidden>
+    <button type="button" class="plate" id="account-plate" aria-expanded="false"
+            aria-controls="account-details">
+      <span class="plate-mode" id="account-mode">DEMO</span>
+      <span class="plate-equity" id="account-equity">—</span>
+    </button>
+    <div class="account-details card" id="account-details" hidden>
+      <div class="receipt-row"><span>equity</span><span id="account-equity-full">—</span></div>
+      <div class="receipt-row"><span>свободно</span><span id="account-available">—</span></div>
+      <div class="receipt-row"><span>счёт</span><span id="account-mode-text">—</span></div>
+      <div class="receipt-row"><span>сухой прогон</span><span id="account-dry">—</span></div>
+      <!-- Меню «…» без SettingsButton (Telegram до 7.0, браузер) — своя ссылка. -->
+      <button type="button" class="link-button account-menu" id="account-positions"
+              hidden>💼 Позиции</button>
+    </div>
+  </div>
+  <p class="account-note" id="account-note" hidden></p>
 
   <main>
     <section class="screen" id="screen-loading">
@@ -38,25 +48,27 @@
       <div class="market-head" id="market-head">
         <button type="button" class="symbol-button" id="market-symbol-button"
                 aria-label="Выбрать монету">
-          <span class="coin" id="market-coin">?</span>
-          <span class="symbol" id="market-symbol">—</span>
-          <span class="caret" aria-hidden="true">▾</span>
+          <span class="symbol-line">
+            <span class="symbol" id="market-symbol">—</span>
+            <span class="caret" aria-hidden="true">▾</span>
+          </span>
+          <span class="symbol-sub">фьючерс<span id="market-leverage" hidden></span></span>
         </button>
-        <span class="chip chip-kind">Фьючерс</span>
-        <span class="chip" id="market-leverage" hidden></span>
         <button type="button" class="star" id="market-favorite" aria-pressed="false"
                 aria-label="Избранное">☆</button>
+        <div class="market-account" id="market-account"></div>
       </div>
 
       <div id="market-body">
         <div class="market-price">
-          <div class="price" id="market-last">—</div>
-          <div class="change">
-            <span class="pill flat" id="market-candle-change">—</span>
-            <span id="market-candle-value"></span>
-            · <span id="market-interval-label"></span>
+          <div class="price-line">
+            <span class="price" id="market-last">—</span>
+            <span class="change" id="market-change">
+              <span class="flat" id="market-candle-change">—</span>
+              · <span id="market-interval-label"></span>
+            </span>
           </div>
-          <div class="muted small" id="market-time"></div>
+          <div class="price-time" id="market-time"></div>
           <p class="note" id="market-stale" hidden></p>
         </div>
 
@@ -84,20 +96,19 @@
           </div>
         </div>
 
+        <dl class="details details-lines">
+          <dt>24ч</dt><dd id="market-day-change">—</dd>
+          <dt>объём 24ч</dt><dd id="market-volume">—</dd>
+          <dt>откр. интерес</dt><dd id="market-oi">—</dd>
+          <dt>фандинг</dt><dd id="market-funding">—</dd>
+        </dl>
+
         <div class="market-position" id="market-position" hidden>
           <h2 class="section-title">Позиция</h2>
           <ul class="market-position-list" id="market-position-list"></ul>
           <p class="note" id="market-position-stale" hidden></p>
           <button type="button" class="link-button" id="market-position-open">💼 Все позиции</button>
         </div>
-
-        <h2 class="section-title">Детали</h2>
-        <dl class="details">
-          <dt>Изменение за 24ч</dt><dd id="market-day-change">—</dd>
-          <dt>Объём за 24ч</dt><dd id="market-volume">—</dd>
-          <dt>Открытый интерес</dt><dd id="market-oi">—</dd>
-          <dt>Фандинг</dt><dd id="market-funding">—</dd>
-        </dl>
         <p class="muted small" id="market-details-note" hidden></p>
       </div>
 

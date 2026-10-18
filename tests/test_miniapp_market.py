@@ -159,11 +159,12 @@ def test_missing_candle_is_not_requested_every_tick() -> None:
 
 
 def test_leverage_chip_is_contract_max_or_hidden() -> None:
-    """Плашка N× — максимум контракта из /api/market (contract.max_leverage); нет ключа
-    или сбой (null) — плашки нет: ни «—», ни выдуманного числа."""
+    """«фьючерс · до N×» (шапка B, Д.3) — максимум контракта из /api/market
+    (contract.max_leverage); нет ключа или сбой (null) — только «фьючерс»: ни «—», ни
+    выдуманного числа."""
     render = _body(_js("market.js"), "function renderMarket(m)")
     assert "const maxLeverage = m.contract.max_leverage;" in render
-    assert 'el.leverage.textContent = maxLeverage ? `${maxLeverage}×` : "";' in render
+    assert 'el.leverage.textContent = maxLeverage ? ` · до ${maxLeverage}×` : "";' in render
     assert "el.leverage.hidden = !maxLeverage;" in render
     assert "m.leverage" not in render
 

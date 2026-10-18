@@ -340,7 +340,7 @@ def test_registry_covers_queue_scenarios() -> None:
         "pos_401", "pos_poll", "pos_to_market", "menu_native",
         "market_lines", "market_lines_none", "confirm_lines",
         "no_init_data", "me_502",
-        "design_fonts", "design_theme",
+        "design_fonts", "design_theme", "design_market", "design_live", "design_font_swap",
     }
     assert [s.name for s in ms.select("all")] == list(ms.SCENARIOS)
     assert ms.select("poll") == [ms.SCENARIOS["poll"]]
@@ -483,3 +483,14 @@ def test_module_constants_assigned_once() -> None:
         if isinstance(t, ast.Name)
     )
     assert [n for n, c in names.items() if c > 1] == []
+
+
+async def test_wait_for_stops_as_network_when_sdk_screen_shows() -> None:
+    """Д.3: SDK telegram.org не загрузился посреди сценария — исход «сеть» (INCONCLUSIVE),
+    а не «не дождался»; сценарии, которые сами ждут экран SDK, его получают."""
+    sdk = {"screens": ["screen-sdk"]}
+    page = ms.Page(FakeBrowser(evaluate=lambda expr: sdk))
+    with pytest.raises(ms.ScenarioError, match=r"telegram\.org не загрузился"):
+        await page.wait_for(lambda s: "screen-market" in s["screens"], 0.5, "рынок")
+    assert await page.wait_for(lambda s: "screen-sdk" in s["screens"], 0.5, "SDK") == sdk
+    assert page.problems == []

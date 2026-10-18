@@ -177,19 +177,24 @@ python -m scripts.miniapp_dev [--port 8765]
   (`market_lines` — хедж на свечах и «линии», закрыта → сняты; `market_lines_none`; `confirm_lines` — после итога; позиции стенда —
   `POST /dev/positions?preset=…`, `Setup.preset`), дизайн Д (`theme` — страница и график в наборе colorScheme, светлая ↔ тёмная; `design_theme` — шапка/фон/нижняя полоса
   Telegram и нативные кнопки в цветах набора, разряды, цена моно; `design_fonts` — все начертания Golos/Plex Mono/Caveat загружены из
-  `vendor/fonts`, body — Golos, `font/woff2`). **Для `confirm_*` стенд — с `EXEC_OPEN_DRY_RUN=false`** (биржа стенда
+  `vendor/fonts`, body — Golos, `font/woff2`; `design_market`/`design_live` — шапка B и плашка счёта, детали, LIVE, 320 px;
+  `design_font_swap` — подмена `--mono` не двигает рынок по вертикали, Plex запрошен между `/api/me` и `/api/market`). Ссылка
+  «💼 Позиции» без SettingsButton — в деталях плашки (`#account-plate` → `#account-positions`). **Для `confirm_*` стенд — с `EXEC_OPEN_DRY_RUN=false`** (биржа стенда
   фейковая; в сухом прогоне сценарий скажет об этом). Перед каждым сценарием — `POST /dev/reset` стенда (новая
   фейковая биржа, пользователь стенда заново; только в `miniapp_dev.py`). Каждый — свой свежий Chrome; сеть
   подменяется через `Fetch` (свой статус, правка ответа, обрыв, зависание, `exact` — путь целиком) — следы своих
   правил замечанием не считаются. SDK с telegram.org не загрузился (сеть) — сценарий прерывается с этим текстом,
-  повторить. Стенд вне Telegram — initData-заглушка в хеше (`#tgWebAppData=…`, `page_url`), без неё — экран «Открой Mini
-  App из бота» (`no_init_data`, `Setup(init_data=False)`); `me_502` — прокси без api (502 без JSON). `all` (46) ≈ 8 мин; exit 0/1/2 как выше. Новый экран — новый сценарий там же
+  повторить; так же `wait_for`, если посреди сценария показан `screen-sdk`. Стенд вне Telegram — initData-заглушка в хеше (`#tgWebAppData=…`, `page_url`), без неё — экран «Открой Mini
+  App из бота» (`no_init_data`, `Setup(init_data=False)`); `me_502` — прокси без api (502 без JSON). `all` (49) ≈ 9 мин; exit 0/1/2 как выше. Новый экран — новый сценарий там же
 - снимки экранов — `--shots <папка> [--shot market|form|confirm|positions|all]` (`scripts/miniapp_shots.py`, при
   запущенном стенде; подэтап «Дизайн Mini App»): экраны 1–4 × светлая/тёмная (themeParams клиента в хеше +
   `prefers-color-scheme`, `Setup.theme`) × 390/320 px, страница целиком, масштаб 2, свои кнопки (браузер 6.0).
   Файл `<экран>-<тема>-<ширина>.png`; **папка внутри репозитория — отказ (exit 2)**: снимки «до» —
   `C:\Users\vladz\OneDrive\Desktop\trading\miniapp_shots\before\`, «после» — `…\after\`. Каждый экран × тема — свой
   Chrome, 16 снимков ≈ 2 мин; замечания — exit 1
+- **мутации (правило владельца 18.10):** исходы CAUGHT / MISSED / **INCONCLUSIVE** — проверка не состоялась из-за сети или SDK
+  telegram.org («SDK … не загрузился», exit 2). INCONCLUSIVE — не «пойман»: перепрогнать; итог прогона мутаций зелёный только при
+  INCONCLUSIVE = 0, в отчёте — отдельной цифрой
 
 `scripts/check_redis.py` — PING и цикл проверок лока, запускать на проде:
 

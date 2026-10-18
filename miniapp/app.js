@@ -12,6 +12,7 @@ import { createConfirmScreen } from "./confirm.js";
 import { createTradeScreen } from "./form.js";
 import { createMarketScreen } from "./market.js";
 import { createPositionsScreen } from "./positions.js";
+import { groupDigits } from "./render.js";
 import { createStorage } from "./storage.js";
 import { initTheme } from "./theme.js";
 
@@ -55,6 +56,7 @@ function show(name, { push = true } = {}) {
   for (const screen of SCREENS) {
     $(`screen-${screen}`).hidden = screen !== name;
   }
+  placeAccount(name);
   if (screens[name]) screens[name].enter();
   if (backButton) {
     // На экране рынка «Назад» Telegram закрывает приложение (§5а).
@@ -79,20 +81,40 @@ function text(value) {
   return value === null || value === undefined ? "—" : String(value);
 }
 
+// Шапка B (Д.3): плашка «DEMO · equity» (разряды — только в показе), на LIVE — красная
+// с «⚠️ Реальный счёт»; нажатие — детали: equity, свободно, счёт, сухой прогон (🧪 в
+// плашке нет — решение 18.10). Ошибка баланса — строкой под шапкой, видна без нажатия.
 function renderAccount(me) {
-  const header = $("account");
+  const account = $("account");
   const live = me.account_mode === "LIVE";
-  header.classList.toggle("live", live);
+  account.classList.toggle("live", live);
   $("account-mode").textContent = live ? "⚠️ Реальный счёт" : "DEMO";
-  $("account-equity").textContent = text(me.equity);
+  $("account-equity").textContent = me.equity === null || me.equity === undefined
+    ? "—" : `${groupDigits(me.equity)} $`;
+  $("account-equity-full").textContent = text(me.equity);
   $("account-available").textContent = text(me.available);
+  $("account-mode-text").textContent = live ? "LIVE · реальный счёт" : "DEMO";
+  $("account-dry").textContent = me.flags && me.flags.dry_run
+    ? "да — на биржу не уйдёт" : "нет";
   const note = $("account-note");
-  const notes = [];
-  if (me.balance_error) notes.push(me.balance_error);
-  if (me.flags && me.flags.dry_run) notes.push("Сухой прогон — на биржу не уйдёт.");
-  note.textContent = notes.join(" ");
-  note.hidden = notes.length === 0;
-  header.hidden = false;
+  note.textContent = me.balance_error || "";
+  note.hidden = !me.balance_error;
+  account.hidden = false;
+  placeAccount(current);
+}
+
+// Плашка одна: на рынке — в строке монеты, на других экранах — в верхней строке.
+function placeAccount(name) {
+  const account = $("account");
+  const slot = name === "market" ? $("market-account") : $("topbar");
+  if (account.parentElement !== slot) slot.append(account);
+  $("topbar").hidden = name === "market" || name === "loading" || account.hidden;
+  setDetails(false);
+}
+
+function setDetails(open) {
+  $("account-details").hidden = !open;
+  $("account-plate").setAttribute("aria-expanded", open ? "true" : "false");
 }
 
 function showError(err, retry) {
@@ -189,11 +211,26 @@ function openExternal(url) {
   }
 }
 
+// Plex Mono — цифры цены и подписи. Preload нет (на экранах ошибок шрифт не нужен —
+// Chrome предупредил бы), поэтому грузим сразу после успешного /api/me, до запроса рынка:
+// иначе при подмене шрифта цена меняет ширину и подпись рядом с ней прыгает на ~12 px
+// (сценарий design_font_swap, решение владельца 18.10). Текст — латиница и кириллица:
+// загружаются оба набора.
+const NUMBER_FONTS = ['600 42px "IBM Plex Mono"', '400 13px "IBM Plex Mono"'];
+
+function loadNumberFont() {
+  if (!document.fonts || typeof document.fonts.load !== "function") return;
+  for (const spec of NUMBER_FONTS) {
+    document.fonts.load(spec, "0123456789.,$ фьючерс").catch(() => {});
+  }
+}
+
 async function start() {
   history.length = 0;
   show("loading", { push: false });
   try {
     me = await api.get("/api/me");
+    loadNumberFont();
     renderAccount(me);
     show("market");
   } catch (err) {
@@ -228,7 +265,7 @@ function init() {
   if (backButton) backButton.onClick(back);
   screens = {
     market: createMarketScreen({
-      api, tg, storage, onSide: openTrade, onPositions: openPositions,
+      api, tg, storage, me: () => me, onSide: openTrade, onPositions: openPositions,
       onFatal: (err) => showError(err, start),
     }),
     trade: createTradeScreen({
@@ -250,8 +287,19 @@ function init() {
   } else {
     const link = $("account-positions");
     link.hidden = false;
-    link.addEventListener("click", openPositions);
+    link.addEventListener("click", () => {
+      setDetails(false);
+      openPositions();
+    });
   }
+  $("account-plate").addEventListener("click", (event) => {
+    event.stopPropagation();
+    setDetails($("account-details").hidden);
+  });
+  // Детали закрываются нажатием мимо них.
+  document.addEventListener("click", (event) => {
+    if (!$("account").contains(event.target)) setDetails(false);
+  });
   $("tv-attribution").addEventListener("click", (event) => {
     event.preventDefault();
     openExternal(TV_URL);

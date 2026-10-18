@@ -185,3 +185,71 @@ def test_group_digits_is_display_only() -> None:
     assert "/g, NBSP)" in body
     assert "const NBSP = String.fromCharCode(160);" in text     # неразрывный, без символа в коде
     assert " " not in text
+
+
+# --- Д.3: экран рынка ----------------------------------------------------------------------
+
+
+def _app() -> str:
+    return (_MINIAPP / "app.js").read_text(encoding="utf-8").replace("\r\n", "\n")
+
+
+def test_number_font_loads_after_me_before_market() -> None:
+    """Plex — после успешного /api/me и до экрана рынка (сдвиг цены ~12 px при подмене,
+    design_font_swap); preload нет — на экранах ошибок шрифт не нужен."""
+    app = _app()
+    start = app[app.index("async function start() {"):]
+    i_me = start.index('me = await api.get("/api/me");')
+    i_load = start.index("loadNumberFont();")
+    i_market = start.index('show("market");')
+    assert i_me < i_load < i_market
+    assert "document.fonts.load(spec" in app
+    html = (_MINIAPP / "index.html").read_text(encoding="utf-8")
+    assert "ibm-plex-mono" not in html
+
+
+def test_plate_has_no_flask_and_groups_equity() -> None:
+    """Решение 18.10: 🧪 в плашке нет; equity — с разрядами только в показе."""
+    app = _app()
+    render = app[app.index("function renderAccount(me) {"):]
+    render = render[:render.index("\n}\n")]
+    assert "🧪" not in render and "🧪" not in (_MINIAPP / "index.html").read_text(encoding="utf-8")
+    assert "groupDigits(me.equity)" in render
+    assert '"да — на биржу не уйдёт"' in render
+
+
+def test_dry_run_line_under_price_from_me() -> None:
+    market = (_MINIAPP / "market.js").read_text(encoding="utf-8")
+    assert 'export const DRY_RUN_LINE = "сухой прогон — на биржу не уйдёт ·";' in market
+    assert "me().flags.dry_run" in market
+    assert "${dry ? DRY_RUN_LINE : \"Цена на\"}" in market
+
+
+def test_plate_moves_between_market_head_and_topbar() -> None:
+    app = _app()
+    place = app[app.index("function placeAccount(name) {"):]
+    place = place[:place.index("\n}\n")]
+    assert 'name === "market" ? $("market-account") : $("topbar")' in place
+    assert 'show(name' not in place
+    show = app[app.index("function show(name"):]
+    assert "placeAccount(name);" in show[:show.index("\n}\n")]
+
+
+def test_price_and_head_rows_have_fixed_heights() -> None:
+    """Подмена шрифта не сдвигает экран по вертикали: высоты строк заданы в px."""
+    fixed = ((".price {", "line-height: 48px;"), (".symbol-line {", "line-height: 28px;"),
+             (".symbol-sub {", "line-height: 16px;"), (".price-time {", "line-height: 16px;"),
+             (".market-head {", "min-height: 48px;"))
+    for selector, prop in fixed:
+        body = _block(selector)
+        assert prop in body, (selector, prop)
+
+
+def test_narrow_screen_shrinks_head_not_clips() -> None:
+    """320 px (iPhone SE): монета, ☆ и плашка — в одну строку; монета меньше, плашка уже."""
+    i = _CSS.index("@media (max-width: 359px) {\n  .market-head")
+    body = _CSS[i:_CSS.index("\n}\n", i)]
+    rules = (".symbol-line { font-size: 18px;", ".plate { padding: 0 6px;",
+             ".market-head { gap: 4px; }")
+    for rule in rules:
+        assert rule in body, rule

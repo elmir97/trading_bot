@@ -36,6 +36,7 @@ export const POSITION_POLL_MS = 10000;
 export const SEARCH_DEBOUNCE_MS = 300;
 const DEFAULT_INTERVAL = "5m";
 const RECENT_LIMIT = 8;
+export const DRY_RUN_LINE = "сухой прогон — на биржу не уйдёт ·";
 const INTERVAL_LABELS = { "1m": "1м", "5m": "5м", "15m": "15м", "1h": "1ч", "4h": "4ч", "1d": "1д" };
 
 function $(id) {
@@ -128,19 +129,17 @@ export function positionSummary(p) {
 
 // --- экран -----------------------------------------------------------------------------
 
-export function createMarketScreen({ api, tg, storage, onSide, onPositions, onFatal }) {
+export function createMarketScreen({ api, tg, storage, me, onSide, onPositions, onFatal }) {
   const native = tg && tg.isVersionAtLeast("7.10");   // MainButton + SecondaryButton
   const el = {
     body: $("market-body"),
     head: $("market-head"),
     symbolButton: $("market-symbol-button"),
-    coin: $("market-coin"),
     symbol: $("market-symbol"),
     leverage: $("market-leverage"),
     favorite: $("market-favorite"),
     last: $("market-last"),
     change: $("market-candle-change"),
-    changeValue: $("market-candle-value"),
     changeInterval: $("market-interval-label"),
     time: $("market-time"),
     stale: $("market-stale"),
@@ -247,8 +246,7 @@ export function createMarketScreen({ api, tg, storage, onSide, onPositions, onFa
     el.stale.hidden = true;
     el.last.textContent = "—";
     el.change.textContent = "—";
-    el.change.className = "pill flat";
-    el.changeValue.textContent = "";
+    el.change.className = "flat";
     el.time.textContent = "";
     for (const node of [el.dayChange, el.volume, el.openInterest, el.funding]) {
       node.textContent = "—";
@@ -263,7 +261,6 @@ export function createMarketScreen({ api, tg, storage, onSide, onPositions, onFa
 
   function renderHead() {
     el.symbol.textContent = symbol || "Выбери монету";
-    el.coin.textContent = symbol ? symbol.charAt(0) : "?";
     const favorite = symbol && favorites().includes(symbol);
     el.favorite.textContent = favorite ? "★" : "☆";
     el.favorite.setAttribute("aria-pressed", favorite ? "true" : "false");
@@ -281,15 +278,14 @@ export function createMarketScreen({ api, tg, storage, onSide, onPositions, onFa
     el.last.textContent = text(m.last);
     const pct = m.candle_change.percent;
     const dir = direction(pct);
-    const arrow = dir === "up" ? "↑" : dir === "down" ? "↓" : "";
-    el.change.textContent = pct === null ? "—" : `${arrow}${String(pct).replace(/^[-+]/, "")}%`;
-    el.change.className = `pill ${dir}`;
-    el.changeValue.textContent = m.candle_change.value === null ? ""
-      : `${signed(m.candle_change.value)} $`;
+    el.change.textContent = pct === null ? "—" : `${signed(pct)}%`;
+    el.change.className = dir;
     el.changeInterval.textContent = INTERVAL_LABELS[m.interval] || m.interval;
     const at = new Date(m.time);
+    // Сухой прогон — строкой под ценой (макет «Рынок»; в плашке счёта его нет).
+    const dry = Boolean(me && me() && me().flags && me().flags.dry_run);
     el.time.textContent = Number.isNaN(at.getTime()) ? ""
-      : `Цена на ${clockFormat.format(at)} ${utcOffset(at)}`;
+      : `${dry ? DRY_RUN_LINE : "Цена на"} ${clockFormat.format(at)} ${utcOffset(at)}`;
 
     const day = m.day_change;
     el.dayChange.textContent = day.percent === null ? "—"
@@ -305,7 +301,7 @@ export function createMarketScreen({ api, tg, storage, onSide, onPositions, onFa
 
     // Максимум плеча контракта для счёта (по ключу BingX); нет ключа или сбой — плашки нет.
     const maxLeverage = m.contract.max_leverage;
-    el.leverage.textContent = maxLeverage ? `${maxLeverage}×` : "";
+    el.leverage.textContent = maxLeverage ? ` · до ${maxLeverage}×` : "";
     el.leverage.hidden = !maxLeverage;
   }
 

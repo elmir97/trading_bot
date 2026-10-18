@@ -95,7 +95,9 @@ STATE_JS = """(() => {
     scroll_x: document.documentElement.scrollWidth - document.documentElement.clientWidth,
     chart_box_width: box ? Math.round(box.getBoundingClientRect().width) : null,
     chart_canvas_width: chart ? Math.round(chart.getBoundingClientRect().width) : null,
-    menu_link: shown('account-positions'),
+    // Своя ссылка «Позиции» (без SettingsButton) — в деталях плашки (Д.3): есть ли она в меню.
+    menu_link: !!$('account-positions') && !$('account-positions').hidden,
+    details_open: shown('account-details'),
     settings_button: tg && tg.SettingsButton ? tg.SettingsButton.isVisible : null,
     account_note: shown('account-note') ? text('account-note') : null,
     positions_state: shown('positions-state') ? text('positions-state-text') : null,
@@ -131,6 +133,9 @@ WAIT_KEYS = ("screens", "last", "market_error", "chart_state", "stale", "error_t
              "blocked", "lev", "lev_max", "pending", "preview_state", "confirm_card",
              "confirm_status", "confirm_action", "main_button", "positions_state",
              "positions_note", "positions_empty", "lines", "lines_on", "market_position")
+
+
+SDK_FAILED = "SDK telegram.org не загрузился (сеть) — повтори сценарий"
 
 
 class ScenarioError(Exception):
@@ -337,6 +342,9 @@ class Page:
                 last, error = {}, str(exc)   # страница ещё грузится
             if last and cond(last):
                 return last
+            if last and "screen-sdk" in last.get("screens", []):
+                # Сеть до telegram.org, не код (как в open_page): исход — INCONCLUSIVE.
+                raise ScenarioError(SDK_FAILED)
             if self.clock() >= deadline:
                 seen = error or ", ".join(f"{k}={v!r}" for k, v in last.items()
                                           if k in WAIT_KEYS)
@@ -467,7 +475,7 @@ async def open_page(page: Page, url: str, setup: Setup) -> dict[str, Any]:
         bc.START_TIMEOUT, f"экран {want}")
     if "screen-sdk" in ready.get("screens", []):
         # Сеть до telegram.org, не код: дальше сценарий смысла не имеет.
-        raise ScenarioError("SDK telegram.org не загрузился (сеть) — повтори сценарий")
+        raise ScenarioError(SDK_FAILED)
     await page.pump(0.5)
     return ready
 
@@ -544,22 +552,29 @@ async def timeframe(page: Page, url: str) -> None:
     page.expect(s.get("charts") == 1, f"графиков {s.get('charts')}, ждали 1")
 
 
-# Пиксель графика — через копию в свой холст 1×1: несколько getImageData с холста библиотеки
-# Chrome отмечает предупреждением (willReadFrequently), а оно — замечание сценария.
+# Фон графика — самый частый цвет полоски 40×1 у верха холста: в одну точку может попасть
+# линия сетки (её место зависит от времени). Полоска — копией в свой холст: несколько
+# getImageData с холста библиотеки Chrome отмечает предупреждением (willReadFrequently).
 THEME_STATE_JS = """(() => {
   const c = document.querySelector('#market-chart canvas');
-  let d = [];
+  let pixel = [];
   if (c) {
-    const one = document.createElement('canvas');
-    one.width = 1;
-    one.height = 1;
-    const ctx = one.getContext('2d');
-    ctx.drawImage(c, 3, 3, 1, 1, 0, 0, 1, 1);
-    d = ctx.getImageData(0, 0, 1, 1).data;
+    const strip = document.createElement('canvas');
+    strip.width = 40;
+    strip.height = 1;
+    const ctx = strip.getContext('2d');
+    ctx.drawImage(c, 3, 3, 40, 1, 0, 0, 40, 1);
+    const d = ctx.getImageData(0, 0, 40, 1).data;
+    const seen = {};
+    for (let i = 0; i < d.length; i += 4) {
+      const key = d[i] + ',' + d[i + 1] + ',' + d[i + 2];
+      seen[key] = (seen[key] || 0) + 1;
+    }
+    const top = Object.entries(seen).sort((a, b) => b[1] - a[1])[0][0];
+    pixel = top.split(',').map(Number);
   }
   return { theme: document.documentElement.dataset.theme || null,
-           body: getComputedStyle(document.body).backgroundColor,
-           pixel: [d[0], d[1], d[2]] };
+           body: getComputedStyle(document.body).backgroundColor, pixel };
 })()"""
 # Бумага и карточка набора (style.css, таблица §9а): фон страницы и фон графика.
 THEME_RGB = {"light": ("rgb(246, 246, 242)", [255, 255, 255]),
@@ -1166,9 +1181,15 @@ def _loaded(s: dict[str, Any]) -> bool:
             and s["positions"] is not None)
 
 
-async def _to_positions(page: Page) -> dict[str, Any]:
-    """Своя ссылка «💼 Позиции» (браузер 6.0 — SettingsButton нет)."""
+async def _positions_link(page: Page) -> None:
+    """Своя ссылка «💼 Позиции» (браузер 6.0 — SettingsButton нет) — в деталях плашки (Д.3)."""
+    await page.click("#account-plate")
+    await page.wait_for(lambda s: s["details_open"], 3, "детали плашки")
     await page.click("#account-positions")
+
+
+async def _to_positions(page: Page) -> dict[str, Any]:
+    await _positions_link(page)
     return await page.wait_for(_loaded, 10, "вкладка «Позиции»")
 
 
@@ -1267,7 +1288,7 @@ async def pos_503(page: Page, url: str) -> None:
     # Рынок сам читает позиции (линии П.2) — подмена после его запроса, иначе он её съест.
     await page.wait_for(lambda s: bool(s["lines"]), 10, "линии позиции на рынке")
     page.intercept(Rule("/api/positions", "status", status=503, body=EXCHANGE_DOWN, times=1))
-    await page.click("#account-positions")
+    await _positions_link(page)
     await page.wait_for(lambda s: s["positions_state"] == EXCHANGE_DOWN["message"]
                         and s["positions_retry"], 10, "ошибка загрузки с «Повторить»")
     await page.click("#positions-retry")
@@ -1559,6 +1580,179 @@ async def design_theme(page: Page, url: str) -> None:
     page.expect(got["hands"] <= 1, f"пометок «от руки» на экране {got['hands']}")
     page.expect(got["digits"] == DIGITS, f"groupDigits: {got['digits']}")
 
+
+# Д.3 — экран рынка: шапка B, цена, график в рамке, детали
+
+MARKET_DESIGN_JS = """(() => {
+  const $ = (id) => document.getElementById(id);
+  const t = (e) => e ? e.textContent.replace(/\\s+/g, ' ').trim() : null;
+  const box = document.querySelector('#screen-market .chart-box');
+  const plate = $('account-plate').getBoundingClientRect();
+  return {
+    plate_in_head: $('market-account').contains($('account')),
+    plate_in_topbar: $('topbar').contains($('account')),
+    topbar_shown: !$('topbar').hidden,
+    plate: t($('account-plate')),
+    plate_right: Math.round(plate.right),
+    live: $('account').classList.contains('live'),
+    mode: t($('account-mode')),
+    mode_shown: !!$('account-mode').offsetParent,
+    mode_bg: getComputedStyle($('account-mode')).backgroundColor,
+    plate_border: getComputedStyle($('account-plate')).borderTopColor,
+    red: getComputedStyle(document.documentElement).getPropertyValue('--red').trim(),
+    red_text: getComputedStyle(document.documentElement).getPropertyValue('--red-text').trim(),
+    sub: t(document.querySelector('.symbol-sub')),
+    symbol_clipped: $('market-symbol').scrollWidth > $('market-symbol').clientWidth,
+    price_size: getComputedStyle($('market-last')).fontSize,
+    chart_border: box ? [getComputedStyle(box).borderTopStyle, getComputedStyle(box).borderTopColor,
+      getComputedStyle($('market-last')).color] : null,
+    time: t($('market-time')),
+    details: $('account-details').hidden ? null
+      : [...$('account-details').querySelectorAll('.receipt-row')]
+        .map((row) => [...row.children].map(t).join(' ')).join(' | '),
+    width: document.documentElement.clientWidth,
+    scroll_x: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+  };
+})()"""
+
+
+async def _market_design(page: Page) -> dict[str, Any]:
+    got = await page.js(MARKET_DESIGN_JS)
+    if not isinstance(got, dict):
+        raise ScenarioError(f"шапка не прочитана: {got!r}")
+    return got
+
+
+def _rgb(hex_: str) -> str:
+    r, g, b = (int(hex_[i:i + 2], 16) for i in (1, 3, 5))
+    return f"rgb({r}, {g}, {b})"
+
+
+def _grouped(value: str) -> str:
+    """Как groupDigits, но пробел обычный (\\s+ в MARKET_DESIGN_JS сводит неразрывный)."""
+    whole, _, frac = value.partition(".")
+    out = ""
+    while len(whole) > 3:
+        out = " " + whole[-3:] + out
+        whole = whole[:-3]
+    return whole + out + ("." + frac if frac else "")
+
+
+@scenario("design_market", "Д.3: шапка B — плашка «DEMO · equity» в строке монеты, детали по "
+                           "нажатию, «до N×», цена 42px, график в рамке, 320 px; на «Позициях» — "
+                           "в верхней строке")
+async def design_market(page: Page, url: str) -> None:
+    await open_page(page, url, Setup())
+    me = await page.js("fetch('/api/me').then((r) => r.json())")
+    dry = bool(me["flags"]["dry_run"])
+    g = await _market_design(page)
+    page.expect(g["plate_in_head"] and not g["topbar_shown"], f"плашка не в строке монеты: {g}")
+    page.expect(g["plate"] == f"DEMO {_grouped(me['equity'])} $",
+                f"плашка: {g['plate']!r} (equity {me['equity']})")
+    page.expect(g["sub"] == "фьючерс · до 125×", f"подпись монеты: {g['sub']!r}")
+    page.expect(g["price_size"] == "42px", f"цена {g['price_size']}")
+    # Рамка 1.5px — при плотности 1 Chrome рисует 1px; проверяем, что она сплошная чернилами.
+    style, color, ink = g["chart_border"] or ("", "", "-")
+    page.expect(style == "solid" and color == ink, f"рамка графика {g['chart_border']}")
+    want_time = "сухой прогон — на биржу не уйдёт ·" if dry else "Цена на"
+    page.expect((g["time"] or "").startswith(want_time), f"строка под ценой: {g['time']!r}")
+    page.expect(g["details"] is None, "детали плашки открыты без нажатия")
+    await page.click("#account-plate")
+    g = await _market_design(page)
+    details = g["details"] or ""
+    for part in (f"equity {me['equity']}", f"свободно {me['available']}", "счёт DEMO",
+                 "сухой прогон " + ("да — на биржу не уйдёт" if dry else "нет")):
+        page.expect(part in details, f"в деталях нет «{part}»: {details!r}")
+    page.expect("🧪" not in (g["plate"] or ""), "🧪 в плашке")
+    await page.click("#market-last")                 # нажатие мимо — детали закрываются
+    g = await _market_design(page)
+    page.expect(g["details"] is None, "детали не закрылись нажатием мимо")
+    await page.viewport(320, 844)
+    await page.pump(1)
+    g = await _market_design(page)
+    page.expect(g["scroll_x"] == 0 and g["plate_right"] <= g["width"],
+                f"320 px: прокрутка {g['scroll_x']}, плашка до {g['plate_right']} при {g['width']}")
+    page.expect(not g["symbol_clipped"], "320 px: монета обрезана («XRP-…»)")
+    await page.viewport(390, 844)
+    await _to_positions(page)
+    g = await _market_design(page)
+    page.expect(g["plate_in_topbar"] and g["topbar_shown"], f"на «Позициях» плашки нет: {g}")
+
+
+@scenario("design_live", "Д.3: LIVE — плашка красная с «⚠️ Реальный счёт», 320 px без прокрутки")
+async def design_live(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(width=320, rules=[Rule("/api/me", "patch", patch=_live)]))
+    g = await _market_design(page)
+    page.expect(g["live"] and g["mode"] == "⚠️ Реальный счёт" and g["mode_shown"],
+                f"LIVE: {g['mode']!r} {g['live']} видно {g['mode_shown']}")
+    page.expect(g["mode_bg"] == _rgb(g["red_text"]) and g["plate_border"] == _rgb(g["red"]),
+                f"LIVE не красная: ярлык {g['mode_bg']}, рамка {g['plate_border']}")
+    page.expect(g["scroll_x"] == 0 and g["plate_right"] <= g["width"],
+                f"LIVE 320 px: прокрутка {g['scroll_x']}, плашка до {g['plate_right']}")
+    await page.click("#account-plate")
+    g = await _market_design(page)
+    page.expect("счёт LIVE · реальный счёт" in (g["details"] or ""), f"детали: {g['details']!r}")
+
+
+# Сдвиг при подмене шрифта (Д.3, владелец 18.10): у Plex нет preload (на экранах ошибок он
+# дал бы предупреждение). Подмена — как у пользователя: --mono то запасной моно, то Plex
+# (CSSOM, CSP её не режет; перезагрузка не годится — Chrome берёт шрифт из кэша в памяти).
+# Вертикаль (top, height) — строго ≤ 1px; горизонталь (ширина цены, сдвиг подписи) —
+# замер в note: по нему решение, грузить ли Plex заранее (после /api/me).
+SWAP_JS = """(async () => {
+  await document.fonts.ready;
+  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  const r = (sel) => {
+    const e = document.querySelector(sel);
+    if (!e) return null;
+    const b = e.getBoundingClientRect();
+    return [Math.round(b.top), Math.round(b.height), Math.round(b.left), Math.round(b.width)];
+  };
+  return {
+    family: getComputedStyle(document.getElementById('market-last')).fontFamily,
+    head: r('#market-head'), price: r('#market-last'), change: r('#market-change'),
+    time: r('#market-time'), chart: r('#screen-market .chart-box'),
+    controls: r('#screen-market .chart-controls'), details: r('#screen-market .details-lines'),
+    plate: r('#account-plate'),
+  };
+})()"""
+FALLBACK_MONO = "ui-monospace, Menlo, Consolas, monospace"
+SWAP_KEYS = ("head", "price", "change", "time", "chart", "controls", "details", "plate")
+PLEX_CHECK_JS = "document.fonts.check('600 42px \"IBM Plex Mono\"', '1.4950')"
+
+
+@scenario("design_font_swap", "Д.3: подмена шрифта не двигает рынок — геометрия с запасным моно = "
+                              "с Plex")
+async def design_font_swap(page: Page, url: str) -> None:
+    await open_page(page, url, Setup())
+    first = await page.js(PLEX_CHECK_JS)
+    page.note(f"Plex к первому показу цены: {'загружен' if first else 'ещё нет'}")
+    # Plex запрошен после /api/me и до первого /api/market (app.js loadNumberFont).
+    order = list(page.collector.urls.values())
+    plex_at = next((i for i, u in enumerate(order) if "ibm-plex-mono-latin-600" in u), None)
+    me_at = next((i for i, u in enumerate(order) if u.endswith("/api/me")), None)
+    market_at = next((i for i, u in enumerate(order) if "/api/market/" in u), None)
+    in_order = (plex_at is not None and me_at is not None and market_at is not None
+                and me_at < plex_at < market_at)
+    page.expect(in_order,
+                f"порядок запросов: /api/me {me_at}, Plex {plex_at}, /api/market {market_at}")
+    await page.pump(1)
+    plex = await page.js(SWAP_JS)
+    page.expect(plex["family"].startswith('"IBM Plex Mono"') and await page.js(PLEX_CHECK_JS),
+                f"Plex не загрузился: {plex['family']!r}")
+    await page.js("document.documentElement.style.setProperty('--mono', "
+                  f"{json.dumps(FALLBACK_MONO)})")
+    fallback = await page.js(SWAP_JS)
+    await page.js("document.documentElement.style.removeProperty('--mono')")
+    page.expect(not fallback["family"].startswith('"IBM Plex Mono"'),
+                f"подмена не сработала: {fallback['family']!r}")
+    moved = {k: (fallback[k][:2], plex[k][:2]) for k in SWAP_KEYS
+             if fallback[k] is None or plex[k] is None
+             or any(abs(a - b) > 1 for a, b in zip(fallback[k][:2], plex[k][:2], strict=True))}
+    page.expect(not moved, f"сдвиг по вертикали при подмене шрифта [top, height]: {moved}")
+    if fallback["price"] and plex["price"] and fallback["change"] and plex["change"]:
+        page.note(f"ширина цены {fallback['price'][3]} → {plex['price'][3]} px, подпись изменения "
+                  f"left {fallback['change'][2]} → {plex['change'][2]} px")
 
 SCENARIO_TIMEOUT = 150.0
 

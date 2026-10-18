@@ -160,33 +160,70 @@ main {
 .text-red { color: var(--red-text); }
 .text-blue { color: var(--blue); }
 
-/* --- Шапка счёта --- */
+/* --- Шапка B (Д.3): плашка счёта и её детали --- */
 
-.account {
+/* Верхняя строка экранов кроме рынка — только плашка справа (экраны 2–4 — Д.4–Д.6). */
+.topbar {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
+  justify-content: flex-end;
   padding: 10px var(--gap);
   background: var(--paper);
   border-bottom: 1px solid var(--rule);
-  font-size: 13px;
 }
 
-.badge {
-  padding: 2px 6px;
+.account { position: relative; flex: none; }
+
+.plate {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  border: var(--border);
+  border-radius: var(--radius);
+  background: var(--card);
+  color: var(--ink);
+  padding: 0 10px;
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 18px;
+}
+
+.plate-mode {
+  padding: 2px 5px;
   border-radius: 2px;
   background: var(--ink);
   color: var(--paper);
-  font-family: var(--mono);
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 10px;
+  line-height: 14px;
 }
 
-.account.live .badge { background: var(--red-text); color: var(--paper); }
-.account.live { box-shadow: inset 0 -2px 0 var(--red); }
+.plate-equity { white-space: nowrap; }
 
-.account-note { width: 100%; color: var(--muted); }
+/* LIVE: плашка красная, «⚠️ Реальный счёт» (§9а, шапка B). */
+.account.live .plate { border-color: var(--red); }
+.account.live .plate-mode { background: var(--red-text); color: var(--paper); }
+
+.account-details {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 10;
+  width: 240px;
+  padding: 6px 12px 8px;
+  font-size: 13px;
+}
+
+.account-details .account-menu { margin: 4px 0 0; padding: 6px 0 0; }
+
+.account-note {
+  margin: 0;
+  padding: 6px var(--gap);
+  border-bottom: 1px solid var(--rule);
+  background: var(--card);
+  color: var(--red-text);
+  font-size: 13px;
+}
 
 .screen { padding: var(--gap) 0; }
 
@@ -241,37 +278,53 @@ main {
   padding: 8px 0 8px 8px;
 }
 
-/* --- Экран рынка (§5а) --- */
+/* --- Экран рынка (§5а; Д.3 — макет «Рынок») --- */
 
+/* Высоты строк заданы явно: подмена шрифта (Plex/Golos после загрузки) не сдвигает
+   цену, график и кнопки (сценарий design_font_swap). */
 .market-head {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-height: 48px;
 }
 
 .symbol-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
   border: 0;
   background: none;
   color: var(--ink);
   font: inherit;
-  font-size: 17px;
-  font-weight: 700;
-  padding: 4px 0;
+  padding: 0;
   margin-right: auto;
   min-width: 0;
+  text-align: left;
+}
+
+.symbol-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: 100%;
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 28px;
+  letter-spacing: -0.5px;
 }
 
 .symbol { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* Узкий экран (iPhone SE) — плашка «Фьючерс» уступает место монете и ☆. */
-@media (max-width: 359px) {
-  .chip-kind { display: none; }
-}
+.caret { color: var(--ink); font-size: 16px; }
 
-.caret { color: var(--muted); font-size: 13px; }
+.symbol-sub {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 16px;
+  white-space: nowrap;
+}
 
 .coin {
   display: inline-flex;
@@ -288,17 +341,6 @@ main {
   flex: none;
 }
 
-.chip {
-  flex: none;
-  padding: 2px 8px;
-  border-radius: var(--radius);
-  border: 1px solid var(--chip-line);
-  background: var(--card);
-  color: var(--muted);
-  font-family: var(--mono);
-  font-size: 12px;
-}
-
 .star {
   flex: none;
   border: 0;
@@ -311,34 +353,50 @@ main {
 
 .star[aria-pressed="true"] { color: var(--blue); }
 
-.market-price { margin: 8px 0 12px; }
+/* Узкий экран (iPhone SE, 320 px): монета, ☆ и плашка — в одну строку без обрезки
+   «XRP-USDT» (сценарий design_market). */
+@media (max-width: 359px) {
+  .market-head { gap: 4px; }
+  .symbol-line { font-size: 18px; gap: 4px; }
+  .star { padding: 2px; font-size: 18px; }
+  .plate { padding: 0 6px; gap: 4px; font-size: 12px; }
+}
+
+.market-price { margin: 10px 0 12px; }
+
+.price-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 12px;
+}
 
 .price {
   font-family: var(--mono);
-  font-size: 30px;
+  font-size: 42px;
   font-weight: 600;
-  letter-spacing: -0.01em;
+  line-height: 48px;
+  letter-spacing: -1px;
   font-variant-numeric: tabular-nums;
 }
 
 .change {
-  margin: 2px 0;
   color: var(--muted);
   font-family: var(--mono);
+  font-size: 15px;
+  line-height: 20px;
   font-variant-numeric: tabular-nums;
 }
 
-.pill {
-  display: inline-block;
+.change .up, .details .up { color: var(--blue); }
+.change .down, .details .down { color: var(--red-text); }
+
+.price-time {
   color: var(--muted);
-  font-weight: 600;
+  font-size: 12px;
+  line-height: 16px;
+  min-height: 16px;
 }
-
-.pill.up { color: var(--blue); }
-.pill.down { color: var(--red-text); }
-
-.details .up { color: var(--blue); }
-.details .down { color: var(--red-text); }
 
 .note {
   margin: 6px 0 0;
@@ -352,10 +410,14 @@ main {
 
 /* Высота — от устойчивой высоты окна Telegram (её ставит SDK); поворот экрана и
    изменение окна подхватывает autoSize графика (ResizeObserver). */
+/* График — в рамке на карточке (макет «Рынок»). */
 .chart-box {
   position: relative;
-  margin: 0 calc(-1 * var(--gap));
-  height: clamp(200px, calc(var(--tg-viewport-stable-height, 100vh) * 0.42), 380px);
+  height: clamp(200px, calc(var(--tg-viewport-stable-height, 100vh) * 0.42), 340px);
+  border: var(--border);
+  border-radius: var(--radius);
+  background: var(--card);
+  overflow: hidden;
 }
 
 .chart { position: absolute; inset: 0; }
@@ -381,8 +443,11 @@ main {
   flex-wrap: wrap;
   justify-content: space-between;
   gap: 8px;
-  margin: 8px 0 4px;
+  margin: 10px 0 4px;
 }
+
+#market-intervals button { min-width: 0; padding: 0 9px; }
+#market-types button { padding: 0 10px; }
 
 /* Сегмент: рамка чернилами, выбранное — заливка чернилами. */
 .segmented {
@@ -416,7 +481,16 @@ main {
 #trade-take-kind,
 #trade-risk-kind { font-family: var(--mono); }
 
-.section-title { font-size: 15px; margin: 16px 0 6px; }
+/* Подпись раздела — как «РАСЧЁТ» / «ТОЛЬКО В ЖУРНАЛЕ» макета. */
+.section-title {
+  margin: 16px 0 6px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
 
 .details {
   display: grid;
@@ -433,6 +507,22 @@ main {
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
 }
+
+/* Детали рынка — моно-строки с линией (макет «Рынок»). */
+.details-lines {
+  gap: 0;
+  margin: 14px 0 0;
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+.details-lines dt,
+.details-lines dd {
+  padding: 7px 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.details-lines dd { padding-left: 12px; }
 
 .market-error { padding: var(--gap) 0; }
 
@@ -644,6 +734,8 @@ main {
 .market-position-list li {
   padding: 6px 0 6px 10px;
   border-left: 3px solid var(--rule);
+  font-family: var(--mono);
+  font-size: 13px;
 }
 
 .market-position-list li.long { border-left-color: var(--ink); }
