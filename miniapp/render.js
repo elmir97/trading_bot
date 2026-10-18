@@ -7,6 +7,7 @@
 export const NO_KEY_TEXT = "Подключи ключи биржи";
 
 const SIDE_TEXT = { LONG: "ЛОНГ", SHORT: "ШОРТ" };
+const SIDE_WORD = { LONG: "лонг", SHORT: "шорт" };
 const MARGIN_TEXT = { ISOLATED: "изол.", CROSSED: "кросс" };
 
 function text(value) {
@@ -54,13 +55,14 @@ export function baseAsset(symbol) {
 }
 
 // Главная кнопка по решению 05.10: есть BLOCK (или отказ) — кнопки нет; есть WARN —
-// «Открыть всё равно»; иначе «Открыть ЛОНГ 52 NEAR».
+// «Открыть всё равно»; иначе «Открыть лонг · 52 NEAR» (макет «Форма», Д.4). Объём —
+// строка сервера (calc.quantity), здесь только разряды.
 export function openAction(card, side, symbol) {
   if (!card || !card.calc || !card.can_open) return { visible: false, text: "", warn: false };
   if (card.has_warnings) return { visible: true, text: "Открыть всё равно", warn: true };
   return {
     visible: true,
-    text: `Открыть ${SIDE_TEXT[side]} ${card.calc.quantity} ${baseAsset(symbol)}`,
+    text: `Открыть ${SIDE_WORD[side]} · ${groupDigits(card.calc.quantity)} ${baseAsset(symbol)}`,
     warn: false,
   };
 }
@@ -83,17 +85,27 @@ function issueItem(icon, message) {
   return item;
 }
 
-// Отрисовка ответа preview. el — элементы блока результата; meta — {symbol, marginType}.
+// Сумма со знаком $ — строка сервера с разрядами; нет значения — «—».
+function usd(value) {
+  return value === null || value === undefined ? "—" : `${groupDigits(value)} $`;
+}
+
+// Отрисовка ответа preview — квитанция «РАСЧЁТ» (Д.4). el — элементы блока результата;
+// meta — {symbol, marginType}. Все числа — строки сервера (calc), здесь только разряды,
+// подписи и единицы: ни одного расчёта.
 export function renderPreview(el, card, { symbol, marginType }) {
   const c = card ? card.calc : null;
   const base = baseAsset(symbol);
-  el.quantity.textContent = c ? `${c.quantity} ${base} ≈ ${c.notional} $` : "—";
-  el.margin.textContent = c ? `${c.margin} $ ${MARGIN_TEXT[marginType] || ""}`.trim() : "—";
-  el.rr.textContent = c ? text(c.rr) : "—";
+  el.quantity.textContent = c ? `${groupDigits(c.quantity)} ${base}` : "—";
+  el.notional.textContent = c ? usd(c.notional) : "—";
+  el.marginLabel.textContent = `маржа${MARGIN_TEXT[marginType] ? `, ${MARGIN_TEXT[marginType]}` : ""}`;
+  el.margin.textContent = c ? usd(c.margin) : "—";
+  el.rr.textContent = c && c.rr !== null && c.rr !== undefined ? `1 : ${c.rr}` : "—";
   el.liq.textContent = c && c.liq_estimate !== null
-    ? `≈ ${c.liq_estimate}${c.liq_ratio !== null ? ` (${c.liq_ratio}× дистанции)` : ""}` : "—";
-  el.fee.textContent = c ? `≈ ${c.fee_usd} $` : "—";
-  el.risk.textContent = c ? `${c.risk_usd} $ (${c.risk_percent}%)` : "—";
+    ? `≈ ${groupDigits(c.liq_estimate)}${c.liq_ratio !== null ? ` · ${c.liq_ratio}× дальше стопа` : ""}`
+    : "—";
+  el.fee.textContent = c ? `≈ ${usd(c.fee_usd)}` : "—";
+  el.risk.textContent = c ? `${usd(c.risk_usd)} · ${c.risk_percent}%` : "—";
 
   el.issues.replaceChildren();
   if (card && card.refusal) el.issues.append(issueItem("🚫", card.refusal.message));
@@ -117,11 +129,12 @@ export function leverageHint(card, cap) {
   return parts.join(" · ");
 }
 
-// Подсказка у риска: что сервер насчитал из ввода ($ ↔ %) и риск по плану.
+// Подсказка у риска (пометка «от руки», Д.4): что сервер насчитал из ввода ($ ↔ %) и
+// риск по плану.
 export function riskHint(card, kind, planRisk) {
   const parts = [];
   if (card && card.calc) {
-    parts.push(kind === "usd" ? `= ${card.levels.risk_percent}%` : `= ${card.calc.risk_usd} $`);
+    parts.push(kind === "usd" ? `= ${card.levels.risk_percent}%` : `= ${usd(card.calc.risk_usd)}`);
   }
   if (planRisk !== null && planRisk !== undefined) parts.push(`по плану ${planRisk}%`);
   return parts.join(" · ");

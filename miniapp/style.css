@@ -561,39 +561,42 @@ main {
 
 .search-item .small { margin-left: auto; }
 
-/* --- Экран сделки (§5а, экран 2) --- */
+/* --- Экран сделки (§5а, экран 2; Д.4 — макет «Форма») --- */
 
 .trade-head { display: flex; align-items: baseline; gap: 8px; }
 
-.trade-title { font-size: 17px; margin: 0; margin-right: auto; }
+.trade-title { font-size: 20px; font-weight: 800; letter-spacing: -0.3px; margin: 0; margin-right: auto; }
 
 .trade-last { color: var(--muted); font-family: var(--mono); font-variant-numeric: tabular-nums; }
 
 .chart-compact {
-  margin-top: 8px;
-  height: clamp(160px, calc(var(--tg-viewport-stable-height, 100vh) * 0.28), 240px);
+  margin-top: 10px;
+  height: clamp(150px, calc(var(--tg-viewport-stable-height, 100vh) * 0.22), 200px);
 }
 
 .trade-blocked { padding: var(--gap) 0; }
 
 .trade-blocked-title { font-size: 17px; font-weight: 600; margin: 0 0 4px; }
 
-.trade-form { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.trade-form { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
 
-.segmented-wide { display: flex; }
-.segmented-wide button { flex: 1; min-height: 40px; font-weight: 600; }
+.segmented-wide { display: flex; margin-bottom: 6px; }
+.segmented-wide button { flex: 1; min-height: 44px; font-size: 16px; font-weight: 700; }
+#trade-side button:not(.selected) { color: var(--muted); }
 #trade-side button[data-side="SHORT"].selected { background: var(--red-text); color: var(--paper); }
 
-.field { display: flex; align-items: center; gap: 8px; }
+.field { display: flex; align-items: center; gap: 10px; }
 
-.field-label { flex: none; width: 48px; color: var(--muted); }
+.field-label { flex: none; width: 58px; color: var(--muted); font-size: 14px; }
+.field-label.stop { color: var(--red-text); font-weight: 600; }
+.field-label.take { color: var(--blue); font-weight: 600; }
 
 /* Поле — подчёркивание: стоп — красным, тейк — синим, остальное — чернилами. */
 .field-input,
 .field-select {
   flex: 1;
   min-width: 0;
-  min-height: 40px;
+  min-height: 44px;
   border: 0;
   border-bottom: 2px solid var(--ink);
   border-radius: 0;
@@ -601,7 +604,7 @@ main {
   background: transparent;
   color: var(--ink);
   font-family: var(--mono);
-  font-size: 18px;
+  font-size: 20px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
@@ -618,15 +621,17 @@ main {
 
 .field-range { flex: 1; min-width: 0; accent-color: var(--ink); }
 
-.field-value { flex: none; min-width: 44px; text-align: right; font-family: var(--mono); font-weight: 600; }
+.field-value { flex: none; min-width: 44px; text-align: right; font-family: var(--mono); font-size: 18px; font-weight: 600; }
 
-.field-hint { margin: -4px 0 0 56px; }
+.field-hint { margin: -6px 0 0 68px; }
 .field-hint:empty { display: none; }
 
-.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: -2px 0 0 56px; }
+.field-note { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: -4px 0 0 68px; }
 
 .chips button {
-  min-height: 30px;
+  min-height: 32px;
   border: 1px solid var(--chip-line);
   border-radius: var(--radius);
   padding: 0 10px;
@@ -636,11 +641,42 @@ main {
   font-size: 13px;
 }
 
+.chips button.selected { border-color: var(--ink); font-weight: 600; }
+
 .chips button:disabled { opacity: 0.4; }
 
-.trade-result { margin: 12px 0 var(--gap); }
+/* Квитанция «РАСЧЁТ»: карточка с пунктирными строками (макет «Форма»). */
+.receipt { margin: 20px 0 var(--gap); }
 
-.trade-result.pending .details dd { opacity: 0.45; }
+.receipt-head {
+  display: flex;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--rule);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.receipt.pending #trade-receipt-state::after { content: "пересчёт…"; }
+
+.receipt-body { padding: 6px 14px 10px; font-size: 14px; }
+
+.receipt .receipt-row > :first-child { white-space: nowrap; }
+.receipt .receipt-row > :last-child { text-align: right; }
+
+/* 320 px: подпись строки квитанции не переносится («риск с комиссией»). */
+@media (max-width: 359px) {
+  .receipt-body { font-size: 13px; }
+  .receipt-row { gap: 8px; }
+}
+
+.receipt > .muted, .receipt > .issues { padding: 0 14px; }
+.receipt > .issues { padding-bottom: 10px; }
+
+.strong { font-weight: 600; }
+
+.trade-result.pending .receipt-row > :last-child { opacity: 0.45; }
 
 .issues { list-style: none; margin: 8px 0 0; padding: 0; }
 .issues li { margin: 4px 0; }

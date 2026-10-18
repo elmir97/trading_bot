@@ -4,6 +4,7 @@ DevTools, порядок команд, ответ evaluate только по с�
 from __future__ import annotations
 
 import asyncio
+import base64
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -228,7 +229,7 @@ def _report(*events: dict[str, Any], state: Any = None) -> bc.Report:
 def test_exit_0_when_clean(monkeypatch: pytest.MonkeyPatch, chrome_exe: Path,
                            capsys: pytest.CaptureFixture[str]) -> None:
     async def fake_check(url: str, chrome: Path, wait: float,
-                         symbol: str | None = None) -> bc.Report:
+                         symbol: str | None = None, local_sdk: bool = True) -> bc.Report:
         return _report(_response(200, url))
 
     monkeypatch.setattr(bc, "check", fake_check)
@@ -239,7 +240,7 @@ def test_exit_0_when_clean(monkeypatch: pytest.MonkeyPatch, chrome_exe: Path,
 def test_exit_1_lists_issues(monkeypatch: pytest.MonkeyPatch, chrome_exe: Path,
                              capsys: pytest.CaptureFixture[str]) -> None:
     async def fake_check(url: str, chrome: Path, wait: float,
-                         symbol: str | None = None) -> bc.Report:
+                         symbol: str | None = None, local_sdk: bool = True) -> bc.Report:
         return _report(_console("error", "boom"), _response(404, url + "x.js"))
 
     monkeypatch.setattr(bc, "check", fake_check)
@@ -347,7 +348,7 @@ def test_main_passes_symbol(monkeypatch: pytest.MonkeyPatch, chrome_exe: Path) -
     seen: list[str | None] = []
 
     async def fake_check(url: str, chrome: Path, wait: float,
-                         symbol: str | None = None) -> bc.Report:
+                         symbol: str | None = None, local_sdk: bool = True) -> bc.Report:
         seen.append(symbol)
         return _report()
 
@@ -355,3 +356,64 @@ def test_main_passes_symbol(monkeypatch: pytest.MonkeyPatch, chrome_exe: Path) -
     assert bc.main(["--chrome", str(chrome_exe), "--symbol", "XRP-USDT"]) == 0
     assert bc.main(["--chrome", str(chrome_exe)]) == 0
     assert seen == ["XRP-USDT", None]
+
+
+# --- SDK telegram.org: копия стенда по умолчанию (Д.4) ------------------------------------
+
+_SDK_SHA256 = "124bdff7ba3fe86c8ba5143467afec21e020405e74abdb92cfdda6c0ee3b5908"
+
+
+def test_stand_sdk_copy_is_recorded_and_not_shipped() -> None:
+    """Копия SDK (telegram.org, Last-Modified 06.10.2026) — байт в байт; в образ и в
+    miniapp/ (прод) не попадает. Обновление копии — новый sha256 здесь."""
+    import hashlib
+
+    data = bc.STAND_SDK.read_bytes()
+    assert hashlib.sha256(data).hexdigest() == _SDK_SHA256
+    text = data.decode("utf-8")
+    assert "window.Telegram.WebApp" in text and "setBottomBarColor" in text
+    assert bc.STAND_SDK.parent.name == "stand_sdk" and bc.STAND_SDK.parent.parent.name == "scripts"
+    assert bc.SDK_URL == "https://telegram.org/js/telegram-web-app.js"
+    assert "scripts/stand_sdk/" in (_ROOT / ".dockerignore").read_text(encoding="utf-8").split()
+    assert "scripts/stand_sdk/** -text" in (_ROOT / ".gitattributes").read_text(
+        encoding="utf-8").splitlines()
+    html = (_ROOT / "miniapp" / "index.html").read_text(encoding="utf-8")
+    assert f'src="{bc.SDK_URL}"' in html                 # прод грузит настоящий SDK
+
+
+async def test_run_check_serves_local_sdk_and_continues_rest() -> None:
+    sdk = {"method": "Fetch.requestPaused",
+           "params": {"requestId": "S", "request": {"url": bc.SDK_URL, "method": "GET"}}}
+    other = {"method": "Fetch.requestPaused",
+             "params": {"requestId": "O", "request": {"url": "https://telegram.org/x.js",
+                                                      "method": "GET"}}}
+    t = FakeTransport([sdk, other])
+    await bc.run_check(t, "http://127.0.0.1:8765/", 0.05)
+    methods = [m["method"] for m in t.sent]
+    assert methods.index("Fetch.enable") < methods.index("Page.navigate")
+    fulfill = next(m["params"] for m in t.sent if m["method"] == "Fetch.fulfillRequest")
+    assert fulfill["requestId"] == "S" and fulfill["responseCode"] == 200
+    assert base64.b64decode(fulfill["body"]) == bc.STAND_SDK.read_bytes()
+    assert {"name": "Content-Type", "value": "application/javascript"} in fulfill["responseHeaders"]
+    cont = [m["params"] for m in t.sent if m["method"] == "Fetch.continueRequest"]
+    assert cont == [{"requestId": "O"}]
+
+
+async def test_run_check_real_sdk_does_not_intercept() -> None:
+    t = FakeTransport([])
+    await bc.run_check(t, "http://127.0.0.1:8765/", 0.05, local_sdk=False)
+    assert "Fetch.enable" not in [m["method"] for m in t.sent]
+
+
+def test_main_real_sdk_flag(monkeypatch: pytest.MonkeyPatch, chrome_exe: Path) -> None:
+    seen: list[bool] = []
+
+    async def fake_check(url: str, chrome: Path, wait: float, symbol: str | None = None,
+                         local_sdk: bool = True) -> bc.Report:
+        seen.append(local_sdk)
+        return _report()
+
+    monkeypatch.setattr(bc, "check", fake_check)
+    assert bc.main(["--chrome", str(chrome_exe)]) == 0
+    assert bc.main(["--chrome", str(chrome_exe), "--real-sdk"]) == 0
+    assert seen == [True, False]

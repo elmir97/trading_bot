@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import json
 import os
 import re
@@ -66,6 +67,22 @@ STORAGE_SYMBOL_KEY = "ma:anon:symbol"
 # проверяет (current_user подменён), но пустая initData — экран «Открой из бота» (app.js).
 # Без user: хранилище — анонимное (ma:anon:…), как у сценариев.
 STAND_INIT_DATA = "query_id=stand&auth_date=0&hash=stand"
+# SDK telegram.org на стенде — локальная копия по умолчанию (Д.4, решение владельца 18.10):
+# сетевые срывы до telegram.org не валят гейт. Chrome получает её через Fetch вместо сети;
+# index.html и прод не меняются. Настоящий SDK — флаг --real-sdk и сценарий sdk_real.
+SDK_URL = "https://telegram.org/js/telegram-web-app.js"
+STAND_SDK = Path(__file__).resolve().parent / "stand_sdk" / "telegram-web-app.js"
+
+
+def stand_sdk_text() -> str:
+    return STAND_SDK.read_text(encoding="utf-8")
+
+
+def sdk_fulfill(request_id: str) -> dict[str, Any]:
+    """Ответ Fetch.fulfillRequest локальной копией SDK."""
+    return {"requestId": request_id, "responseCode": 200,
+            "responseHeaders": [{"name": "Content-Type", "value": "application/javascript"}],
+            "body": base64.b64encode(STAND_SDK.read_bytes()).decode()}
 
 
 def page_url(url: str, *, version: str | None = None, init_data: bool = True,
@@ -235,7 +252,8 @@ def seed_script(symbol: str) -> str:
 
 
 async def run_check(transport: Transport, url: str, wait: float, *, symbol: str | None = None,
-                    clock: Callable[[], float] = time.monotonic) -> Report:
+                    clock: Callable[[], float] = time.monotonic,
+                    local_sdk: bool = True) -> Report:
     collector = Collector()
     seq = 0
 
@@ -256,10 +274,19 @@ async def run_check(transport: Transport, url: str, wait: float, *, symbol: str 
             except TimeoutError:
                 return
             collector.feed(msg)
+            if msg.get("method") == "Fetch.requestPaused":
+                rid = msg["params"]["requestId"]
+                if msg["params"].get("request", {}).get("url") == SDK_URL:
+                    await call("Fetch.fulfillRequest", sdk_fulfill(rid))
+                else:
+                    await call("Fetch.continueRequest", {"requestId": rid})
 
     for method in ("Runtime.enable", "Log.enable", "Network.enable", "Page.enable"):
         await call(method)
     await call("Network.setCacheDisabled", {"cacheDisabled": True})
+    if local_sdk:
+        await call("Fetch.enable", {"patterns": [
+            {"urlPattern": "*telegram.org*", "requestStage": "Request"}]})
     await call("Page.addScriptToEvaluateOnNewDocument", {"source": CSP_LISTENER})
     if symbol is not None:
         await call("Page.addScriptToEvaluateOnNewDocument", {"source": seed_script(symbol)})
@@ -360,11 +387,12 @@ async def chrome_page(http: aiohttp.ClientSession, chrome: Path) -> AsyncIterato
                 proc.wait(10)
 
 
-async def check(url: str, chrome: Path, wait: float, symbol: str | None = None) -> Report:
+async def check(url: str, chrome: Path, wait: float, symbol: str | None = None,
+                local_sdk: bool = True) -> Report:
     async with aiohttp.ClientSession() as http:
         await stand_answers(http, url)
         async with chrome_page(http, chrome) as transport:
-            return await run_check(transport, url, wait, symbol=symbol)
+            return await run_check(transport, url, wait, symbol=symbol, local_sdk=local_sdk)
 
 
 async def check_scenarios(url: str, chrome: Path, items: list[Any]) -> list[tuple[Any, Any]]:
@@ -448,6 +476,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--shots", default=None,
                         help="папка снимков экранов (вне репозитория), scripts/miniapp_shots.py")
     parser.add_argument("--shot", default="all", help="экран для --shots или all")
+    parser.add_argument("--real-sdk", action="store_true",
+                        help="SDK с telegram.org (по умолчанию — копия scripts/stand_sdk)")
     return parser.parse_args(argv)
 
 
@@ -482,7 +512,8 @@ def main(argv: list[str] | None = None) -> int:
             results = asyncio.run(check_scenarios(url, chrome, items))
         else:
             chrome = chrome_path(args.chrome)
-            report = asyncio.run(check(url, chrome, args.wait, symbol))
+            report = asyncio.run(check(url, chrome, args.wait, symbol,
+                                       local_sdk=not args.real_sdk))
     except EnvironmentNotReadyError as exc:
         print(f"✗ Проверка не проведена: {exc}", file=sys.stderr)
         return 2

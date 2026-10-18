@@ -151,8 +151,8 @@
 
       <form class="trade-form" id="trade-form" novalidate>
         <div class="segmented segmented-wide" id="trade-side" role="group" aria-label="Сторона">
-          <button type="button" data-side="LONG">Лонг</button>
-          <button type="button" data-side="SHORT">Шорт</button>
+          <button type="button" data-side="LONG">↗ Лонг</button>
+          <button type="button" data-side="SHORT">↘ Шорт</button>
         </div>
 
         <div class="field">
@@ -163,14 +163,14 @@
           </div>
         </div>
         <div class="field" id="trade-limit-row" hidden>
-          <span class="field-label">Цена</span>
+          <label class="field-label" for="trade-limit">Цена</label>
           <input class="field-input" id="trade-limit" inputmode="decimal" autocomplete="off"
                  aria-label="Цена лимита">
           <select class="field-select" id="trade-expiry" aria-label="Срок лимита"></select>
         </div>
 
         <div class="field">
-          <span class="field-label">Стоп</span>
+          <label class="field-label stop" for="trade-stop">Стоп</label>
           <input class="field-input" id="trade-stop" inputmode="decimal" autocomplete="off"
                  aria-label="Стоп">
           <div class="segmented" id="trade-stop-kind" role="group" aria-label="Стоп: цена или %">
@@ -185,7 +185,7 @@
         </div>
 
         <div class="field">
-          <span class="field-label">Тейк</span>
+          <label class="field-label take" for="trade-take">Тейк</label>
           <input class="field-input" id="trade-take" inputmode="decimal" autocomplete="off"
                  placeholder="нет" aria-label="Тейк">
           <div class="segmented" id="trade-take-kind" role="group" aria-label="Тейк: цена или %">
@@ -202,7 +202,7 @@
         </div>
 
         <div class="field">
-          <span class="field-label">Риск</span>
+          <label class="field-label" for="trade-risk">Риск</label>
           <input class="field-input" id="trade-risk" inputmode="decimal" autocomplete="off"
                  aria-label="Риск">
           <div class="segmented" id="trade-risk-kind" role="group" aria-label="Риск: $ или %">
@@ -210,26 +210,29 @@
             <button type="button" data-kind="percent">%</button>
           </div>
         </div>
-        <p class="field-hint muted small" id="trade-risk-hint"></p>
+        <p class="field-hint hand" id="trade-risk-hint"></p>
 
         <div class="field">
-          <span class="field-label">Плечо</span>
+          <label class="field-label" for="trade-leverage">Плечо</label>
           <input type="range" class="field-range" id="trade-leverage" min="1" max="1" step="1"
                  value="1" aria-label="Плечо">
           <output class="field-value" id="trade-leverage-value" for="trade-leverage"></output>
         </div>
-        <p class="field-hint muted small" id="trade-leverage-hint"></p>
+        <p class="field-hint field-note" id="trade-leverage-hint"></p>
       </form>
 
-      <div class="trade-result" id="trade-result">
-        <dl class="details">
-          <dt>Объём</dt><dd id="trade-quantity">—</dd>
-          <dt>Маржа</dt><dd id="trade-margin">—</dd>
-          <dt>Риск с комиссией</dt><dd id="trade-risk-usd">—</dd>
-          <dt>RR</dt><dd id="trade-rr">—</dd>
-          <dt>Ликвидация</dt><dd id="trade-liq">—</dd>
-          <dt>Комиссия</dt><dd id="trade-fee">—</dd>
-        </dl>
+      <!-- Квитанция «РАСЧЁТ» (макет «Форма»): все числа — строки ответа preview. -->
+      <div class="trade-result receipt card" id="trade-result">
+        <div class="receipt-head"><span>РАСЧЁТ</span><span id="trade-receipt-state"></span></div>
+        <div class="receipt-body">
+          <div class="receipt-row"><span>объём</span><span class="strong" id="trade-quantity">—</span></div>
+          <div class="receipt-row"><span>≈ сумма</span><span id="trade-notional">—</span></div>
+          <div class="receipt-row"><span id="trade-margin-label">маржа</span><span id="trade-margin">—</span></div>
+          <div class="receipt-row"><span>риск с комиссией</span><span class="text-red strong" id="trade-risk-usd">—</span></div>
+          <div class="receipt-row"><span>RR</span><span class="text-blue strong" id="trade-rr">—</span></div>
+          <div class="receipt-row"><span>ликвидация</span><span id="trade-liq">—</span></div>
+          <div class="receipt-row"><span>комиссия</span><span id="trade-fee">—</span></div>
+        </div>
         <p class="muted small" id="trade-rounded" hidden></p>
         <ul class="issues" id="trade-issues" hidden></ul>
         <p class="muted small" id="trade-preview-state" hidden></p>

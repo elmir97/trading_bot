@@ -150,7 +150,8 @@ class Rule:
     action: "status" — ответ без сервера (status, body); "patch" — ответ сервера,
     JSON правит `patch`; "fail" — обрыв до сервера (net::ERR_INTERNET_DISCONNECTED);
     "hang" — запрос держится без ответа. times — сколько раз (None — всегда).
-    raw — у "status" тело как есть, не JSON (пустое — как 502 Caddy без api)."""
+    raw — у "status" тело как есть, не JSON (пустое — как 502 Caddy без api);
+    sdk — у "status" ответ локальной копией SDK telegram.org (bc.STAND_SDK)."""
 
     match: str
     action: str
@@ -161,6 +162,7 @@ class Rule:
     times: int | None = None
     exact: bool = False
     raw: str | None = None
+    sdk: bool = False
     hits: int = 0
 
     def applies(self, url: str, method: str) -> bool:
@@ -292,6 +294,8 @@ class Page:
                             {"requestId": rid, "errorReason": "InternetDisconnected"})
         elif rule.action == "hang":
             self.hung.append(url)
+        elif rule.action == "status" and rule.sdk:
+            await self.call("Fetch.fulfillRequest", bc.sdk_fulfill(rid))
         elif rule.action == "status" and rule.raw is not None:
             await self.call("Fetch.fulfillRequest", {
                 "requestId": rid, "responseCode": rule.status, "responseHeaders": [],
@@ -415,6 +419,8 @@ class Setup:
     init_data: bool = True             # заглушка tgWebAppData; False — как Safari по ссылке
     preset: str | None = None          # позиции стенда (miniapp_dev.PRESETS)
     theme: str | None = None           # "light" | "dark": themeParams в хеше + prefers-color-scheme
+    real_sdk: bool = False             # SDK с telegram.org; по умолчанию — копия стенда (без сети)
+    intercept_fonts: bool = False      # Fetch ловит и vendor/fonts (правила на шрифты)
 
 
 # Тема клиента Telegram (стандартные цвета светлой и тёмной); вне Telegram страница видит
@@ -457,10 +463,14 @@ async def open_page(page: Page, url: str, setup: Setup) -> dict[str, Any]:
             {"name": "prefers-color-scheme", "value": setup.theme}]})
     for rule in setup.rules:
         page.intercept(rule)
-    await page.call("Fetch.enable", {"patterns": [
-        {"urlPattern": "*/api/*", "requestStage": "Request"},
-        {"urlPattern": "*telegram.org*", "requestStage": "Request"},
-    ]})
+    if not setup.real_sdk:
+        # После правил сценария: sdk_block/sdk_hang перекрывают копию своими правилами.
+        page.intercept(Rule(bc.SDK_URL, "status", sdk=True))
+    patterns = [{"urlPattern": "*/api/*", "requestStage": "Request"},
+                {"urlPattern": "*telegram.org*", "requestStage": "Request"}]
+    if setup.intercept_fonts:
+        patterns.append({"urlPattern": "*/vendor/fonts/*", "requestStage": "Request"})
+    await page.call("Fetch.enable", {"patterns": patterns})
     await page.call("Page.navigate", {"url": bc.page_url(
         url, version=NATIVE_VERSION if setup.native else None, init_data=setup.init_data,
         theme_params=None if setup.theme is None else THEME_PARAMS[setup.theme])})
@@ -813,14 +823,14 @@ async def form_flow(page: Page, native: bool) -> None:
     body = _previews(page)[-1].body if _previews(page) else {}
     page.expect(body.get("stop") == {"kind": "percent", "value": "2"},
                 f"стоп ушёл не процентом: {body.get('stop')}")
-    page.expect((_button(s, native) or "").startswith("Открыть ЛОНГ"),
+    page.expect((_button(s, native) or "").startswith("Открыть лонг · "),
                 f"кнопка: {_button(s, native)!r}")
     page.expect(int(s.get("lev") or 0) <= cap, f"плечо {s.get('lev')} выше потолка {cap}")
     page.expect(s.get("take_2r_disabled") is False, "чип 2R неактивен при стопе")
 
     await page.click("#trade-take-2r")
     s = await _settled(page, "превью 2R")
-    page.expect("RR2.00" in (s.get("result") or "").replace(" ", ""), f"2R: {s.get('result')!r}")
+    page.expect("RR1:2.00" in (s.get("result") or "").replace(" ", ""), f"2R: {s.get('result')!r}")
     # Автомасштаб (17.10): вход, стоп и тейк — в видимом диапазоне графика формы.
     await page.wait_for(lambda s: _in_view(s.get("trade_lines_view")), 5,
                         "вход/стоп/тейк формы в видимом диапазоне")
@@ -864,7 +874,7 @@ async def form_flow(page: Page, native: bool) -> None:
 
     await page.click('#trade-take-chips [data-percent=""]')
     s = await _settled(page, "без тейка")
-    page.expect((_button(s, native) or "").startswith("Открыть ЛОНГ"),
+    page.expect((_button(s, native) or "").startswith("Открыть лонг · "),
                 f"без тейка кнопка: {_button(s, native)!r}")
     if native:
         await page.telegram_event("main_button_pressed")
@@ -1499,6 +1509,14 @@ async def me_502(page: Page, url: str) -> None:
 
 
 
+@scenario("sdk_real", "SDK с telegram.org (не копия стенда): страница стартует, рынок с графиком")
+async def sdk_real(page: Page, url: str) -> None:
+    s = await open_page(page, url, Setup(real_sdk=True))
+    page.expect(s.get("market_charts") == 1, f"рынок с настоящим SDK: {s.get('screens')}")
+    sdk = [u for st, u in page.collector.network if u == bc.SDK_URL and st == 200]
+    page.expect(bool(sdk), "SDK не пришёл с telegram.org")
+
+
 # Д — дизайн Mini App (§9а «Дизайн Mini App»)
 
 FONT_FACES = (("Golos Text", "400", "Жж"), ("Golos Text", "800", "Az"),
@@ -1753,6 +1771,157 @@ async def design_font_swap(page: Page, url: str) -> None:
     if fallback["price"] and plex["price"] and fallback["change"] and plex["change"]:
         page.note(f"ширина цены {fallback['price'][3]} → {plex['price'][3]} px, подпись изменения "
                   f"left {fallback['change'][2]} → {plex['change'][2]} px")
+
+FONT_STATE_JS = """(() => ({
+  plex: document.fonts.check('600 42px "IBM Plex Mono"', '1.4950'),
+  price_visible: document.getElementById('market-last').getBoundingClientRect().width > 0,
+}))()"""
+
+
+async def _market_without_plex(page: Page, url: str, rule: Rule) -> None:
+    """Plex недоступен — рынок всё равно показан запасным моно: loadNumberFont не ждётся,
+    отказ шрифта не ломает экран (решение владельца 18.10)."""
+    s = await open_page(page, url, Setup(intercept_fonts=True, rules=[rule]))
+    page.expect(s.get("last") not in (None, "—") and s.get("market_charts") == 1,
+                f"рынок без Plex не показан: {s.get('screens')} {s.get('last')!r}")
+    await page.pump(3)                    # опрос цены идёт, шрифт так и не пришёл
+    s = await page.state()
+    page.expect(s.get("last") not in (None, "—"), "цена пропала")
+    got = await page.js(FONT_STATE_JS)
+    page.expect(got["plex"] is False, "Plex загрузился — правило не сработало")
+    page.expect(got["price_visible"], "цена не видна (шрифт держит текст невидимым)")
+    page.expect(rule.hits > 0, "запросов к Plex не было")
+
+
+@scenario("design_font_404", "Д.4: Plex отвечает 404 — рынок и цена отрисованы запасным моно")
+async def design_font_404(page: Page, url: str) -> None:
+    await _market_without_plex(page, url, Rule("ibm-plex-mono", "status", status=404))
+
+
+@scenario("design_font_hang", "Д.4: Plex висит без ответа — рынок и цена отрисованы запасным моно")
+async def design_font_hang(page: Page, url: str) -> None:
+    await _market_without_plex(page, url, Rule("ibm-plex-mono", "hang"))
+
+
+
+# Д.4 — форма сделки: квитанция и кнопка — строки ответа preview, фронт только форматирует
+
+# Объём в ответе preview подменяется значением, которое НЕ следует из суммы и цены входа:
+# любой пересчёт на фронте (сумма / вход и т. п.) даст другое число — сценарий его поймает;
+# заодно ≥ 1000 — проверка разрядов на кнопке («86 482»).
+TAP_QUANTITY = "86482"
+
+
+class PreviewTap:
+    """Ответы preview сервера (правило Fetch «patch»; объём — TAP_QUANTITY) — эталон для
+    квитанции: страница обязана показать те же строки, только с разрядами."""
+
+    def __init__(self) -> None:
+        self.seen: list[Any] = []
+
+    def __call__(self, data: Any) -> Any:
+        if isinstance(data, dict) and isinstance(data.get("calc"), dict):
+            data["calc"]["quantity"] = TAP_QUANTITY
+        self.seen.append(data)
+        return data
+
+    @property
+    def last(self) -> dict[str, Any]:
+        if not self.seen or not isinstance(self.seen[-1], dict) or not self.seen[-1].get("calc"):
+            raise ScenarioError(f"ответ preview не пойман: {self.seen[-1:]!r}")
+        return self.seen[-1]
+
+
+FORM_DESIGN_JS = """(() => {
+  const $ = (id) => document.getElementById(id);
+  const t = (id) => $(id).textContent.replace(/\\s+/g, ' ').trim();
+  const color = (sel) => getComputedStyle(document.querySelector(sel)).color;
+  const root = getComputedStyle(document.documentElement);
+  const tg = window.Telegram && window.Telegram.WebApp;
+  const picked = (id) => [...document.querySelectorAll(id + ' .selected')]
+    .map((b) => b.textContent);
+  return {
+    receipt: ['trade-quantity', 'trade-notional', 'trade-margin-label', 'trade-margin',
+              'trade-risk-usd', 'trade-rr', 'trade-liq', 'trade-fee'].map(t),
+    hint: t('trade-risk-hint'),
+    hint_hand: $('trade-risk-hint').classList.contains('hand'),
+    hands: [...document.querySelectorAll('#screen-trade .hand')].filter((e) => e.offsetParent
+      && e.textContent.trim()).length,
+    stop_chip: picked('#trade-stop-chips'),
+    take_chip: picked('#trade-take-chips'),
+    stop_label: color('label[for="trade-stop"]'), take_label: color('label[for="trade-take"]'),
+    red_text: root.getPropertyValue('--red-text').trim(),
+    blue: root.getPropertyValue('--blue').trim(),
+    main: tg && tg.MainButton.isVisible
+      ? [tg.MainButton.text.replace(/\\s+/g, ' '), tg.MainButton.color, tg.MainButton.textColor]
+      : null,
+    paper: root.getPropertyValue('--paper').trim(), ink: root.getPropertyValue('--ink').trim(),
+    scroll_x: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+  };
+})()"""
+
+
+def _receipt_want(calc: dict[str, Any], margin_type: str) -> list[str]:
+    """Что обязана показать квитанция: строки сервера + разряды + подписи. Здесь тоже
+    ничего не считается — только форматирование тех же строк."""
+    g = _grouped
+    liq = "—" if calc["liq_estimate"] is None else (
+        f"≈ {g(calc['liq_estimate'])}"
+        + ("" if calc["liq_ratio"] is None else f" · {calc['liq_ratio']}× дальше стопа"))
+    margin = {"ISOLATED": "маржа, изол.", "CROSSED": "маржа, кросс"}.get(margin_type, "маржа")
+    return [f"{g(calc['quantity'])} XRP", f"{g(calc['notional'])} $", margin,
+            f"{g(calc['margin'])} $", f"{g(calc['risk_usd'])} $ · {calc['risk_percent']}%",
+            "—" if calc["rr"] is None else f"1 : {calc['rr']}", liq, f"≈ {g(calc['fee_usd'])} $"]
+
+
+async def _form_design(page: Page) -> dict[str, Any]:
+    got = await page.js(FORM_DESIGN_JS)
+    if not isinstance(got, dict):
+        raise ScenarioError(f"форма не прочитана: {got!r}")
+    return got
+
+
+@scenario("design_form", "Д.4: форма — квитанция и «Открыть лонг · N XRP» из ответа preview "
+                         "(только разряды), чипы, подписи стоп/тейк, пометка риска, шорт, 320 px")
+async def design_form(page: Page, url: str) -> None:
+    tap = PreviewTap()
+    await open_page(page, url, Setup(native=True, rules=[
+        Rule("/api/open/preview", "patch", patch=tap, method="POST")]))
+    me = await page.js("fetch('/api/me').then((r) => r.json())")
+    await _to_form(page, True)
+    await page.click('#trade-stop-chips [data-percent="2"]')
+    await _settled(page, "превью формы")
+    await page.pump(0.3)
+    g = await _form_design(page)
+    calc = tap.last["calc"]
+    want = _receipt_want(calc, me["margin_type"])
+    page.expect(g["receipt"] == want, f"квитанция {g['receipt']} ≠ сервер {want}")
+    paper, ink, red = g["paper"], g["ink"], g["red_text"]
+    page.expect(g["main"] == [f"Открыть лонг · {_grouped(calc['quantity'])} XRP", ink, paper],
+                f"MainButton {g['main']}")
+    page.expect(g["receipt"][0] == "86 482 XRP", f"объём не строка сервера: {g['receipt'][0]!r}")
+    page.expect(g["stop_chip"] == ["2%"] and g["take_chip"] == ["нет"],
+                f"выбранные чипы: стоп {g['stop_chip']}, тейк {g['take_chip']}")
+    page.expect(g["stop_label"] == _rgb(red) and g["take_label"] == _rgb(g["blue"]),
+                f"подписи: стоп {g['stop_label']}, тейк {g['take_label']}")
+    page.expect(g["hint_hand"] and g["hint"].startswith(f"= {_grouped(calc['risk_usd'])} $"),
+                f"пометка риска: {g['hint']!r}")
+    page.expect(g["hands"] <= 1, f"пометок «от руки» на форме {g['hands']}")
+
+    await page.click('#trade-side [data-side="SHORT"]')
+    await page.pump(0.5)
+    await _settled(page, "превью шорта")
+    await page.pump(0.3)
+    g = await _form_design(page)
+    calc = tap.last["calc"]
+    page.expect(g["main"] == [f"Открыть шорт · {_grouped(calc['quantity'])} XRP",
+                              paper, red], f"MainButton шорта {g['main']}")
+
+    await page.viewport(320, 844)
+    await page.pump(1)
+    g = await _form_design(page)
+    page.expect(g["scroll_x"] == 0, f"форма 320 px: прокрутка {g['scroll_x']}")
+
 
 SCENARIO_TIMEOUT = 150.0
 

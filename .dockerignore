@@ -21,5 +21,7 @@ scripts/miniapp_dev.py
 scripts/miniapp_browser_check.py
 scripts/miniapp_scenarios.py
 scripts/miniapp_shots.py
+# Копия SDK telegram.org для стенда (сценарии без сети) — не для прода и не для образа.
+scripts/stand_sdk/
 # Caddyfile и шаблон override — Caddy монтирует с диска сервера, образу не нужны.
 deploy/

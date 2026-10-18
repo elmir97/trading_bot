@@ -4,3 +4,5 @@
 # Сторонние файлы Mini App — байт в байт как в пакете: sha256 сверяет
 # tests/test_miniapp_vendor.py, autocrlf не должен их трогать.
 miniapp/vendor/** -text
+# Копия SDK telegram.org стенда — байт в байт (sha256 в tests/test_miniapp_browser_check.py).
+scripts/stand_sdk/** -text

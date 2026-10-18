@@ -312,7 +312,7 @@ async def test_open_page_prepares_everything_before_navigate() -> None:
     assert '"ma:anon:symbol", "\\"XRP-USDT\\""' in scripts[1]
     assert '"ma:anon:interval", "\\"1m\\""' in scripts[1]
     assert t.last("Page.navigate") == {"url": bc.page_url(URL, version="8.0")}
-    assert page.rules == [rule]
+    assert page.rules[0] == rule and page.rules[-1].sdk          # копия SDK — последней
     patterns = [p["urlPattern"] for p in t.last("Fetch.enable")["patterns"]]
     assert patterns == ["*/api/*", "*telegram.org*"]
 
@@ -341,6 +341,7 @@ def test_registry_covers_queue_scenarios() -> None:
         "market_lines", "market_lines_none", "confirm_lines",
         "no_init_data", "me_502",
         "design_fonts", "design_theme", "design_market", "design_live", "design_font_swap",
+        "sdk_real", "design_font_404", "design_font_hang", "design_form",
     }
     assert [s.name for s in ms.select("all")] == list(ms.SCENARIOS)
     assert ms.select("poll") == [ms.SCENARIOS["poll"]]
@@ -494,3 +495,26 @@ async def test_wait_for_stops_as_network_when_sdk_screen_shows() -> None:
         await page.wait_for(lambda s: "screen-market" in s["screens"], 0.5, "рынок")
     assert await page.wait_for(lambda s: "screen-sdk" in s["screens"], 0.5, "SDK") == sdk
     assert page.problems == []
+
+
+async def test_open_page_serves_local_sdk_after_scenario_rules() -> None:
+    """Д.4: SDK telegram.org — копия стенда по умолчанию, правило последним: правила
+    сценария (sdk_block, sdk_hang) срабатывают первыми; real_sdk — без подмены."""
+    rule = ms.Rule("telegram.org", "fail")
+    page = ms.Page(FakeBrowser())
+    await ms.open_page(page, URL, ms.Setup(rules=[rule], wait_screen=None))
+    assert page.rules[0] is rule
+    assert page.rules[-1].sdk and page.rules[-1].match == bc.SDK_URL
+    real = ms.Page(FakeBrowser())
+    await ms.open_page(real, URL, ms.Setup(real_sdk=True, wait_screen=None))
+    assert not [r for r in real.rules if r.sdk]
+
+
+async def test_sdk_rule_fulfills_with_stand_copy() -> None:
+    t = FakeBrowser()
+    page = ms.Page(t)
+    page.intercept(ms.Rule(bc.SDK_URL, "status", sdk=True))
+    await page._handle(_paused(bc.SDK_URL, rid="S1"))
+    sent = t.last("Fetch.fulfillRequest")
+    assert sent["requestId"] == "S1"
+    assert base64.b64decode(sent["body"]) == bc.STAND_SDK.read_bytes()

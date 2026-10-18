@@ -253,3 +253,50 @@ def test_narrow_screen_shrinks_head_not_clips() -> None:
              ".market-head { gap: 4px; }")
     for rule in rules:
         assert rule in body, rule
+
+
+def test_number_font_never_blocks_market() -> None:
+    """Владелец 18.10: загрузка Plex не ждётся перед рынком, отказ шрифта поглощается
+    (сценарии design_font_404, design_font_hang)."""
+    app = _app()
+    assert "await loadNumberFont" not in app
+    body = app[app.index("function loadNumberFont() {"):]
+    body = body[:body.index("\n}\n")]
+    assert ".catch(() => {})" in body and "await" not in body
+
+
+# --- Д.4: форма сделки ---------------------------------------------------------------------
+
+
+def _render_fn(name: str) -> str:
+    text = (_MINIAPP / "render.js").read_text(encoding="utf-8").replace("\r\n", "\n")
+    body = text[text.index(name):]
+    return body[:body.index("\n}\n")]
+
+
+@pytest.mark.parametrize("name", ["export function openAction(", "export function renderPreview(",
+                                  "export function riskHint(", "function usd("])
+def test_receipt_and_button_only_format_server_strings(name: str) -> None:
+    """Владелец 18.10 (Д.4): числа квитанции и «N XRP» на кнопке — из ответа сервера,
+    фронт только форматирует (groupDigits); никакого пересчёта в JS."""
+    body = _render_fn(name)
+    for banned in ("Number(", "parseFloat", "parseInt", "toFixed", "Math.", "BigInt"):
+        assert banned not in body, (name, banned)
+    # Арифметика над значениями сервера (c.x * …, calc.y - …).
+    assert re.search(r"\b(?:c|calc|card\.calc)\.\w+\s*[-+*/%]\s*[\w(]", body) is None, name
+
+
+def test_button_and_receipt_numbers_go_through_group_digits() -> None:
+    assert "groupDigits(card.calc.quantity)" in _render_fn("export function openAction(")
+    preview = _render_fn("export function renderPreview(")
+    for value in ("groupDigits(c.quantity)", "usd(c.notional)", "usd(c.margin)", "usd(c.risk_usd)",
+                  "groupDigits(c.liq_estimate)", "usd(c.fee_usd)"):
+        assert value in preview, value
+    assert "groupDigits(value)" in _render_fn("function usd(")
+
+
+def test_form_has_one_hand_note_and_receipt() -> None:
+    html = (_MINIAPP / "index.html").read_text(encoding="utf-8")
+    trade = html[html.index('id="screen-trade"'):html.index('id="screen-confirm"')]
+    assert trade.count("hand") == 1 and 'class="field-hint hand" id="trade-risk-hint"' in trade
+    assert 'class="trade-result receipt card"' in trade and ">РАСЧЁТ<" in trade

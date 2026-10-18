@@ -76,6 +76,8 @@ export function createTradeScreen({ api, tg, storage, me, onOpen, onFatal }) {
     previewState: $("trade-preview-state"),
     out: {
       quantity: $("trade-quantity"),
+      notional: $("trade-notional"),
+      marginLabel: $("trade-margin-label"),
       margin: $("trade-margin"),
       risk: $("trade-risk-usd"),
       rr: $("trade-rr"),
@@ -185,6 +187,22 @@ export function createTradeScreen({ api, tg, storage, me, onOpen, onFatal }) {
     el.take2r.disabled = !take2r();
     const plan = me().plan;
     el.riskHint.textContent = riskHint(card, riskKind, plan.risk_percent);
+    markChips();
+  }
+
+  // Выбранный чип — рамкой (макет «Форма»): тот, чьё значение сейчас в поле. Только показ:
+  // сравнение строк, без расчётов. «нет» у тейка — когда поле пустое.
+  function markChips() {
+    const stop = stopKind === "percent" ? el.stop.value.trim() : null;
+    for (const chip of el.stopChips.querySelectorAll("button[data-percent]")) {
+      chip.classList.toggle("selected", chip.dataset.percent === stop);
+    }
+    const take = el.take.value.trim();
+    for (const chip of el.takeChips.querySelectorAll("button[data-percent]")) {
+      const none = chip.dataset.percent === "";
+      chip.classList.toggle("selected", none ? take === ""
+        : takeKind === "percent" && chip.dataset.percent === take);
+    }
   }
 
   function resetFields() {
