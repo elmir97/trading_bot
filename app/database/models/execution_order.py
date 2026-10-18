@@ -18,7 +18,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Enum, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import CheckConstraint, Enum, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -31,6 +31,7 @@ from app.database.base import (
 )
 from app.trading.enums import (
     CancelSource,
+    ExchangeKeyMode,
     OrderRole,
     OrderSide,
     OrderStatus,
@@ -48,6 +49,7 @@ if TYPE_CHECKING:
 class ExecutionOrder(IntPKMixin, TimestampMixin, Base):
     __tablename__ = "execution_orders"
     __table_args__ = (
+        CheckConstraint("account_mode IN ('LIVE', 'DEMO')", name="account_mode_known"),
         Index("ix_execution_orders_user_status", "user_id", "status"),
         Index("ix_execution_orders_notification_id", "notification_id"),
         Index("ix_execution_orders_position_action_id", "position_action_id"),
@@ -86,6 +88,13 @@ class ExecutionOrder(IntPKMixin, TimestampMixin, Base):
         ForeignKey("trade_openings.id", ondelete="SET NULL")
     )
 
+    # M9 (B.9): счёт биржи, куда шёл (или пошёл бы) ордер: у открытия — его
+    # account_mode, у действия этапа 4 — action.account_mode, у входа по
+    # сигналу — строки входа. Поиск по cid — только клиентом этого счёта.
+    account_mode: Mapped[ExchangeKeyMode] = mapped_column(
+        Enum(ExchangeKeyMode, native_enum=False, length=8, create_constraint=False),
+        nullable=False,
+    )
     # Детерминированный ключ идемпотентности: f"tj{notification_id}u{user_id}
     # {E|S|T}" (app/execution/models.py::client_order_id). Строки до шага
     # 15.5.2а хранят прежние форматы: f"tj{signal_id}{user_id}{ROLE}" (до

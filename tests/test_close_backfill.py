@@ -1,8 +1,8 @@
 """Добор строк закрытия по cid (деплой 4, 4.4, app/execution/close_backfill.py)
-против настоящей БД: UNKNOWN и FILLED без цены → FILLED с ценой; действие
-FAILED «не подтверждено» → DONE с пометкой (правило владельца 12.10, #37);
-неполный ответ и 109421 — строка не тронута, причина в логе; строк нет — ни
-одного GET."""
+против настоящей БД: UNKNOWN и FILLED без цены → FILLED с ценой; неполный
+ответ и 109421 — строка не тронута, причина в логе; строк нет — ни одного GET.
+С B.9 строки действий этапа 4 добор не берёт — правило владельца 12.10 (#37,
+FAILED «не подтверждено» → DONE) проверяет tests/test_action_recovery.py."""
 
 from __future__ import annotations
 
@@ -31,6 +31,7 @@ from app.execution.close_backfill import (
 )
 from app.services.user_service import UserService
 from app.trading.enums import (
+    ExchangeKeyMode,
     OrderRole,
     OrderSide,
     OrderStatus,
@@ -91,6 +92,7 @@ async def ctx(unique_telegram_id):  # type: ignore[no-untyped-def]
 
 async def _action(c, status=PositionActionStatus.FAILED, message=UNCONFIRMED_MESSAGE):  # type: ignore[no-untyped-def]
     action = PositionAction(
+        account_mode=ExchangeKeyMode.DEMO,
         user_id=c.uid, symbol="XRP-USDT", side=TradeSide.LONG, kind=PositionActionKind.CLOSE_FULL,
         status=status, params={}, error_code="POSITION_CHANGED" if message else None,
         error_message=message,
@@ -103,6 +105,7 @@ async def _action(c, status=PositionActionStatus.FAILED, message=UNCONFIRMED_MES
 async def _row(c, cid: str, status: OrderStatus, *, action=None, price=None,  # type: ignore[no-untyped-def]
                role=OrderRole.CLOSE) -> ExecutionOrder:
     row = ExecutionOrder(
+        account_mode=ExchangeKeyMode.DEMO,
         user_id=c.uid, position_action_id=action.id if action else None, client_order_id=cid,
         exchange_order_id="2109373768501567488", symbol="XRP-USDT", side=OrderSide.SELL,
         position_side=TradeSide.LONG, order_type=OrderType.MARKET, role=role,
@@ -113,26 +116,19 @@ async def _row(c, cid: str, status: OrderStatus, *, action=None, price=None,  # 
     return row
 
 
-async def test_unknown_row_and_failed_action_confirmed(ctx, caplog) -> None:  # type: ignore[no-untyped-def]
-    """#37: строка UNKNOWN, действие FAILED «не подтверждено» → FILLED с ценой
-    и комиссией, действие DONE, ошибка очищена, пометка в params."""
-    action = await _action(ctx)
-    row = await _row(ctx, ctx.cid(37), OrderStatus.UNKNOWN, action=action)
+async def test_unknown_row_backfilled(ctx, caplog) -> None:  # type: ignore[no-untyped-def]
+    """Строка закрытия без действия (аварийное закрытие открытия) UNKNOWN →
+    FILLED с ценой и комиссией; следующий проход не читает."""
+    row = await _row(ctx, ctx.cid(37), OrderStatus.UNKNOWN)
     client = Client({ctx.cid(37): _fill(ctx.cid(37))})
     with caplog.at_level(logging.INFO):
         done = await backfill_close_rows(ctx.session, client, ctx.uid, NOW)  # type: ignore[arg-type]
     await ctx.session.commit()
     assert done == [row.id]
     await ctx.session.refresh(row)
-    await ctx.session.refresh(action)
     assert (row.status, row.price, row.quantity) == (OrderStatus.FILLED, D("1.4094"), D(194))
     assert row.raw_response["commission"] == "0.136712"
-    assert action.status is PositionActionStatus.DONE
-    assert action.error_code is None and action.error_message is None
-    assert action.params["confirmed_by"] == "добор по cid"
-    messages = [r.getMessage() for r in caplog.records]
-    assert "Строка закрытия добрана по cid" in messages
-    assert "Действие подтверждено добором" in messages
+    assert "Строка закрытия добрана по cid" in [r.getMessage() for r in caplog.records]
 
     client.calls.clear()                       # добрано — следующий проход не читает
     assert await backfill_close_rows(ctx.session, client, ctx.uid, NOW) == []  # type: ignore[arg-type]
@@ -140,25 +136,26 @@ async def test_unknown_row_and_failed_action_confirmed(ctx, caplog) -> None:  # 
 
 
 async def test_filled_without_price_backfilled(ctx) -> None:  # type: ignore[no-untyped-def]
-    """4.2: закрыто по ответу POST, цена не дочитана — добор цены; действие
-    уже DONE — не трогаем."""
-    action = await _action(ctx, PositionActionStatus.DONE, None)
-    row = await _row(ctx, ctx.cid(38), OrderStatus.FILLED, action=action)
+    """4.2: закрыто по ответу POST, цена не дочитана — добор цены."""
+    row = await _row(ctx, ctx.cid(38), OrderStatus.FILLED)
     await backfill_close_rows(ctx.session, Client({ctx.cid(38): _fill(ctx.cid(38))}), ctx.uid, NOW)  # type: ignore[arg-type]
     await ctx.session.commit()
     await ctx.session.refresh(row)
-    await ctx.session.refresh(action)
-    assert row.price == D("1.4094") and action.status is PositionActionStatus.DONE
-    assert "confirmed_by" not in (action.params or {})
+    assert row.price == D("1.4094")
 
 
-async def test_failed_action_other_reason_not_touched(ctx) -> None:  # type: ignore[no-untyped-def]
-    """Правило — только для «не подтверждено»: отказ биржи остаётся FAILED."""
-    action = await _action(ctx, message="Закрытие не прошло: rejected")
-    await _row(ctx, ctx.cid(39), OrderStatus.UNKNOWN, action=action)
-    await backfill_close_rows(ctx.session, Client({ctx.cid(39): _fill(ctx.cid(39))}), ctx.uid, NOW)  # type: ignore[arg-type]
-    await ctx.session.commit()
+@pytest.mark.parametrize("status", [OrderStatus.UNKNOWN, OrderStatus.FILLED])
+async def test_action_rows_left_to_recovery(ctx, status) -> None:  # type: ignore[no-untyped-def]
+    """B.9: строки действий этапа 4 ведёт app/execution/action_recovery.py
+    (клиентом счёта действия) — добор их не читает и не трогает."""
+    action = await _action(ctx)
+    row = await _row(ctx, ctx.cid(39), status, action=action)
+    client = Client({ctx.cid(39): _fill(ctx.cid(39))})
+    assert await backfill_close_rows(ctx.session, client, ctx.uid, NOW) == []  # type: ignore[arg-type]
+    assert client.calls == []
+    await ctx.session.refresh(row)
     await ctx.session.refresh(action)
+    assert (row.status, row.price) == (status, None)
     assert action.status is PositionActionStatus.FAILED
 
 
@@ -168,16 +165,14 @@ async def test_failed_action_other_reason_not_touched(ctx) -> None:  # type: ign
     "NEW",
 ])
 async def test_unread_row_untouched_reason_logged(ctx, caplog, answer) -> None:  # type: ignore[no-untyped-def]
-    action = await _action(ctx)
-    row = await _row(ctx, ctx.cid(40), OrderStatus.UNKNOWN, action=action)
+    row = await _row(ctx, ctx.cid(40), OrderStatus.UNKNOWN)
     reply = _fill(ctx.cid(40), "NEW") if answer == "NEW" else answer
     with caplog.at_level(logging.INFO):
         done = await backfill_close_rows(ctx.session, Client({ctx.cid(40): reply}), ctx.uid, NOW)  # type: ignore[arg-type]
     await ctx.session.commit()
     assert done == []
     await ctx.session.refresh(row)
-    await ctx.session.refresh(action)
-    assert row.status is OrderStatus.UNKNOWN and action.status is PositionActionStatus.FAILED
+    assert row.status is OrderStatus.UNKNOWN
     [rec] = [r for r in caplog.records if r.getMessage() == "Строка закрытия не добрана по cid"]
     assert rec.cid == ctx.cid(40)  # type: ignore[attr-defined]
 

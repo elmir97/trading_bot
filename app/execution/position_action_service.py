@@ -20,6 +20,12 @@ PENDING коммитится ДО HTTP — UNIQUE на client_order_id не пу
 ордер на повторное «Да» или после рестарта. Под Redis-локом позиции
 (exec:lock:…) reconciler цикл пропускает.
 
+B.9 (19.10.2026): первая строка PENDING коммитится вместе с переходом
+действия CARD → SUBMITTED — повторное «Да» не пересчитывает карточку
+(раньше расхождение объёма после исполненного закрытия давало ложный
+REFUSED). Прерванное рестартом доводит до итога только чтением биржи
+app/execution/action_recovery.py; счёт действия — account_mode (M9).
+
 EXEC_DRY_RUN — на биржу ничего не уходит: строки DRY_RUN с тем, что ушло
 бы. Live — только через существующие флаги (exec_allow_live_mode_orders,
 bingx_trading_mode), по умолчанию демо.
@@ -120,6 +126,20 @@ class CardOutcome:
 class ConfirmOutcome:
     text: str
     final: bool = True   # False — карточку не трогать (лок занят)
+
+
+class _Interrupted(Exception):  # noqa: N818 — не ошибка: управляемый обрыв
+    """EXEC_OPEN_FAULT interrupt_action_after_*: обрыв «как рестартом» —
+    дальше ничего не пишется, итог за восстановлением (B.9)."""
+
+    def __init__(self, fault: str) -> None:
+        super().__init__(fault)
+        self.fault = fault
+
+
+INTERRUPT_AFTER_PENDING = "interrupt_action_after_pending"
+INTERRUPT_AFTER_POST = "interrupt_action_after_post"
+SUBMITTED_TEXT = "Действие уже отправлено на биржу — итог придёт сообщением."
 
 
 class PositionActionService:
@@ -266,6 +286,7 @@ class PositionActionService:
             trade_id=trade.id if trade is not None else None,
             symbol=symbol, side=side, position_id=inputs.position.position_id,
             kind=kind, status=PositionActionStatus.CARD, params=plan.params,
+            account_mode=self._settings.bingx_allowed_exchange_mode,
             card_message_id=message_id,
             **_snapshot(plan, inputs),
         )
@@ -288,6 +309,7 @@ class PositionActionService:
         action = PositionAction(
             user_id=self._user.id, symbol=symbol, side=side, kind=kind,
             status=PositionActionStatus.REFUSED, params=_jsonable(params),
+            account_mode=self._settings.bingx_allowed_exchange_mode,
             error_code=refusal.code.value, error_message=refusal.message,
             position_id=inputs.position.position_id if inputs else None,
             mark_price=inputs.mark if inputs else None,
@@ -321,6 +343,10 @@ class PositionActionService:
         self, action_id: int, *, message_id: int | None, risk_confirmed: bool
     ) -> ConfirmOutcome:
         action = await self._load(action_id)
+        if action is not None and action.status is PositionActionStatus.SUBMITTED:
+            # Как при занятом локе — всплывашка, карточку не трогать: итог
+            # напишет идущее «Да» или восстановление (B.9).
+            return ConfirmOutcome(SUBMITTED_TEXT, final=False)
         if action is None or action.status is not PositionActionStatus.CARD:
             return ConfirmOutcome("Карточка уже обработана — открой действие заново.")
         if action.card_message_id is not None and message_id != action.card_message_id:
@@ -344,7 +370,13 @@ class PositionActionService:
         key = position_lock_key(self._user.id, action.symbol, action.side.value)
         try:
             async with RedisLock(self._redis, key, self._settings.confirm_lock_ttl_seconds):
-                return ConfirmOutcome(await self._confirm_locked(action))
+                try:
+                    return ConfirmOutcome(await self._confirm_locked(action))
+                except _Interrupted as stop:
+                    return ConfirmOutcome(
+                        f"🧪 EXEC_OPEN_FAULT {stop.fault}: действие прервано как рестартом — "
+                        "итог пришлёт восстановление."
+                    )
         except LockBusyError:
             return ConfirmOutcome("Действие с этой позицией уже выполняется.", final=False)
 
@@ -439,22 +471,36 @@ class PositionActionService:
     ) -> ExecutionOrder:
         return ExecutionOrder(
             user_id=self._user.id, position_action_id=action.id, trade_id=action.trade_id,
+            account_mode=action.account_mode,
             client_order_id=client_order_id, exchange_order_id=exchange_order_id,
             symbol=action.symbol, side=_CLOSING_SIDE[action.side], position_side=action.side,
             order_type=order_type, role=role, quantity=quantity, trigger_price=trigger,
             price=price, status=status,
         )
 
-    async def _insert_pending(self, row: ExecutionOrder) -> bool:
+    async def _insert_pending(self, action: PositionAction, row: ExecutionOrder) -> bool:
         """PENDING до HTTP. UNIQUE на client_order_id: строка уже есть — ордер
-        по этой карточке уже отправлялся, второй не шлём."""
+        по этой карточке уже отправлялся, второй не шлём. Первая строка — тем
+        же коммитом, что CARD → SUBMITTED (B.9): после него действие ведут
+        только этот проход и восстановление."""
         self._session.add(row)
+        if action.status is PositionActionStatus.CARD:
+            action.status = PositionActionStatus.SUBMITTED
         try:
             await self._session.commit()
         except IntegrityError:
             await self._session.rollback()
             return False
+        self._interrupt(INTERRUPT_AFTER_PENDING, action)
         return True
+
+    def _interrupt(self, fault: str, action: PositionAction) -> None:
+        """Управляемый сбой B.9 (только демо — config): обрыв после коммита
+        PENDING или после POST, как SIGTERM в эту секунду."""
+        if fault in self._settings.exec_open_faults:
+            logger.warning("Управляемый сбой: %s", fault,
+                           extra={"action_id": action.id, "fault": fault})
+            raise _Interrupted(fault)
 
     async def _delay(self) -> None:
         await asyncio.sleep(self._settings.exec_order_readback_delay_ms / 1000)
@@ -509,7 +555,7 @@ class PositionActionService:
         )
         row = self._row(action, role, otype, OrderStatus.PENDING, quantity=quantity,
                         trigger=level, client_order_id=cid)
-        if not await self._insert_pending(row):
+        if not await self._insert_pending(action, row):
             return None, None, "по этой карточке уже отправлялся — повторно не шлю"
         try:
             placed = await client.place_conditional_order(
@@ -517,6 +563,7 @@ class PositionActionService:
                 position_side=action.side.value, order_type=otype.value, stop_price=level,
                 quantity=quantity, client_order_id=cid, close_position=not bridge,
             )
+            self._interrupt(INTERRUPT_AFTER_POST, action)
         except ExchangeError as exc:
             row.status = OrderStatus.REJECTED if exc.code else OrderStatus.UNKNOWN
             row.error_code = str(exc.code) if exc.code else type(exc).__name__
@@ -731,7 +778,7 @@ class PositionActionService:
                                      role=OrderRole.CLOSE)
         row = self._row(action, OrderRole.CLOSE, OrderType.MARKET, OrderStatus.PENDING,
                         quantity=plan.close_qty, price=inputs.mark, client_order_id=cid)
-        if not await self._insert_pending(row):
+        if not await self._insert_pending(action, row):
             return await self._finish(action, PositionActionStatus.FAILED, ExecutionRefusal(
                 Code.CARD_STALE, "Закрытие по этой карточке уже отправлялось — повторно не шлю."
             ))
@@ -740,6 +787,7 @@ class PositionActionService:
                 symbol=action.symbol, side=_CLOSING_SIDE[p.side], position_side=p.side.value,
                 quantity=plan.close_qty, client_order_id=cid,
             )
+            self._interrupt(INTERRUPT_AFTER_POST, action)
         except ExchangeError as exc:
             row.status = OrderStatus.REJECTED if exc.code else OrderStatus.UNKNOWN
             row.error_code = str(exc.code) if exc.code else type(exc).__name__
@@ -757,9 +805,12 @@ class PositionActionService:
         # и есть подтверждение (11.10, #37: чтение по cid в первые ~2 с после
         # исполнения не дало FILLED, позиция при этом закрылась). Цена и
         # комиссия — дочиткой; не вышло — price NULL = «не дочитано», добор и
-        # выход в журнал — reconciler.
+        # выход в журнал — восстановление (B.9). NULL — сразу вместе с FILLED:
+        # обрыв до дочитки оставлял в price mark карточки (B.9, план 18.10).
         post_filled = placed.status == "FILLED"
         row.status = OrderStatus.FILLED if post_filled else OrderStatus.SUBMITTED
+        if post_filled:
+            row.price = None
         row.exchange_order_id = str(placed.order_id) or None
         await self._session.commit()
         if post_filled:
@@ -829,51 +880,66 @@ class PositionActionService:
         return await self._finish(action, PositionActionStatus.DONE, text=text)
 
     async def _settle_closed(self, client: ExchangeClient, action: PositionAction) -> None:
-        """Позиция закрыта целиком — строки её стопов/тейков (сделки и действий
-        этапа 4 по positionId) в CANCELLED по свежему openOrders: снятое биржей
-        при закрытии — EXCHANGE, снятое нами выше уже USER. Стоящие не трогаем."""
-        rows = await conditional_rows(
+        if not await conditional_rows(
             self._session, user_id=self._user.id, trade_id=action.trade_id,
             position_id=action.position_id,
-        )
-        if not rows:
+        ):
             return
-        log = {"action_id": action.id, "trade_id": action.trade_id}
         try:
             live = {str(o.order_id) for o in await client.get_open_orders(action.symbol)}
         except ExchangeError:
             logger.warning("openOrders после закрытия не получены — строки не закрыты",
-                           extra=log)
+                           extra={"action_id": action.id, "trade_id": action.trade_id})
             return
-        result = settle(rows, open_order_ids=live, context=log)
-        await self._session.commit()
-        if result.standing:
-            logger.warning("Условный ордер ещё стоит после закрытия позиции",
-                           extra={**log, "ids": result.standing})
+        await settle_closed(self._session, action, live)
 
     async def _find_any(self, client: ExchangeClient, symbol: str, ids: set[str]) -> set[str]:
         return {str(o.order_id) for o in await client.get_open_orders(symbol)} & ids
 
     async def _journal_exit(self, trade_id: int, fill: Any, full: bool) -> None:
-        """Выход в журнал сразу из read-back: external_fill_id = orderId —
-        reconciler его не запишет второй раз (recorded_order_ids / exits_after)."""
-        trades = TradeRepository(self._session)
-        trade = await trades.lock_for_reconcile(trade_id)
-        if trade is None or not trade.is_open:
-            return
-        try:
-            async with self._session.begin_nested():
-                await TradeJournal(trades).close_trade(
-                    trade, exit_price=fill.avg_price,
-                    quantity=None if full else fill.executed_qty, fee=fill.fee,
-                    exit_reason=EXIT_REASON_FULL if full else EXIT_REASON_PARTIAL,
-                    closed_at=fill.filled_at or datetime.now(UTC),
-                    external_fill_id=str(fill.order_id),
-                )
-        except (IntegrityError, JournalError):
-            logger.warning("Выход не записан в журнал — допишет сверка", exc_info=True,
-                           extra={"trade_id": trade_id})
-        await self._session.commit()
+        await journal_exit(self._session, trade_id, fill, full)
+
+
+async def settle_closed(session: AsyncSession, action: PositionAction, live: set[str]) -> None:
+    """Позиция закрыта целиком — строки её стопов/тейков (сделки и действий
+    этапа 4 по positionId) в CANCELLED по свежему openOrders (live — id
+    стоящих): снятое биржей при закрытии — EXCHANGE, снятое нами уже USER.
+    Стоящие не трогаем. Общий для «Да» и восстановления (B.9)."""
+    rows = await conditional_rows(
+        session, user_id=action.user_id, trade_id=action.trade_id,
+        position_id=action.position_id,
+    )
+    if not rows:
+        return
+    log = {"action_id": action.id, "trade_id": action.trade_id}
+    result = settle(rows, open_order_ids=live, context=log)
+    await session.commit()
+    if result.standing:
+        logger.warning("Условный ордер ещё стоит после закрытия позиции",
+                       extra={**log, "ids": result.standing})
+
+
+async def journal_exit(session: AsyncSession, trade_id: int, fill: Any, full: bool) -> None:
+    """Выход в журнал сразу из read-back: external_fill_id = orderId —
+    reconciler его не запишет второй раз (recorded_order_ids / exits_after).
+    Общий для «Да» и восстановления (B.9)."""
+    trades = TradeRepository(session)
+    trade = await trades.lock_for_reconcile(trade_id)
+    if trade is None or not trade.is_open:
+        return
+    try:
+        async with session.begin_nested():
+            await TradeJournal(trades).close_trade(
+                trade, exit_price=fill.avg_price,
+                quantity=None if full else fill.executed_qty, fee=fill.fee,
+                exit_reason=EXIT_REASON_FULL if full else EXIT_REASON_PARTIAL,
+                closed_at=fill.filled_at or datetime.now(UTC),
+                external_fill_id=str(fill.order_id),
+            )
+    except (IntegrityError, JournalError):
+        logger.warning("Выход не записан в журнал — допишет сверка", exc_info=True,
+                       extra={"trade_id": trade_id})
+    await session.commit()
 
 
 def _snapshot(plan: ActionPlan, inputs: ActionInputs) -> dict[str, Any]:

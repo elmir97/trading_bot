@@ -248,6 +248,7 @@ async def test_partial_failure_reports_but_keeps_data(ctx) -> None:  # type: ign
 async def _bot_order(session, user_id: int, exchange_order_id: str) -> None:  # type: ignore[no-untyped-def]
     """Строка execution_orders с orderId биржи — след входа/стопа бота."""
     session.add(ExecutionOrder(
+        account_mode=ExchangeKeyMode.DEMO,
         user_id=user_id, client_order_id=f"tj-import-{user_id}-{exchange_order_id}",
         exchange_order_id=exchange_order_id, symbol="BTC-USDT", side=OrderSide.BUY,
         position_side=TradeSide.LONG, order_type=OrderType.MARKET, role=OrderRole.ENTRY,

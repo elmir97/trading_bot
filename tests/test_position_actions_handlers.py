@@ -18,7 +18,7 @@ from app.bot.handlers.position_actions import (
     card_keyboard,
 )
 from app.execution.position_action_service import ConfirmOutcome
-from app.trading.enums import ExecutionCallbackAction, TradeSide
+from app.trading.enums import ExchangeKeyMode, ExecutionCallbackAction, TradeSide
 from app.workers.execution_digest import build_stats, detect_anomalies, render_execution_digest
 
 
@@ -133,6 +133,7 @@ def test_digest_counts_actions_and_flags_failed() -> None:
 
     def a(status: PositionActionStatus) -> PositionAction:
         return PositionAction(user_id=1, symbol="XRP-USDT", side=TradeSide.LONG,
+                              account_mode=ExchangeKeyMode.DEMO,
                               kind=PositionActionKind.CLOSE_FULL, status=status)
 
     stats = build_stats([], [a(PositionActionStatus.DONE), a(PositionActionStatus.DRY_RUN),

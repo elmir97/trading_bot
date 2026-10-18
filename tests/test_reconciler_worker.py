@@ -201,6 +201,7 @@ def _row(user_id: int, nid: int, symbol: str, role: OrderRole, status: OrderStat
         OrderRole.TAKE_PROFIT: OrderType.TAKE_PROFIT_MARKET,
     }[role]
     return ExecutionOrder(
+        account_mode=ExchangeKeyMode.DEMO,
         user_id=user_id, notification_id=nid, client_order_id=f"tj{nid}u{user_id}{letter}",
         exchange_order_id=exchange_id, symbol=symbol,
         side=OrderSide.BUY if role is OrderRole.ENTRY else OrderSide.SELL,
@@ -1404,6 +1405,7 @@ async def _bot_open_trade(  # type: ignore[no-untyped-def]
     def row(role: OrderRole, order_type: OrderType, status: OrderStatus, oid: str,
             cid: str | None) -> ExecutionOrder:
         return ExecutionOrder(
+            account_mode=ExchangeKeyMode.DEMO,
             user_id=user_id, trade_id=trade.id, client_order_id=cid, exchange_order_id=oid,
             symbol=symbol, side=OrderSide.BUY if role is OrderRole.ENTRY else OrderSide.SELL,
             position_side=TradeSide.LONG, order_type=order_type, role=role, status=status,
@@ -1582,6 +1584,7 @@ async def _closed_xrp_trade(  # type: ignore[no-untyped-def]
     )
     made = [
         ExecutionOrder(
+            account_mode=ExchangeKeyMode.DEMO,
             user_id=user_id, trade_id=trade.id, exchange_order_id=oid, symbol=XRP,
             side=OrderSide.SELL, position_side=TradeSide.LONG,
             order_type=(OrderType.STOP_MARKET if role is OrderRole.STOP_LOSS
@@ -1708,6 +1711,7 @@ async def test_closes_fully_settles_every_row_not_only_last(ctx) -> None:  # typ
         opened_at=datetime(2026, 9, 27, 14, 15, 30, 300000, tzinfo=UTC),
     )
     extra = ExecutionOrder(
+        account_mode=ExchangeKeyMode.DEMO,
         user_id=user.id, trade_id=sol.id, exchange_order_id=early, symbol="SOL-USDT",
         side=OrderSide.SELL, position_side=TradeSide.LONG, order_type=OrderType.STOP_MARKET,
         role=OrderRole.STOP_LOSS, status=OrderStatus.SUBMITTED,
@@ -1754,11 +1758,13 @@ async def test_closes_fully_standing_rows_untouched(ctx) -> None:  # type: ignor
 
 async def test_close_row_unknown_backfilled_and_action_confirmed(ctx) -> None:  # type: ignore[no-untyped-def]
     """#37 (11.10): «Закрыть всё» исполнилось, строка CLOSE — UNKNOWN, действие
-    FAILED «не подтверждено». Проход сверки добирает строку по cid (FILLED с
-    ценой) и переводит действие в DONE с пометкой."""
+    FAILED «не подтверждено». Проход сверки (с B.9 — восстановление действий в
+    нём) добирает строку по cid (FILLED с ценой) и переводит действие в DONE с
+    пометкой."""
     settings, db, session, user, demo = ctx
     await _seed_live(session, user.id)
     action = PositionAction(
+        account_mode=ExchangeKeyMode.DEMO,
         user_id=user.id, symbol="LINK-USDT", side=TradeSide.LONG,
         kind=PositionActionKind.CLOSE_FULL, status=PositionActionStatus.FAILED, params={},
         error_code="POSITION_CHANGED", error_message="Исполнение закрытия не подтверждено.",
@@ -1767,6 +1773,7 @@ async def test_close_row_unknown_backfilled_and_action_confirmed(ctx) -> None:  
     await session.flush()
     cid = f"tm{action.id}u{user.id}C"
     row = ExecutionOrder(
+        account_mode=ExchangeKeyMode.DEMO,
         user_id=user.id, position_action_id=action.id, client_order_id=cid,
         symbol="LINK-USDT", side=OrderSide.SELL, position_side=TradeSide.LONG,
         order_type=OrderType.MARKET, role=OrderRole.CLOSE, status=OrderStatus.UNKNOWN,
@@ -1776,7 +1783,8 @@ async def test_close_row_unknown_backfilled_and_action_confirmed(ctx) -> None:  
     await session.commit()
     demo.orders_by_cid[cid] = _live_entry(side="SELL", clientOrderId=cid)
 
-    await _run_reconciler(settings, db, FakeBot())
+    # B.9: строки действий добирает восстановление (под локом — нужен Redis).
+    await _run_reconciler(settings, db, FakeBot(), FakeRedis())
 
     async with db.session() as s:
         fresh = await s.get(ExecutionOrder, row.id)
@@ -1798,6 +1806,7 @@ async def test_close_button_exit_is_closed_by_bot(ctx) -> None:  # type: ignore[
     [child] = [o for o in demo.all_orders["SOL-USDT"] if str(o["orderId"]) == SOL_CHILD]
     child.update(type="MARKET", triggerOrderId="", stopPrice="")
     session.add(ExecutionOrder(
+        account_mode=ExchangeKeyMode.DEMO,
         user_id=user.id, trade_id=sol_id, client_order_id=f"tm99u{user.id}C",
         exchange_order_id=SOL_CHILD, symbol="SOL-USDT", side=OrderSide.SELL,
         position_side=TradeSide.LONG, order_type=OrderType.MARKET, role=OrderRole.CLOSE,
@@ -1829,6 +1838,7 @@ async def test_fired_stop_filled_even_without_open_orders(ctx) -> None:  # type:
         opened_at=datetime(2026, 9, 27, 14, 15, 30, 300000, tzinfo=UTC),
     )
     session.add(ExecutionOrder(
+        account_mode=ExchangeKeyMode.DEMO,
         user_id=user.id, trade_id=sol.id, exchange_order_id=early, symbol="SOL-USDT",
         side=OrderSide.SELL, position_side=TradeSide.LONG, order_type=OrderType.STOP_MARKET,
         role=OrderRole.STOP_LOSS, status=OrderStatus.SUBMITTED,

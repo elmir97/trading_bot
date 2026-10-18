@@ -11,7 +11,12 @@ price NULL («не дочитано»). Обе дочитывает reconciler: 
 «подтверждено добором».
 
 На 109421 строку не трогаем (только INFO): у строки нет счёта, а ответ
-клиента другого режима (DEMO/LIVE) — тоже «order not exist»."""
+клиента другого режима (DEMO/LIVE) — тоже «order not exist».
+
+B.9 (19.10.2026): строки действий этапа 4 (position_action_id не NULL)
+здесь не разбираются — их целиком ведёт app/execution/action_recovery.py
+(клиентом счёта действия), в том числе правило владельца выше. Остались
+строки закрытия без действия (аварийное закрытие открытия)."""
 
 from __future__ import annotations
 
@@ -22,10 +27,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.database.models.execution_order import ExecutionOrder
-from app.database.models.position_action import PositionAction
 from app.exchanges.base import ExchangeClient, ExchangeError
 from app.execution.readback_log import readback_failure
-from app.trading.enums import OrderRole, OrderStatus, PositionActionStatus
+from app.trading.enums import OrderRole, OrderStatus
 
 logger = get_logger(__name__)
 
@@ -55,6 +59,7 @@ async def backfill_close_rows(
             ExecutionOrder.user_id == user_id,
             ExecutionOrder.role == OrderRole.CLOSE,
             ExecutionOrder.client_order_id.is_not(None),
+            ExecutionOrder.position_action_id.is_(None),
             ExecutionOrder.created_at >= now - BACKFILL_WINDOW,
             _due(),  # type: ignore[arg-type]
         ).order_by(ExecutionOrder.id).limit(BACKFILL_MAX_ROWS)
@@ -87,21 +92,4 @@ async def backfill_close_rows(
         done.append(row.id)
         logger.info("Строка закрытия добрана по cid",
                     extra={**log, "price": str(fill.avg_price), "qty": str(fill.executed_qty)})
-        if row.position_action_id is not None:
-            await _confirm_action(session, row.position_action_id, now)
     return done
-
-
-async def _confirm_action(session: AsyncSession, action_id: int, now: datetime) -> None:
-    action = await session.get(PositionAction, action_id)
-    if (
-        action is None or action.status is not PositionActionStatus.FAILED
-        or action.error_message != UNCONFIRMED_MESSAGE
-    ):
-        return
-    action.status = PositionActionStatus.DONE
-    action.error_code = None
-    action.error_message = None
-    action.params = {**(action.params or {}), "confirmed_by": CONFIRMED_MARK,
-                     "confirmed_at": now.isoformat()}
-    logger.info("Действие подтверждено добором", extra={"action_id": action.id})

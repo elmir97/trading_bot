@@ -274,6 +274,11 @@ async def run() -> None:
             await background_jobs.openings.run()
         except Exception:
             logger.exception("Восстановление открытий при старте упало — повторит цикл")
+        # B.9: действия этапа 4, прерванные посреди «Да» (только чтение биржи).
+        try:
+            await background_jobs.recover_actions()
+        except Exception:
+            logger.exception("Восстановление действий при старте упало — повторит цикл")
     # B.1: «Открыть» с тревогой — быстрые повторы защиты тем же воркером.
     dp["alarm_retry"] = background_jobs.openings.retry_alarm
     background_jobs.start()

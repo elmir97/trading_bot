@@ -2003,6 +2003,22 @@ class TestReconcilerHistoryEndpoints:
         assert by_type["TAKE_PROFIT_MARKET"].status == "CANCELLED"
         entry = by_type["MARKET"]
         assert (entry.status, entry.reduce_only, entry.trigger_order_id) == ("FILLED", False, None)
+        # B.9: clientOrderId из живого ответа — свой у входа, "" у условников.
+        assert entry.client_order_id == "tj215u1e"
+        assert stop.client_order_id == by_type["TAKE_PROFIT_MARKET"].client_order_id == ""
+        await client.close()
+
+    async def test_history_without_client_order_id_is_none(self) -> None:
+        """B.9: поля clientOrderId нет — None, не "" («нет в истории по cid»
+        по такому ответу не доказать)."""
+        from tests.bingx_fixtures import live_items
+
+        orders = live_items("allOrders SOL")
+        for o in orders:
+            del o["clientOrderId"]
+        client = make_client(lambda r: ok({"orders": orders}))
+        got = await client.get_all_orders("SOL-USDT", *_SOL_WINDOW)
+        assert got and all(o.client_order_id is None for o in got)
         await client.close()
 
     async def test_positions_carry_position_id(self) -> None:

@@ -100,12 +100,28 @@ def test_fault_refused_with_any_live_sign(live: dict[str, Any]) -> None:
         Settings(**BASE, exec_open_fault="fail_backup_stop", **live)  # type: ignore[arg-type]
 
 
-async def test_startup_refused_and_logged(monkeypatch, caplog) -> None:  # type: ignore[no-untyped-def]
+@pytest.mark.parametrize("fault", ["interrupt_action_after_pending", "interrupt_action_after_post"])
+def test_action_interrupt_faults_demo_only(fault: str) -> None:
+    """B.9: сбои-обрывы действий этапа 4 — известны и только на демо: счёт не
+    DEMO или любой признак live — отказ на старте."""
+    s = Settings(**BASE, exec_open_fault=fault)  # type: ignore[arg-type]
+    assert s.exec_open_faults == {fault} and s.bingx_allowed_exchange_mode.value == "DEMO"
+    for live in (
+        {"bingx_trading_mode": "live"},
+        {"exec_open_allow_live": True},
+        {"exec_allow_live_mode_orders": True},
+    ):
+        with pytest.raises(ValidationError, match="только на демо"):
+            Settings(**BASE, exec_open_fault=fault, **live)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("fault", ["fail_backup_stop", "interrupt_action_after_post"])
+async def test_startup_refused_and_logged(monkeypatch, caplog, fault: str) -> None:  # type: ignore[no-untyped-def]
     """Запрещённая конфигурация — бот не стартует, причина в логе."""
     from app import main as app_main
 
     try:
-        Settings(**BASE, exec_open_fault="fail_backup_stop", bingx_trading_mode="live")  # type: ignore[arg-type]
+        Settings(**BASE, exec_open_fault=fault, bingx_trading_mode="live")  # type: ignore[arg-type]
     except ValidationError as exc:
         error = exc
 

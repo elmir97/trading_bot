@@ -104,6 +104,10 @@ class BackgroundJobs:
             },
         )
 
+    async def recover_actions(self) -> int:
+        """B.9: восстановление действий этапа 4 — при старте до поллинга."""
+        return await self._reconciler.recover_actions()
+
     async def shutdown(self) -> None:
         await self.openings.close()
         if self._scheduler.running:

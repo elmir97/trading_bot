@@ -41,7 +41,12 @@ from app.database.base import (
     RatioNumeric,
     TimestampMixin,
 )
-from app.trading.enums import PositionActionKind, PositionActionStatus, TradeSide
+from app.trading.enums import (
+    ExchangeKeyMode,
+    PositionActionKind,
+    PositionActionStatus,
+    TradeSide,
+)
 
 
 class PositionAction(IntPKMixin, TimestampMixin, Base):
@@ -56,6 +61,7 @@ class PositionAction(IntPKMixin, TimestampMixin, Base):
             "'SUBMITTED', 'DONE', 'FAILED')",
             name="status_known",
         ),
+        CheckConstraint("account_mode IN ('LIVE', 'DEMO')", name="account_mode_known"),
         Index("ix_position_actions_user_created", "user_id", "created_at"),
         Index("ix_position_actions_user_symbol_side", "user_id", "symbol", "side"),
     )
@@ -69,6 +75,13 @@ class PositionAction(IntPKMixin, TimestampMixin, Base):
     symbol: Mapped[str] = mapped_column(String(32), nullable=False)
     side: Mapped[TradeSide] = mapped_column(
         Enum(TradeSide, native_enum=False, length=8), nullable=False
+    )
+    # M9 (B.9): каким счётом шло действие — восстановление после рестарта
+    # проверяет ордера по cid клиентом этого счёта (109421 от клиента другого
+    # режима — не доказательство).
+    account_mode: Mapped[ExchangeKeyMode] = mapped_column(
+        Enum(ExchangeKeyMode, native_enum=False, length=8, create_constraint=False),
+        nullable=False,
     )
     # positionId биржи строкой (значения > 2^53 приходят числом — не float).
     position_id: Mapped[str | None] = mapped_column(String(64))

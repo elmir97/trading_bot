@@ -23,6 +23,7 @@ from app.database.repositories.user import UserRepository
 from app.database.session import Database
 from app.services.user_service import UserService
 from app.trading.enums import (
+    ExchangeKeyMode,
     ExecutionCallbackAction,
     OrderRole,
     OrderSide,
@@ -62,6 +63,7 @@ async def ctx(unique_telegram_id):  # type: ignore[no-untyped-def]
 def _action(user_id: int, **overrides: object) -> PositionAction:
     fields: dict[str, object] = dict(
         user_id=user_id, symbol="XRP-USDT", side=TradeSide.LONG,
+        account_mode=ExchangeKeyMode.DEMO,
         position_id="2105907655281221634", kind=PositionActionKind.MOVE_STOP,
         params={"breakeven": True}, mark_price=D("1.5263"), position_qty=D(30),
         current_stop=D("1.4795"), new_level=D("1.5268"),
@@ -99,6 +101,35 @@ async def test_unknown_kind_or_status_rejected(ctx, column: str, value: str) -> 
     await session.rollback()
 
 
+@pytest.mark.parametrize("table", ["position_actions", "execution_orders"])
+@pytest.mark.parametrize("value", ["TESTNET", None])
+async def test_account_mode_known_and_required(ctx, table: str, value: str | None) -> None:  # type: ignore[no-untyped-def]
+    """M9 (B.9): счёт — NOT NULL и только LIVE/DEMO у действия и у ордера."""
+    session, user = ctx
+    uid = user.id
+    action = _action(uid)
+    session.add(action)
+    await session.flush()
+    order = ExecutionOrder(
+        account_mode=ExchangeKeyMode.DEMO,
+        user_id=uid, position_action_id=action.id, client_order_id=f"tm{action.id}u{uid}C",
+        symbol="XRP-USDT", side=OrderSide.SELL, position_side=TradeSide.LONG,
+        order_type=OrderType.MARKET, role=OrderRole.CLOSE, status=OrderStatus.PENDING,
+    )
+    session.add(order)
+    await session.commit()
+    row_id = action.id if table == "position_actions" else order.id
+    with pytest.raises(IntegrityError):
+        await session.execute(
+            text(f"UPDATE {table} SET account_mode = :v WHERE id = :id"),
+            {"v": value, "id": row_id},
+        )
+    await session.rollback()
+    for live in (action, order):
+        await session.refresh(live)
+        assert live.account_mode is ExchangeKeyMode.DEMO
+
+
 async def test_order_link_is_set_null_when_action_deleted(ctx) -> None:  # type: ignore[no-untyped-def]
     session, user = ctx
     uid = user.id
@@ -106,6 +137,7 @@ async def test_order_link_is_set_null_when_action_deleted(ctx) -> None:  # type:
     session.add(action)
     await session.flush()
     order = ExecutionOrder(
+        account_mode=ExchangeKeyMode.DEMO,
         user_id=uid, position_action_id=action.id, client_order_id=f"tm{action.id}u{uid}S",
         symbol="XRP-USDT", side=OrderSide.SELL, position_side=TradeSide.LONG,
         order_type=OrderType.STOP_MARKET, role=OrderRole.STOP_LOSS, status=OrderStatus.CANCELLED,

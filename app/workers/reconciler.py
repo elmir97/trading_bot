@@ -36,6 +36,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import outbox
+from app.bot.action_result import send_action_recovered
 from app.core.config import Settings
 from app.core.input_prompt import InputGate
 from app.core.logging import get_logger
@@ -62,6 +63,7 @@ from app.exchanges.base import (
     Position,
 )
 from app.exchanges.bingx import _QUOTE_ASSET_BY_MODE
+from app.execution.action_recovery import RecoveryNote, recover_actions
 from app.execution.close_backfill import backfill_close_rows
 from app.execution.position_view import (
     apply_exchange_levels,
@@ -269,6 +271,13 @@ class Reconciler:
             return
         self._cycle_errors = 0
         try:
+            # B.9: прерванные рестартом действия этапа 4 — до сверки сделок:
+            # orderId закрытия в строке раньше, чем сверка разберёт выход.
+            try:
+                await self.recover_actions()
+            except Exception:
+                self._cycle_errors += 1
+                logger.exception("Восстановление действий упало")
             await self._run_cycle()
         except Exception:
             self._cycle_errors += 1
@@ -307,6 +316,20 @@ class Reconciler:
                 self._cycle_errors += 1
                 logger.exception("Сверка пользователя упала", extra={"user_id": user_id})
             await self._record_sent()
+
+    async def recover_actions(self) -> int:
+        """B.9: один проход восстановления действий (и при старте бота, до
+        поллинга — app/main.py). Только чтение биржи."""
+        if self._redis is None:
+            return 0
+
+        async def notify(note: RecoveryNote) -> None:
+            await send_action_recovered(self._bot, self._db, note)
+
+        return await recover_actions(
+            self._db, self._settings, self._redis,
+            ExchangeFactory(self._settings, self._cipher), notify,
+        )
 
     async def _record_sent(self) -> None:
         """После commit (или отката) транзакции: сообщение уже в чате, журнал

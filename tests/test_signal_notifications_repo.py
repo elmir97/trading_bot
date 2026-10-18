@@ -26,6 +26,7 @@ from app.database.repositories.user import UserRepository
 from app.database.session import Database
 from app.services.user_service import UserService
 from app.trading.enums import (
+    ExchangeKeyMode,
     OrderRole,
     OrderSide,
     OrderStatus,
@@ -214,6 +215,7 @@ def _order_row(
     notification: SignalNotification, status: OrderStatus, role: OrderRole = OrderRole.ENTRY
 ) -> ExecutionOrder:
     return ExecutionOrder(
+        account_mode=ExchangeKeyMode.DEMO,
         user_id=notification.user_id,
         signal_id=notification.signal_id,
         notification_id=notification.id,

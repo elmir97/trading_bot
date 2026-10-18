@@ -513,6 +513,10 @@ class HistoryOrder:
     position_id: str | None
     created_at: datetime
     updated_at: datetime
+    # B.9: clientOrderId строкой ("" — у вложенных и дочерних ордеров, живьём
+    # 27.09); None — поля в ответе нет: «нет в истории по cid» по такому
+    # ответу не доказать (app/execution/action_recovery.py).
+    client_order_id: str | None = None
 
 
 class ExchangeClient(ABC):

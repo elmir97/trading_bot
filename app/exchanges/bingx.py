@@ -267,6 +267,9 @@ def _parse_history_order(item: Any) -> HistoryOrder:
         position_id=_optional_id(item.get("positionID") or item.get("positionId")),
         created_at=_exchange_time(_required(item, "time"), "time"),
         updated_at=_exchange_time(_required(item, "updateTime", "time"), "updateTime"),
+        client_order_id=(
+            str(item["clientOrderId"]) if item.get("clientOrderId") is not None else None
+        ),
     )
 
 

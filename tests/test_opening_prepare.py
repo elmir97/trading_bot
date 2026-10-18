@@ -438,6 +438,7 @@ async def test_links_and_new_values(ctx) -> None:  # type: ignore[no-untyped-def
     ctx.session.add(opening)
     await ctx.session.flush()
     order = ExecutionOrder(
+        account_mode=ExchangeKeyMode.DEMO,
         user_id=ctx.uid, trade_opening_id=opening.id, client_order_id=f"to{opening.id}u{ctx.uid}e",
         symbol="XRP-USDT", side=OrderSide.BUY, position_side=TradeSide.LONG,
         order_type=OrderType.LIMIT, role=OrderRole.ENTRY, status=OrderStatus.WORKING,

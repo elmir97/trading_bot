@@ -851,6 +851,7 @@ class OpeningService:
         for role, order_type, order_side, letter, price, trigger in rows:
             self._session.add(ExecutionOrder(
                 user_id=self._user.id, trade_opening_id=opening.id,
+                account_mode=opening.account_mode,
                 client_order_id=opening_client_order_id(opening.id, self._user.id, letter),
                 symbol=opening.symbol, side=order_side, position_side=side,
                 order_type=order_type, role=role, quantity=calc.quantity, price=price,

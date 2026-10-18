@@ -366,6 +366,7 @@ class Settings(BaseSettings):
         """Управляемый сбой — только демо: при любом признаке live отказ на старте."""
         if self.exec_open_faults and (
             self.bingx_trading_mode == "live"
+            or self.bingx_allowed_exchange_mode is not ExchangeKeyMode.DEMO
             or self.exec_open_allow_live
             or self.exec_allow_live_mode_orders
         ):
@@ -565,6 +566,12 @@ OPEN_FAULTS = frozenset({
     # аварийное закрытие «отклонены»; ручное закрытие кнопкой — нет. На демо —
     # вместе со skip_attached_stop (иначе позицию прикроет вложенный стоп).
     "fail_backup_stop_always",
+    # B.9 (19.10.2026): действие этапа 4 обрывается «как рестартом» — для
+    # проверки восстановления на демо без убийства контейнера. Каждое «Да»,
+    # пока сбой задан (не только первое): действие SUBMITTED и строка PENDING
+    # закоммичены, дальше ничего не пишется — итог за восстановлением.
+    "interrupt_action_after_pending",   # до POST: на биржу ничего не ушло
+    "interrupt_action_after_post",      # POST ушёл, ответ не записан
 })
 
 

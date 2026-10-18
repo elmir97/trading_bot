@@ -83,9 +83,10 @@ async def conn(unique_telegram_id: Callable[[], int]) -> AsyncIterator[Any]:
             err = SPEC.error_before if i == SPEC.error_row else (None, None)
             await c.execute(sa.text(
                 "INSERT INTO execution_orders (id, user_id, client_order_id, symbol, side,"
-                " position_side, order_type, role, status, error_code, error_message)"
+                " position_side, order_type, role, status, error_code, error_message,"
+                " account_mode)"
                 " VALUES (:id, :u, :cid, 'XRP-USDT', 'SELL', 'LONG', 'STOP_MARKET',"
-                " 'STOP_LOSS', :st, :code, :msg)"
+                " 'STOP_LOSS', :st, :code, :msg, 'DEMO')"
             ), {"id": i, "u": user_id, "cid": SPEC.cids[i], "st": g.before,
                 "code": err[0], "msg": err[1]})
         yield c

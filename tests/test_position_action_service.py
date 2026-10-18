@@ -562,6 +562,7 @@ async def test_pending_row_blocks_second_order(ctx) -> None:  # type: ignore[no-
     card = await _card(ctx)
     # Перенос начинается с моста — его ключ SB и блокирует повторную отправку.
     ctx.session.add(ExecutionOrder(
+        account_mode=ExchangeKeyMode.DEMO,
         user_id=ctx.uid, client_order_id=f"tm{card.action.id}u{ctx.uid}SB", symbol="XRP-USDT",
         side="SELL", position_side=TradeSide.LONG, order_type="STOP_MARKET",
         role=OrderRole.STOP_LOSS, status=OrderStatus.PENDING,
@@ -619,12 +620,14 @@ async def _placed_stop(c, oid: str, position_id: str) -> ExecutionOrder:  # type
     """Стоп, поставленный прошлым действием этапа 4 над позицией position_id,
     — строка SUBMITTED с его orderId."""
     action = PositionAction(
+        account_mode=ExchangeKeyMode.DEMO,
         user_id=c.uid, symbol="XRP-USDT", side=TradeSide.LONG, position_id=position_id,
         kind=PositionActionKind.MOVE_STOP, status=PositionActionStatus.DONE,
     )
     c.session.add(action)
     await c.session.flush()
     row = ExecutionOrder(
+        account_mode=ExchangeKeyMode.DEMO,
         user_id=c.uid, position_action_id=action.id, exchange_order_id=oid,
         symbol="XRP-USDT", side=OrderSide.SELL, position_side=TradeSide.LONG,
         order_type=OrderType.STOP_MARKET, role=OrderRole.STOP_LOSS, status=OrderStatus.SUBMITTED,

@@ -56,6 +56,7 @@ from app.exchanges.base import (
 )
 from app.execution.models import OrderRequest
 from app.trading.enums import (
+    ExchangeKeyMode,
     OrderRole,
     OrderSide,
     OrderStatus,
@@ -449,7 +450,9 @@ async def _check_conditionals(
     try:
         orders = await client.get_open_orders(order.symbol, max_retries=1)
     except ExchangeError as exc:
-        await _mark_unverified(session, order, result, fill, stop_row, take_row, str(exc))
+        await _mark_unverified(
+            session, order, result, fill, stop_row, take_row, str(exc), entry_row.account_mode
+        )
         return
 
     stop_match = match(
@@ -467,7 +470,10 @@ async def _check_conditionals(
         try:
             orders = await client.get_open_orders(order.symbol, max_retries=1)
         except ExchangeError as exc:
-            await _mark_unverified(session, order, result, fill, stop_row, take_row, str(exc))
+            await _mark_unverified(
+                session, order, result, fill, stop_row, take_row, str(exc),
+                entry_row.account_mode,
+            )
             return
         stop_match = match(
             orders, OrderType.STOP_MARKET, order.stop_loss, order.stop_loss_client_order_id
@@ -479,11 +485,13 @@ async def _check_conditionals(
 
     if stop_row is None:
         result.stop = await _resolve(
-            session, client, order, position_side, OrderRole.STOP_LOSS, stop_match, result
+            session, client, order, position_side, OrderRole.STOP_LOSS, stop_match, result,
+            entry_row.account_mode,
         )
     if take_row is None:
         result.take = await _resolve(
-            session, client, order, position_side, OrderRole.TAKE_PROFIT, take_match, result
+            session, client, order, position_side, OrderRole.TAKE_PROFIT, take_match, result,
+            entry_row.account_mode,
         )
     _raise_alarm_if_unprotected(result, order, fill)
 
@@ -504,11 +512,14 @@ def _state_from_row(row: ExecutionOrder) -> ConditionalState:
 
 
 def _conditional_row(
-    order: OrderRequest, role: OrderRole, *, status: OrderStatus, level: Decimal
+    order: OrderRequest, role: OrderRole, *, status: OrderStatus, level: Decimal,
+    account_mode: ExchangeKeyMode,
 ) -> ExecutionOrder:
+    """Стоп/тейк входа по сигналу — счёт строки входа (M9)."""
     is_stop = role is OrderRole.STOP_LOSS
     return ExecutionOrder(
         user_id=order.user_id,
+        account_mode=account_mode,
         signal_id=order.signal_id,
         notification_id=order.notification_id,
         client_order_id=(
@@ -534,6 +545,7 @@ async def _resolve(
     role: OrderRole,
     found: Match,
     result: ReadbackResult,
+    account_mode: ExchangeKeyMode,
 ) -> ConditionalState:
     is_stop = role is OrderRole.STOP_LOSS
     level = order.stop_loss if is_stop else order.take_profit
@@ -549,7 +561,10 @@ async def _resolve(
     if found.order is not None:
         o = found.order
         assert o.stop_price is not None, "find_our_conditional не берёт ордер без stopPrice"
-        row = _conditional_row(order, role, status=OrderStatus.SUBMITTED, level=o.stop_price)
+        row = _conditional_row(
+            order, role, status=OrderStatus.SUBMITTED, level=o.stop_price,
+            account_mode=account_mode,
+        )
         row.exchange_order_id = o.order_id or None
         row.raw_response = {
             "found": True,
@@ -564,7 +579,9 @@ async def _resolve(
         return ConditionalState(ConditionalOutcome.FOUND, o.order_id, o.stop_price)
 
     # Не нашёлся — одна попытка выставить отдельно. PENDING до HTTP.
-    row = _conditional_row(order, role, status=OrderStatus.PENDING, level=level)
+    row = _conditional_row(
+        order, role, status=OrderStatus.PENDING, level=level, account_mode=account_mode
+    )
     if not await _insert(session, row):
         return _state_from_row(await _existing(session, order, role))
     await session.commit()
@@ -639,6 +656,7 @@ async def _mark_unverified(
     stop_row: ExecutionOrder | None,
     take_row: ExecutionOrder | None,
     error: str,
+    account_mode: ExchangeKeyMode,
 ) -> None:
     """Р3: openOrders не прочитан — есть ли стоп, неизвестно. Вслепую не
     спасаем (второй стоп). Тревога и строка-наблюдение без client_order_id
@@ -650,7 +668,8 @@ async def _mark_unverified(
     )
     if stop_row is None:
         row = _conditional_row(
-            order, OrderRole.STOP_LOSS, status=OrderStatus.ERROR, level=order.stop_loss
+            order, OrderRole.STOP_LOSS, status=OrderStatus.ERROR, level=order.stop_loss,
+            account_mode=account_mode,
         )
         row.client_order_id = None
         row.error_code = STOP_UNVERIFIED

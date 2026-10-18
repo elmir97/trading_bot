@@ -40,6 +40,7 @@ from app.execution.models import OrderRequest
 from app.execution.readback import ConditionalOutcome, find_our_conditional, verify_entry
 from app.services.user_service import UserService
 from app.trading.enums import (
+    ExchangeKeyMode,
     OrderRole,
     OrderSide,
     OrderStatus,
@@ -239,6 +240,7 @@ async def _entry(  # type: ignore[no-untyped-def]
     # PENDING-строка входа, как её писал путь «Да» до удаления входа по
     # сигналу (02.10) — read-back её читает.
     row = ExecutionOrder(
+        account_mode=ExchangeKeyMode.DEMO,
         user_id=order.user_id,
         signal_id=order.signal_id,
         notification_id=order.notification_id,
@@ -619,6 +621,7 @@ async def test_stop_claimed_by_other_entry_is_not_ours(ctx) -> None:  # type: ig
     await session.flush()
     other_order = _order(user.id, slot.id, other.id)
     other_stop = ExecutionOrder(
+        account_mode=ExchangeKeyMode.DEMO,
         user_id=user.id, signal_id=slot.id, notification_id=other.id,
         client_order_id=other_order.stop_loss_client_order_id, symbol="LINK-USDT",
         side=OrderSide.SELL, position_side=TradeSide.LONG, order_type=OrderType.STOP_MARKET,
@@ -753,6 +756,7 @@ async def test_pending_rescue_row_is_not_resent(ctx) -> None:  # type: ignore[no
         (OrderRole.TAKE_PROFIT, order.take_profit_client_order_id),
     ):
         session.add(ExecutionOrder(
+            account_mode=ExchangeKeyMode.DEMO,
             user_id=user.id, signal_id=slot.id, notification_id=n.id, client_order_id=cid,
             symbol="LINK-USDT", side=OrderSide.SELL, position_side=TradeSide.LONG,
             order_type=OrderType.STOP_MARKET, role=role, status=OrderStatus.PENDING,

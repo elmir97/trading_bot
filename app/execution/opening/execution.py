@@ -255,6 +255,7 @@ class Runner:
     ) -> ExecutionOrder:
         return ExecutionOrder(
             user_id=self.opening.user_id, trade_opening_id=self.opening.id,
+            account_mode=self.opening.account_mode,
             symbol=self.opening.symbol, side=side, position_side=self.side,
             order_type=order_type, role=role, **kw,
         )

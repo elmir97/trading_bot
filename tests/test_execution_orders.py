@@ -33,6 +33,7 @@ from app.database.repositories.user import UserRepository
 from app.database.session import Database
 from app.services.user_service import UserService
 from app.trading.enums import (
+    ExchangeKeyMode,
     OrderRole,
     OrderSide,
     OrderStatus,
@@ -90,6 +91,7 @@ def _trade(user_id: int, **overrides: object) -> Trade:
 def _order(user_id: int, client_order_id: str, **overrides: object) -> ExecutionOrder:
     fields: dict[str, object] = {
         "user_id": user_id,
+        "account_mode": ExchangeKeyMode.DEMO,
         "client_order_id": f"{_RUN_ID}-{client_order_id}",
         "symbol": "BTC-USDT",
         "side": OrderSide.BUY,

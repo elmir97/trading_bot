@@ -29,6 +29,7 @@ from app.execution.settle import conditional_rows, history_facts, settle
 from app.services.user_service import UserService
 from app.trading.enums import (
     CancelSource,
+    ExchangeKeyMode,
     OrderRole,
     OrderSide,
     OrderStatus,
@@ -47,6 +48,7 @@ NOW = datetime(2026, 10, 10, 12, 0, tzinfo=UTC)
 def _row(oid: str | None, status: OrderStatus = OrderStatus.SUBMITTED, *,
          role: OrderRole = OrderRole.STOP_LOSS, **kw: Any) -> ExecutionOrder:
     return ExecutionOrder(
+        account_mode=ExchangeKeyMode.DEMO,
         user_id=kw.pop("user_id", 1), exchange_order_id=oid, symbol="XRP-USDT",
         side=OrderSide.SELL, position_side=TradeSide.LONG,
         order_type=(OrderType.STOP_MARKET if role is OrderRole.STOP_LOSS
@@ -173,6 +175,7 @@ async def db_ctx(unique_telegram_id):  # type: ignore[no-untyped-def]
 
 async def _action(session, uid: int, position_id: str) -> int:  # type: ignore[no-untyped-def]
     action = PositionAction(
+        account_mode=ExchangeKeyMode.DEMO,
         user_id=uid, symbol="XRP-USDT", side=TradeSide.LONG, position_id=position_id,
         kind=PositionActionKind.MOVE_STOP, status=PositionActionStatus.DONE,
     )
