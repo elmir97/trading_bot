@@ -1263,7 +1263,7 @@ def _with_bot(data: Any) -> Any:
     return data
 
 
-@scenario("pos_chat", "П.1: «⚙️ Действия в чате» — openTelegramLink t.me/<бот>?start=pos-…")
+@scenario("pos_chat", "П.1: «Действия →» — openTelegramLink t.me/<бот>?start=pos-…")
 async def pos_chat(page: Page, url: str) -> None:
     await open_page(page, url, Setup(native=True, preset="hedge",
                                      rules=[Rule("/api/me", "patch", patch=_with_bot)]))
@@ -2089,6 +2089,156 @@ async def confirm_double_old(page: Page, url: str) -> None:
                   " setTimeout(() => b.click(), 30);")
     await page.wait_for(_done, 25, "итог «Сделка #N»")
     page.expect(len(_confirms(page)) == 1, f"/confirm: {len(_confirms(page))}, ждали 1")
+
+
+@scenario("confirm_double_burst", "Д.5: старый клиент (6.0) — залп из трёх нажатий одним скриптом "
+                                  "без пауз — ровно один /confirm, без ошибок")
+async def confirm_double_burst(page: Page, url: str) -> None:
+    await open_page(page, url, Setup())
+    await _ready_form(page, False)
+    await _to_confirm(page, False)
+    await page.js("const b = document.getElementById('confirm-action'); b.click(); b.click();"
+                  " b.click();")
+    await page.wait_for(_done, 25, "итог «Сделка #N»")
+    page.expect(len(_confirms(page)) == 1, f"/confirm: {len(_confirms(page))}, ждали 1")
+
+
+
+# Д.6 — экран позиций: полоска, PnL, журнал — числа и доли сервера, фронт только ставит
+
+class PositionsTap:
+    """Ответы /api/positions (правило «patch»): у LONG — PnL «-1.23 $» (знак -1) и цена за
+    тейком (mark_at 1, край take), у SHORT — PnL «0.00 $» (знак 0). Ответ сохраняется —
+    эталон: страница обязана показать ровно это."""
+
+    def __init__(self) -> None:
+        self.seen: list[dict[str, Any]] = []
+
+    def __call__(self, data: Any) -> Any:
+        if isinstance(data, dict):
+            for p in data.get("positions") or []:
+                if p["side"] == "LONG":
+                    p["pnl_text"], p["pnl_sign"] = "-1.23 $", -1
+                    if p.get("bar"):
+                        p["bar"]["mark_at"], p["bar"]["mark_edge"] = "1.0000", "take"
+                else:
+                    p["pnl_text"], p["pnl_sign"] = "0.00 $", 0
+            self.seen.append(data)
+        return data
+
+    @property
+    def last(self) -> dict[str, Any]:
+        if not self.seen:
+            raise ScenarioError("ответ /api/positions не пойман")
+        return self.seen[-1]
+
+
+POSITIONS_DESIGN_JS = """(() => {
+  const root = getComputedStyle(document.documentElement);
+  const cards = [...document.querySelectorAll('#positions-list .position-card')].map((c) => {
+    const pnl = c.querySelector('.position-pnl');
+    const track = c.querySelector('.position-bar-track');
+    const mark = c.querySelector('.position-bar-mark');
+    let bar = null;
+    if (track && mark) {
+      const t = track.getBoundingClientRect();
+      const m = mark.getBoundingClientRect();
+      bar = {
+        mark_at: track.dataset.markAt, entry_at: track.dataset.entryAt,
+        mark_offset: (m.left + m.width / 2 - t.left) / t.width,
+        mark_class: mark.className,
+        labels: [...c.querySelectorAll('.position-bar-labels span')].map((s) => s.textContent),
+      };
+    }
+    return {
+      id: c.dataset.position, danger: c.classList.contains('danger'),
+      border: getComputedStyle(c).borderTopColor,
+      name: c.querySelector('.position-symbol').textContent,
+      pnl: pnl.textContent, pnl_class: pnl.className, pnl_color: getComputedStyle(pnl).color,
+      bar, chat: c.querySelector('[data-chat]') ? c.querySelector('[data-chat]').textContent : null,
+    };
+  });
+  return {
+    cards,
+    journal: [...document.querySelectorAll('#positions-journal-list li')]
+      .map((li) => li.textContent),
+    red: root.getPropertyValue('--red').trim(),
+    red_text: root.getPropertyValue('--red-text').trim(),
+    muted: root.getPropertyValue('--muted').trim(),
+    scroll_x: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+  };
+})()"""
+
+
+@scenario("design_positions", "Д.6: позиции — PnL текстом и цветом по знаку сервера, полоска по "
+                              "доле сервера (за краем — край), без стопа — красная рамка и без "
+                              "полоски, журнал без хвоста нулей, «Действия →», 320 px")
+async def design_positions(page: Page, url: str) -> None:
+    tap = PositionsTap()
+    await open_page(page, url, Setup(preset="hedge", rules=[
+        Rule("/api/positions", "patch", patch=tap),
+        Rule("/api/me", "patch", patch=_with_bot)]))
+    await _to_positions(page)
+    await page.pump(0.5)
+    got = await page.js(POSITIONS_DESIGN_JS)
+    server = {f"{p['symbol']}:{p['side']}": p for p in tap.last["positions"]}
+    cards = {c["id"]: c for c in got["cards"]}
+    page.expect(set(cards) == set(server), f"карточки {sorted(cards)} ≠ сервер {sorted(server)}")
+    long, short = cards.get("XRP-USDT:LONG"), cards.get("XRP-USDT:SHORT")
+    if not long or not short:
+        raise ScenarioError(f"нет карточек хеджа: {sorted(cards)}")
+    page.expect(long["name"] == "XRP · Лонг" and short["name"] == "XRP · Шорт",
+                f"заголовки: {long['name']!r}, {short['name']!r}")
+    page.expect(long["pnl"] == "-1.23 $" and "down" in long["pnl_class"]
+                and long["pnl_color"] == _rgb(got["red_text"]), f"PnL лонга: {long}")
+    page.expect(short["pnl"] == "0.00 $" and "flat" in short["pnl_class"]
+                and short["pnl_color"] == _rgb(got["muted"]), f"PnL шорта: {short}")
+    sbar = server["XRP-USDT:LONG"]["bar"]
+    bar = long["bar"]
+    if bar is None or sbar is None:
+        raise ScenarioError(f"полоски лонга нет: страница {bar}, сервер {sbar}")
+    page.expect(bar["labels"] == [sbar["stop"], sbar["entry"], sbar["take"]],
+                f"подписи полоски {bar['labels']}")
+    page.expect(bar["mark_at"] == sbar["mark_at"] and abs(bar["mark_offset"] - 1.0) < 0.02
+                and "edge-take" in bar["mark_class"], f"отметка за тейком: {bar}")
+    page.expect(not long["danger"], "у лонга со стопом красная рамка")
+    page.expect(short["danger"] and short["border"] == _rgb(got["red"]) and short["bar"] is None,
+                f"шорт без стопа: рамка {short['border']}, полоска {short['bar']}")
+    page.expect(long["chat"] == "Действия →", f"кнопка действий: {long['chat']!r}")
+    page.expect(got["journal"] and not any(re.search(r"\\.\\d*0000\\b", j) for j in got["journal"]),
+                f"журнал с хвостом нулей: {got['journal']}")
+
+    await page.viewport(320, 844)
+    await page.pump(1)
+    got = await page.js(POSITIONS_DESIGN_JS)
+    page.expect(got["scroll_x"] == 0, f"позиции 320 px: прокрутка {got['scroll_x']}")
+
+
+@scenario("design_positions_bar", "Д.6: отметка цены — ровно на доле сервера (без подмены)")
+async def design_positions_bar(page: Page, url: str) -> None:
+    seen: list[dict[str, Any]] = []
+
+    def keep(data: Any) -> Any:
+        if isinstance(data, dict):
+            seen.append(data)
+        return data
+
+    await open_page(page, url, Setup(preset="hedge", rules=[
+        Rule("/api/positions", "patch", patch=keep)]))
+    await _to_positions(page)
+    await page.pump(0.5)
+    got = await page.js(POSITIONS_DESIGN_JS)
+    if not seen:
+        raise ScenarioError("ответ /api/positions не пойман")
+    server = {f"{p['symbol']}:{p['side']}": p for p in seen[-1]["positions"]}
+    long = next((c for c in got["cards"] if c["id"] == "XRP-USDT:LONG"), None)
+    sbar = server.get("XRP-USDT:LONG", {}).get("bar")
+    if long is None or long["bar"] is None or sbar is None:
+        raise ScenarioError(f"полоски лонга нет: {long}, сервер {sbar}")
+    at = float(sbar["mark_at"])
+    page.note(f"доля сервера {sbar['mark_at']}, на странице {long['bar']['mark_offset']:.4f}")
+    page.expect(abs(long["bar"]["mark_offset"] - at) < 0.02 and sbar["mark_edge"] is None,
+                f"отметка не на доле сервера: {long['bar']} vs {sbar}")
 
 
 SCENARIO_TIMEOUT = 150.0

@@ -124,7 +124,7 @@ export function positionSummary(p) {
   const stop = p.stops.length ? "" : " · ⚠️ без стопа";
   const liq = p.liquidation_price === null ? "" : ` · ликв. ${p.liquidation_price}`;
   return `${side} ${text(p.quantity)} · вход ${text(p.entry_price)} · `
-    + `${signed(text(p.unrealized_pnl))} $${liq}${stop}`;
+    + `${p.pnl_text ?? "—"}${liq}${stop}`;          // PnL со знаком — текст сервера (Д.6)
 }
 
 // --- экран -----------------------------------------------------------------------------

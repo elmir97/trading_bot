@@ -266,6 +266,19 @@ class ProtectiveOut(BaseModel):
     quantity: Decimal | None
 
 
+class BarOut(BaseModel):
+    """Полоска стоп — вход — тейк (Д.6): шкала от ближнего стопа (0) к ближнему тейку (1),
+    у шорта зеркальная (стоп выше тейка) — считает сервер; фронт только ставит left:%."""
+
+    stop: str                           # «стоп 1.4402» — подписи с точностью контракта
+    entry: str
+    take: str
+    mark: str                           # цена (mark) текстом
+    entry_at: Decimal                   # 0..1, обрезана по краям
+    mark_at: Decimal                    # 0..1, обрезана по краям
+    mark_edge: str | None               # stop | take — цена за этим краем (обрезана)
+
+
 class PositionOut(BaseModel):
     symbol: str
     side: str                           # LONG | SHORT
@@ -274,8 +287,11 @@ class PositionOut(BaseModel):
     entry_price: Decimal
     mark_price: Decimal
     unrealized_pnl: Decimal | None
+    pnl_text: str | None                # «+2.73 $» / «-0.85 $» / «0.00 $» — знак ставит сервер
+    pnl_sign: int                       # 1 / -1 / 0 (нет PnL — 0): цвет на фронте
     liquidation_price: Decimal | None
     price_precision: int | None         # контракта нет в списке — цены без округления
+    bar: BarOut | None                  # нет стопа или тейка (или они не по сторонам) — нет
     stops: list[ProtectiveOut]          # от ближнего к цене; несколько — лестница
     takes: list[ProtectiveOut]
     trade_id: int | None                # сделка журнала того же счёта; None — «не в журнале»
@@ -288,7 +304,7 @@ class JournalTradeOut(BaseModel):
     id: int
     symbol: str
     side: str
-    entry_price: Decimal | None
+    entry_price: Decimal | None         # по точности контракта; нет в списке — без хвоста нулей
     account_mode: str | None            # DEMO | LIVE | None — ручная запись без счёта
 
 

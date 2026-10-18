@@ -300,3 +300,45 @@ def test_form_has_one_hand_note_and_receipt() -> None:
     trade = html[html.index('id="screen-trade"'):html.index('id="screen-confirm"')]
     assert trade.count("hand") == 1 and 'class="field-hint hand" id="trade-risk-hint"' in trade
     assert 'class="trade-result receipt card"' in trade and ">РАСЧЁТ<" in trade
+
+
+# --- Д.6: экран позиций --------------------------------------------------------------------
+
+
+def _positions_js() -> str:
+    return (_MINIAPP / "positions.js").read_text(encoding="utf-8").replace("\r\n", "\n")
+
+
+def test_pnl_text_and_color_from_server_sign() -> None:
+    """Владелец 18.10: плюс — синий, минус — красный, ноль — muted; знак и текст — сервера."""
+    js = _positions_js()
+    assert "pnlClass(p.pnl_sign)" in js and "p.pnl_text ??" in js
+    assert "unrealized_pnl" not in js
+    cls = js[js.index("export function pnlClass(sign) {"):]
+    cls = cls[:cls.index("\n}\n")]
+    assert 'if (sign === 1) return "up";' in cls and 'if (sign === -1) return "down";' in cls
+    market = (_MINIAPP / "market.js").read_text(encoding="utf-8")
+    assert 'p.pnl_text ?? "—"' in market and "unrealized_pnl" not in market
+    assert ".position-pnl.flat { color: var(--muted); }" in _CSS
+
+
+def test_bar_front_only_sets_server_fractions() -> None:
+    """Полоска: доли 0..1 и подписи — сервера; фронт только ставит --at (CSS calc)."""
+    js = _positions_js()
+    bar = js[js.index("export function positionBar(bar) {"):]
+    bar = bar[:bar.index("\n}\n")]
+    for banned in ("Number(", "parseFloat", "toFixed", "Math.", "* 100", "/ "):
+        assert banned not in bar, banned
+    for at in ('risk.style.setProperty("--at", String(bar.entry_at));',
+               'entry.style.setProperty("--at", String(bar.entry_at));',
+               'mark.style.setProperty("--at", String(bar.mark_at));'):
+        assert at in bar
+    assert "if (!bar) return null;" in bar
+    assert "left: calc(var(--at) * 100%);" in _CSS and "width: calc(var(--at) * 100%);" in _CSS
+
+
+def test_position_without_stop_is_danger_card() -> None:
+    js = _positions_js()
+    assert 'item.className = `position-card${p.stops.length ? "" : " danger"}`;' in js
+    body = _block(".position-card.danger {")
+    assert "border-color: var(--red);" in body and "var(--danger-shadow)" in body

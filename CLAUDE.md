@@ -184,7 +184,9 @@ python -m scripts.miniapp_dev [--port 8765]
   — Plex недоступен, рынок и цена показаны (`Setup.intercept_fonts`); `design_form` — квитанция и «Открыть лонг · N XRP» = строки
   ответа preview (объём подменён на «86482», `PreviewTap`), только разряды; `design_confirm`/`design_confirm_refused` — «ЗАПИСЬ
   № opening_id» (без него — без номера), строки = карточка сервера, «было → стало» из превью и карточки (`CardTap`), таймер
-  «действует M:SS»; `confirm_double`/`confirm_double_old` — двойное нажатие = один `/confirm`; `sdk_real` — настоящий SDK
+  «действует M:SS»; `confirm_double`/`confirm_double_old`/`confirm_double_burst` — двойное нажатие (8.0; 6.0 касаниями с паузой;
+  6.0 залпом одним скриптом) = один `/confirm`; `design_positions`/`design_positions_bar` — PnL и полоска позиций по ответу
+  сервера (`bar`, `pnl_sign`), без стопа — красная рамка; `sdk_real` — настоящий SDK
   telegram.org, sha256 сверяется с копией стенда (расхождение — `WARN:` строкой отчёта, не замечание).
   **SDK telegram.org на стенде — копия `scripts/stand_sdk/telegram-web-app.js` по умолчанию** (Fetch подставляет её вместо сети:
   сценарии, `--shots`, обычная проверка; `--real-sdk` у обычной проверки и `Setup(real_sdk=True)` — настоящий). Прод и `index.html`
@@ -194,7 +196,7 @@ python -m scripts.miniapp_dev [--port 8765]
   подменяется через `Fetch` (свой статус, правка ответа, обрыв, зависание, `exact` — путь целиком) — следы своих
   правил замечанием не считаются. SDK с telegram.org не загрузился (сеть) — сценарий прерывается с этим текстом,
   повторить; так же `wait_for`, если посреди сценария показан `screen-sdk`. Стенд вне Telegram — initData-заглушка в хеше (`#tgWebAppData=…`, `page_url`), без неё — экран «Открой Mini
-  App из бота» (`no_init_data`, `Setup(init_data=False)`); `me_502` — прокси без api (502 без JSON). `all` (57) ≈ 7 мин; exit 0/1/2 как выше. Новый экран — новый сценарий там же
+  App из бота» (`no_init_data`, `Setup(init_data=False)`); `me_502` — прокси без api (502 без JSON). `all` (60) ≈ 7 мин; exit 0/1/2 как выше. Новый экран — новый сценарий там же
 - снимки экранов — `--shots <папка> [--shot market|form|confirm|positions|all]` (`scripts/miniapp_shots.py`, при
   запущенном стенде; подэтап «Дизайн Mini App»): экраны 1–4 × светлая/тёмная (themeParams клиента в хеше +
   `prefers-color-scheme`, `Setup.theme`) × 390/320 px, страница целиком, масштаб 2, свои кнопки (браузер 6.0).

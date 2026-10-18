@@ -788,12 +788,18 @@ main {
 .positions-list, .journal-list { list-style: none; margin: 0; padding: 0; }
 
 .position-card {
-  margin: 0 0 14px;
-  padding: 12px;
+  margin: 0 0 18px;
+  padding: 12px 14px;
   background: var(--card);
   border: var(--border);
   border-radius: var(--radius);
   box-shadow: 4px 4px 0 var(--shadow);
+}
+
+/* Позиция без стопа — красная рамка и тень (макет «Позиции», Д.6). */
+.position-card.danger {
+  border-color: var(--red);
+  box-shadow: 4px 4px 0 var(--danger-shadow);
 }
 
 .position-head {
@@ -810,7 +816,49 @@ main {
   text-align: left;
 }
 
-.position-symbol { margin-right: auto; }
+.position-symbol { margin-right: auto; font-size: 18px; font-weight: 700; }
+
+.position-details { font-size: 13px; }
+
+/* Полоска стоп — вход — тейк: доли 0..1 — сервера, здесь только calc(var(--at) * 100%). */
+.position-bar { margin: 4px 0 12px; }
+
+.position-bar-track {
+  position: relative;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--chart-grid);
+}
+
+.position-bar-risk {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: calc(var(--at) * 100%);
+  background: var(--red);
+  opacity: 0.25;
+}
+
+.position-bar-entry,
+.position-bar-mark {
+  position: absolute;
+  left: calc(var(--at) * 100%);
+  transform: translateX(-50%);
+}
+
+.position-bar-entry { top: -2px; width: 2px; height: 12px; background: var(--muted); }
+.position-bar-mark { top: -4px; width: 3px; height: 16px; background: var(--ink); }
+.position-bar-mark.edge-stop { background: var(--red); }
+.position-bar-mark.edge-take { background: var(--blue); }
+
+.position-bar-labels {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+}
 
 .position-side {
   padding: 1px 8px;
@@ -822,7 +870,8 @@ main {
 .position-side.long { background: var(--ink); }
 .position-side.short { background: var(--red-text); }
 
-.position-pnl { font-family: var(--mono); }
+.position-pnl { font-family: var(--mono); font-size: 16px; font-weight: 600; }
+.position-pnl.flat { color: var(--muted); }
 .position-pnl.up { color: var(--blue); }
 .position-pnl.down { color: var(--red-text); }
 
@@ -833,7 +882,12 @@ main {
 
 .positions-empty { padding: 16px 0; }
 
-.journal-list li { padding: 6px 0; border-bottom: 1px dashed var(--rule); }
+.journal-list li {
+  padding: 8px 0;
+  border-bottom: 1px dashed var(--rule);
+  font-family: var(--mono);
+  font-size: 13px;
+}
 
 /* Блок «Позиция» на экране рынка (П.2) */
 

@@ -343,6 +343,7 @@ def test_registry_covers_queue_scenarios() -> None:
         "design_fonts", "design_theme", "design_market", "design_live", "design_font_swap",
         "sdk_real", "design_font_404", "design_font_hang", "design_form", "design_confirm",
         "design_confirm_refused", "confirm_double", "confirm_double_old",
+        "confirm_double_burst", "design_positions", "design_positions_bar",
     }
     assert [s.name for s in ms.select("all")] == list(ms.SCENARIOS)
     assert ms.select("poll") == [ms.SCENARIOS["poll"]]

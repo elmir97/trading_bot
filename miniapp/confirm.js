@@ -363,25 +363,37 @@ export function createConfirmScreen({ api, tg, me, onBack, onMarket, onFatal }) 
   }
 
   // Двойное нажатие — один запрос (Д.5): пока открыт вопрос showConfirm, повторные нажатия
-  // не считаются; после ответа режим уже «sending». Срок карточки истёк — не подтверждаем
-  // (таймер мог не успеть сработать), сразу «Пересчитать».
+  // не считаются; после ответа режим уже «sending». Старый клиент (без showConfirm) —
+  // синхронно, без await до «sending»: залп нажатий одним скриптом иначе отбрасывал второе
+  // (флаг asking ещё стоял) — 0 запросов (сценарий confirm_double_burst, 18.10). Срок
+  // карточки истёк — не подтверждаем (таймер мог не успеть сработать), сразу «Пересчитать».
   async function confirmPressed() {
     if (mode !== "card" || asking) return;
     if (expiresAt && secondsLeft() <= 0) {
       expired(EXPIRED_TEXT);
       return;
     }
-    asking = true;
-    let ok;
-    try {
-      ok = await ask(confirmQuestion(card, body.side, body.symbol, live()));
-    } finally {
-      asking = false;
-    }
-    if (!ok || !active || mode !== "card") return;
-    if (expiresAt && secondsLeft() <= 0) {
-      expired(EXPIRED_TEXT);
-      return;
+    const question = confirmQuestion(card, body.side, body.symbol, live());
+    if (!popup) {
+      if (!armed) {
+        armed = true;
+        status(`${question}\nНажми ещё раз, чтобы подтвердить.`);
+        return;
+      }
+      armed = false;
+    } else {
+      asking = true;
+      let ok;
+      try {
+        ok = await ask(question);
+      } finally {
+        asking = false;
+      }
+      if (!ok || !active || mode !== "card") return;
+      if (expiresAt && secondsLeft() <= 0) {
+        expired(EXPIRED_TEXT);
+        return;
+      }
     }
     stopTimers();
     mode = "sending";

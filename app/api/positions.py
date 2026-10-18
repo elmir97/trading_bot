@@ -21,11 +21,13 @@ TTL_POSITIONS, промах под локом ключа (TTLCache) — один
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from app.api.deps import ApiError, ApiState
 from app.api.market import MarketReader
 from app.api.schemas import (
+    BarOut,
     ErrorBody,
     JournalTradeOut,
     PositionOut,
@@ -46,6 +48,7 @@ from app.execution.position_view import (
     journal_only,
     start_param,
 )
+from app.trading.enums import TradeSide
 
 logger = get_logger(__name__)
 
@@ -112,14 +115,64 @@ def _px(value: Any, precision: int | None) -> Any:
     return value if precision is None or value is None else price(value, precision)
 
 
+BAR_STEP = Decimal("0.0001")
+
+
+def _plain(value: Decimal) -> Decimal:
+    """Без хвоста нулей и без экспоненты: 2400.000000000000 → 2400 (контракта нет в списке)."""
+    return Decimal(format(value.normalize(), "f"))
+
+
+def _at(value: Decimal) -> Decimal:
+    return min(max(value, Decimal(0)), Decimal(1)).quantize(BAR_STEP, rounding=ROUND_HALF_UP)
+
+
+def position_bar(side: TradeSide, entry: Decimal, mark: Decimal, stop: Decimal | None,
+                 take: Decimal | None, precision: int | None) -> BarOut | None:
+    """Полоска стоп — вход — тейк (Д.6, решение владельца 18.10): доля от стопа (0) к тейку
+    (1) — одна формула для обеих сторон: у шорта стоп выше тейка, шкала зеркальная сама.
+    Нет стопа или тейка, или они не по своим сторонам (лонг: тейк выше стопа, шорт: ниже)
+    — полоски нет. Вход и цена обрезаны по краям; цена за краем — mark_edge."""
+    if stop is None or take is None:
+        return None
+    span = take - stop
+    if (side is TradeSide.LONG and span <= 0) or (side is TradeSide.SHORT and span >= 0):
+        return None
+    mark_raw = (mark - stop) / span
+    edge = "stop" if mark_raw < 0 else "take" if mark_raw > 1 else None
+
+    def text(value: Decimal) -> str:
+        return str(_px(value, precision))
+
+    return BarOut(stop=f"стоп {text(stop)}", entry=f"вход {text(entry)}",
+                  take=f"тейк {text(take)}", mark=text(mark),
+                  entry_at=_at((entry - stop) / span), mark_at=_at(mark_raw), mark_edge=edge)
+
+
+def pnl_text(value: Decimal | None) -> tuple[str | None, int]:
+    """PnL текстом со знаком и знак для цвета (Д.6): плюс — «+», минус — «-», ноль — без."""
+    if value is None:
+        return None, 0
+    v = money(value)
+    assert v is not None
+    sign = 1 if v > 0 else -1 if v < 0 else 0
+    if sign == 0:
+        v = abs(v)                  # −0.004 → «-0.00» после округления: ноль без минуса
+    return f"{'+' if sign > 0 else ''}{v} $", sign
+
+
 def _position(view: PositionView, precision: int | None) -> PositionOut:
     p = view.position
+    text, sign = pnl_text(p.unrealized_pnl)
     return PositionOut(
         symbol=p.symbol, side=p.side.value, quantity=p.quantity, leverage=p.leverage,
         entry_price=_px(p.entry_price, precision), mark_price=_px(p.mark_price, precision),
-        unrealized_pnl=money(p.unrealized_pnl),
+        unrealized_pnl=money(p.unrealized_pnl), pnl_text=text, pnl_sign=sign,
         liquidation_price=_px(p.liquidation_price or None, precision),
         price_precision=precision,
+        bar=position_bar(p.side, p.entry_price, p.mark_price,
+                         view.stops[0].trigger_price if view.stops else None,
+                         view.takes[0].trigger_price if view.takes else None, precision),
         stops=[_protective(o, precision) for o in view.stops],
         takes=[_protective(o, precision) for o in view.takes],
         trade_id=view.trade.id if view.trade is not None else None,
@@ -127,27 +180,52 @@ def _position(view: PositionView, precision: int | None) -> PositionOut:
     )
 
 
-def _journal(trade: Trade) -> JournalTradeOut:
+def journal_price(value: Decimal | None, precision: int | None) -> Decimal | None:
+    """Вход сделки журнала (Д.6): по точности контракта; контракта нет в списке (снят,
+    список не прочитан) — без хвоста нулей, не «2400.000000000000»."""
+    if value is None:
+        return None
+    return price(value, precision) if precision is not None else _plain(value)
+
+
+def _journal(trade: Trade, precision: dict[str, int]) -> JournalTradeOut:
     return JournalTradeOut(
-        id=trade.id, symbol=trade.symbol, side=trade.side.value, entry_price=trade.entry_price,
+        id=trade.id, symbol=trade.symbol, side=trade.side.value,
+        entry_price=journal_price(trade.entry_price, precision.get(trade.symbol)),
         account_mode=trade.account_mode.value if trade.account_mode is not None else None,
     )
+
+
+async def _journal_precision(state: ApiState, user_id: int,
+                             trades: list[Trade]) -> dict[str, int]:
+    """Точность цен для «Только в журнале» без ключа биржи (список контрактов публичный).
+    Сбой списка — {}: вход без хвоста нулей, вкладка не падает (журнал важнее точности)."""
+    if not trades:
+        return {}
+    try:
+        async with MarketReader(state) as reader:
+            return {i.symbol: i.price_precision for i in await reader.symbols()}
+    except ExchangeError as exc:
+        logger.warning("Mini App: список контрактов не прочитан — журнал без точности",
+                       extra={"user_id": user_id, "error": type(exc).__name__})
+        return {}
 
 
 async def positions_out(state: ApiState, session: Any, user: User) -> PositionsOut:
     mode = state.settings.bingx_allowed_exchange_mode
     open_trades = await TradeRepository(session).list_open(user.id)
 
-    def journal_answer(code: str, message: str) -> PositionsOut:
+    async def journal_answer(code: str, message: str) -> PositionsOut:
         # Без биржи все открытые сделки — «только журнал» (как в боте).
+        precision = await _journal_precision(state, user.id, open_trades)
         return PositionsOut(
             account_mode=mode.value, bot_account_mode=user.settings.active_exchange_mode.value,
-            positions=[], journal_only=[_journal(t) for t in open_trades],
+            positions=[], journal_only=[_journal(t, precision) for t in open_trades],
             exchange_error=ErrorBody(code=code, message=message),
         )
 
     if await state.factory.get_credentials(session, user.id, mode=mode) is None:
-        return journal_answer("NO_KEY", NO_KEY_TEXT)
+        return await journal_answer("NO_KEY", NO_KEY_TEXT)
     try:
         snapshot = await _snapshot(state, session, user.id)
         precision: dict[str, int] = {}
@@ -157,7 +235,7 @@ async def positions_out(state: ApiState, session: Any, user: User) -> PositionsO
     except ExchangeAuthError:
         logger.warning("Mini App: биржа отклонила ключ при чтении позиций",
                        extra={"user_id": user.id})
-        return journal_answer("KEY_REJECTED", KEY_REJECTED_TEXT)
+        return await journal_answer("KEY_REJECTED", KEY_REJECTED_TEXT)
     except ExchangeError as exc:
         logger.warning("Mini App: позиции не прочитаны",
                        extra={"user_id": user.id, "error": type(exc).__name__})
@@ -165,12 +243,18 @@ async def positions_out(state: ApiState, session: Any, user: User) -> PositionsO
                        f"Биржа не ответила ({type(exc).__name__}) — повтори.") from None
     views = build_views(list(snapshot.positions), list(snapshot.orders), open_trades,
                         account_mode=mode)
+    journal = journal_only(open_trades, views)
+    # Точность журнала: список уже прочитан для позиций — он же; нет позиций — отдельно, сбой
+    # списка вкладку не роняет (_journal_precision).
+    journal_precision = precision if precision else await _journal_precision(state, user.id,
+                                                                             journal)
     return PositionsOut(
         account_mode=mode.value, bot_account_mode=user.settings.active_exchange_mode.value,
         positions=[_position(v, precision.get(v.position.symbol)) for v in views],
-        journal_only=[_journal(t) for t in journal_only(open_trades, views)],
+        journal_only=[_journal(t, journal_precision) for t in journal],
         exchange_error=None,
     )
 
 
-__all__ = ["TTL_POSITIONS", "ExchangeReads", "cache_key", "forget", "positions_out"]
+__all__ = ["TTL_POSITIONS", "ExchangeReads", "cache_key", "forget", "journal_price", "pnl_text",
+           "position_bar", "positions_out"]

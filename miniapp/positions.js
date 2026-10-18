@@ -10,6 +10,7 @@
 // экрана — опрос стоит, запрос в полёте отменяется. 401 — «Сессия истекла» (onFatal).
 
 import { ApiError } from "./api.js";
+import { groupDigits } from "./render.js";
 
 export const POLL_MS = 5000;
 export const MAX_BACKOFF_MS = 30000;
@@ -46,10 +47,44 @@ export function levelText(orders) {
   return `${orders.length} ордера: ${orders.map(one).join("; ")}`;
 }
 
-export function pnlClass(value) {
-  const s = String(value ?? "");
-  if (!s || /^[-+]?0*(\.0*)?$/.test(s)) return "flat";
-  return s.startsWith("-") ? "down" : "up";
+// Цвет PnL — по знаку, который отдал сервер (pnl_sign: 1 / -1 / 0; Д.6): плюс — синий,
+// минус — красный, ноль — muted. Текст со знаком — тоже сервера (pnl_text).
+export function pnlClass(sign) {
+  if (sign === 1) return "up";
+  if (sign === -1) return "down";
+  return "flat";
+}
+
+// Полоска стоп — вход — тейк (Д.6): доли 0..1 и подписи — сервера (bar); фронт только
+// ставит --at (CSS: left: calc(var(--at) * 100%)). Нет bar — полоски нет.
+export function positionBar(bar) {
+  if (!bar) return null;
+  const box = document.createElement("div");
+  box.className = "position-bar";
+  const track = document.createElement("div");
+  track.className = "position-bar-track";
+  track.dataset.entryAt = String(bar.entry_at);
+  track.dataset.markAt = String(bar.mark_at);
+  const risk = document.createElement("span");
+  risk.className = "position-bar-risk";
+  risk.style.setProperty("--at", String(bar.entry_at));
+  const entry = document.createElement("span");
+  entry.className = "position-bar-entry";
+  entry.style.setProperty("--at", String(bar.entry_at));
+  const mark = document.createElement("span");
+  mark.className = `position-bar-mark${bar.mark_edge ? ` edge-${bar.mark_edge}` : ""}`;
+  mark.style.setProperty("--at", String(bar.mark_at));
+  mark.title = bar.mark;
+  track.append(risk, entry, mark);
+  const labels = document.createElement("div");
+  labels.className = "position-bar-labels";
+  for (const value of [bar.stop, bar.entry, bar.take]) {
+    const label = document.createElement("span");
+    label.textContent = value;
+    labels.append(label);
+  }
+  box.append(track, labels);
+  return box;
 }
 
 export function createPositionsScreen({ api, tg, me, onSymbol, onMarket, onFatal }) {
@@ -103,28 +138,26 @@ export function createPositionsScreen({ api, tg, me, onSymbol, onMarket, onFatal
 
   function card(p, username) {
     const item = document.createElement("li");
-    item.className = "position-card";
+    // Без стопа — красная рамка и тень (макет «Позиции»).
+    item.className = `position-card${p.stops.length ? "" : " danger"}`;
     item.dataset.position = `${p.symbol}:${p.side}`;
 
     const head = document.createElement("button");
     head.type = "button";
     head.className = "position-head";
     head.dataset.symbol = p.symbol;
-    const side = document.createElement("span");
-    side.className = `position-side ${p.side === "LONG" ? "long" : "short"}`;
-    side.textContent = p.side === "LONG" ? "Лонг" : "Шорт";
     const name = document.createElement("span");
     name.className = "position-symbol";
-    name.textContent = p.symbol;
+    name.textContent = `${short(p.symbol)} · ${p.side === "LONG" ? "Лонг" : "Шорт"}`;
     const pnl = document.createElement("span");
-    pnl.className = `position-pnl ${pnlClass(p.unrealized_pnl)}`;
-    pnl.textContent = `${text(p.unrealized_pnl)} $`;
-    head.append(side, name, pnl);
+    pnl.className = `position-pnl ${pnlClass(p.pnl_sign)}`;
+    pnl.textContent = p.pnl_text ?? "—";
+    head.append(name, pnl);
 
     const details = document.createElement("dl");
-    details.className = "details";
+    details.className = "details position-details";
     details.append(
-      ...row("Объём", `${text(p.quantity)} ${short(p.symbol)} · плечо ${p.leverage}×`),
+      ...row("Объём", `${groupDigits(p.quantity)} ${short(p.symbol)} · плечо ${p.leverage}×`),
       ...row("Вход · mark", `${text(p.entry_price)} · ${text(p.mark_price)}`),
       ...row("Стоп", levelText(p.stops), p.stops.length ? "" : "warn"),
       ...row("Тейк", levelText(p.takes)),
@@ -134,13 +167,16 @@ export function createPositionsScreen({ api, tg, me, onSymbol, onMarket, onFatal
       : "⚠️ не в журнале"));
 
     item.append(head, details);
+    const bar = positionBar(p.bar);
+    if (bar) item.append(bar);
     const link = chatLink(username, p.start_param);
     if (link) {
+      // До экрана 5 (действия в Mini App) — экран действий позиции в чате бота.
       const chat = document.createElement("button");
       chat.type = "button";
       chat.className = "button button-small button-plain position-chat";
       chat.dataset.chat = link;
-      chat.textContent = "⚙️ Действия в чате";
+      chat.textContent = "Действия →";
       item.append(chat);
     } else {
       const hint = document.createElement("p");

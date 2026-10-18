@@ -38,7 +38,7 @@ def _body(text: str, start: str) -> str:
 def test_confirm_posts_once_after_show_confirm() -> None:
     confirm = _js("confirm.js")
     pressed = _body(confirm, "async function confirmPressed()")
-    asked = pressed.index("ok = await ask(confirmQuestion(card, body.side, body.symbol, live()));")
+    asked = pressed.index("ok = await ask(question);")
     post = pressed.index("api.post(`/api/open/${openingId}/confirm`")
     assert asked < post
     assert pressed.count("api.post(") == 1
@@ -47,7 +47,11 @@ def test_confirm_posts_once_after_show_confirm() -> None:
     # один запрос, сценарий confirm_double).
     assert 'if (mode !== "card" || asking) return;' in pressed
     assert pressed.index("asking = true;") < asked
-    assert "} finally {\n      asking = false;\n    }" in pressed
+    assert "} finally {\n        asking = false;\n      }" in pressed
+    # Старый клиент — синхронно до «sending»: залп нажатий одним скриптом (confirm_double_burst)
+    # иначе отбрасывал второе нажатие — 0 запросов.
+    old = pressed[pressed.index("if (!popup) {"):pressed.index("} else {")]
+    assert "await" not in old and "armed = true;" in old and "armed = false;" in old
     assert 'mode = "sending";' in pressed
     # Вся отправка — только из confirmPressed / cancelPressed / create.
     posts = re.findall(r"api\.post\(([^,)]+)", confirm)

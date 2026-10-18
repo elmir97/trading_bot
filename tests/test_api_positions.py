@@ -99,11 +99,12 @@ class PositionsClient:
 
 async def _trade(api: Any, *, side: TradeSide = TradeSide.LONG,
                  mode: ExchangeKeyMode | None = DEMO, hours: int = 1,
-                 position_id: str | None = None) -> int:
+                 position_id: str | None = None, symbol: str = "XRP-USDT",
+                 entry: str = "1.3818") -> int:
     state = api.state()
     async with state.db.session() as session:
         trade = Trade(
-            user_id=api.uid, symbol="XRP-USDT", side=side, entry_price=D("1.3818"),
+            user_id=api.uid, symbol=symbol, side=side, entry_price=D(entry),
             quantity=D(195), source=TradeSource.IMPORTED if mode else TradeSource.MANUAL,
             account_mode=mode, opened_at=datetime.now(UTC) - timedelta(hours=hours),
             external_position_id=position_id,
@@ -137,7 +138,12 @@ async def test_positions_linked_unlinked_and_journal(api) -> None:  # type: igno
     assert long == {
         "symbol": "XRP-USDT", "side": "LONG", "quantity": "195", "leverage": 10,
         "entry_price": "1.3818", "mark_price": "1.3821", "unrealized_pnl": "0.05",
+        "pnl_text": "+0.05 $", "pnl_sign": 1,
         "liquidation_price": "1.2500", "price_precision": 4,
+        # Д.6: полоска от ближнего стопа 1.34021 к ближнему тейку 1.4231 — по сырым ценам
+        # биржи, подписи по точности контракта
+        "bar": {"stop": "стоп 1.3402", "entry": "вход 1.3818", "take": "тейк 1.4231",
+                "mark": "1.3821", "entry_at": "0.5022", "mark_at": "0.5055", "mark_edge": None},
         # лестница: от ближнего к цене; closePosition — без объёма
         "stops": [{"price": "1.3402", "close_position": True, "quantity": None},
                   {"price": "1.3000", "close_position": True, "quantity": None}],
@@ -145,6 +151,7 @@ async def test_positions_linked_unlinked_and_journal(api) -> None:  # type: igno
         "trade_id": linked, "start_param": "pos-XRP-USDT-L",
     }
     assert short["trade_id"] is None and short["stops"] == [] and short["takes"] == []
+    assert short["bar"] is None                          # нет стопа и тейка — полоски нет
     assert short["liquidation_price"] is None and short["start_param"] == "pos-XRP-USDT-S"
     journal = {t["id"]: t["account_mode"] for t in body["journal_only"]}
     assert journal == {manual: None, live: "LIVE"}
@@ -317,3 +324,28 @@ async def test_api_starts_when_get_me_fails(api, monkeypatch) -> None:  # type: 
 
 async def _noop() -> None:
     return None
+
+
+async def test_journal_entry_by_contract_precision(api) -> None:  # type: ignore[no-untyped-def]
+    """Д.6: «Только в журнале» — вход по точности контракта, не «2400.000000000000»;
+    контракта нет в списке — без хвоста нулей. И с ключом (список читается для позиций),
+    и без ключа (список публичный)."""
+    xrp = await _trade(api, mode=None, entry="1.381850000000")
+    btc = await _trade(api, mode=LIVE, symbol="BTC-USDT", entry="62000.000000000000")
+    eth = await _trade(api, mode=LIVE, symbol="ETH-USDT", entry="2400.000000000000")
+    want = {xrp: "1.3819", btc: "62000.0", eth: "2400"}
+    for has_key in (True, False):
+        client = PositionsClient([])
+        body = (await _get(api.state(factory=FakeFactory(client, has_key=has_key)), api)).json()
+        got = {t["id"]: t["entry_price"] for t in body["journal_only"]}
+        assert got == want, has_key
+
+
+async def test_journal_survives_contract_list_failure(api) -> None:  # type: ignore[no-untyped-def]
+    """Список контрактов не прочитан — вкладка не падает: вход журнала без хвоста нулей."""
+    trade_id = await _trade(api, mode=None, entry="1.381800000000")
+    public = FakePublic()
+    public.fail["symbols"] = ExchangeUnavailableError("timeout")
+    r = await _get(api.state(factory=FakeFactory(PositionsClient([]), public=public)), api)
+    assert r.status_code == 200, r.text
+    assert [(t["id"], t["entry_price"]) for t in r.json()["journal_only"]] == [(trade_id, "1.3818")]
