@@ -158,6 +158,13 @@ def _inflight(row: Any = ExecutionOrder) -> Any:
     )
 
 
+def _with_manual(code: str | None, message: str | None, note: str) -> str:
+    """MANUAL_RECONCILE: прежнее не затирается (владелец 19.10) — сообщение
+    дописывается, прежний error_code — в нём же."""
+    tail = f"MANUAL_RECONCILE: {note}; прежний код: {code or '—'}."
+    return f"{message} | {tail}" if message else tail
+
+
 def _row_inflight(row: ExecutionOrder) -> bool:
     if row.client_order_id is None or row.error_code == MANUAL_RECONCILE:
         return False
@@ -305,8 +312,11 @@ class _Pass:
         undecided = {rid: s.value for rid, s in seen.items() if s in _UNDECIDED}
         if Seen.MANUAL in seen.values() and active:
             # Действие не довести без истории — тоже из проходов, до ручной сверки.
+            a.error_message = _with_manual(
+                a.error_code, a.error_message,
+                "строка ордера старше окна истории BingX — нужна ручная сверка",
+            )
             a.error_code = MANUAL_RECONCILE
-            a.error_message = "Строка ордера старше окна истории BingX — нужна ручная сверка."
         if undecided:
             await self.session.commit()   # подтверждённое по другим строкам — не терять
             logger.info("Действие не восстановлено — повтор следующим проходом",
@@ -405,10 +415,10 @@ class _Pass:
     def _manual(self, row: ExecutionOrder, log: dict[str, Any], why: str) -> Seen:
         """Старше окна истории, одна проверка по cid не решила: отметка и
         WARNING — дальше строку проходы не берут (владелец 19.10)."""
-        days = HISTORY_WINDOW.days
-        row.error_message = (
-            f"Старше окна истории BingX ({days} дн.) — нужна ручная сверка; {why.strip()}; "
-            f"прежний код: {row.error_code or '—'}."
+        row.error_message = _with_manual(
+            row.error_code, row.error_message,
+            f"старше окна истории BingX ({HISTORY_WINDOW.days} дн.) — нужна ручная сверка; "
+            f"{why.strip()}",
         )
         row.error_code = MANUAL_RECONCILE
         logger.warning("Строка действия старше окна истории BingX — нужна ручная сверка",

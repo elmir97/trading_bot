@@ -600,6 +600,8 @@ async def test_old_row_one_check_then_manual_and_excluded(ctx, caplog) -> None: 
     import logging
 
     action, row = await _finished(ctx, PositionActionStatus.EXPIRED)
+    row.error_code, row.error_message = "ExchangeUnavailableError", "таймаут POST"
+    await ctx.session.commit()
     await _age(ctx, row.id)
     since = len(ctx.exchange.calls)
     with caplog.at_level(logging.WARNING):
@@ -611,7 +613,10 @@ async def test_old_row_one_check_then_manual_and_excluded(ctx, caplog) -> None: 
     assert rec.levelno == logging.WARNING
     [row] = await _rows(ctx, action.id)
     assert row.status is OrderStatus.PENDING and row.error_code == MANUAL_RECONCILE
+    # прежнее не затёрто: сообщение дописано, прежний код — в нём
+    assert row.error_message.startswith("таймаут POST | MANUAL_RECONCILE: ")
     assert "нужна ручная сверка" in row.error_message
+    assert "прежний код: ExchangeUnavailableError" in row.error_message
     assert (await _action(ctx, action.id)).status is PositionActionStatus.EXPIRED
     assert action.id not in await due_action_ids(ctx.session)
     since = len(ctx.exchange.calls)
@@ -639,5 +644,7 @@ async def test_old_row_of_active_action_excludes_action(ctx) -> None:  # type: i
     fresh = await _action(ctx, action.id)
     assert fresh.status is PositionActionStatus.SUBMITTED
     assert fresh.error_code == MANUAL_RECONCILE
+    assert fresh.error_message.startswith("MANUAL_RECONCILE: ")
+    assert "прежний код: —" in fresh.error_message
     assert action.id not in await due_action_ids(ctx.session)
     assert ctx.notes == []
