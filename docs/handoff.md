@@ -51,7 +51,16 @@ api 196.2 — тренда не даёт).
   RAM available 885 МБ, диск / 7.8 из 28 ГБ. restarts 0; с 16:01 W/E бота — 4 (две пары «Failed to fetch updates» 22:27 и 22:58 —
   сеть до Telegram, поллинг продолжился), Traceback 0; api W/E/Traceback 0. Пульс reconciler 05:01:33 — циклов 60, ошибок 0, по
   локу 0. Порог доклада (+15 МиБ/ч, api 230) не достигнут
-- **Дальше по «да»:** (1) репетиция M9 на копии прода; (2) деплой с миграцией; (3) демо: `interrupt_action_after_pending` и
+- **Репетиция M9 — 19.10 06:06 UTC, по «да», на HEAD `7feb503`: ИТОГ: OK, exit 0.** `--from fcf50d29396e --checksum
+  --expect-columns position_actions.account_mode,execution_orders.account_mode`. Образ `e642c39444cd` (сборка из `git archive`,
+  RAM 882 МБ); upgrade «M9: счёт размечен — position_actions DEMO 43, execution_orders по открытию 135, execution_orders DEMO 100»
+  (135 + 100 = 235 = все строки); строки 20 таблиц = baseline на всех шагах; md5 после обоих downgrade = baseline (❌ нет); схема
+  после downgrade = baseline, upgrade 2 = upgrade 1. «Схема baseline → upgrade 1»: две колонки `character varying(8)` NOT NULL и два
+  CHECK `ck_*_account_mode_known` — совпадает с офлайн-SQL. Уборка: контейнер, сеть, тег `trading_bot:rehearsal`, дамп — нет
+  (проверено: образов rehearsal/dangling, контейнеров и сетей нет); лог `/opt/backups/rehearsal_20261019_060624.log` удалён после
+  отчёта. Диск / — 7.8 из 28 ГБ (21 ГБ свободно); build cache Docker 1.5 ГБ (1.46 ГБ освобождаемо) — не трогал, чистка — по «да»
+- **Дальше по «да»:** (1) ~~репетиция M9~~ ✅; (2) деплой с миграцией (шаги CLAUDE.md «Деплой с миграцией»; `master` ff до
+  `miniapp`); (3) демо: `interrupt_action_after_pending` и
   `_after_post` на «Закрыть всё» и переносе — каждое по «да». #40/210 после деплоя — одна проверка → `MANUAL_RECONCILE` (12.10 старше
   7 дней), ручное закрытие владельцем
 
