@@ -17,7 +17,12 @@ SUBMITTED / UNKNOWN, закрытие — ещё FILLED без цены. Зде�
   NOT_PLACED — только после ДВУХ таких проверок в разных проходах, не
   раньше NOT_PLACED_RECHECK после первой (время первой — в Redis: переживает
   рестарт). Любой признак ордера между ними снимает отметку;
-- сообщение в чат — итогом, через notify (бот: app/bot/action_result.py).
+- сообщение в чат — итогом, через notify (бот: app/bot/action_result.py);
+- строка старше окна истории BingX (HISTORY_WINDOW, 7 дней; владелец 19.10):
+  одна проверка по cid — не решила (109421, сбой, не окончательный статус) —
+  WARNING «нужна ручная сверка», error_code MANUAL_RECONCILE (у строки, у
+  активного действия — и у него), и из проходов она исключена; закрывает
+  владелец вручную по истории BingX.
 
 Сервисный слой: тот же проход вызовет и API Mini App, когда действия
 переедут туда. Под локом позиции, как «Да»: лок занят — пропуск до
@@ -77,12 +82,21 @@ ORDER_NOT_EXIST_CODE = 109421
 # после первой (и всегда в другом проходе: за проход строка проверяется раз).
 NOT_PLACED_RECHECK = timedelta(seconds=30)
 NOT_FOUND_KEY = "action:notfound:{row_id}"
-NOT_FOUND_TTL_SECONDS = 86400
+# Отметка первой проверки живёт час (владелец 19.10): не копится; вторая
+# проверка — через минуту, циклом reconciler.
+NOT_FOUND_TTL_SECONDS = 3600
+# Окно истории BingX (как BACKFILL_WINDOW добора): старше — «нет в истории»
+# не доказать, опрашивать каждый цикл бессмысленно.
+HISTORY_WINDOW = timedelta(days=7)
+MANUAL_RECONCILE = "MANUAL_RECONCILE"
 # Окно истории вокруг строки: POST уходит через миллисекунды после коммита.
 HISTORY_BEFORE = timedelta(minutes=1)
 HISTORY_AFTER = timedelta(hours=1)
 MAX_ACTIONS_PER_PASS = 10
 INTERRUPTED = "INTERRUPTED"
+# Завершённое действие (EXPIRED/REFUSED/FAILED), чьё закрытие доказано по cid
+# (владелец 19.10, отступление от правила 12.10 принято).
+CLOSED_AFTER_ALL = "ранее было отмечено как неудачное, но закрытие исполнилось на бирже."
 RECOVERED_MARK = "восстановление по cid"
 
 _ACTIVE = (PositionActionStatus.CARD, PositionActionStatus.SUBMITTED)
@@ -122,9 +136,10 @@ class Seen(StrEnum):
     NOT_PLACED = "NOT_PLACED"  # две проверки «нет нигде»
     WAIT = "WAIT"              # первая проверка «нет нигде» — ждём вторую
     UNKNOWN = "UNKNOWN"        # биржа не ответила / ответ не доказательство
+    MANUAL = "MANUAL"          # старше окна истории, проверка не решила — вручную
 
 
-_UNDECIDED = (Seen.WAIT, Seen.UNKNOWN)
+_UNDECIDED = (Seen.WAIT, Seen.UNKNOWN, Seen.MANUAL)
 
 
 def _inflight(row: Any = ExecutionOrder) -> Any:
@@ -133,6 +148,7 @@ def _inflight(row: Any = ExecutionOrder) -> Any:
     (стоит на бирже), её разбирает settle."""
     return and_(
         row.client_order_id.is_not(None),
+        row.error_code.is_distinct_from(MANUAL_RECONCILE),
         or_(
             row.status.in_((OrderStatus.PENDING, OrderStatus.UNKNOWN)),
             and_(row.role == OrderRole.CLOSE, row.status == OrderStatus.SUBMITTED),
@@ -143,7 +159,7 @@ def _inflight(row: Any = ExecutionOrder) -> Any:
 
 
 def _row_inflight(row: ExecutionOrder) -> bool:
-    if row.client_order_id is None:
+    if row.client_order_id is None or row.error_code == MANUAL_RECONCILE:
         return False
     if row.status in (OrderStatus.PENDING, OrderStatus.UNKNOWN):
         return True
@@ -157,23 +173,27 @@ def _row_open(row: ExecutionOrder) -> bool:
     """У активного действия — любая строка без окончательного исхода."""
     return _row_inflight(row) or (
         row.client_order_id is not None and row.status is OrderStatus.SUBMITTED
+        and row.error_code != MANUAL_RECONCILE
     )
 
 
 async def due_action_ids(session: AsyncSession, limit: int = MAX_ACTIONS_PER_PASS) -> list[int]:
     """SUBMITTED; CARD со строкой ордера (код до B.9); любое действие со
-    строкой без записанного исхода."""
+    строкой без записанного исхода. Отмеченные MANUAL_RECONCILE — нет."""
     rows = ExecutionOrder
     has_inflight = exists().where(rows.position_action_id == PositionAction.id, _inflight())
     has_order = exists().where(
         rows.position_action_id == PositionAction.id, rows.client_order_id.is_not(None)
     )
     return list(await session.scalars(
-        select(PositionAction.id).where(or_(
-            PositionAction.status == PositionActionStatus.SUBMITTED,
-            and_(PositionAction.status == PositionActionStatus.CARD, has_order),
-            has_inflight,
-        )).order_by(PositionAction.id).limit(limit)
+        select(PositionAction.id).where(
+            PositionAction.error_code.is_distinct_from(MANUAL_RECONCILE),
+            or_(
+                PositionAction.status == PositionActionStatus.SUBMITTED,
+                and_(PositionAction.status == PositionActionStatus.CARD, has_order),
+                has_inflight,
+            ),
+        ).order_by(PositionAction.id).limit(limit)
     ))
 
 
@@ -283,6 +303,10 @@ class _Pass:
         for row in check:
             seen[row.id] = await self._resolve(client, row, orders)
         undecided = {rid: s.value for rid, s in seen.items() if s in _UNDECIDED}
+        if Seen.MANUAL in seen.values() and active:
+            # Действие не довести без истории — тоже из проходов, до ручной сверки.
+            a.error_code = MANUAL_RECONCILE
+            a.error_message = "Строка ордера старше окна истории BingX — нужна ручная сверка."
         if undecided:
             await self.session.commit()   # подтверждённое по другим строкам — не терять
             logger.info("Действие не восстановлено — повтор следующим проходом",
@@ -332,6 +356,7 @@ class _Pass:
         log = {**self.log, "execution_order_id": row.id, "cid": row.client_order_id,
                "prev_status": row.status.value}
         found = self._standing(row, orders)
+        old = self.now - row.created_at > HISTORY_WINDOW
         if found is not None and row.role is not OrderRole.CLOSE:
             row.status = OrderStatus.SUBMITTED
             row.exchange_order_id = str(found.order_id)
@@ -341,6 +366,8 @@ class _Pass:
             fill = await client.get_order_fill(row.symbol, row.client_order_id or "",
                                                max_retries=1)
         except ExchangeError as exc:
+            if old:
+                return self._manual(row, log, f"по cid: {type(exc).__name__} {exc.code or ''}")
             if exc.code != ORDER_NOT_EXIST_CODE:
                 logger.info("Строка действия не проверена по cid",
                             extra={**log, "error": type(exc).__name__, "code": exc.code})
@@ -369,9 +396,25 @@ class _Pass:
             row.exchange_order_id = fill.order_id or row.exchange_order_id
             logger.info("Строка действия: снята без исполнения", extra=log)
             return Seen.GONE
+        if old:
+            return self._manual(row, log, f"по cid статус {fill.status}")
         logger.info("Строка действия: исход по cid не окончательный",
                     extra={**log, "status": fill.status, "executed": str(fill.executed_qty)})
         return Seen.UNKNOWN
+
+    def _manual(self, row: ExecutionOrder, log: dict[str, Any], why: str) -> Seen:
+        """Старше окна истории, одна проверка по cid не решила: отметка и
+        WARNING — дальше строку проходы не берут (владелец 19.10)."""
+        days = HISTORY_WINDOW.days
+        row.error_message = (
+            f"Старше окна истории BingX ({days} дн.) — нужна ручная сверка; {why.strip()}; "
+            f"прежний код: {row.error_code or '—'}."
+        )
+        row.error_code = MANUAL_RECONCILE
+        logger.warning("Строка действия старше окна истории BingX — нужна ручная сверка",
+                       extra={**log, "why": why.strip(),
+                              "age_days": (self.now - row.created_at).days})
+        return Seen.MANUAL
 
     async def _not_found(
         self, client: ExchangeClient, row: ExecutionOrder, log: dict[str, Any]
@@ -469,8 +512,9 @@ class _Pass:
         qp = info.quantity_precision if info else 8
         return _Result(
             f"♻️ После перезапуска бота — {_WHAT[a.kind]} {a.symbol} {a.side.value}: "
-            f"карточка #{a.id} всё же исполнилась.\n✅ Закрыто {fmt_qty(fill.executed_qty, qp)} "
-            f"по {fmt_price(fill.avg_price, pp)} · комиссия {fmt_amount(fill.fee)} USDT."
+            f"действие #{a.id} {CLOSED_AFTER_ALL}\n"
+            f"✅ Закрыто {fmt_qty(fill.executed_qty, qp)} по {fmt_price(fill.avg_price, pp)} · "
+            f"комиссия {fmt_amount(fill.fee)} USDT."
         )
 
     async def _journal(self, row: ExecutionOrder) -> None:

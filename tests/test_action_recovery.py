@@ -23,7 +23,7 @@ from typing import Any
 import pytest
 import pytest_asyncio
 from fakeredis.aioredis import FakeRedis
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.core.config import Settings
 from app.core.locks import RedisLock, position_lock_key
@@ -37,6 +37,7 @@ from app.database.session import Database
 from app.exchanges.base import ExchangeResponseError, HistoryOrder, OrderFill
 from app.execution import action_recovery
 from app.execution.action_recovery import (
+    MANUAL_RECONCILE,
     NOT_FOUND_KEY,
     RECOVERED_MARK,
     RecoveryNote,
@@ -253,7 +254,9 @@ async def test_close_not_sent_not_placed_only_after_two_checks(ctx) -> None:  # 
     assert await ctx.recover(T0) == 0                       # первая проверка: отметка
     [row] = await _rows(ctx, action.id)
     assert row.status is OrderStatus.PENDING
-    assert await ctx.redis.get(NOT_FOUND_KEY.format(row_id=row.id)) is not None
+    key = NOT_FOUND_KEY.format(row_id=row.id)
+    assert await ctx.redis.get(key) is not None
+    assert 0 < await ctx.redis.ttl(key) <= 3600                  # не копится: час
     assert await ctx.recover(T0 + timedelta(seconds=10)) == 0   # рано: < 30 с
     assert (await _rows(ctx, action.id))[0].status is OrderStatus.PENDING
     assert ctx.notes == []
@@ -369,7 +372,9 @@ async def test_expired_but_close_filled_becomes_done_with_note(ctx) -> None:  # 
     assert fresh.status is PositionActionStatus.DONE and fresh.error_code is None
     assert fresh.params["confirmed_by"] == RECOVERED_MARK
     [note] = ctx.notes
-    assert f"карточка #{action.id} всё же исполнилась" in note.text
+    assert (f"действие #{action.id} ранее было отмечено как неудачное, но закрытие исполнилось "
+            "на бирже.") in note.text
+    assert "✅ Закрыто 30 по 1.55" in note.text
 
 
 async def test_failed_unconfirmed_done_silently(ctx) -> None:  # type: ignore[no-untyped-def]
@@ -578,3 +583,61 @@ async def test_one_action_failure_does_not_stop_others(ctx, monkeypatch) -> None
     assert await ctx.recover(T0) == 1
     assert calls == [first.id, second.id]
     assert (await _action(ctx, second.id)).status is PositionActionStatus.DONE
+
+
+# --- строки старше окна истории BingX (владелец 19.10) ------------------------------------
+
+
+async def _age(c, row_id: int, days: int = 8) -> None:  # type: ignore[no-untyped-def]
+    await c.session.execute(update(ExecutionOrder).where(ExecutionOrder.id == row_id)
+                            .values(created_at=T0 - timedelta(days=days)))
+    await c.session.commit()
+
+
+async def test_old_row_one_check_then_manual_and_excluded(ctx, caplog) -> None:  # type: ignore[no-untyped-def]
+    """#40/210: строка старше окна истории — одна проверка по cid (без истории),
+    WARNING «нужна ручная сверка», дальше циклы её не берут."""
+    import logging
+
+    action, row = await _finished(ctx, PositionActionStatus.EXPIRED)
+    await _age(ctx, row.id)
+    since = len(ctx.exchange.calls)
+    with caplog.at_level(logging.WARNING):
+        await ctx.recover(T0)
+    names = [n for n, _ in ctx.exchange.calls[since:]]
+    assert names.count("fill") == 1 and "history" not in names
+    [rec] = [r for r in caplog.records
+             if r.getMessage() == "Строка действия старше окна истории BingX — нужна ручная сверка"]
+    assert rec.levelno == logging.WARNING
+    [row] = await _rows(ctx, action.id)
+    assert row.status is OrderStatus.PENDING and row.error_code == MANUAL_RECONCILE
+    assert "нужна ручная сверка" in row.error_message
+    assert (await _action(ctx, action.id)).status is PositionActionStatus.EXPIRED
+    assert action.id not in await due_action_ids(ctx.session)
+    since = len(ctx.exchange.calls)
+    await ctx.recover(T0 + timedelta(minutes=5))
+    assert ctx.exchange.calls[since:] == [] and ctx.notes == []
+
+
+async def test_old_row_filled_still_resolved(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Старое, но по cid исполнено — это доказательство: DONE, как обычно."""
+    action, row = await _finished(ctx, PositionActionStatus.EXPIRED)
+    await _age(ctx, row.id)
+    ctx.exchange.fills[row.client_order_id] = OrderFill(
+        "2106096", row.client_order_id, "FILLED", D("1.5500"), D(30), D(30), D("0.02"), {}, T0,
+    )
+    await ctx.recover(T0)
+    assert (await _action(ctx, action.id)).status is PositionActionStatus.DONE
+    assert (await _rows(ctx, action.id))[0].error_code != MANUAL_RECONCILE
+
+
+async def test_old_row_of_active_action_excludes_action(ctx) -> None:  # type: ignore[no-untyped-def]
+    action, _ = await _confirm(ctx, fault="interrupt_action_after_pending")
+    [row] = await _rows(ctx, action.id)
+    await _age(ctx, row.id)
+    await ctx.recover(T0)
+    fresh = await _action(ctx, action.id)
+    assert fresh.status is PositionActionStatus.SUBMITTED
+    assert fresh.error_code == MANUAL_RECONCILE
+    assert action.id not in await due_action_ids(ctx.session)
+    assert ctx.notes == []
