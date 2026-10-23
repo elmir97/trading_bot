@@ -155,6 +155,7 @@ async def test_fault_warning_hourly(caplog, monkeypatch) -> None:  # type: ignor
     from app.workers.openings import OpeningsWorker
 
     monkeypatch.setattr(openings, "expire_stale_cards", AsyncMock(return_value=0))
+    monkeypatch.setattr(openings, "expire_stale_action_cards", AsyncMock(return_value=0))
 
     settings = Settings(**BASE, exec_open_fault="skip_attached_stop")  # type: ignore[arg-type]
     worker = OpeningsWorker(None, None, settings, None, None, factory=object())  # type: ignore[arg-type]

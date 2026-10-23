@@ -92,6 +92,12 @@ api, Mini App) — меняется только запись; (4) ORPHAN: си�
   дочерний) уже в fills сделки или сделки нет; нет нигде при полном окне → `recon:gone:{row_id}` в Redis (TTL 3 × every ×
   interval = 900 с), CANCELLED/NULL на второй проверке подряд; старая отметка не в счёт; ордер снова виден — отметка снимается.
   Статус — через `settle()`. В чат ничего, INFO в лог. Правило в CLAUDE.md «Конвенции» дополнено
+- **Очередь п.2 (коммит 2 из 3, 24.10): срок карточек действий.** `expire_stale_action_cards` (`app/execution/action_recovery.py`)
+  в цикле `OpeningsWorker.run` рядом с `expire_stale_cards`: CARD старше `exec_confirm_ttl_seconds + confirm_lock_ttl_seconds`
+  (60 + 187 = 247 с) → EXPIRED, `error_code` CARD_EXPIRED, `decided_at`; кнопки не снимаются. CARD → SUBMITTED в `_insert_pending`
+  — условный UPDATE (`WHERE status='CARD'`): rowcount 0 → откат строки PENDING, без отправки, статус остаётся EXPIRED (не FAILED).
+  «Да» на EXPIRED → «Карточка устарела — открой действие заново.» **#46 (CARD с 19.10) закроется этим механизмом в первом цикле
+  после деплоя; перед деплоем — SELECT активных CARD на проде (ожидается только #46)**
 
 **19.10.2026: прод — деплой B.9 + M9 `880aa9b` с миграцией `919ae8ad384e`, bot+api 07:14:36 UTC, каждый шаг по «да».** Прод =
 образ `trading_bot-bot:latest` **`5319b87e83c5`** (bot и api), код на диске `880aa9b` (md5 348/348, без `miniapp/`), статика `miniapp/` и

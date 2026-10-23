@@ -20,7 +20,7 @@ from typing import Any
 import pytest
 import pytest_asyncio
 from fakeredis.aioredis import FakeRedis
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.core.config import Settings
 from app.core.locks import RedisLock, position_lock_key
@@ -227,7 +227,7 @@ async def ctx(unique_telegram_id):  # type: ignore[no-untyped-def]
                                          market_cache=TTLCache())
 
         yield SimpleNamespace(session=session, user=user, uid=uid, exchange=exchange,
-                              service=service, redis=redis)
+                              service=service, redis=redis, db=db)
         await session.rollback()
         fresh = await UserRepository(session).get_by_id(uid)
         await cleanup_user(session, fresh)
@@ -821,3 +821,74 @@ async def test_close_post_filled_read_ok_journals_exit(ctx) -> None:  # type: ig
     assert row.status is OrderStatus.FILLED and row.price == D("1.5600")
     fresh = await ctx.session.scalar(select(Trade).where(Trade.id == trade.id))
     assert not fresh.is_open
+
+
+# --- п.2 (24.10): срок карточек действий ------------------------------------------------
+
+
+def _card_ttl(c) -> timedelta:  # type: ignore[no-untyped-def]
+    s = c.service()._settings
+    return timedelta(seconds=s.exec_confirm_ttl_seconds + s.confirm_lock_ttl_seconds)
+
+
+async def test_stale_action_cards_expire_only_card(ctx) -> None:  # type: ignore[no-untyped-def]
+    """CARD старше exec_confirm_ttl + TTL лока → EXPIRED, CARD_EXPIRED,
+    decided_at. Свежая CARD и старое SUBMITTED не тронуты."""
+    from app.execution.action_recovery import expire_stale_action_cards
+
+    old, fresh, sent = [(await _card(ctx)).action for _ in range(3)]
+    ttl = _card_ttl(ctx)
+    old.created_at = datetime.now(UTC) - ttl - timedelta(seconds=5)
+    fresh.created_at = datetime.now(UTC) - ttl + timedelta(seconds=30)
+    sent.created_at = old.created_at
+    sent.status = PositionActionStatus.SUBMITTED
+    await ctx.session.commit()
+
+    assert await expire_stale_action_cards(ctx.db, ctx.service()._settings) >= 1
+
+    for a in (old, fresh, sent):
+        await ctx.session.refresh(a)
+    assert (old.status, old.error_code) == (PositionActionStatus.EXPIRED, "CARD_EXPIRED")
+    assert old.decided_at is not None
+    assert fresh.status is PositionActionStatus.CARD and fresh.decided_at is None
+    assert sent.status is PositionActionStatus.SUBMITTED
+
+
+async def test_yes_on_expired_card_says_stale_sends_nothing(ctx) -> None:  # type: ignore[no-untyped-def]
+    card = await _card(ctx, PositionActionKind.CLOSE_FULL, {})
+    card.action.status = PositionActionStatus.EXPIRED
+    card.action.error_code = "CARD_EXPIRED"
+    await ctx.session.commit()
+    result = await ctx.service().confirm(card.action.id, message_id=55, risk_confirmed=False)
+    assert result.text == "Карточка устарела — открой действие заново."
+    assert not {"market", "place_conditional", "cancel"} & set(ctx.exchange.names())
+
+
+@pytest.mark.parametrize("kind,params", [
+    (PositionActionKind.CLOSE_FULL, {}),
+    (PositionActionKind.MOVE_STOP, {"breakeven": True}),
+])
+async def test_card_expired_during_yes_nothing_sent(ctx, kind, params) -> None:  # type: ignore[no-untyped-def]
+    """Гонка: «Да» прошёл проверки, а воркер в этот момент закрыл карточку
+    сроком. Переход CARD → SUBMITTED условный: rowcount 0 — без отправки,
+    действие остаётся EXPIRED (не FAILED), строки PENDING нет."""
+    card = await _card(ctx, kind, params)
+    action_id = card.action.id
+    real = ctx.exchange.get_positions
+
+    async def expire_then_read(**kw):  # type: ignore[no-untyped-def]
+        async with ctx.db.session() as other:
+            await other.execute(
+                update(PositionAction).where(PositionAction.id == action_id)
+                .values(status=PositionActionStatus.EXPIRED, error_code="CARD_EXPIRED")
+            )
+            await other.commit()
+        return await real(**kw)
+
+    ctx.exchange.get_positions = expire_then_read
+    result = await ctx.service().confirm(action_id, message_id=55, risk_confirmed=False)
+    assert result.text == "Карточка устарела — открой действие заново."
+    assert not {"market", "place_conditional", "cancel"} & set(ctx.exchange.names())
+    assert await _rows(ctx, action_id) == []
+    action = await ctx.session.get(PositionAction, action_id, populate_existing=True)
+    assert action is not None and action.status is PositionActionStatus.EXPIRED

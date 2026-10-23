@@ -45,7 +45,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Protocol
 
-from sqlalchemy import and_, exists, or_, select
+from sqlalchemy import and_, exists, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
@@ -188,6 +188,31 @@ def _row_open(row: ExecutionOrder) -> bool:
         row.client_order_id is not None and row.status is OrderStatus.SUBMITTED
         and row.error_code != MANUAL_RECONCILE
     )
+
+
+async def expire_stale_action_cards(db: Database, settings: Settings) -> int:
+    """п.2 (24.10): карточки действий CARD старше срока «Да» и TTL лока →
+    EXPIRED (CARD_EXPIRED, decided_at), как у открытий (expire_stale_cards).
+    Только статус в базе: кнопки не снимаются — «Да» на такой карточке
+    ответит «Карточка устарела». Запас на TTL лока: «Да», принятое в конце
+    срока, успевает перевести CARD → SUBMITTED (условно, _insert_pending)."""
+    now = datetime.now(UTC)
+    moment = now - timedelta(
+        seconds=settings.exec_confirm_ttl_seconds + settings.confirm_lock_ttl_seconds
+    )
+    async with db.session() as session:
+        result = await session.execute(
+            update(PositionAction)
+            .where(PositionAction.status == PositionActionStatus.CARD,
+                   PositionAction.created_at < moment)
+            .values(status=PositionActionStatus.EXPIRED, error_code="CARD_EXPIRED",
+                    decided_at=now)
+        )
+        await session.commit()
+        expired = int(result.rowcount or 0)  # type: ignore[attr-defined]
+    if expired:
+        logger.info("Карточки действий устарели без решения", extra={"count": expired})
+    return expired
 
 
 async def due_action_ids(session: AsyncSession, limit: int = MAX_ACTIONS_PER_PASS) -> list[int]:

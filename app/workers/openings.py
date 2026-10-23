@@ -22,6 +22,7 @@ from app.core.security import SecretCipher
 from app.database.models.outgoing_message import OutgoingMeta
 from app.database.models.trade_opening import TradeOpening
 from app.database.session import Database
+from app.execution.action_recovery import expire_stale_action_cards
 from app.execution.opening.recovery import (
     expire_stale_cards,
     recover_one,
@@ -155,6 +156,8 @@ class OpeningsWorker:
                 )
                 self._fault_warned_at = now
         await expire_stale_cards(self._db, self._settings)
+        # п.2 (24.10): и карточки действий с позицией — тот же цикл.
+        await expire_stale_action_cards(self._db, self._settings)
         if self._redis is None:
             return
         await recover_openings(

@@ -40,7 +40,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -138,9 +138,15 @@ class _Interrupted(Exception):  # noqa: N818 — не ошибка: управл
         self.fault = fault
 
 
+class _CardGone(Exception):  # noqa: N818 — не ошибка: карточку закрыл срок
+    """п.2 (24.10): CARD → SUBMITTED не прошёл (карточка уже EXPIRED) — на
+    биржу ничего не ушло, статус не трогаем."""
+
+
 INTERRUPT_AFTER_PENDING = "interrupt_action_after_pending"
 INTERRUPT_AFTER_POST = "interrupt_action_after_post"
 SUBMITTED_TEXT = "Действие уже отправлено на биржу — итог придёт сообщением."
+CARD_EXPIRED_TEXT = "Карточка устарела — открой действие заново."
 
 
 class PositionActionService:
@@ -348,6 +354,8 @@ class PositionActionService:
             # Как при занятом локе — всплывашка, карточку не трогать: итог
             # напишет идущее «Да» или восстановление (B.9).
             return ConfirmOutcome(SUBMITTED_TEXT, final=False)
+        if action is not None and action.status is PositionActionStatus.EXPIRED:
+            return ConfirmOutcome(CARD_EXPIRED_TEXT)
         if action is None or action.status is not PositionActionStatus.CARD:
             return ConfirmOutcome("Карточка уже обработана — открой действие заново.")
         if action.card_message_id is not None and message_id != action.card_message_id:
@@ -373,6 +381,8 @@ class PositionActionService:
             async with RedisLock(self._redis, key, self._settings.confirm_lock_ttl_seconds):
                 try:
                     return ConfirmOutcome(await self._confirm_locked(action))
+                except _CardGone:
+                    return ConfirmOutcome(CARD_EXPIRED_TEXT)
                 except _Interrupted as stop:
                     return ConfirmOutcome(
                         f"🧪 EXEC_OPEN_FAULT {stop.fault}: действие прервано как рестартом — "
@@ -483,11 +493,26 @@ class PositionActionService:
         """PENDING до HTTP. UNIQUE на client_order_id: строка уже есть — ордер
         по этой карточке уже отправлялся, второй не шлём. Первая строка — тем
         же коммитом, что CARD → SUBMITTED (B.9): после него действие ведут
-        только этот проход и восстановление."""
+        только этот проход и восстановление. Переход условный (п.2, 24.10):
+        карточку уже закрыл срок (EXPIRED воркером) — rowcount 0, откат, без
+        отправки (_CardGone)."""
         self._session.add(row)
-        if action.status is PositionActionStatus.CARD:
-            action.status = PositionActionStatus.SUBMITTED
         try:
+            if action.status is PositionActionStatus.CARD:
+                moved = await self._session.execute(
+                    update(PositionAction)
+                    .where(PositionAction.id == action.id,
+                           PositionAction.status == PositionActionStatus.CARD)
+                    .values(status=PositionActionStatus.SUBMITTED)
+                    .execution_options(synchronize_session=False)
+                )
+                if not moved.rowcount:  # type: ignore[attr-defined]
+                    action_id = action.id
+                    await self._session.rollback()
+                    logger.info("Карточка действия уже не CARD — на биржу не отправляю",
+                                extra={"action_id": action_id})
+                    raise _CardGone
+                action.status = PositionActionStatus.SUBMITTED
             await self._session.commit()
         except IntegrityError:
             await self._session.rollback()

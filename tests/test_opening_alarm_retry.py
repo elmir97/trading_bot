@@ -270,10 +270,25 @@ async def test_cycle_passes_retry_hook(monkeypatch) -> None:  # type: ignore[no-
 
     monkeypatch.setattr(openings, "recover_openings", recover)
     monkeypatch.setattr(openings, "expire_stale_cards", AsyncMock(return_value=0))
+    monkeypatch.setattr(openings, "expire_stale_action_cards", AsyncMock(return_value=0))
     worker = OpeningsWorker(None, None, Settings(**BASE), None, object(),  # type: ignore[arg-type]
                             factory=object())
     await worker.run()
     assert seen["on_alarm"] == worker.retry_alarm
+
+
+async def test_cycle_expires_stale_action_cards(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """п.2 (24.10): цикл воркера закрывает сроком и карточки действий с
+    позицией (#46 — CARD с 19.10), рядом с карточками открытий."""
+    from app.workers import openings
+
+    actions = AsyncMock(return_value=0)
+    monkeypatch.setattr(openings, "expire_stale_cards", AsyncMock(return_value=0))
+    monkeypatch.setattr(openings, "expire_stale_action_cards", actions)
+    settings = Settings(**BASE)
+    worker = OpeningsWorker(None, None, settings, None, None, factory=object())  # type: ignore[arg-type]
+    await worker.run()
+    actions.assert_awaited_once_with(None, settings)
 
 
 @needs_db
