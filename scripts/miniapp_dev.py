@@ -110,7 +110,7 @@ class DevExchange(OpeningExchange):
     на last (иначе график прыгает к цене), одно и то же для таймфрейма при
     каждой перезагрузке; сетка свечей — по границам интервала, как у биржи."""
 
-    async def get_ticker(self, symbol: str, *, max_retries: int | None = None) -> Ticker:
+    async def get_ticker(self, symbol: str, *, max_attempts: int | None = None) -> Ticker:
         self._read("ticker", symbol)
         open_price = self.last - Decimal("0.0123")
         change = self.last - open_price

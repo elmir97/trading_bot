@@ -888,18 +888,18 @@ class OpeningService:
         try:
             if market.margin_type is not desired:
                 await client.set_margin_type(symbol, desired)
-                actual = await client.get_margin_type(symbol, max_retries=1)
+                actual = await client.get_margin_type(symbol, max_attempts=1)
                 if actual is not desired:
                     return (
                         "MARGIN_MODE_FAILED",
                         f"Режим маржи {symbol} не сменился: на бирже {actual.value}. "
                         "Вход не отправлен.",
                     )
-            info = await client.get_leverage(symbol, max_retries=1)
+            info = await client.get_leverage(symbol, max_attempts=1)
             current = info.long_leverage if side.direction > 0 else info.short_leverage
             if current != opening.leverage:
                 await client.set_leverage(symbol, opening.leverage, position_side=side.value)
-                info = await client.get_leverage(symbol, max_retries=1)
+                info = await client.get_leverage(symbol, max_attempts=1)
                 current = info.long_leverage if side.direction > 0 else info.short_leverage
                 if current != opening.leverage:
                     return (

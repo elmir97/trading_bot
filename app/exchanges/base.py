@@ -540,8 +540,8 @@ class ExchangeClient(ABC):
     # --- Публичные данные (ключи не требуются) ----------------------------
 
     @abstractmethod
-    async def get_ticker(self, symbol: str, *, max_retries: int | None = None) -> Ticker:
-        """max_retries=None — обычное поведение (self._max_retries клиента,
+    async def get_ticker(self, symbol: str, *, max_attempts: int | None = None) -> Ticker:
+        """max_attempts=None — обычное поведение (self._max_attempts клиента,
         см. BingXClient). Явное значение переопределяет его для этого
         вызова, не трогая остальных потребителей клиента — нужно пути
         подтверждения «Да» (раздел 8 ТЗ): там повтор транспортного слоя
@@ -559,20 +559,20 @@ class ExchangeClient(ABC):
     ) -> list[Kline]: ...
 
     @abstractmethod
-    async def get_symbols(self, *, max_retries: int | None = None) -> list[SymbolInfo]:
-        """max_retries — см. get_ticker."""
+    async def get_symbols(self, *, max_attempts: int | None = None) -> list[SymbolInfo]:
+        """max_attempts — см. get_ticker."""
         ...
 
     # --- Приватные данные (нужны ключи) -----------------------------------
 
     @abstractmethod
-    async def get_balance(self, *, max_retries: int | None = None) -> Balance:
-        """max_retries — см. get_ticker."""
+    async def get_balance(self, *, max_attempts: int | None = None) -> Balance:
+        """max_attempts — см. get_ticker."""
         ...
 
     @abstractmethod
-    async def get_positions(self, *, max_retries: int | None = None) -> list[Position]:
-        """max_retries — см. get_ticker. Только живые позиции (объём != 0).
+    async def get_positions(self, *, max_attempts: int | None = None) -> list[Position]:
+        """max_attempts — см. get_ticker. Только живые позиции (объём != 0).
 
         Шаг 15.5.4а: читает и гвард EXCHANGE_POSITION_EXISTS — поэтому
         строгий: непонятная запись роняет чтение, а не пропускается."""
@@ -591,24 +591,24 @@ class ExchangeClient(ABC):
 
     @abstractmethod
     async def get_open_orders(
-        self, symbol: str | None = None, *, max_retries: int | None = None
+        self, symbol: str | None = None, *, max_attempts: int | None = None
     ) -> list[OpenOrder]:
-        """max_retries — см. get_ticker: read-back на пути «Да» читает с
-        max_retries=1 (шаг 15.5.3), остальные — обычным ретраем."""
+        """max_attempts — см. get_ticker: read-back на пути «Да» читает с
+        max_attempts=1 (шаг 15.5.3), остальные — обычным ретраем."""
         ...
 
     @abstractmethod
     async def get_leverage(
-        self, symbol: str, *, max_retries: int | None = None
+        self, symbol: str, *, max_attempts: int | None = None
     ) -> LeverageInfo:
         """Текущее и максимальное плечо по символу (раздел 16 ТЗ, шаг
         15.5.1) — GET, чтение, а не следующий за ним, отдельный set_leverage
-        (POST) ниже. max_retries — см. get_ticker: путь подтверждения
-        читает с max_retries=1, путь карточки — обычным ретраем."""
+        (POST) ниже. max_attempts — см. get_ticker: путь подтверждения
+        читает с max_attempts=1, путь карточки — обычным ретраем."""
         ...
 
     @abstractmethod
-    async def get_position_mode(self, *, max_retries: int | None = None) -> bool:
+    async def get_position_mode(self, *, max_attempts: int | None = None) -> bool:
         """Режим позиций аккаунта: True — хедж (LONG/SHORT раздельно),
         False — односторонний (BOTH). Раздел 16 ТЗ, шаг 15.5.1 — рабочий
         путь v1 (не v2, тот отвечает code 100404), значение живёт под
@@ -618,7 +618,7 @@ class ExchangeClient(ABC):
         ...
 
     async def get_margin_type(
-        self, symbol: str, *, max_retries: int | None = None
+        self, symbol: str, *, max_attempts: int | None = None
     ) -> MarginType:
         """Режим маржи символа (28.09). Не abstractmethod: клиент, который
         его не умеет, отвечает явной ошибкой — вызывающий код
@@ -682,7 +682,7 @@ class ExchangeClient(ABC):
 
     @abstractmethod
     async def get_order_fill(
-        self, symbol: str, client_order_id: str, *, max_retries: int | None = None
+        self, symbol: str, client_order_id: str, *, max_attempts: int | None = None
     ) -> OrderFill:
         """Шаг 15.5.3: строгое чтение исполнения — нет обязательного поля
         (orderId, status, avgPrice, origQty, executedQty, commission) →
@@ -744,7 +744,7 @@ class ExchangeClient(ABC):
     # Шаг 15.6, reconciler. Не абстрактные: фейки тестов, которым сверка не
     # нужна, не обязаны их реализовывать; реальный клиент — BingXClient.
     async def get_all_orders(
-        self, symbol: str, start: datetime, end: datetime, *, max_retries: int | None = None
+        self, symbol: str, start: datetime, end: datetime, *, max_attempts: int | None = None
     ) -> list[HistoryOrder]:
         """Ордера символа за окно не длиннее 7 дней (ограничение BingX)."""
         raise NotImplementedError

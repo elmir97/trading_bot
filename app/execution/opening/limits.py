@@ -37,7 +37,7 @@ _CANCELLED = ("CANCELLED", "CANCELED", "EXPIRED")
 async def _read(runner: Runner) -> OrderFill | None:
     try:
         return await runner.client.get_order_fill(
-            runner.opening.symbol, runner.cid("e"), max_retries=1
+            runner.opening.symbol, runner.cid("e"), max_attempts=1
         )
     except ExchangeError as exc:
         logger.warning(

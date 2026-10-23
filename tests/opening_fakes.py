@@ -99,11 +99,11 @@ class OpeningExchange:
 
     # --- чтение -----------------------------------------------------------------
 
-    async def get_symbols(self, *, max_retries: int | None = None) -> list[SymbolInfo]:
+    async def get_symbols(self, *, max_attempts: int | None = None) -> list[SymbolInfo]:
         self._read("symbols")
         return [self.info]
 
-    async def get_ticker(self, symbol: str, *, max_retries: int | None = None) -> Ticker:
+    async def get_ticker(self, symbol: str, *, max_attempts: int | None = None) -> Ticker:
         self._read("ticker", symbol)
         return Ticker(symbol, self.last, _now())
 
@@ -111,31 +111,31 @@ class OpeningExchange:
         self._read("mark", symbol)
         return self.mark
 
-    async def get_balance(self, *, max_retries: int | None = None) -> Balance:
+    async def get_balance(self, *, max_attempts: int | None = None) -> Balance:
         self._read("balance")
         return Balance("VST", self.available, D(0), D(0), self.equity)
 
-    async def get_leverage(self, symbol: str, *, max_retries: int | None = None) -> LeverageInfo:
+    async def get_leverage(self, symbol: str, *, max_attempts: int | None = None) -> LeverageInfo:
         self._read("leverage", symbol)
         return LeverageInfo(
             symbol, self.leverage["LONG"], self.leverage["SHORT"],
             self.max_leverage, self.max_leverage,
         )
 
-    async def get_margin_type(self, symbol: str, *, max_retries: int | None = None) -> MarginType:
+    async def get_margin_type(self, symbol: str, *, max_attempts: int | None = None) -> MarginType:
         self._read("margin_type", symbol)
         return self.margin_type
 
-    async def get_position_mode(self, *, max_retries: int | None = None) -> bool:
+    async def get_position_mode(self, *, max_attempts: int | None = None) -> bool:
         self._read("position_mode")
         return True
 
-    async def get_positions(self, *, max_retries: int | None = None) -> list[Position]:
+    async def get_positions(self, *, max_attempts: int | None = None) -> list[Position]:
         self._read("positions")
         return list(self.positions.values())
 
     async def get_open_orders(
-        self, symbol: str | None = None, *, max_retries: int | None = None
+        self, symbol: str | None = None, *, max_attempts: int | None = None
     ) -> list[OpenOrder]:
         self._read("open_orders", symbol)
         if self.conditional_invisible_in_list:
@@ -147,7 +147,7 @@ class OpeningExchange:
         return CommissionRate(taker=self.taker, maker=D("0.0002"))
 
     async def get_order_fill(
-        self, symbol: str, client_order_id: str, *, max_retries: int | None = None
+        self, symbol: str, client_order_id: str, *, max_attempts: int | None = None
     ) -> OrderFill:
         self._read("order_fill", client_order_id)
         order = self.by_cid.get(client_order_id.lower())

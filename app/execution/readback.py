@@ -210,7 +210,7 @@ async def verify_entry(
     price_precision: int,
     sleep: Sleep = asyncio.sleep,
 ) -> ReadbackResult:
-    """См. докстринг модуля. Каждый HTTP — max_retries=1: путь «Да» держит
+    """См. докстринг модуля. Каждый HTTP — max_attempts=1: путь «Да» держит
     Redis-лок, TTL которого посчитан на один таймаут на вызов."""
     result = ReadbackResult(entry_status=entry_row.status)
     if entry_row.status not in (OrderStatus.SUBMITTED, OrderStatus.UNKNOWN, OrderStatus.FILLED):
@@ -237,13 +237,13 @@ async def _check_liquidation(
 ) -> None:
     """28.09, блок D: ликвидация позиции должна быть за стопом, а не перед
     ним (плечо считается от стопа, но формула приблизительная). Одно чтение
-    позиций, max_retries=1, без повторов. Ликвидация по ту сторону стопа —
+    позиций, max_attempts=1, без повторов. Ликвидация по ту сторону стопа —
     тревога уровня «ПОЗИЦИЯ БЕЗ СТОПА» и ERROR; не удалось проверить (сбой
     чтения, позиции нет, liquidationPrice нет или 0) — предупреждение и
     WARNING, без тревоги."""
     stop = order.stop_loss
     try:
-        positions = await client.get_positions(max_retries=1)
+        positions = await client.get_positions(max_attempts=1)
     except ExchangeError:
         logger.warning(
             "Ликвидация не проверена: позиции не прочитались",
@@ -307,7 +307,7 @@ async def _read_fill(
     if entry_row.status is OrderStatus.UNKNOWN:
         await sleep(settings.exec_unknown_search_delay_ms / 1000)
         try:
-            fill = await client.get_order_fill(symbol, cid, max_retries=1)
+            fill = await client.get_order_fill(symbol, cid, max_attempts=1)
         except ReadbackIncomplete as exc:
             # Ордер нашёлся (биржа отдала объект), но без обязательного
             # поля — позиция могла открыться: дальше как SUBMITTED.
@@ -343,7 +343,7 @@ async def _read_fill(
         if attempt:
             await sleep(settings.exec_order_readback_delay_ms / 1000)
         try:
-            fill = await client.get_order_fill(symbol, cid, max_retries=1)
+            fill = await client.get_order_fill(symbol, cid, max_attempts=1)
         except ReadbackIncomplete as exc:
             _incomplete(result, exc, entry_row)
             await session.commit()
@@ -448,7 +448,7 @@ async def _check_conditionals(
         )
 
     try:
-        orders = await client.get_open_orders(order.symbol, max_retries=1)
+        orders = await client.get_open_orders(order.symbol, max_attempts=1)
     except ExchangeError as exc:
         await _mark_unverified(
             session, order, result, fill, stop_row, take_row, str(exc), entry_row.account_mode
@@ -468,7 +468,7 @@ async def _check_conditionals(
         # «нет» только после второго чтения.
         await sleep(settings.exec_open_orders_recheck_delay_ms / 1000)
         try:
-            orders = await client.get_open_orders(order.symbol, max_retries=1)
+            orders = await client.get_open_orders(order.symbol, max_attempts=1)
         except ExchangeError as exc:
             await _mark_unverified(
                 session, order, result, fill, stop_row, take_row, str(exc),

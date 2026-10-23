@@ -340,8 +340,8 @@ def _stale_open_orders(c, reads: int):  # type: ignore[no-untyped-def]
     original = c.exchange.get_open_orders
     state = {"last": [], "left": reads}
 
-    async def read(symbol=None, *, max_retries=None):  # type: ignore[no-untyped-def]
-        orders = await original(symbol, max_retries=max_retries)
+    async def read(symbol=None, *, max_attempts=None):  # type: ignore[no-untyped-def]
+        orders = await original(symbol, max_attempts=max_attempts)
         if c.exchange.positions:
             state["last"] = orders
             return orders

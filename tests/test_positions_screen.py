@@ -71,19 +71,19 @@ class _Client:
         self.open_orders_symbols: list[str | None] = []
         self.name = "bingx"
 
-    async def get_positions(self, *, max_retries=None) -> list[Position]:  # type: ignore[no-untyped-def]
+    async def get_positions(self, *, max_attempts=None) -> list[Position]:  # type: ignore[no-untyped-def]
         if self._error:
             raise self._error
         return self._positions
 
-    async def get_open_orders(self, symbol=None, *, max_retries=None) -> list[OpenOrder]:  # type: ignore[no-untyped-def]
+    async def get_open_orders(self, symbol=None, *, max_attempts=None) -> list[OpenOrder]:  # type: ignore[no-untyped-def]
         self.open_orders_symbols.append(symbol)
         return self._orders
 
-    async def get_symbols(self, *, max_retries=None) -> list[SymbolInfo]:  # type: ignore[no-untyped-def]
+    async def get_symbols(self, *, max_attempts=None) -> list[SymbolInfo]:  # type: ignore[no-untyped-def]
         return [SymbolInfo("XRP-USDT", 4, 0, D(2), D(2))]
 
-    async def get_balance(self, *, max_retries=None) -> Balance:  # type: ignore[no-untyped-def]
+    async def get_balance(self, *, max_attempts=None) -> Balance:  # type: ignore[no-untyped-def]
         if self.balance_error is not None:
             raise self.balance_error
         return Balance("USDT", D(9000), D(100), D(5), D(10000))

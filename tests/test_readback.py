@@ -128,13 +128,15 @@ class FakeReadbackClient(ExchangeClient):
             raise item
         return item
 
-    async def get_order_fill(self, symbol, client_order_id, *, max_retries=None):  # type: ignore[no-untyped-def]
-        self.calls.append(("get_order_fill", {"cid": client_order_id, "max_retries": max_retries}))
+    async def get_order_fill(self, symbol, client_order_id, *, max_attempts=None):  # type: ignore[no-untyped-def]
+        self.calls.append(
+            ("get_order_fill", {"cid": client_order_id, "max_attempts": max_attempts})
+        )
         item = self._next(self.fills)
         return BingXClient._parse_order_fill(item) if isinstance(item, dict) else item
 
-    async def get_open_orders(self, symbol=None, *, max_retries=None):  # type: ignore[no-untyped-def]
-        self.calls.append(("get_open_orders", {"symbol": symbol, "max_retries": max_retries}))
+    async def get_open_orders(self, symbol=None, *, max_attempts=None):  # type: ignore[no-untyped-def]
+        self.calls.append(("get_open_orders", {"symbol": symbol, "max_attempts": max_attempts}))
         return self._next(self.open_orders)
 
     async def place_conditional_order(self, **kwargs):  # type: ignore[no-untyped-def]
@@ -149,19 +151,19 @@ class FakeReadbackClient(ExchangeClient):
         return sum(1 for c in self.calls if c[0] == name)
 
     # --- не используется read-back --------------------------------------
-    async def get_ticker(self, symbol, *, max_retries=None):  # type: ignore[no-untyped-def]
+    async def get_ticker(self, symbol, *, max_attempts=None):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 
     async def get_klines(self, symbol, interval, limit=500, end_time=None):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 
-    async def get_symbols(self, *, max_retries=None):  # type: ignore[no-untyped-def]
+    async def get_symbols(self, *, max_attempts=None):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 
-    async def get_balance(self, *, max_retries=None):  # type: ignore[no-untyped-def]
+    async def get_balance(self, *, max_attempts=None):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 
-    async def get_positions(self, *, max_retries=None):  # type: ignore[no-untyped-def]
+    async def get_positions(self, *, max_attempts=None):  # type: ignore[no-untyped-def]
         # Проверка ликвидации: liquidationPrice живьём не снят (значение вне
         # allowlist разведки 27.09) — позиций нет, только предупреждение.
         return []
@@ -172,10 +174,10 @@ class FakeReadbackClient(ExchangeClient):
     async def get_fills(self, start_time, end_time, symbol=None):  # type: ignore[no-untyped-def]
         return []
 
-    async def get_leverage(self, symbol, *, max_retries=None):  # type: ignore[no-untyped-def]
+    async def get_leverage(self, symbol, *, max_attempts=None):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 
-    async def get_position_mode(self, *, max_retries=None):  # type: ignore[no-untyped-def]
+    async def get_position_mode(self, *, max_attempts=None):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 
     async def set_leverage(self, symbol, leverage, *, position_side=None):  # type: ignore[no-untyped-def]
@@ -329,7 +331,7 @@ async def test_submitted_with_stop_and_take_in_place(ctx) -> None:  # type: igno
     assert (t.exchange_order_id, t.client_order_id) == (LINK_TAKE, f"tj{n.id}u{user.id}T")
     assert client.count("place_conditional_order") == 0
     assert client.count("get_open_orders") == 1
-    assert all(c[1]["max_retries"] == 1 for c in client.calls if "max_retries" in c[1])
+    assert all(c[1]["max_attempts"] == 1 for c in client.calls if "max_attempts" in c[1])
 
 
 def _live_new() -> dict[str, object]:

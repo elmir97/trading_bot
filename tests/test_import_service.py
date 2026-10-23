@@ -80,19 +80,19 @@ class FakeExchange(ExchangeClient):
         self.calls += 1
         return [f for f in self._fills if start_time <= f.executed_at < end_time]
 
-    async def get_ticker(self, symbol: str, *, max_retries: int | None = None) -> Ticker: ...
+    async def get_ticker(self, symbol: str, *, max_attempts: int | None = None) -> Ticker: ...
     async def get_klines(self, symbol, interval, limit=500, end_time=None) -> list[Kline]: ...  # type: ignore[no-untyped-def]
-    async def get_symbols(self, *, max_retries: int | None = None) -> list[SymbolInfo]: ...
-    async def get_balance(self, *, max_retries: int | None = None) -> Balance: ...
-    async def get_positions(self, *, max_retries=None) -> list[Position]: ...  # type: ignore[no-untyped-def]
+    async def get_symbols(self, *, max_attempts: int | None = None) -> list[SymbolInfo]: ...
+    async def get_balance(self, *, max_attempts: int | None = None) -> Balance: ...
+    async def get_positions(self, *, max_attempts=None) -> list[Position]: ...  # type: ignore[no-untyped-def]
     async def get_api_restrictions(self) -> ApiRestrictions: ...
-    async def get_leverage(self, symbol, *, max_retries=None): ...  # type: ignore[no-untyped-def]
-    async def get_position_mode(self, *, max_retries=None): ...  # type: ignore[no-untyped-def]
+    async def get_leverage(self, symbol, *, max_attempts=None): ...  # type: ignore[no-untyped-def]
+    async def get_position_mode(self, *, max_attempts=None): ...  # type: ignore[no-untyped-def]
     async def set_leverage(self, symbol, leverage, *, position_side=None) -> int: ...  # type: ignore[no-untyped-def]
     async def place_market_order(self, **kwargs) -> OrderResult: ...  # type: ignore[no-untyped-def]
-    async def get_order_fill(self, symbol, client_order_id, *, max_retries=None): ...  # type: ignore[no-untyped-def]
+    async def get_order_fill(self, symbol, client_order_id, *, max_attempts=None): ...  # type: ignore[no-untyped-def]
     async def place_conditional_order(self, **kwargs): ...  # type: ignore[no-untyped-def]
-    async def get_open_orders(self, symbol: str | None = None, *, max_retries=None) -> list: ...  # type: ignore[no-untyped-def]
+    async def get_open_orders(self, symbol: str | None = None, *, max_attempts=None) -> list: ...  # type: ignore[no-untyped-def]
     async def close(self) -> None: ...
 
 

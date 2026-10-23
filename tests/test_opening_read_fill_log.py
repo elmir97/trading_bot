@@ -28,7 +28,9 @@ class Client:
     def __init__(self, answers: list[Any]) -> None:
         self.answers = answers
 
-    async def get_order_fill(self, symbol: str, cid: str, *, max_retries: int | None = None) -> Any:
+    async def get_order_fill(
+        self, symbol: str, cid: str, *, max_attempts: int | None = None
+    ) -> Any:
         answer = self.answers.pop(0)
         if isinstance(answer, Exception):
             raise answer

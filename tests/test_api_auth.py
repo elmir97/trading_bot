@@ -101,6 +101,20 @@ def test_settings_allowed_ids() -> None:
         Settings(miniapp_allowed_telegram_ids="12,abc", **base)  # type: ignore[arg-type]
 
 
+
+def test_settings_http_attempts_at_least_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """23.10.2026: HTTP_MAX_RETRIES — число попыток; 0 — бот не стартует
+    (иначе GET к бирже не уходил бы вовсе). Имя env прежнее — прод-конфиг."""
+    base = {"bot_token": TOKEN, "database_url": "postgresql+asyncpg://u:p@h/d",
+            "encryption_key": "0" * 43 + "="}
+    assert Settings(**base).http_max_retries == 3  # type: ignore[arg-type]
+    monkeypatch.setenv("HTTP_MAX_RETRIES", "1")
+    assert Settings(**base).http_max_retries == 1  # type: ignore[arg-type]
+    for bad in ("0", "-1"):
+        monkeypatch.setenv("HTTP_MAX_RETRIES", bad)
+        with pytest.raises(ValueError, match="http_max_retries"):
+            Settings(**base)  # type: ignore[arg-type]
+
 # --- эндпоинты на настоящей БД ---------------------------------------------------------
 
 needs_db = pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="Нужен PostgreSQL")

@@ -78,7 +78,7 @@ class RecoveryExchange(FakeExchange):
         self.history: list[HistoryOrder] = []
         self.history_error: Exception | None = None
 
-    async def get_order_fill(self, symbol, client_order_id, *, max_retries=None) -> OrderFill:  # type: ignore[no-untyped-def]
+    async def get_order_fill(self, symbol, client_order_id, *, max_attempts=None) -> OrderFill:  # type: ignore[no-untyped-def]
         self.calls.append(("fill", client_order_id))
         if self.fill_errors:
             raise self.fill_errors.pop(0)
@@ -86,7 +86,7 @@ class RecoveryExchange(FakeExchange):
             return self.fills[client_order_id]
         raise ExchangeResponseError("BingX: order not exist (код 109421)", code=109421)
 
-    async def get_all_orders(self, symbol, start, end, *, max_retries=None) -> list[HistoryOrder]:  # type: ignore[no-untyped-def]
+    async def get_all_orders(self, symbol, start, end, *, max_attempts=None) -> list[HistoryOrder]:  # type: ignore[no-untyped-def]
         self.calls.append(("history", (start, end)))
         if self.history_error is not None:
             raise self.history_error
@@ -226,14 +226,14 @@ async def test_post_filled_row_price_is_null_until_read(ctx) -> None:  # type: i
     seen: list[tuple[Any, Any]] = []
     read = ctx.exchange.get_order_fill
 
-    async def spy(symbol, cid, *, max_retries=None):  # type: ignore[no-untyped-def]
+    async def spy(symbol, cid, *, max_attempts=None):  # type: ignore[no-untyped-def]
         if not seen:
             async with ctx.db.session() as other:
                 seen.append((await other.execute(
                     select(ExecutionOrder.status, ExecutionOrder.price)
                     .where(ExecutionOrder.client_order_id == cid)
                 )).one())
-        return await read(symbol, cid, max_retries=max_retries)
+        return await read(symbol, cid, max_attempts=max_attempts)
 
     ctx.exchange.get_order_fill = spy
     ctx.exchange.fill_errors = [ExchangeResponseError("сеть", code=None)] * 3

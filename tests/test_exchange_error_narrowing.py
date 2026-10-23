@@ -74,7 +74,7 @@ class FakeExchangeClient:
         self.available: D | None = D("900")
         self.get_symbols_raises: Exception | None = None
 
-    async def get_balance(self, *, max_retries=None):  # type: ignore[no-untyped-def]
+    async def get_balance(self, *, max_attempts=None):  # type: ignore[no-untyped-def]
         if self.get_balance_raises is not None:
             raise self.get_balance_raises
         return SimpleNamespace(
@@ -82,7 +82,7 @@ class FakeExchangeClient:
             used_margin=D("0"), unrealized_pnl=D("0"),
         )
 
-    async def get_symbols(self, *, max_retries=None):  # type: ignore[no-untyped-def]
+    async def get_symbols(self, *, max_attempts=None):  # type: ignore[no-untyped-def]
         if self.get_symbols_raises is not None:
             raise self.get_symbols_raises
         return []

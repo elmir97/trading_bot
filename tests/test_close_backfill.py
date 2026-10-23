@@ -53,7 +53,9 @@ class Client:
         self.answers = answers
         self.calls: list[str] = []
 
-    async def get_order_fill(self, symbol: str, cid: str, *, max_retries: int | None = None) -> Any:
+    async def get_order_fill(
+        self, symbol: str, cid: str, *, max_attempts: int | None = None
+    ) -> Any:
         self.calls.append(cid)
         answer = self.answers[cid]
         if isinstance(answer, Exception):

@@ -121,24 +121,24 @@ class FakeExchange:
     def names(self) -> list[str]:
         return [c[0] for c in self.calls]
 
-    async def get_positions(self, *, max_retries=None) -> list[Position]:  # type: ignore[no-untyped-def]
+    async def get_positions(self, *, max_attempts=None) -> list[Position]:  # type: ignore[no-untyped-def]
         self.calls.append(("positions", None))
         return [self.position] if self.position else []
 
-    async def get_open_orders(self, symbol=None, *, max_retries=None) -> list[OpenOrder]:  # type: ignore[no-untyped-def]
+    async def get_open_orders(self, symbol=None, *, max_attempts=None) -> list[OpenOrder]:  # type: ignore[no-untyped-def]
         self.calls.append(("open_orders", symbol))
         return list(self.orders)
 
     async def get_mark_price(self, symbol: str) -> Decimal:
         return self.mark
 
-    async def get_symbols(self, *, max_retries=None) -> list[SymbolInfo]:  # type: ignore[no-untyped-def]
+    async def get_symbols(self, *, max_attempts=None) -> list[SymbolInfo]:  # type: ignore[no-untyped-def]
         return [SymbolInfo("XRP-USDT", 4, 0, D(2), D(2))]
 
-    async def get_balance(self, *, max_retries=None) -> Balance:  # type: ignore[no-untyped-def]
+    async def get_balance(self, *, max_attempts=None) -> Balance:  # type: ignore[no-untyped-def]
         return Balance("USDT", D(9000), D(100), D(0), D(10000))
 
-    async def get_position_mode(self, *, max_retries=None) -> bool:  # type: ignore[no-untyped-def]
+    async def get_position_mode(self, *, max_attempts=None) -> bool:  # type: ignore[no-untyped-def]
         return True
 
     async def place_conditional_order(self, **kw: Any) -> OrderResult:
@@ -185,7 +185,7 @@ class FakeExchange:
         return OrderResult(oid, kw["client_order_id"], kw["symbol"], kw["side"].value,
                            kw["position_side"], "MARKET", self.post_status, self.post_raw)
 
-    async def get_order_fill(self, symbol, client_order_id, *, max_retries=None) -> OrderFill:  # type: ignore[no-untyped-def]
+    async def get_order_fill(self, symbol, client_order_id, *, max_attempts=None) -> OrderFill:  # type: ignore[no-untyped-def]
         self.calls.append(("fill", client_order_id))
         if self.fill_errors:
             raise self.fill_errors.pop(0)

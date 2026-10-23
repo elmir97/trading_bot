@@ -70,7 +70,7 @@ async def backfill_close_rows(
                "prev_status": row.status.value}
         try:
             fill = await client.get_order_fill(
-                row.symbol, row.client_order_id or "", max_retries=1
+                row.symbol, row.client_order_id or "", max_attempts=1
             )
         except ExchangeError as exc:
             logger.info("Строка закрытия не добрана по cid",

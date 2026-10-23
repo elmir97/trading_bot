@@ -117,7 +117,7 @@ class TestSetMarginType:
             calls["n"] += 1
             raise httpx.TimeoutException("timeout")
 
-        client = make_client(handler, max_retries=3)
+        client = make_client(handler, max_attempts=3)
         client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
         with pytest.raises(ExchangeUnavailableError):
             await client.set_margin_type("XRP-USDT", MarginType.ISOLATED)
@@ -220,7 +220,7 @@ class TestPlaceLimitOrder:
             calls["n"] += 1
             raise httpx.TimeoutException("timeout")
 
-        client = make_client(handler, max_retries=3)
+        client = make_client(handler, max_attempts=3)
         client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
         with pytest.raises(ExchangeUnavailableError):
             await client.place_limit_order(

@@ -21,7 +21,7 @@ class FakeClient:
         self._error = error
         self.calls = 0
 
-    async def get_position_mode(self, *, max_retries: int | None = None) -> bool:
+    async def get_position_mode(self, *, max_attempts: int | None = None) -> bool:
         self.calls += 1
         if self._error is not None:
             raise self._error

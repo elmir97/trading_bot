@@ -234,7 +234,7 @@ redis-server --appendonly no --save "" --maxmemory 256mb --maxmemory-policy noev
 
 Фейки `BingXClient` на execution-пути (`get_ticker`, `get_symbols`, `get_balance`,
 `get_position_mode`) подставляются monkeypatch на класс и обязаны повторять текущие
-сигнатуры, включая `max_retries`. 22.09 три поломки фейков шли каскадом (`2d9a4d8`).
+сигнатуры, включая `max_attempts` (до 23.10.2026 — `max_retries`). 22.09 три поломки фейков шли каскадом (`2d9a4d8`).
 **Открытый вопрос:** падала ли проверка [14] или проходила с неверным исходом.
 
 ## Форматирование чисел

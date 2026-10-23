@@ -23,7 +23,7 @@ from app.trading.enums import ExchangeKeyMode
 # позициями (этап 4) пересчитает его под себя.
 #
 # Раздел 8 ТЗ / раздел 16 ТЗ (шаг 15.5.1): число HTTP-вызовов на пути
-# подтверждения («Да»), каждый max_retries=1 (не путать с картой карточки —
+# подтверждения («Да»), каждый max_attempts=1 (не путать с картой карточки —
 # там обычный ретрай клиента, см. ExecutionService.evaluate()). Список:
 #   get_ticker          — app/exchanges/bingx.py (BingXClient.get_ticker)
 #   get_balance          — app/exchanges/bingx.py (BingXClient.get_balance)
@@ -138,7 +138,11 @@ class Settings(BaseSettings):
     bingx_trading_mode: Literal["demo", "live"] = "demo"
     bingx_recv_window: int = 5000
     http_timeout_seconds: float = 10.0
-    http_max_retries: int = 3
+    # Число ПОПЫТОК GET-запроса к бирже (1 = одна, без повторов), не число
+    # повторов: имя env HTTP_MAX_RETRIES историческое, оставлено, чтобы не
+    # ломать прод-конфиг. В клиенте параметр — max_attempts. 0 и меньше —
+    # ошибка конфига на старте: при 0 запрос не ушёл бы вовсе.
+    http_max_retries: int = Field(default=3, ge=1)
     # Троттлинг сканера (см. app/exchanges/bingx.py, раздел
     # X-RateLimit-Requests-Remain/-Expire): при remaining <= порога клиент
     # сам ждёт до конца окна ПЕРЕД следующим запросом, не дожидаясь 429.
@@ -494,7 +498,7 @@ class Settings(BaseSettings):
         троттлера — ещё одним членом. При дефолтах:
         ceil(10.0 × (16+1)) + 10 + ceil(2.5) + 4 = 170 + 10 + 3 + 4 = 187.
 
-        При max_retries=1 на каждом из этих вызовов (см. п.1-2 разведки)
+        При max_attempts=1 на каждом из этих вызовов (см. п.1-2 разведки)
         бэкофф между попытками не наступает — цикл в BingXClient._request
         не спит перед последней попыткой, поэтому в сумме нет ничего, кроме
         самих таймаутов.

@@ -78,14 +78,14 @@ class PositionsClient:
         self.order_symbols: list[str | None] = []
         self.closed = 0
 
-    async def get_positions(self, *, max_retries: int | None = None) -> list[Position]:
+    async def get_positions(self, *, max_attempts: int | None = None) -> list[Position]:
         self.calls["positions"] += 1
         if self.fail is not None:
             raise self.fail
         return list(self.positions)
 
     async def get_open_orders(self, symbol: str | None = None, *,
-                              max_retries: int | None = None) -> list[OpenOrder]:
+                              max_attempts: int | None = None) -> list[OpenOrder]:
         self.calls["open_orders"] += 1
         self.order_symbols.append(symbol)
         return list(self.orders)

@@ -612,7 +612,7 @@ async def _run_execution_scenario(sim, tg, db, redis, settings) -> None:  # type
 _XRP = SymbolInfo("XRP-USDT", 4, 0, D(2), D(2))
 
 
-async def _fake_positions(self, *, max_retries=None) -> list[Position]:  # type: ignore[no-untyped-def]
+async def _fake_positions(self, *, max_attempts=None) -> list[Position]:  # type: ignore[no-untyped-def]
     return [Position(
         symbol="XRP-USDT", side=TradeSide.LONG, quantity=D(30), entry_price=D("1.5253"),
         mark_price=D("1.56"), leverage=20, unrealized_pnl=D("1.04"),
@@ -620,7 +620,7 @@ async def _fake_positions(self, *, max_retries=None) -> list[Position]:  # type:
     )]
 
 
-async def _fake_open_orders(self, symbol=None, *, max_retries=None) -> list[OpenOrder]:  # type: ignore[no-untyped-def]
+async def _fake_open_orders(self, symbol=None, *, max_attempts=None) -> list[OpenOrder]:  # type: ignore[no-untyped-def]
     now = datetime.now(UTC)
     return [OpenOrder(
         order_id="2105910661355233280", client_order_id="", symbol="XRP-USDT", side="SELL",
@@ -635,20 +635,20 @@ async def _fake_mark(self, symbol: str) -> D:  # type: ignore[no-untyped-def]
     return D("1.56")
 
 
-async def _fake_symbols(self, *, max_retries=None) -> list[SymbolInfo]:  # type: ignore[no-untyped-def]
+async def _fake_symbols(self, *, max_attempts=None) -> list[SymbolInfo]:  # type: ignore[no-untyped-def]
     return [_XRP]
 
 
-async def _fake_contracts(self, *, max_retries=None) -> list[SymbolInfo]:  # type: ignore[no-untyped-def]
+async def _fake_contracts(self, *, max_attempts=None) -> list[SymbolInfo]:  # type: ignore[no-untyped-def]
     return [_XRP, SymbolInfo("BTC-USDT", 1, 4, D("0.0001"), D(2)),
             SymbolInfo("ETH-USDT", 2, 2, D("0.01"), D(2))]
 
 
-async def _fake_balance(self, *, max_retries=None) -> Balance:  # type: ignore[no-untyped-def]
+async def _fake_balance(self, *, max_attempts=None) -> Balance:  # type: ignore[no-untyped-def]
     return Balance("USDT", D(9000), D(100), D(0), D(10000))
 
 
-async def _fake_position_mode(self, *, max_retries=None) -> bool:  # type: ignore[no-untyped-def]
+async def _fake_position_mode(self, *, max_attempts=None) -> bool:  # type: ignore[no-untyped-def]
     return True
 
 
@@ -758,15 +758,15 @@ async def _run_position_actions(sim, tg, db, settings) -> None:  # type: ignore[
 # в запрет сети.
 
 
-async def _fake_ticker(self, symbol: str, *, max_retries=None) -> Ticker:  # type: ignore[no-untyped-def]
+async def _fake_ticker(self, symbol: str, *, max_attempts=None) -> Ticker:  # type: ignore[no-untyped-def]
     return Ticker(symbol, D("3000"), datetime.now(UTC))
 
 
-async def _fake_leverage(self, symbol: str, *, max_retries=None) -> LeverageInfo:  # type: ignore[no-untyped-def]
+async def _fake_leverage(self, symbol: str, *, max_attempts=None) -> LeverageInfo:  # type: ignore[no-untyped-def]
     return LeverageInfo(symbol, 20, 20, 100, 100)
 
 
-async def _fake_margin_type(self, symbol: str, *, max_retries=None) -> MarginType:  # type: ignore[no-untyped-def]
+async def _fake_margin_type(self, symbol: str, *, max_attempts=None) -> MarginType:  # type: ignore[no-untyped-def]
     return MarginType.ISOLATED
 
 

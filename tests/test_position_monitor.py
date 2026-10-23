@@ -64,11 +64,11 @@ class FakeExchange:
         self.orders = [_order("s1", "STOP_MARKET", STOP), _order("t1", "TAKE_PROFIT_MARKET", TAKE)]
         self.calls: list[str] = []
 
-    async def get_positions(self, *, max_retries=None) -> list[Position]:  # type: ignore[no-untyped-def]
+    async def get_positions(self, *, max_attempts=None) -> list[Position]:  # type: ignore[no-untyped-def]
         self.calls.append("positions")
         return [self.position] if self.position else []
 
-    async def get_open_orders(self, symbol=None, *, max_retries=None) -> list[OpenOrder]:  # type: ignore[no-untyped-def]
+    async def get_open_orders(self, symbol=None, *, max_attempts=None) -> list[OpenOrder]:  # type: ignore[no-untyped-def]
         self.calls.append("open_orders")
         return list(self.orders)
 
@@ -82,7 +82,7 @@ class FakeMarket:
     async def get_mark_prices(self, symbols: list[str]) -> dict[str, Decimal | None]:
         return dict.fromkeys(symbols, self.mark)
 
-    async def get_symbols(self, *, max_retries=None) -> list[SymbolInfo]:  # type: ignore[no-untyped-def]
+    async def get_symbols(self, *, max_attempts=None) -> list[SymbolInfo]:  # type: ignore[no-untyped-def]
         return [SymbolInfo("SOL-USDT", 2, 2, D(1), D(1))]
 
 

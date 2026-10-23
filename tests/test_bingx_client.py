@@ -735,17 +735,17 @@ class TestGetPositions:
         with pytest.raises(ExchangeResponseError, match="не список"):
             await self._positions(payload)
 
-    async def test_max_retries_one_does_not_retry(self) -> None:
+    async def test_max_attempts_one_does_not_retry(self) -> None:
         calls = {"n": 0}
 
         def handler(request: httpx.Request) -> httpx.Response:
             calls["n"] += 1
             raise httpx.TimeoutException("timeout")
 
-        client = make_client(handler, max_retries=3)
+        client = make_client(handler, max_attempts=3)
         client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
         with pytest.raises(ExchangeUnavailableError):
-            await client.get_positions(max_retries=1)
+            await client.get_positions(max_attempts=1)
         assert calls["n"] == 1
         await client.close()
 
@@ -784,18 +784,18 @@ class TestGetPositionMode:
             await client.get_position_mode()
         await client.close()
 
-    async def test_max_retries_override_does_not_retry(self) -> None:
+    async def test_max_attempts_override_does_not_retry(self) -> None:
         calls = {"n": 0}
 
         def handler(request: httpx.Request) -> httpx.Response:
             calls["n"] += 1
             raise httpx.TimeoutException("timeout")
 
-        client = make_client(handler, max_retries=3)
+        client = make_client(handler, max_attempts=3)
         client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
 
         with pytest.raises(ExchangeUnavailableError):
-            await client.get_position_mode(max_retries=1)
+            await client.get_position_mode(max_attempts=1)
         assert calls["n"] == 1
         await client.close()
 
@@ -843,9 +843,9 @@ class TestGetLeverage:
             await client.get_leverage("BTC-USDT")
         await client.close()
 
-    async def test_max_retries_override_does_not_retry(self) -> None:
+    async def test_max_attempts_override_does_not_retry(self) -> None:
         """Путь подтверждения («Да») держит Redis-лок — как и у остальных
-        чтений (get_ticker/get_balance/get_symbol_info), max_retries=1
+        чтений (get_ticker/get_balance/get_symbol_info), max_attempts=1
         не должен ретраить."""
         calls = {"n": 0}
 
@@ -853,11 +853,11 @@ class TestGetLeverage:
             calls["n"] += 1
             raise httpx.TimeoutException("timeout")
 
-        client = make_client(handler, max_retries=3)
+        client = make_client(handler, max_attempts=3)
         client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
 
         with pytest.raises(ExchangeUnavailableError):
-            await client.get_leverage("BTC-USDT", max_retries=1)
+            await client.get_leverage("BTC-USDT", max_attempts=1)
         assert calls["n"] == 1
         await client.close()
 
@@ -892,7 +892,7 @@ class TestSetLeverage:
     async def test_network_failure_does_not_retry(self) -> None:
         """Раздел 8 ТЗ, докстринг bingx.py:692-699: торговые вызовы,
         меняющие состояние перед входом, не ретраятся автоматически — до
-        этой правки set_leverage не передавал max_retries и молча ретраился
+        этой правки set_leverage не передавал max_attempts и молча ретраился
         3 раза, расходясь с собственным докстрингом файла."""
         calls = {"n": 0}
 
@@ -900,7 +900,7 @@ class TestSetLeverage:
             calls["n"] += 1
             raise httpx.TimeoutException("timeout")
 
-        client = make_client(handler, max_retries=3)
+        client = make_client(handler, max_attempts=3)
         client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
 
         with pytest.raises(ExchangeUnavailableError):
@@ -995,7 +995,7 @@ class TestPlaceMarketOrder:
             calls["n"] += 1
             raise httpx.TimeoutException("timeout")
 
-        client = make_client(handler, max_retries=3)
+        client = make_client(handler, max_attempts=3)
         client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
 
         with pytest.raises(ExchangeUnavailableError):
@@ -1421,7 +1421,7 @@ class TestErrorHandling:
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(401, json={"code": 100001, "msg": "bad key"})
 
-        client = make_client(handler, max_retries=1)
+        client = make_client(handler, max_attempts=1)
         with pytest.raises(ExchangeAuthError, match="IP"):
             await client.get_balance()
         await client.close()
@@ -1433,7 +1433,7 @@ class TestErrorHandling:
                 200, json={"code": 100001, "msg": "signature verification failed"}
             )
 
-        client = make_client(handler, max_retries=1)
+        client = make_client(handler, max_attempts=1)
         with pytest.raises(ExchangeAuthError, match="signature"):
             await client.get_balance()
         await client.close()
@@ -1448,7 +1448,7 @@ class TestErrorHandling:
                 200, json={"code": 80001, "msg": "insufficient margin"}
             )
 
-        client = make_client(handler, max_retries=1)
+        client = make_client(handler, max_attempts=1)
         with pytest.raises(ExchangeResponseError) as excinfo:
             await client.get_balance()
         assert excinfo.value.code == 80001
@@ -1463,7 +1463,7 @@ class TestErrorHandling:
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json={"code": "oops", "msg": "weird"})
 
-        client = make_client(handler, max_retries=1)
+        client = make_client(handler, max_attempts=1)
         with pytest.raises(ExchangeResponseError) as excinfo:
             await client.get_balance()
         assert excinfo.value.code is None
@@ -1476,7 +1476,7 @@ class TestErrorHandling:
             calls["n"] += 1
             return httpx.Response(429, headers={"Retry-After": "0"})
 
-        client = make_client(handler, max_retries=3)
+        client = make_client(handler, max_attempts=3)
         client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
 
         with pytest.raises(ExchangeRateLimitError):
@@ -1495,7 +1495,7 @@ class TestErrorHandling:
             return ok({"symbol": "BTC-USDT", "lastPrice": "100000",
                        "volume": "1", "priceChangePercent": "0"})
 
-        client = make_client(handler, max_retries=3)
+        client = make_client(handler, max_attempts=3)
         client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
 
         ticker = await client.get_ticker("BTC-USDT")
@@ -1507,7 +1507,7 @@ class TestErrorHandling:
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, text="не json")
 
-        client = make_client(handler, max_retries=1)
+        client = make_client(handler, max_attempts=1)
         with pytest.raises(ExchangeResponseError, match="JSON"):
             await client.get_ticker("BTC-USDT")
         await client.close()
@@ -1516,7 +1516,7 @@ class TestErrorHandling:
         def handler(request: httpx.Request) -> httpx.Response:
             raise httpx.TimeoutException("timeout")
 
-        client = make_client(handler, max_retries=2)
+        client = make_client(handler, max_attempts=2)
         client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
 
         with pytest.raises(ExchangeUnavailableError, match="вовремя"):
@@ -1526,58 +1526,58 @@ class TestErrorHandling:
 
 class TestPerCallRetryOverride:
     """Раздел 8 ТЗ: путь подтверждения («Да») держит Redis-лок — обычный
-    повтор клиента (по умолчанию max_retries=3) там только удлиняет
+    повтор клиента (по умолчанию max_attempts=3) там только удлиняет
     удержание лока. get_ticker/get_balance/get_symbols принимают
-    max_retries за вызов, не трогая дефолт клиента для остальных
+    max_attempts за вызов, не трогая дефолт клиента для остальных
     потребителей (сканер и т.п.), которые его не передают."""
 
-    async def test_get_ticker_max_retries_override_does_not_retry(self) -> None:
+    async def test_get_ticker_max_attempts_override_does_not_retry(self) -> None:
         calls = {"n": 0}
 
         def handler(request: httpx.Request) -> httpx.Response:
             calls["n"] += 1
             raise httpx.TimeoutException("timeout")
 
-        client = make_client(handler, max_retries=3)
+        client = make_client(handler, max_attempts=3)
         client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
 
         with pytest.raises(ExchangeUnavailableError):
-            await client.get_ticker("BTC-USDT", max_retries=1)
+            await client.get_ticker("BTC-USDT", max_attempts=1)
         assert calls["n"] == 1
         await client.close()
 
-    async def test_get_balance_max_retries_override_does_not_retry(self) -> None:
+    async def test_get_balance_max_attempts_override_does_not_retry(self) -> None:
         calls = {"n": 0}
 
         def handler(request: httpx.Request) -> httpx.Response:
             calls["n"] += 1
             raise httpx.TimeoutException("timeout")
 
-        client = make_client(handler, max_retries=3)
+        client = make_client(handler, max_attempts=3)
         client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
 
         with pytest.raises(ExchangeUnavailableError):
-            await client.get_balance(max_retries=1)
+            await client.get_balance(max_attempts=1)
         assert calls["n"] == 1
         await client.close()
 
-    async def test_get_symbols_max_retries_override_does_not_retry(self) -> None:
+    async def test_get_symbols_max_attempts_override_does_not_retry(self) -> None:
         calls = {"n": 0}
 
         def handler(request: httpx.Request) -> httpx.Response:
             calls["n"] += 1
             raise httpx.TimeoutException("timeout")
 
-        client = make_client(handler, max_retries=3)
+        client = make_client(handler, max_attempts=3)
         client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
 
         with pytest.raises(ExchangeUnavailableError):
-            await client.get_symbols(max_retries=1)
+            await client.get_symbols(max_attempts=1)
         assert calls["n"] == 1
         await client.close()
 
     async def test_get_ticker_without_override_keeps_client_default(self) -> None:
-        """Без max_retries — старое поведение не меняется (остальные
+        """Без max_attempts — старое поведение не меняется (остальные
         потребители клиента, например сканер, ничего не передают)."""
         calls = {"n": 0}
 
@@ -1585,12 +1585,88 @@ class TestPerCallRetryOverride:
             calls["n"] += 1
             raise httpx.TimeoutException("timeout")
 
-        client = make_client(handler, max_retries=3)
+        client = make_client(handler, max_attempts=3)
         client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
 
         with pytest.raises(ExchangeUnavailableError):
             await client.get_ticker("BTC-USDT")
         assert calls["n"] == 3
+        await client.close()
+
+
+class TestMaxAttemptsBounds:
+    """23.10.2026: max_attempts — число попыток (1 = одна), не повторов.
+    При 0 цикл попыток не выполнялся: запрос не уходил, наружу —
+    AssertionError (при python -O — TypeError от raise None). Теперь
+    ValueError до любого HTTP и до троттлинга."""
+
+    @pytest.mark.parametrize("bad", [0, -1])
+    def test_constructor_rejects_less_than_one(self, bad: int) -> None:
+        with pytest.raises(ValueError, match="max_attempts"):
+            BingXClient(max_attempts=bad)
+
+    @pytest.mark.parametrize("method", ["GET", "POST", "DELETE"])
+    @pytest.mark.parametrize("bad", [0, -1])
+    async def test_call_rejects_less_than_one_without_http(self, bad: int, method: str) -> None:
+        calls = {"n": 0, "throttle": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            return ok({})
+
+        client = make_client(handler, max_attempts=3)
+
+        async def throttle(*args: object, **kwargs: object) -> None:
+            calls["throttle"] += 1
+
+        client._maybe_throttle = throttle  # type: ignore[method-assign]
+        with pytest.raises(ValueError, match="max_attempts"):
+            await client._request(
+                "/openApi/swap/v2/trade/order", {"symbol": "XRP-USDT"}, signed=True,
+                method=method, max_attempts=bad,
+            )
+        assert calls == {"n": 0, "throttle": 0}
+        await client.close()
+
+    async def test_public_getter_rejects_zero_without_http(self) -> None:
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            return ok({})
+
+        client = make_client(handler)
+        with pytest.raises(ValueError, match="max_attempts"):
+            await client.get_open_orders("XRP-USDT", max_attempts=0)
+        assert calls["n"] == 0
+        await client.close()
+
+    @pytest.mark.parametrize("attempts", [1, 2])
+    async def test_attempts_count_is_exact(self, attempts: int) -> None:
+        """1 — ровно одна попытка, 2 — ровно две: число попыток, не повторов."""
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            raise httpx.TimeoutException("timeout")
+
+        client = make_client(handler, max_attempts=3)
+        client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
+        with pytest.raises(ExchangeUnavailableError):
+            await client.get_open_orders("XRP-USDT", max_attempts=attempts)
+        assert calls["n"] == attempts
+        await client.close()
+
+    async def test_one_attempt_success(self) -> None:
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            return ok({"orders": []})
+
+        client = make_client(handler)
+        assert await client.get_open_orders("XRP-USDT", max_attempts=1) == []
+        assert calls["n"] == 1
         await client.close()
 
 
@@ -1624,7 +1700,7 @@ class TestGetOrderFill:
             return ok({"order": _live_entry()})
 
         client = make_client(handler)
-        fill = await client.get_order_fill("LINK-USDT", LINK_ENTRY_CID, max_retries=1)
+        fill = await client.get_order_fill("LINK-USDT", LINK_ENTRY_CID, max_attempts=1)
 
         assert fill.order_id == "2104122757776154624"
         assert fill.client_order_id == "tj209u1e"  # Р1: эхо биржи строчными
@@ -1680,17 +1756,17 @@ class TestGetOrderFill:
         assert fill.order_id == "777"
         await client.close()
 
-    async def test_max_retries_one_does_not_retry(self) -> None:
+    async def test_max_attempts_one_does_not_retry(self) -> None:
         calls = {"n": 0}
 
         def handler(request: httpx.Request) -> httpx.Response:
             calls["n"] += 1
             raise httpx.TimeoutException("timeout")
 
-        client = make_client(handler, max_retries=3)
+        client = make_client(handler, max_attempts=3)
         client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
         with pytest.raises(ExchangeUnavailableError):
-            await client.get_order_fill("LINK-USDT", LINK_ENTRY_CID, max_retries=1)
+            await client.get_order_fill("LINK-USDT", LINK_ENTRY_CID, max_attempts=1)
         assert calls["n"] == 1
         await client.close()
 
@@ -1732,17 +1808,17 @@ class TestOrderFillNotFilledLiveForm:
 
 
 class TestGetOpenOrdersMaxRetries:
-    async def test_max_retries_one_does_not_retry(self) -> None:
+    async def test_max_attempts_one_does_not_retry(self) -> None:
         calls = {"n": 0}
 
         def handler(request: httpx.Request) -> httpx.Response:
             calls["n"] += 1
             raise httpx.TimeoutException("timeout")
 
-        client = make_client(handler, max_retries=3)
+        client = make_client(handler, max_attempts=3)
         client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
         with pytest.raises(ExchangeUnavailableError):
-            await client.get_open_orders("BTC-USDT", max_retries=1)
+            await client.get_open_orders("BTC-USDT", max_attempts=1)
         assert calls["n"] == 1
         await client.close()
 
@@ -1851,7 +1927,7 @@ class TestPlaceConditionalOrder:
             calls["n"] += 1
             raise httpx.TimeoutException("timeout")
 
-        client = make_client(handler, max_retries=3)
+        client = make_client(handler, max_attempts=3)
         client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
         with pytest.raises(ExchangeUnavailableError):
             await client.place_conditional_order(
@@ -2307,7 +2383,7 @@ class TestCancelOrder:
             calls["n"] += 1
             raise httpx.TimeoutException("timeout")
 
-        client = make_client(handler, max_retries=3)
+        client = make_client(handler, max_attempts=3)
         client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
         with pytest.raises(ExchangeUnavailableError):
             await client.cancel_order("XRP-USDT", "1")
@@ -2329,7 +2405,7 @@ def _ticking_clock(step: float):  # type: ignore[no-untyped-def]
 class TestRetrySigningAndNoOrderRepeat:
     """08.10.2026: подпись и timestamp — заново на каждую попытку (прод, 2×
     «109400 timestamp is invalid» после таймаута позиций); повторяет клиент
-    только GET — POST/DELETE ровно один раз при любом max_retries."""
+    только GET — POST/DELETE ровно один раз при любом max_attempts."""
 
     @staticmethod
     def _signed_ok(client: BingXClient, request: httpx.Request) -> bool:
@@ -2347,7 +2423,7 @@ class TestRetrySigningAndNoOrderRepeat:
                 raise httpx.TimeoutException("timeout")
             return ok([])
 
-        client = make_client(handler, max_retries=3)
+        client = make_client(handler, max_attempts=3)
         client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
         assert await client.get_positions() == []
         assert len(seen) == 2
@@ -2366,7 +2442,7 @@ class TestRetrySigningAndNoOrderRepeat:
             seen.append(request)
             return httpx.Response(502) if len(seen) == 1 else ok({"orders": []})
 
-        client = make_client(handler, max_retries=3)
+        client = make_client(handler, max_attempts=3)
         client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
         assert await client.get_open_orders("XRP-USDT") == []
         stamps = [dict(httpx.QueryParams(r.url.query))["timestamp"] for r in seen]
@@ -2406,15 +2482,15 @@ class TestRetrySigningAndNoOrderRepeat:
                 return httpx.Response(502)
             return httpx.Response(200, json={"code": 100410, "msg": "rate limit", "data": {}})
 
-        client = make_client(handler, max_retries=3)
+        client = make_client(handler, max_attempts=3)
         client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
         with pytest.raises((ExchangeUnavailableError, ExchangeRateLimitError)):
             await call(client)
         assert calls["n"] == 1, name
         await client.close()
 
-    async def test_post_ignores_explicit_max_retries(self) -> None:
-        """Даже явный max_retries=3 в _request не повторяет POST — правило в
+    async def test_post_ignores_explicit_max_attempts(self) -> None:
+        """Даже явный max_attempts=3 в _request не повторяет POST — правило в
         транспорте, а не на совести каждого метода."""
         calls = {"n": 0}
 
@@ -2422,12 +2498,12 @@ class TestRetrySigningAndNoOrderRepeat:
             calls["n"] += 1
             raise httpx.TimeoutException("timeout")
 
-        client = make_client(handler, max_retries=3)
+        client = make_client(handler, max_attempts=3)
         client._sleep = lambda seconds: _noop()  # type: ignore[assignment]
         with pytest.raises(ExchangeUnavailableError):
             await client._request(
                 "/openApi/swap/v2/trade/order", {"symbol": "XRP-USDT"}, signed=True,
-                method="POST", max_retries=3,
+                method="POST", max_attempts=3,
             )
         assert calls["n"] == 1
         await client.close()

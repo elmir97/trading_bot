@@ -374,7 +374,7 @@ class _Pass:
             return Seen.STANDING
         try:
             fill = await client.get_order_fill(row.symbol, row.client_order_id or "",
-                                               max_retries=1)
+                                               max_attempts=1)
         except ExchangeError as exc:
             if old:
                 return self._manual(row, log, f"по cid: {type(exc).__name__} {exc.code or ''}")
@@ -457,7 +457,7 @@ class _Pass:
         start = row.created_at - HISTORY_BEFORE
         end = max(min(self.now, row.created_at + HISTORY_AFTER), start + timedelta(seconds=1))
         try:
-            history = await client.get_all_orders(row.symbol, start, end, max_retries=1)
+            history = await client.get_all_orders(row.symbol, start, end, max_attempts=1)
         except (ExchangeError, ValueError) as exc:
             logger.info("Строка действия: история не получена",
                         extra={**self.log, "execution_order_id": row.id,

@@ -518,7 +518,7 @@ class PositionActionService:
             if attempt:
                 await self._delay()
             try:
-                fill = await client.get_order_fill(action.symbol, cid, max_retries=1)
+                fill = await client.get_order_fill(action.symbol, cid, max_attempts=1)
             except ExchangeError as exc:
                 logger.info("Закрытие не подтверждено по cid",
                             extra={**log, "attempt": attempt + 1, **readback_failure(error=exc)})

@@ -114,21 +114,21 @@ class MarketDataService:
         now = datetime.now(UTC)
         return [c for c in candles if c.is_closed(now)]
 
-    async def get_symbols(self, *, max_retries: int | None = None) -> list[SymbolInfo]:
-        """max_retries — см. ExchangeClient.get_ticker. Не входит в ключ
+    async def get_symbols(self, *, max_attempts: int | None = None) -> list[SymbolInfo]:
+        """max_attempts — см. ExchangeClient.get_ticker. Не входит в ключ
         кэша: число повторов не меняет полученное значение, только то, как
         быстро его достали, а промах по кэшу и так бьёт по сети не чаще,
         чем раз в TTL_SYMBOLS."""
         return await self._cache.get_or_fetch(
             f"symbols:{self._client.name}",
             TTL_SYMBOLS,
-            lambda: self._client.get_symbols(max_retries=max_retries),
+            lambda: self._client.get_symbols(max_attempts=max_attempts),
         )
 
     async def get_symbol_info(
-        self, symbol: str, *, max_retries: int | None = None
+        self, symbol: str, *, max_attempts: int | None = None
     ) -> SymbolInfo | None:
-        for info in await self.get_symbols(max_retries=max_retries):
+        for info in await self.get_symbols(max_attempts=max_attempts):
             if info.symbol == symbol:
                 return info
         return None

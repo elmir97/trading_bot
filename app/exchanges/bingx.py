@@ -145,6 +145,11 @@ class _RateLimitState:
     expires_at: float
 
 
+def _check_attempts(max_attempts: int) -> None:
+    if max_attempts < 1:
+        raise ValueError(f"max_attempts должен быть >= 1, получено {max_attempts}")
+
+
 def _to_decimal(value: Any, field: str) -> Decimal:
     """Числа биржи приходят строками — так и разбираем, минуя float.
 
@@ -363,7 +368,7 @@ class BingXClient(ExchangeClient):
         base_url: str = "https://open-api.bingx.com",
         recv_window: int = 5000,
         timeout: float = 10.0,
-        max_retries: int = 3,
+        max_attempts: int = 3,
         client: httpx.AsyncClient | None = None,
         mode: ExchangeKeyMode = ExchangeKeyMode.LIVE,
         rate_limit_threshold: int = 20,
@@ -375,7 +380,11 @@ class BingXClient(ExchangeClient):
         self._api_secret = api_secret
         self._base_url = base_url.rstrip("/")
         self._recv_window = recv_window
-        self._max_retries = max_retries
+        # max_attempts — число попыток GET (1 = одна), не повторов.
+        # 23.10.2026: при 0 цикл не выполнялся и запрос не уходил вовсе —
+        # падать внятно здесь, а не AssertionError после «попыток».
+        _check_attempts(max_attempts)
+        self._max_attempts = max_attempts
         self._rate_limit_threshold = rate_limit_threshold
         self._private_rate_limit_threshold = private_rate_limit_threshold
         self._rate_limit_throttle_enabled = rate_limit_throttle_enabled
@@ -466,7 +475,7 @@ class BingXClient(ExchangeClient):
         *,
         signed: bool = False,
         method: str = "GET",
-        max_retries: int | None = None,
+        max_attempts: int | None = None,
     ) -> Any:
         params = params or {}
 
@@ -480,19 +489,21 @@ class BingXClient(ExchangeClient):
             raise ValueError(f"Неподдерживаемый метод: {method}")
         # 08.10.2026: повторяет клиент только чтение (GET). POST и DELETE —
         # ордера, плечо, режим маржи, отмена — ровно одна попытка при любом
-        # max_retries: после обрыва исход решает вызывающий код (поиск по
+        # max_attempts: после обрыва исход решает вызывающий код (поиск по
         # clientOrderId, чтение openOrders/плеча), иначе повтор мог бы
         # выставить второй ордер.
+        if max_attempts is not None:
+            _check_attempts(max_attempts)
         if method == "GET":
-            retries = max_retries if max_retries is not None else self._max_retries
+            attempts = max_attempts if max_attempts is not None else self._max_attempts
         else:
-            retries = 1
+            attempts = 1
 
         await self._maybe_throttle(method, path, signed=signed)
 
         last_error: Exception | None = None
 
-        for attempt in range(1, retries + 1):
+        for attempt in range(1, attempts + 1):
             # Подпись и timestamp — заново на каждую попытку (08.10.2026): строка,
             # собранная один раз до цикла, после таймаута и паузы уходила со
             # старым timestamp — BingX отвечал 109400 «timestamp is invalid».
@@ -536,7 +547,7 @@ class BingXClient(ExchangeClient):
                         "BingX временно недоступен", extra={"path": path}
                     )
 
-            if attempt < retries:
+            if attempt < attempts:
                 # Экспоненциальная пауза: при перегрузке биржи частые
                 # повторы только усугубляют ситуацию.
                 delay = self._backoff(last_error, attempt)
@@ -683,10 +694,10 @@ class BingXClient(ExchangeClient):
 
     # --- Публичные данные --------------------------------------------------
 
-    async def get_ticker(self, symbol: str, *, max_retries: int | None = None) -> Ticker:
+    async def get_ticker(self, symbol: str, *, max_attempts: int | None = None) -> Ticker:
         """Живая форма (29.09, live и demo): data — объект, lastPrice —
         строка. Пустой ответ или нет lastPrice — ошибка, не цена 0."""
-        data = await self._request(QUOTE_TICKER, {"symbol": symbol}, max_retries=max_retries)
+        data = await self._request(QUOTE_TICKER, {"symbol": symbol}, max_attempts=max_attempts)
         if isinstance(data, list):
             data = data[0] if len(data) == 1 else None
         if not isinstance(data, dict):
@@ -768,8 +779,8 @@ class BingXClient(ExchangeClient):
             close_time=close_time,
         )
 
-    async def get_symbols(self, *, max_retries: int | None = None) -> list[SymbolInfo]:
-        data = await self._request(QUOTE_CONTRACTS, max_retries=max_retries)
+    async def get_symbols(self, *, max_attempts: int | None = None) -> list[SymbolInfo]:
+        data = await self._request(QUOTE_CONTRACTS, max_attempts=max_attempts)
         if not isinstance(data, list):
             raise ExchangeResponseError("Ожидался список контрактов")
 
@@ -862,9 +873,9 @@ class BingXClient(ExchangeClient):
 
     # --- Приватные данные --------------------------------------------------
 
-    async def get_balance(self, *, max_retries: int | None = None) -> Balance:
+    async def get_balance(self, *, max_attempts: int | None = None) -> Balance:
         expected_asset = _QUOTE_ASSET_BY_MODE[self._mode]
-        data = await self._request(USER_BALANCE, signed=True, max_retries=max_retries)
+        data = await self._request(USER_BALANCE, signed=True, max_attempts=max_attempts)
         if isinstance(data, list):
             # Боевая форма ответа (проверено по логам, не по документации,
             # раздел 16 ТЗ): список записей по активам, у каждой уже плоский
@@ -903,7 +914,7 @@ class BingXClient(ExchangeClient):
             equity=_to_decimal(data.get("equity"), "equity"),
         )
 
-    async def get_positions(self, *, max_retries: int | None = None) -> list[Position]:
+    async def get_positions(self, *, max_attempts: int | None = None) -> list[Position]:
         """Шаг 15.5.4а: разбор строгий — по этому чтению гвард
         EXCHANGE_POSITION_EXISTS решает, пускать ли вход.
 
@@ -913,7 +924,7 @@ class BingXClient(ExchangeClient):
         положительная: сторона только из positionSide. positionSide=BOTH
         (one-way) живьём не снят — UnsupportedPositionMode, не догадка по
         знаку."""
-        data = await self._request(USER_POSITIONS, signed=True, max_retries=max_retries)
+        data = await self._request(USER_POSITIONS, signed=True, max_attempts=max_attempts)
         if not isinstance(data, list):
             raise ExchangeResponseError(
                 f"Ответ positions — не список: {type(data).__name__}"
@@ -1064,7 +1075,7 @@ class BingXClient(ExchangeClient):
 
     # --- Торговые методы (этап 15.2) ----------------------------------------
     #
-    # Всё, что размещает или меняет реальные ордера, идёт с retries=1:
+    # Всё, что размещает или меняет реальные ордера, идёт с одной попыткой:
     # автоматический повтор на таймауте здесь недопустим — раздел 8 ТЗ
     # прямо запрещает повторную отправку без предварительной сверки по
     # client_order_id, а транспортный retry этой сверки не делает. Чтение
@@ -1072,18 +1083,18 @@ class BingXClient(ExchangeClient):
     # обычный retry сохраняет.
 
     async def get_leverage(
-        self, symbol: str, *, max_retries: int | None = None
+        self, symbol: str, *, max_attempts: int | None = None
     ) -> LeverageInfo:
         """Раздел 16 ТЗ, шаг 15.5.1: GET на тот же путь, что и set_leverage
         ниже — чтение, не изменение состояния, поэтому обычный retry
-        (max_retries=None по умолчанию), а не max_retries=1, как у POST-
+        (max_attempts=None по умолчанию), а не max_attempts=1, как у POST-
         методов этого блока. Поля без дефолтов: если maxLongLeverage/
         maxShortLeverage/longLeverage/shortLeverage нет в ответе —
         ExchangeResponseError, не подставленное число (раздел 16: живой
         ответ /quote/contracts вообще не отдаёт максимум плеча — молчаливый
         дефолт по этой же причине убран у SymbolInfo)."""
         data = await self._request(
-            TRADE_LEVERAGE, {"symbol": symbol}, signed=True, max_retries=max_retries
+            TRADE_LEVERAGE, {"symbol": symbol}, signed=True, max_attempts=max_attempts
         )
         if not isinstance(data, dict):
             raise ExchangeResponseError("Ожидался объект с данными о плече")
@@ -1101,14 +1112,14 @@ class BingXClient(ExchangeClient):
             max_short_leverage=int(data["maxShortLeverage"]),
         )
 
-    async def get_position_mode(self, *, max_retries: int | None = None) -> bool:
+    async def get_position_mode(self, *, max_attempts: int | None = None) -> bool:
         """Раздел 16 ТЗ, шаг 15.5.1: GET POSITION_SIDE_DUAL (v1 — см.
         комментарий у константы). Чтение, обычный retry по умолчанию.
         dualSidePosition — под data (проверено живым запросом), значит
         _request()/_parse() уже развернули её сюда; отсутствие поля —
         явная ошибка, не молчаливый дефолт (тот же принцип, что и в
         get_leverage выше)."""
-        data = await self._request(POSITION_SIDE_DUAL, signed=True, max_retries=max_retries)
+        data = await self._request(POSITION_SIDE_DUAL, signed=True, max_attempts=max_attempts)
         if not isinstance(data, dict) or "dualSidePosition" not in data:
             raise ExchangeResponseError(
                 f"В ответе {POSITION_SIDE_DUAL} нет поля dualSidePosition"
@@ -1116,13 +1127,13 @@ class BingXClient(ExchangeClient):
         return bool(data["dualSidePosition"])
 
     async def get_margin_type(
-        self, symbol: str, *, max_retries: int | None = None
+        self, symbol: str, *, max_attempts: int | None = None
     ) -> MarginType:
         """28.09: GET TRADE_MARGIN_TYPE, чтение, обычный retry. Строгий
         разбор: нет поля или незнакомое значение — ExchangeResponseError,
         не подставленное «ISOLATED»."""
         data = await self._request(
-            TRADE_MARGIN_TYPE, {"symbol": symbol}, signed=True, max_retries=max_retries
+            TRADE_MARGIN_TYPE, {"symbol": symbol}, signed=True, max_attempts=max_attempts
         )
         raw = data.get("marginType") if isinstance(data, dict) else None
         if raw not in tuple(MarginType):
@@ -1139,13 +1150,13 @@ class BingXClient(ExchangeClient):
             "leverage": leverage,
             "side": position_side or "BOTH",
         }
-        # retries=1: это торговый вызов, меняющий состояние позиции перед
+        # Одна попытка: это торговый вызов, меняющий состояние позиции перед
         # входом — та же логика, что и у place_market_order ниже (раздел 8
         # ТЗ, см. докстринг блока "Торговые методы" выше). До этой правки
         # параметр не передавался, и вызов молча ретраился 3 раза — расходясь
         # с собственным докстрингом файла.
         data = await self._request(
-            TRADE_LEVERAGE, params, signed=True, method="POST", max_retries=1
+            TRADE_LEVERAGE, params, signed=True, method="POST", max_attempts=1
         )
         return int(data.get("leverage", leverage))
 
@@ -1180,7 +1191,7 @@ class BingXClient(ExchangeClient):
             params["stopLoss"] = _build_tp_sl(OrderType.STOP_MARKET, stop_loss)
 
         data = await self._request(
-            TRADE_ORDER, params, signed=True, method="POST", max_retries=1
+            TRADE_ORDER, params, signed=True, method="POST", max_attempts=1
         )
         order = data.get("order", data) if isinstance(data, dict) else {}
         return self._parse_order(order)
@@ -1201,7 +1212,7 @@ class BingXClient(ExchangeClient):
         /trade/order, что и у маркета: type — условный, closePosition=true и
         quantity (обязателен — без него 109400 «parameter quantity or
         stopPrice is must», разведка 02.10; при срабатывании закрывается весь
-        остаток, исполнено 30 при quantity 40). max_retries=1 — торговый
+        остаток, исполнено 30 при quantity 40). max_attempts=1 — торговый
         вызов, повтор после обрыва мог бы выставить второй ордер."""
         if order_type not in (OrderType.STOP_MARKET.value, OrderType.TAKE_PROFIT_MARKET.value):
             raise ValueError(f"Не условный тип ордера: {order_type!r}")
@@ -1223,7 +1234,7 @@ class BingXClient(ExchangeClient):
         if close_position:
             params["closePosition"] = "true"
         data = await self._request(
-            TRADE_ORDER, params, signed=True, method="POST", max_retries=1
+            TRADE_ORDER, params, signed=True, method="POST", max_attempts=1
         )
         order = data.get("order", data) if isinstance(data, dict) else {}
         return self._parse_order(order)
@@ -1232,11 +1243,11 @@ class BingXClient(ExchangeClient):
         """POST TRADE_MARGIN_TYPE (Р1, живьём 05.10): code 0, data = {symbol,
         marginType} — новый режим; повтор того же режима — тоже code 0. При
         позиции/ордерах по символу — 104103 (Р3а), ExchangeResponseError с
-        кодом. max_retries=1 — меняет состояние счёта перед входом. Ответ не
+        кодом. max_attempts=1 — меняет состояние счёта перед входом. Ответ не
         доказательство: вызывающий сверяет get_margin_type."""
         data = await self._request(
             TRADE_MARGIN_TYPE, {"symbol": symbol, "marginType": margin_type.value},
-            signed=True, method="POST", max_retries=1,
+            signed=True, method="POST", max_attempts=1,
         )
         raw = data.get("marginType") if isinstance(data, dict) else None
         if raw not in tuple(MarginType):
@@ -1261,7 +1272,7 @@ class BingXClient(ExchangeClient):
         маркета; вложенные stopLoss/takeProfit — той же JSON-строкой.
         Постановка — status PENDING; пересекающий рынок лимит исполняется
         сразу (FILLED). Срок жизни ордера держит бот — у BingX его нет.
-        max_retries=1: повтор после обрыва мог бы выставить второй ордер."""
+        max_attempts=1: повтор после обрыва мог бы выставить второй ордер."""
         if not 1 <= len(client_order_id) <= 40:
             raise ValueError(
                 "clientOrderID у BingX — 1-40 символов, получено "
@@ -1284,7 +1295,7 @@ class BingXClient(ExchangeClient):
         if stop_loss is not None:
             params["stopLoss"] = _build_tp_sl(OrderType.STOP_MARKET, stop_loss)
         data = await self._request(
-            TRADE_ORDER, params, signed=True, method="POST", max_retries=1
+            TRADE_ORDER, params, signed=True, method="POST", max_attempts=1
         )
         order = data.get("order", data) if isinstance(data, dict) else {}
         return self._parse_order(order)
@@ -1314,13 +1325,13 @@ class BingXClient(ExchangeClient):
         data.order со status "CANCELLED"; повторная отмена → code 109400 и
         msg «order not exist» — OrderNotFoundError (по тексту: тот же код у
         других ошибок). Ответ — не доказательство (см. CancelResult).
-        max_retries=1 — как у остальных торговых вызовов."""
+        max_attempts=1 — как у остальных торговых вызовов."""
         return await self._cancel({"symbol": symbol, "orderId": str(order_id)}, str(order_id))
 
     async def _cancel(self, params: dict[str, Any], fallback_id: str) -> CancelResult:
         try:
             data = await self._request(
-                TRADE_ORDER, params, signed=True, method="DELETE", max_retries=1,
+                TRADE_ORDER, params, signed=True, method="DELETE", max_attempts=1,
             )
         except ExchangeResponseError as exc:
             if exc.code == ORDER_NOT_EXIST_CANCEL_CODE and "not exist" in str(exc).lower():
@@ -1336,13 +1347,13 @@ class BingXClient(ExchangeClient):
         )
 
     async def get_order_fill(
-        self, symbol: str, client_order_id: str, *, max_retries: int | None = None
+        self, symbol: str, client_order_id: str, *, max_attempts: int | None = None
     ) -> OrderFill:
         """Шаг 15.5.3: тот же GET, что у get_order, но строгий разбор
         (_parse_order_fill). Форма ответа снята живьём (GET #37, демо 27.09):
         поиск по clientOrderID от регистра не зависит, в ответе cid строчными."""
         params = {"symbol": symbol, "clientOrderID": client_order_id}
-        data = await self._request(TRADE_ORDER, params, signed=True, max_retries=max_retries)
+        data = await self._request(TRADE_ORDER, params, signed=True, max_attempts=max_attempts)
         order = data.get("order", data) if isinstance(data, dict) else None
         if not isinstance(order, dict):
             raise ExchangeResponseError("Ожидался объект ордера в data.order")
@@ -1413,7 +1424,7 @@ class BingXClient(ExchangeClient):
         )
 
     async def get_all_orders(
-        self, symbol: str, start: datetime, end: datetime, *, max_retries: int | None = None
+        self, symbol: str, start: datetime, end: datetime, *, max_attempts: int | None = None
     ) -> list[HistoryOrder]:
         """Шаг 15.6: ордера символа за окно не длиннее 7 дней, включая
         исполненные дочерние ордера сработавших стопов/тейков. Чтение —
@@ -1426,7 +1437,7 @@ class BingXClient(ExchangeClient):
             "limit": 500,
         }
         data = await self._request(
-            TRADE_ALL_ORDERS, params, signed=True, max_retries=max_retries
+            TRADE_ALL_ORDERS, params, signed=True, max_attempts=max_attempts
         )
         orders = data.get("orders") if isinstance(data, dict) else None
         if not isinstance(orders, list):
@@ -1434,11 +1445,11 @@ class BingXClient(ExchangeClient):
         return [_parse_history_order(item) for item in orders]
 
     async def get_open_orders(
-        self, symbol: str | None = None, *, max_retries: int | None = None
+        self, symbol: str | None = None, *, max_attempts: int | None = None
     ) -> list[OpenOrder]:
         params = {"symbol": symbol} if symbol else {}
         data = await self._request(
-            TRADE_OPEN_ORDERS, params, signed=True, max_retries=max_retries
+            TRADE_OPEN_ORDERS, params, signed=True, max_attempts=max_attempts
         )
         orders = data.get("orders", []) if isinstance(data, dict) else data
         if not isinstance(orders, list):

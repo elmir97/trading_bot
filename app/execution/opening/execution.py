@@ -413,7 +413,7 @@ class Runner:
                 await self._sleep(delay)
             try:
                 fill = await self.client.get_order_fill(
-                    self.opening.symbol, self.cid("e"), max_retries=1
+                    self.opening.symbol, self.cid("e"), max_attempts=1
                 )
                 not_found = False
             except ExchangeError as exc:
@@ -486,7 +486,7 @@ class Runner:
         return max(candidates, key=lambda o: (o.close_position, o.quantity))
 
     async def _visible_orders(self) -> list[OpenOrder]:
-        orders = await self.client.get_open_orders(self.opening.symbol, max_retries=1)
+        orders = await self.client.get_open_orders(self.opening.symbol, max_attempts=1)
         if not self._hidden:
             return orders
         return [o for o in orders if o.client_order_id.casefold() not in self._hidden]
@@ -499,7 +499,7 @@ class Runner:
             )
             return StopCheck.ABSENT, None
         try:
-            fill = await self.client.get_order_fill(self.opening.symbol, cid, max_retries=1)
+            fill = await self.client.get_order_fill(self.opening.symbol, cid, max_attempts=1)
         except ExchangeError as exc:
             if exc.code == ORDER_NOT_EXIST_CODE:
                 return StopCheck.ABSENT, None
@@ -515,7 +515,7 @@ class Runner:
         return StopCheck.UNKNOWN, fill.order_id
 
     async def position(self) -> Position | None:
-        positions = await self.client.get_positions(max_retries=1)
+        positions = await self.client.get_positions(max_attempts=1)
         return next(
             (p for p in positions if p.symbol == self.opening.symbol and p.side is self.side),
             None,
@@ -716,7 +716,7 @@ class Runner:
                 )
         await self._sleep(self.settings.exec_order_readback_delay_ms / 1000)
         live = {o.order_id for o in await self.client.get_open_orders(
-            self.opening.symbol, max_retries=1
+            self.opening.symbol, max_attempts=1
         )}
         left = [a for a in attached if a.order_id in live]
         for row in await self._rows(role):
@@ -911,7 +911,7 @@ class Runner:
             await self.session.commit()
         fill: OrderFill | None = None
         try:
-            fill = await self.client.get_order_fill(o.symbol, cid, max_retries=1)
+            fill = await self.client.get_order_fill(o.symbol, cid, max_attempts=1)
         except ExchangeError as exc:
             logger.info("Аварийное закрытие не прочитано по cid",
                         extra={**self._log(), **readback_failure(error=exc)})
@@ -949,7 +949,7 @@ class Runner:
                 await self._sleep(self.settings.exec_order_readback_delay_ms / 1000)
             try:
                 live = {o.order_id for o in await self.client.get_open_orders(
-                    self.opening.symbol, max_retries=1
+                    self.opening.symbol, max_attempts=1
                 )}
             except ExchangeError:
                 logger.warning("openOrders после аварийного закрытия не получены",
@@ -974,7 +974,7 @@ class Runner:
             return None
         try:
             fill = await self.client.get_order_fill(
-                self.opening.symbol, rows[-1].client_order_id or "", max_retries=1
+                self.opening.symbol, rows[-1].client_order_id or "", max_attempts=1
             )
         except ExchangeError as exc:
             logger.info("Закрытие не дочитано по cid",
