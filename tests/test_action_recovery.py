@@ -49,6 +49,7 @@ from app.execution.position_action_service import SUBMITTED_TEXT, PositionAction
 from app.market.cache import TTLCache
 from app.services.user_service import UserService
 from app.trading.enums import (
+    CancelSource,
     ExchangeKeyMode,
     OrderRole,
     OrderSide,
@@ -61,7 +62,15 @@ from app.trading.enums import (
 )
 from app.trading.journal import TradeJournal
 from tests.conftest import cleanup_user
-from tests.test_position_action_service import BE, ENTRY, OLD_STOP, PID, FakeExchange, _open_order
+from tests.test_position_action_service import (
+    BE,
+    ENTRY,
+    OLD_STOP,
+    PID,
+    FakeExchange,
+    _open_order,
+    _placed_stop,
+)
 
 pytestmark = pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="Нужен PostgreSQL")
 
@@ -301,6 +310,97 @@ async def test_close_sent_done_first_pass_journal_once(ctx) -> None:  # type: ig
 
     assert await ctx.recover(T0 + timedelta(minutes=1)) == 0   # больше нечего
     assert len(ctx.notes) == 1
+
+
+def _hist_at(oid: str, status: str, otype: str, updated: datetime) -> HistoryOrder:
+    return HistoryOrder(
+        order_id=oid, symbol="XRP-USDT", side="SELL", position_side="LONG",
+        order_type=otype, status=status, avg_price=D(0), executed_qty=D(0), fee=D(0),
+        realized_pnl=D(0), reduce_only=True, trigger_order_id=None, position_id=PID,
+        created_at=updated, updated_at=updated, client_order_id="",
+    )
+
+
+GONE_EARLIER, NOWHERE = "2105910661355200001", "2105910661355200002"
+
+
+async def _interrupted_full_close(c):  # type: ignore[no-untyped-def]
+    """Стоп позиции (стоит), стоп, снятый владельцем раньше, и строка без
+    ордера нигде; «Закрыть всё» прервано после POST."""
+    rows = [await _placed_stop(c, oid, PID) for oid in (OLD_STOP, GONE_EARLIER, NOWHERE)]
+    action, _ = await _confirm(c, fault="interrupt_action_after_post")
+    [close] = await _rows(c, action.id)
+    return rows, c.exchange.fills[close.client_order_id].order_id
+
+
+async def _refreshed(c, rows):  # type: ignore[no-untyped-def]
+    for r in rows:
+        await c.session.refresh(r)
+    return [(r.status, r.cancel_source) for r in rows]
+
+
+async def test_full_close_recovery_exchange_by_time_of_our_close(ctx) -> None:  # type: ignore[no-untyped-def]
+    """п.1б, путь B.9 (24.10): T — updateTime нашего закрытия по orderId
+    строки; стоп снят через +1 с — EXCHANGE, снятый за 139 с — NULL, нет
+    нигде при полном окне — CANCELLED/NULL. Окно — от создания самой ранней
+    строки минус минута (allOrders отбирает по созданию)."""
+    rows, close_oid = await _interrupted_full_close(ctx)
+    ctx.exchange.history = [
+        _hist_at(close_oid, "FILLED", "MARKET", T0),
+        _hist_at(OLD_STOP, "CANCELLED", "STOP_MARKET", T0 + timedelta(seconds=1)),
+        _hist_at(GONE_EARLIER, "CANCELLED", "STOP_MARKET", T0 - timedelta(seconds=139)),
+    ]
+    await ctx.recover(T0)
+    assert await _refreshed(ctx, rows) == [
+        (OrderStatus.CANCELLED, CancelSource.EXCHANGE),
+        (OrderStatus.CANCELLED, None),
+        (OrderStatus.CANCELLED, None),
+    ]
+    [(start, _end)] = [p for name, p in ctx.exchange.calls if name == "history"]
+    assert start <= min(r.created_at for r in rows) - timedelta(minutes=1)
+
+
+async def test_full_close_recovery_without_our_close_in_history_null(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Нашего закрытия в выдаче нет — T неизвестно: всем NULL, даже если
+    рядом чужой MARKET FILLED в ту же секунду."""
+    rows, _ = await _interrupted_full_close(ctx)
+    ctx.exchange.history = [
+        _hist_at("2106999999999999999", "FILLED", "MARKET", T0),
+        _hist_at(OLD_STOP, "CANCELLED", "STOP_MARKET", T0 + timedelta(seconds=1)),
+    ]
+    await ctx.recover(T0)
+    assert (await _refreshed(ctx, rows))[0] == (OrderStatus.CANCELLED, None)
+
+
+async def test_full_close_recovery_history_failure_leaves_rows(ctx) -> None:  # type: ignore[no-untyped-def]
+    """История не получена — «нет в истории» не доказать: строки не
+    трогаем (доберёт сверка), действие всё равно завершается."""
+    rows, _ = await _interrupted_full_close(ctx)
+    ctx.exchange.history_error = ExchangeResponseError("BingX: boom (код 1)", code=1)
+    await ctx.recover(T0)
+    assert {s for s, _ in await _refreshed(ctx, rows)} == {OrderStatus.SUBMITTED}
+    assert len(ctx.notes) == 1
+
+
+async def test_full_close_recovery_full_page_is_incomplete(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Выдача упёрлась в лимит 500 — неполная: найденное в истории решается
+    по ней, «нет нигде» строку не закрывает."""
+    from app.exchanges.base import ALL_ORDERS_LIMIT
+
+    rows, close_oid = await _interrupted_full_close(ctx)
+    filler = [_hist_at(str(8_000_000 + i), "CANCELLED", "STOP_MARKET", T0 - timedelta(hours=1))
+              for i in range(ALL_ORDERS_LIMIT - 2)]
+    ctx.exchange.history = [
+        _hist_at(close_oid, "FILLED", "MARKET", T0),
+        _hist_at(OLD_STOP, "CANCELLED", "STOP_MARKET", T0 + timedelta(seconds=1)),
+        *filler,
+    ]
+    await ctx.recover(T0)
+    assert await _refreshed(ctx, rows) == [
+        (OrderStatus.CANCELLED, CancelSource.EXCHANGE),
+        (OrderStatus.SUBMITTED, None),
+        (OrderStatus.SUBMITTED, None),
+    ]
 
 
 async def test_partial_close_sent_levels_after(ctx) -> None:  # type: ignore[no-untyped-def]

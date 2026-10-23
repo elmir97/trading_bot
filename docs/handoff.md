@@ -77,6 +77,21 @@ api, Mini App) — меняется только запись; (4) ORPHAN: си�
   времени создания — окно истории от `min(created_at)` проверяемых строк минус запас, не от закрытия; окно не помещается в лимиты
   (7 дней / 500 ордеров) — неполное: CANCELLED/NULL по ветке «нет в истории» не ставить. (3) **Известное ограничение (принято):**
   ручная отмена в ту же секунду, что и закрытие (в допуске [T − 1 с, T + 10 с]), получит EXCHANGE
+- **Очередь п.1 (коммит 1 из 3, 24.10): сверка стопов/тейков открытой позиции + EXCHANGE только по доказательству.** Без миграций.
+  **1б** — `settle(exchange_ids=…)`: умолчание `cancel_source` NULL. Пути: «Да» «Закрыть всё» — EXCHANGE ордерам из `inputs`
+  (openOrders перед POST под локом); B.9 (`_settle_after_close`) — история от `min(created_at)` строк и строки закрытия минус минута,
+  T по orderId строки CLOSE, история не получена / неполная — «нет нигде» не закрывает; аварийное закрытие открытия — ордерам,
+  виденным стоящими в этом проходе Runner (`_seen_standing`; скрытый s1 теперь NULL); сверка `_settle_trade` — T по последнему
+  выходу, «полное» только если окно сделки покрывает создание строк; `_settle_closed_trades` — окно от строк и входов, T по
+  последнему EXIT-fill журнала (`_closing_order_ids`), без orderId — NULL. Общие функции: `history_window`, `exchange_cancelled`,
+  `HistoryWindow.complete` (7 дней / `ALL_ORDERS_LIMIT` 500) в `app/execution/settle.py`; `HISTORY_LIMIT` переехал туда.
+  **1а** — `Reconciler._check_open_positions` (раз в `reconciler_stop_check_every`, один снимок openOrders на уровни и строки):
+  строки SUBMITTED/UNKNOWN с orderId при живой позиции счёта (сделка с позицией по trade_id/уведомлению; действия по positionId
+  живых позиций); без строк идущего действия (CARD/SUBMITTED), активного открытия, MANUAL_RECONCILE, REJECTED. Нет в снимке →
+  openOrders(symbol) + allOrders от создания строк: снят → CANCELLED/NULL; исполнен → FILLED, только если выход (сам ордер или
+  дочерний) уже в fills сделки или сделки нет; нет нигде при полном окне → `recon:gone:{row_id}` в Redis (TTL 3 × every ×
+  interval = 900 с), CANCELLED/NULL на второй проверке подряд; старая отметка не в счёт; ордер снова виден — отметка снимается.
+  Статус — через `settle()`. В чат ничего, INFO в лог. Правило в CLAUDE.md «Конвенции» дополнено
 
 **19.10.2026: прод — деплой B.9 + M9 `880aa9b` с миграцией `919ae8ad384e`, bot+api 07:14:36 UTC, каждый шаг по «да».** Прод =
 образ `trading_bot-bot:latest` **`5319b87e83c5`** (bot и api), код на диске `880aa9b` (md5 348/348, без `miniapp/`), статика `miniapp/` и

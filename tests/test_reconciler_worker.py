@@ -96,6 +96,11 @@ class LiveDemo:
         self.all_orders: dict[str, list[dict[str, Any]]] = {
             "SOL-USDT": live_items("allOrders SOL"),
         }
+        # 24.10: окно allOrders как у биржи — по времени СОЗДАНИЯ (time)
+        # ордера (разведка 23.10). Включается тестом: живые ответы 27.09
+        # старше окна «сейчас − 7 дней».
+        self.window_by_created = False
+        self.all_orders_windows: list[tuple[str, int, int]] = []
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         path, params = request.url.path, request.url.params
@@ -104,7 +109,12 @@ class LiveDemo:
             return _ok(self.positions)
         if path == "/openApi/swap/v2/trade/allOrders":
             assert params["symbol"] in self.all_orders, "история нужна только закрытым"
-            return _ok({"orders": self.all_orders[params["symbol"]]})
+            start, end = int(params["startTime"]), int(params["endTime"])
+            self.all_orders_windows.append((params["symbol"], start, end))
+            orders = self.all_orders[params["symbol"]]
+            if self.window_by_created:
+                orders = [o for o in orders if start <= int(o["time"]) <= end]
+            return _ok({"orders": orders})
         if path == "/openApi/swap/v2/trade/openOrders" and self.fail_open_orders:
             return httpx.Response(200, json={"code": 109400, "msg": "rejected", "data": {}})
         if path == "/openApi/swap/v2/trade/openOrders":
@@ -382,6 +392,9 @@ async def test_missing_stop_alarm_once(ctx) -> None:  # type: ignore[no-untyped-
     settings.reconciler_stop_check_every = 1
     await _seed_live(session, user.id)
     demo.link_open_orders = []
+    # п.1а: строк стопа/тейка нет в openOrders при живой позиции — сверка
+    # перечитывает историю символа (здесь их нет и в ней).
+    demo.all_orders["LINK-USDT"] = []
     bot = FakeBot()
 
     await _run_reconciler(settings, db, bot)
@@ -1551,10 +1564,15 @@ def test_recon_kinds_fit_outgoing_kind_column() -> None:
 XRP = "XRP-USDT"
 
 
-def _xrp_hist(oid: str, otype: str, status: str, trigger: str = "0") -> dict[str, Any]:
+def _xrp_hist(oid: str, otype: str, status: str, trigger: str = "0", *,
+              created: datetime | None = None, updated: datetime | None = None) -> dict[str, Any]:
     item = dict(live_items("allOrders SOL")[1])
     item.update(symbol=XRP, orderId=int(oid), type=otype, status=status,
                 triggerOrderId=int(trigger), stopPrice="1.3000", origQty="100")
+    if created is not None:
+        item["time"] = int(created.timestamp() * 1000)
+    if updated is not None:
+        item["updateTime"] = int(updated.timestamp() * 1000)
     return item
 
 
@@ -1611,26 +1629,108 @@ def _sweep_calls(demo: LiveDemo) -> list[str]:
 
 async def test_sweep_settles_closed_trade_rows_by_history(ctx) -> None:  # type: ignore[no-untyped-def]
     """Риск 3: сделка закрыта, строки остались SUBMITTED (биржа не успела
-    снять к моменту чтения). Следующий цикл: в истории CANCELLED → EXCHANGE;
+    снять к моменту чтения). Следующий цикл: в истории CANCELLED в допуске
+    от нашего закрытия → EXCHANGE; снят задолго до закрытия (руками) → NULL;
     нет ни в истории, ни в openOrders → CANCELLED без источника; REJECTED
     (старая строка Т4) обход не трогает."""
     settings, db, session, user, demo = ctx
     demo.positions = []
-    _, rows = await _closed_xrp_trade(session, user.id, [
+    trade, rows = await _closed_xrp_trade(session, user.id, [
         (OrderRole.STOP_LOSS, OrderStatus.SUBMITTED, "7001"),
         (OrderRole.TAKE_PROFIT, OrderStatus.UNKNOWN, "7002"),
         (OrderRole.STOP_LOSS, OrderStatus.REJECTED, "7003"),
+        (OrderRole.STOP_LOSS, OrderStatus.SUBMITTED, "7004"),
     ])
-    demo.all_orders[XRP] = [_xrp_hist("7001", "STOP_MARKET", "CANCELLED")]
+    closed = trade.closed_at
+    assert closed is not None
+    demo.all_orders[XRP] = [
+        _xrp_hist(f"9{user.id}12", "MARKET", "FILLED", updated=closed),
+        _xrp_hist("7001", "STOP_MARKET", "CANCELLED", updated=closed + timedelta(seconds=1)),
+        _xrp_hist("7004", "STOP_MARKET", "CANCELLED", updated=closed - timedelta(seconds=139)),
+    ]
 
     await _run_reconciler(settings, db, FakeBot())
 
     got = await _orders(db, [r.id for r in rows])
-    stop, take, rejected = (got[r.id] for r in rows)
+    stop, take, rejected, bridge = (got[r.id] for r in rows)
     assert (stop.status, stop.cancel_source) == (OrderStatus.CANCELLED, CancelSource.EXCHANGE)
     assert (take.status, take.cancel_source) == (OrderStatus.CANCELLED, None)
     assert rejected.status is OrderStatus.REJECTED and rejected.error_code == "NOT_FOUND"
+    assert (bridge.status, bridge.cancel_source) == (OrderStatus.CANCELLED, None)
     assert _sweep_calls(demo).count("/openApi/swap/v2/trade/allOrders") == 1
+
+
+async def test_sweep_without_our_closing_order_in_history_is_null(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Уточнение владельца 23.10 (1): T — updateTime НАШЕГО закрытия по
+    orderId из журнала. Его нет в выдаче — NULL, даже если рядом чужой
+    MARKET FILLED в ту же секунду."""
+    settings, db, session, user, demo = ctx
+    demo.positions = []
+    trade, [stop] = await _closed_xrp_trade(
+        session, user.id, [(OrderRole.STOP_LOSS, OrderStatus.SUBMITTED, "7011")]
+    )
+    closed = trade.closed_at
+    assert closed is not None
+    demo.all_orders[XRP] = [
+        _xrp_hist("7099", "MARKET", "FILLED", updated=closed),
+        _xrp_hist("7011", "STOP_MARKET", "CANCELLED", updated=closed + timedelta(seconds=1)),
+    ]
+
+    await _run_reconciler(settings, db, FakeBot())
+
+    got = (await _orders(db, [stop.id]))[stop.id]
+    assert (got.status, got.cancel_source) == (OrderStatus.CANCELLED, None)
+
+
+async def test_sweep_window_starts_at_row_creation_not_close(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Уточнение владельца 23.10 (2): allOrders отбирает по созданию ордера.
+    Стоп создан задолго до закрытия — окно от создания строки (минус запас)
+    его захватывает: в выдаче → EXCHANGE. Окно от закрытия его бы потеряло."""
+    settings, db, session, user, demo = ctx
+    demo.positions = []
+    demo.window_by_created = True
+    trade, [stop] = await _closed_xrp_trade(
+        session, user.id, [(OrderRole.STOP_LOSS, OrderStatus.SUBMITTED, "7021")],
+        age=timedelta(days=2),
+    )
+    closed = trade.closed_at
+    assert closed is not None
+    created = trade.opened_at + timedelta(seconds=30)
+    stop.created_at = created
+    trade.closed_at = closed = created + timedelta(days=1)
+    await session.commit()
+    demo.all_orders[XRP] = [
+        _xrp_hist(f"9{user.id}12", "MARKET", "FILLED", created=closed, updated=closed),
+        _xrp_hist("7021", "STOP_MARKET", "CANCELLED", created=created,
+                  updated=closed + timedelta(seconds=1)),
+    ]
+
+    await _run_reconciler(settings, db, FakeBot())
+
+    got = (await _orders(db, [stop.id]))[stop.id]
+    assert (got.status, got.cancel_source) == (OrderStatus.CANCELLED, CancelSource.EXCHANGE)
+    [(_symbol, start, _end)] = demo.all_orders_windows
+    assert start <= int(created.timestamp() * 1000) - 60_000
+
+
+async def test_sweep_full_page_is_incomplete(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Уточнение владельца 23.10 (2): выдача упёрлась в лимит 500 — окно
+    неполное, «нет в истории» строку не закрывает."""
+    from app.exchanges.base import ALL_ORDERS_LIMIT
+
+    settings, db, session, user, demo = ctx
+    demo.positions = []
+    _, [stop] = await _closed_xrp_trade(
+        session, user.id, [(OrderRole.STOP_LOSS, OrderStatus.SUBMITTED, "7031")]
+    )
+    demo.all_orders[XRP] = [
+        _xrp_hist(str(8_000_000 + i), "STOP_MARKET", "CANCELLED") for i in range(ALL_ORDERS_LIMIT)
+    ]
+
+    await _run_reconciler(settings, db, FakeBot())
+
+    got = (await _orders(db, [stop.id]))[stop.id]
+    assert got.status is OrderStatus.SUBMITTED and got.cancel_source is None
 
 
 async def test_sweep_fired_stop_by_child_is_filled(ctx) -> None:  # type: ignore[no-untyped-def]
@@ -1855,3 +1955,295 @@ async def test_fired_stop_filled_even_without_open_orders(ctx) -> None:  # type:
         )))
     by_oid = {r.exchange_order_id: r.status for r in rows}
     assert by_oid == {SOL_STOP: OrderStatus.FILLED, early: OrderStatus.SUBMITTED}
+
+
+# --- п.1а (24.10): стопы/тейки открытой позиции по openOrders и истории -------------------
+
+LINK_PID = "2104122757805514754"
+LINK_STOP_OPEN = live_items("openOrders LINK")[0]   # стоп; [1] — тейк
+
+
+def _link_hist(oid: str, otype: str, status: str, trigger: str = "0", *,
+               created: datetime | None = None) -> dict[str, Any]:
+    item = _xrp_hist(oid, otype, status, trigger, created=created)
+    item["symbol"] = "LINK-USDT"
+    return item
+
+
+async def _link_rows(db) -> tuple[ExecutionOrder, ExecutionOrder]:  # type: ignore[no-untyped-def]
+    rows = await _rows(db, "LINK-USDT")
+    return rows[OrderRole.STOP_LOSS], rows[OrderRole.TAKE_PROFIT]
+
+
+def _stop_gone(demo: LiveDemo) -> None:
+    """Владелец снял стоп LINK в BingX: в openOrders остался только тейк."""
+    demo.link_open_orders = [o for o in demo.link_open_orders if str(o["orderId"]) != LINK_STOP]
+
+
+async def _cycle(settings, db, redis=None) -> None:  # type: ignore[no-untyped-def]
+    """Новый Reconciler — первый цикл, проверка стопов в нём всегда."""
+    await _run_reconciler(settings, db, FakeBot(), redis)
+
+
+async def test_open_position_stop_cancelled_in_history_is_cancelled_null(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Позиция открыта, стоп снят руками: в истории CANCELLED → строка
+    CANCELLED без источника (кто снял — неизвестно). Тейк стоит — не тронут.
+    Окно истории — от создания строки минус минута."""
+    settings, db, session, user, demo = ctx
+    await _seed_live(session, user.id)
+    _stop_gone(demo)
+    demo.window_by_created = True
+    stop, _take = await _link_rows(db)
+    demo.all_orders["LINK-USDT"] = [
+        _link_hist(LINK_STOP, "STOP_MARKET", "CANCELLED", created=stop.created_at),
+    ]
+
+    await _cycle(settings, db)
+
+    stop, take = await _link_rows(db)
+    assert (stop.status, stop.cancel_source) == (OrderStatus.CANCELLED, None)
+    assert take.status is OrderStatus.SUBMITTED
+    [start] = [w[1] for w in demo.all_orders_windows if w[0] == "LINK-USDT"]
+    assert start <= int(stop.created_at.timestamp() * 1000) - 60_000
+
+
+async def test_open_position_nothing_to_check_no_extra_requests(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Стоп и тейк стоят в общем openOrders — ни openOrders по символу, ни
+    истории: один снимок на уровни и строки."""
+    settings, db, session, user, demo = ctx
+    await _seed_live(session, user.id)
+
+    await _cycle(settings, db)
+
+    stop, take = await _link_rows(db)
+    assert {stop.status, take.status} == {OrderStatus.SUBMITTED}
+    demo.all_orders["LINK-USDT"] = []
+    before = len(demo.calls)
+    await _cycle(settings, db)
+    # Второй цикл: SOL уже закрыта; LINK — снимок уровней и проверка стопа
+    # сделки, без openOrders(LINK) п.1а и без истории.
+    assert [w for w in demo.all_orders_windows if w[0] == "LINK-USDT"] == []
+    assert demo.calls[before:].count("/openApi/swap/v2/trade/openOrders") == 2
+
+
+async def test_open_position_absent_everywhere_needs_two_checks(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Нет ни в openOrders, ни в полной истории: первая проверка — только
+    отметка в Redis с TTL ≈ 3 интервала проверки стопов, вторая подряд —
+    CANCELLED/NULL, отметка снята."""
+    settings, db, session, user, demo = ctx
+    await _seed_live(session, user.id)
+    _stop_gone(demo)
+    demo.all_orders["LINK-USDT"] = []
+    redis = FakeRedis()
+    stop, _ = await _link_rows(db)
+    key = f"recon:gone:{stop.id}"
+
+    await _cycle(settings, db, redis)
+    stop, _ = await _link_rows(db)
+    assert stop.status is OrderStatus.SUBMITTED
+    ttl = 3 * settings.reconciler_stop_check_every * settings.reconciler_interval_seconds
+    assert ttl - 5 <= await redis.ttl(key) <= ttl
+
+    await _cycle(settings, db, redis)
+    stop, take = await _link_rows(db)
+    assert (stop.status, stop.cancel_source) == (OrderStatus.CANCELLED, None)
+    assert take.status is OrderStatus.SUBMITTED
+    assert await redis.get(key) is None
+
+
+async def test_open_position_stale_mark_not_counted(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Отметка старше 3 интервалов (TTL не успел снять) — не в счёт: это
+    снова первая проверка, отметка обновляется."""
+    settings, db, session, user, demo = ctx
+    await _seed_live(session, user.id)
+    _stop_gone(demo)
+    demo.all_orders["LINK-USDT"] = []
+    redis = FakeRedis()
+    stop, _ = await _link_rows(db)
+    key = f"recon:gone:{stop.id}"
+    ttl = 3 * settings.reconciler_stop_check_every * settings.reconciler_interval_seconds
+    stale = datetime.now(UTC).timestamp() - ttl - 60
+    await redis.set(key, stale)
+
+    await _cycle(settings, db, redis)
+
+    stop, _ = await _link_rows(db)
+    assert stop.status is OrderStatus.SUBMITTED
+    assert float(await redis.get(key)) > stale
+
+
+async def test_open_position_mark_cleared_when_order_seen(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Подряд: ордер снова виден в openOrders — отметка снимается, следующая
+    пропажа начинает отсчёт заново."""
+    settings, db, session, user, demo = ctx
+    await _seed_live(session, user.id)
+    demo.all_orders["LINK-USDT"] = []
+    redis = FakeRedis()
+    stop, _ = await _link_rows(db)
+    key = f"recon:gone:{stop.id}"
+    full = list(demo.link_open_orders)
+    _stop_gone(demo)
+    await _cycle(settings, db, redis)
+    assert await redis.get(key) is not None
+
+    demo.link_open_orders = full
+    await _cycle(settings, db, redis)
+    assert await redis.get(key) is None
+
+    _stop_gone(demo)
+    await _cycle(settings, db, redis)
+    stop, _ = await _link_rows(db)
+    assert stop.status is OrderStatus.SUBMITTED
+
+
+async def test_open_position_incomplete_history_untouched(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Выдача упёрлась в лимит 500 — «нет в истории» не доказано: строка не
+    трогается и после двух проверок, отметки нет."""
+    from app.exchanges.base import ALL_ORDERS_LIMIT
+
+    settings, db, session, user, demo = ctx
+    await _seed_live(session, user.id)
+    _stop_gone(demo)
+    demo.all_orders["LINK-USDT"] = [
+        _link_hist(str(8_000_000 + i), "STOP_MARKET", "CANCELLED") for i in range(ALL_ORDERS_LIMIT)
+    ]
+    redis = FakeRedis()
+    await _cycle(settings, db, redis)
+    await _cycle(settings, db, redis)
+    stop, _ = await _link_rows(db)
+    assert stop.status is OrderStatus.SUBMITTED
+    assert await redis.get(f"recon:gone:{stop.id}") is None
+
+
+async def test_open_position_filled_waits_for_exit_in_journal(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Стоп исполнен (дочерний FILLED), а выхода в журнале сделки ещё нет —
+    строку не трогаем (частичное закрытие пишет сверка сделки). Выход в
+    журнале — FILLED."""
+    settings, db, session, user, demo = ctx
+    link_id = (await _seed_live(session, user.id))[1]
+    _stop_gone(demo)
+    child = "2104122758140699999"
+    demo.all_orders["LINK-USDT"] = [_link_hist(child, "STOP_MARKET", "FILLED", trigger=LINK_STOP)]
+
+    await _cycle(settings, db)
+    stop, _ = await _link_rows(db)
+    assert stop.status is OrderStatus.SUBMITTED
+
+    async with db.session() as s:
+        trade = await s.scalar(
+            select(Trade).where(Trade.id == link_id).options(selectinload(Trade.fills))
+        )
+        assert trade is not None
+        await TradeJournal(TradeRepository(s)).close_trade(
+            trade, exit_price=D("14.0"), quantity=D("100"), fee=D("0.1"),
+            exit_reason=EXIT_STOP_LOSS, external_fill_id=child,
+        )
+        await s.commit()
+    await _cycle(settings, db)
+    stop, _ = await _link_rows(db)
+    assert (stop.status, stop.cancel_source) == (OrderStatus.FILLED, None)
+
+
+async def _position_action_stop(  # type: ignore[no-untyped-def]
+    session, user_id: int, oid: str, *, status: PositionActionStatus = PositionActionStatus.DONE,
+    mode: ExchangeKeyMode = ExchangeKeyMode.DEMO, error_code: str | None = None,
+) -> ExecutionOrder:
+    action = PositionAction(
+        account_mode=mode, user_id=user_id, symbol="LINK-USDT", side=TradeSide.LONG,
+        position_id=LINK_PID, kind=PositionActionKind.MOVE_STOP, status=status,
+    )
+    session.add(action)
+    await session.flush()
+    row = ExecutionOrder(
+        account_mode=mode, user_id=user_id, position_action_id=action.id,
+        exchange_order_id=oid, symbol="LINK-USDT", side=OrderSide.SELL,
+        position_side=TradeSide.LONG, order_type=OrderType.STOP_MARKET,
+        role=OrderRole.STOP_LOSS, status=OrderStatus.SUBMITTED, error_code=error_code,
+    )
+    session.add(row)
+    await session.commit()
+    return row
+
+
+async def test_open_position_rows_of_manual_position_by_position_id(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Позиция без сделки в журнале: строки действий этапа 4 — по positionId
+    живой позиции. Исполнен без сделки — FILLED сразу; снят — CANCELLED/NULL.
+    Строки идущего действия, MANUAL_RECONCILE и чужого счёта не трогаем."""
+    settings, db, session, user, demo = ctx
+    demo.link_open_orders = []
+    fired = await _position_action_stop(session, user.id, "7401")
+    taken = await _position_action_stop(session, user.id, "7402")
+    busy = await _position_action_stop(session, user.id, "7403",
+                                       status=PositionActionStatus.SUBMITTED)
+    manual = await _position_action_stop(session, user.id, "7404", error_code="MANUAL_RECONCILE")
+    other = await _position_action_stop(session, user.id, "7405", mode=ExchangeKeyMode.LIVE)
+    demo.all_orders["LINK-USDT"] = [
+        _link_hist("7499", "STOP_MARKET", "FILLED", trigger="7401"),
+        *(_link_hist(oid, "STOP_MARKET", "CANCELLED") for oid in ("7402", "7403", "7404", "7405")),
+    ]
+
+    await _cycle(settings, db)
+
+    made = (fired, taken, busy, manual, other)
+    got = await _orders(db, [r.id for r in made])
+    assert [(got[r.id].status, got[r.id].cancel_source) for r in made] == [
+        (OrderStatus.FILLED, None), (OrderStatus.CANCELLED, None),
+        (OrderStatus.SUBMITTED, None), (OrderStatus.SUBMITTED, None), (OrderStatus.SUBMITTED, None),
+    ]
+
+
+async def test_open_position_closed_position_rows_not_taken(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Позиции нет — это не п.1а (строки закрытой позиции решают пути
+    закрытия): строка по positionId закрытой позиции не трогается."""
+    settings, db, session, user, demo = ctx
+    demo.positions = []
+    demo.link_open_orders = []
+    row = await _position_action_stop(session, user.id, "7501")
+    demo.all_orders["LINK-USDT"] = [_link_hist("7501", "STOP_MARKET", "CANCELLED")]
+
+    await _cycle(settings, db)
+
+    assert (await _orders(db, [row.id]))[row.id].status is OrderStatus.SUBMITTED
+
+
+async def test_closes_fully_row_older_than_trade_window_left_for_sweep(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Уточнение владельца 23.10 (2): окно истории сделки — от входа, а строка
+    создана раньше (allOrders отбирает по созданию — её ордера в выдаче нет).
+    «Нет в истории» по такому окну не доказано: закрытие сверкой строку не
+    трогает, обход закрытых сделок берёт окно от строки и находит отмену в
+    допуске от закрытия — EXCHANGE (а не CANCELLED/NULL по неполному окну)."""
+    settings, db, session, user, demo = ctx
+    demo.window_by_created = True
+    opened_live = datetime(2026, 9, 27, 14, 15, 30, 300000, tzinfo=UTC)
+    shift = datetime.now(UTC) - timedelta(hours=1) - opened_live
+    ms = int(shift.total_seconds() * 1000)
+    items = []
+    for item in live_items("allOrders SOL"):
+        item = dict(item)
+        item["time"], item["updateTime"] = int(item["time"]) + ms, int(item["updateTime"]) + ms
+        items.append(item)
+    closed_ms = max(int(i["updateTime"]) for i in items)
+    early = "2104213344721920077"
+    early_created = opened_live + shift - timedelta(minutes=10)
+    early_item = _xrp_hist(early, "STOP_MARKET", "CANCELLED", created=early_created)
+    early_item.update(symbol="SOL-USDT", updateTime=closed_ms + 1000)
+    demo.all_orders["SOL-USDT"] = [*items, early_item]
+    sol = await _bot_open_trade(
+        session, user.id, "SOL-USDT", entry="123.021", qty="1362.07", entry_id=SOL_ENTRY,
+        stop_id=SOL_STOP, take_id=SOL_TAKE, fee="83.781520", opened_at=opened_live + shift,
+    )
+    extra = ExecutionOrder(
+        account_mode=ExchangeKeyMode.DEMO,
+        user_id=user.id, trade_id=sol.id, exchange_order_id=early, symbol="SOL-USDT",
+        side=OrderSide.SELL, position_side=TradeSide.LONG, order_type=OrderType.STOP_MARKET,
+        role=OrderRole.STOP_LOSS, status=OrderStatus.SUBMITTED, created_at=early_created,
+    )
+    session.add(extra)
+    await session.commit()
+    demo.positions = [p for p in demo.positions if p["symbol"] != "SOL-USDT"]
+
+    await _run_reconciler(settings, db, FakeBot())
+
+    assert (await _trade(db, sol.id)).status is TradeStatus.CLOSED
+    got = (await _orders(db, [extra.id]))[extra.id]
+    assert (got.status, got.cancel_source) == (OrderStatus.CANCELLED, CancelSource.EXCHANGE)

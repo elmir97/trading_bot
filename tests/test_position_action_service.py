@@ -671,6 +671,20 @@ async def test_full_close_settles_position_rows(  # type: ignore[no-untyped-def]
     assert other.status is OrderStatus.SUBMITTED
 
 
+async def test_full_close_exchange_only_for_orders_standing_before_post(ctx) -> None:  # type: ignore[no-untyped-def]
+    """п.1б (24.10): EXCHANGE — только ордерам, стоявшим в openOrders перед
+    POST под локом. Строка, чьего ордера там уже не было (снят раньше), —
+    CANCELLED без источника: кто снял, не доказано."""
+    mine = await _placed_stop(ctx, OLD_STOP, PID)
+    stray = await _placed_stop(ctx, "2105910661355299998", PID)    # в openOrders его нет
+    card = await _card(ctx, PositionActionKind.CLOSE_FULL, {})
+    await ctx.service().confirm(card.action.id, message_id=55, risk_confirmed=False)
+    await ctx.session.refresh(mine)
+    await ctx.session.refresh(stray)
+    assert (mine.status, mine.cancel_source) == (OrderStatus.CANCELLED, CancelSource.EXCHANGE)
+    assert (stray.status, stray.cancel_source) == (OrderStatus.CANCELLED, None)
+
+
 async def test_full_close_standing_order_row_untouched(ctx, caplog) -> None:  # type: ignore[no-untyped-def]
     """Остаток не снялся и стоит в openOrders — строку не трогаем, WARNING."""
     ctx.exchange.auto_cancel_on_close = False

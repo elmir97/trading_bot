@@ -233,6 +233,10 @@ class Runner:
         # hide_backup_stop: cid, скрытые в openOrders и в запросе по cid в
         # этом проходе (новый Runner в следующем цикле их уже видит).
         self._hidden: set[str] = set()
+        # п.1б (24.10): orderId, которые этот проход видел стоящими в
+        # openOrders. После аварийного закрытия EXCHANGE — только им: без
+        # этого «биржа сняла» не доказано, cancel_source NULL.
+        self._seen_standing: set[str] = set()
 
     @property
     def side(self) -> TradeSide:
@@ -487,9 +491,10 @@ class Runner:
 
     async def _visible_orders(self) -> list[OpenOrder]:
         orders = await self.client.get_open_orders(self.opening.symbol, max_attempts=1)
-        if not self._hidden:
-            return orders
-        return [o for o in orders if o.client_order_id.casefold() not in self._hidden]
+        if self._hidden:
+            orders = [o for o in orders if o.client_order_id.casefold() not in self._hidden]
+        self._seen_standing.update(o.order_id for o in orders)
+        return orders
 
     async def check_by_cid(self, cid: str) -> tuple[StopCheck, str | None]:
         """Ордер по своему clientOrderId: стоит / окончательно нет / неизвестно."""
@@ -718,6 +723,7 @@ class Runner:
         live = {o.order_id for o in await self.client.get_open_orders(
             self.opening.symbol, max_attempts=1
         )}
+        self._seen_standing |= live
         left = [a for a in attached if a.order_id in live]
         for row in await self._rows(role):
             if row.exchange_order_id in {a.order_id for a in attached} and (
@@ -935,7 +941,8 @@ class Runner:
 
     async def _settle_after_close(self) -> None:
         """Позиция закрыта аварийно — стоп/тейк открытия сняла биржа. Строки
-        закрываются только по openOrders; биржа снимает их за десятки мс
+        закрываются только по openOrders (EXCHANGE — только виденным стоящими
+        в этом проходе, иначе NULL); биржа снимает их за десятки мс
         (Т4: 32–52 мс), поэтому стоящие — один повтор через паузу read-back.
         Сбой чтения или ордер всё ещё стоит — строки не трогаем (WARNING);
         их доберёт сверка по закрытой сделке."""
@@ -955,7 +962,9 @@ class Runner:
                 logger.warning("openOrders после аварийного закрытия не получены",
                                extra=self._log())
                 return
-            result = settle(rows, open_order_ids=live, context=self._log())
+            result = settle(rows, open_order_ids=live, exchange_ids=self._seen_standing,
+                            context=self._log())
+            self._seen_standing |= live
             await self.session.commit()
             rows = [r for r in rows if r.id in result.standing]
         if rows:

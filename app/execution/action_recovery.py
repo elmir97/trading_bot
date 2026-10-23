@@ -63,6 +63,12 @@ from app.execution.models import action_client_order_id
 from app.execution.position_action_service import journal_exit, settle_closed
 from app.execution.position_actions import levels_after_partial
 from app.execution.position_view import protective_orders
+from app.execution.settle import (
+    conditional_rows,
+    exchange_cancelled,
+    history_facts,
+    history_window,
+)
 from app.market.cache import TTLCache
 from app.market.data import MarketDataService
 from app.trading.enums import (
@@ -341,7 +347,8 @@ class _Pass:
             )
         elif a.kind in (PositionActionKind.CLOSE_PARTIAL, PositionActionKind.CLOSE_FULL):
             status, text = await self._close_outcome(
-                placed, seen, orders, position, info.price_precision, info.quantity_precision,
+                client, placed, seen, orders, position, info.price_precision,
+                info.quantity_precision,
             )
         else:
             status, text = self._move_outcome(
@@ -542,8 +549,8 @@ class _Pass:
                                a.kind is PositionActionKind.CLOSE_FULL)
 
     async def _close_outcome(
-        self, placed: list[ExecutionOrder], seen: dict[int, Seen], orders: list[OpenOrder],
-        position: Position | None, pp: int, qp: int,
+        self, client: ExchangeClient, placed: list[ExecutionOrder], seen: dict[int, Seen],
+        orders: list[OpenOrder], position: Position | None, pp: int, qp: int,
     ) -> tuple[PositionActionStatus, str]:
         a = self.action
         [row] = [r for r in placed if r.role is OrderRole.CLOSE] or [placed[0]]
@@ -578,7 +585,7 @@ class _Pass:
             return PositionActionStatus.DONE, (
                 f"{text}\n{levels_after_partial(stops, takes, rest, qp)}."
             )
-        await settle_closed(self.session, a, {str(o.order_id) for o in orders})
+        await self._settle_after_close(client, row, {str(o.order_id) for o in orders})
         leftovers = sorted(
             str(o.order_id) for o in orders
             if o.position_side == a.side.value and o.side == closing and o.stop_price is not None
@@ -589,6 +596,36 @@ class _Pass:
                 "сними их в BingX."
             )
         return PositionActionStatus.DONE, f"{text}\nСтоп и тейк биржа сняла сама."
+
+    async def _settle_after_close(
+        self, client: ExchangeClient, close_row: ExecutionOrder, live: set[str]
+    ) -> None:
+        """Строки стопов/тейков закрытой позиции — по openOrders и истории
+        (п.1б, 24.10): EXCHANGE — отмена в допуске от updateTime нашего
+        закрытия (по orderId строки), иначе NULL. Окно — от создания самой
+        ранней строки (allOrders отбирает по созданию); окно неполное или
+        история не получена — «нет в истории» строку не закрывает."""
+        a = self.action
+        rows = await conditional_rows(
+            self.session, user_id=a.user_id, trade_id=a.trade_id, position_id=a.position_id,
+        )
+        if not rows:
+            return
+        window = history_window([close_row.created_at, *(r.created_at for r in rows)], self.now)
+        try:
+            history = await client.get_all_orders(a.symbol, window.start, self.now,
+                                                  max_attempts=1)
+        except (ExchangeError, ValueError) as exc:
+            logger.info("Восстановление действия: история для строк стопа/тейка не получена",
+                        extra={**self.log, "error": type(exc).__name__})
+            history, complete = [], False
+        else:
+            complete = window.complete(history)
+        await settle_closed(
+            self.session, a, live, rows=rows, facts=history_facts(history),
+            default=OrderStatus.CANCELLED if complete else None,
+            exchange_ids=exchange_cancelled(history, close_row.exchange_order_id),
+        )
 
     def _move_outcome(
         self, placed: list[ExecutionOrder], orders: list[OpenOrder], position: Position | None,

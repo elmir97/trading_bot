@@ -28,6 +28,7 @@ import httpx
 
 from app.core.logging import get_logger
 from app.exchanges.base import (
+    ALL_ORDERS_LIMIT,
     CONDITIONAL_WORKING_TYPE,
     ApiRestrictions,
     AttachedTpSl,
@@ -1434,7 +1435,7 @@ class BingXClient(ExchangeClient):
             "symbol": symbol,
             "startTime": int(start.timestamp() * 1000),
             "endTime": int(end.timestamp() * 1000),
-            "limit": 500,
+            "limit": ALL_ORDERS_LIMIT,
         }
         data = await self._request(
             TRADE_ALL_ORDERS, params, signed=True, max_attempts=max_attempts

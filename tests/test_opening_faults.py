@@ -219,7 +219,9 @@ async def test_t4_hidden_stop_decided_by_cid_emergency(ctx) -> None:  # type: ig
     row = next(r for r in await _rows(ctx, opening.id) if r.client_order_id == s1)
     # A.3: s1 биржа приняла (orderId есть) — статус по факту после закрытия,
     # решение «не найден» остаётся в error_code историей (владелец 10.10).
-    assert row.status is OrderStatus.CANCELLED and row.cancel_source is CancelSource.EXCHANGE
+    # п.1б (24.10): s1 скрыт — этот проход ни разу не видел его стоящим,
+    # «биржа сняла» не доказано — NULL.
+    assert row.status is OrderStatus.CANCELLED and row.cancel_source is None
     assert row.error_code == "NOT_FOUND"
 
 

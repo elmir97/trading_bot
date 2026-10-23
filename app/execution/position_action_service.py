@@ -34,6 +34,7 @@ bingx_trading_mode), по умолчанию демо.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -867,7 +868,11 @@ class PositionActionService:
                 client, action, str(o.order_id), OrderRole.STOP_LOSS, OrderType.STOP_MARKET,
                 o.stop_price, o.quantity,
             )
-        await self._settle_closed(client, action)
+        # EXCHANGE — только ордерам, стоявшим в openOrders перед POST под
+        # локом (inputs): их снятие после закрытия — биржа (п.1б, 24.10).
+        await self._settle_closed(
+            client, action, {o.order_id for o in (*inputs.stops, *inputs.takes)}
+        )
         if leftovers:
             ids = {str(o.order_id) for o in leftovers}
             still = await self._find_any(client, action.symbol, ids)
@@ -879,7 +884,9 @@ class PositionActionService:
             text += "\nСтоп и тейк биржа сняла сама."
         return await self._finish(action, PositionActionStatus.DONE, text=text)
 
-    async def _settle_closed(self, client: ExchangeClient, action: PositionAction) -> None:
+    async def _settle_closed(
+        self, client: ExchangeClient, action: PositionAction, exchange_ids: set[str]
+    ) -> None:
         if not await conditional_rows(
             self._session, user_id=self._user.id, trade_id=action.trade_id,
             position_id=action.position_id,
@@ -891,7 +898,7 @@ class PositionActionService:
             logger.warning("openOrders после закрытия не получены — строки не закрыты",
                            extra={"action_id": action.id, "trade_id": action.trade_id})
             return
-        await settle_closed(self._session, action, live)
+        await settle_closed(self._session, action, live, exchange_ids=exchange_ids)
 
     async def _find_any(self, client: ExchangeClient, symbol: str, ids: set[str]) -> set[str]:
         return {str(o.order_id) for o in await client.get_open_orders(symbol)} & ids
@@ -900,19 +907,33 @@ class PositionActionService:
         await journal_exit(self._session, trade_id, fill, full)
 
 
-async def settle_closed(session: AsyncSession, action: PositionAction, live: set[str]) -> None:
+async def settle_closed(
+    session: AsyncSession, action: PositionAction, live: set[str], *,
+    exchange_ids: Collection[str] = (),
+    facts: Mapping[str, OrderStatus] | None = None,
+    default: OrderStatus | None = OrderStatus.CANCELLED,
+    rows: list[ExecutionOrder] | None = None,
+) -> None:
     """Позиция закрыта целиком — строки её стопов/тейков (сделки и действий
-    этапа 4 по positionId) в CANCELLED по свежему openOrders (live — id
-    стоящих): снятое биржей при закрытии — EXCHANGE, снятое нами уже USER.
-    Стоящие не трогаем. Общий для «Да» и восстановления (B.9)."""
-    rows = await conditional_rows(
-        session, user_id=action.user_id, trade_id=action.trade_id,
-        position_id=action.position_id,
-    )
+    этапа 4 по positionId) по свежему openOrders (live — id стоящих) и
+    истории (facts): CANCELLED — EXCHANGE только у exchange_ids (доказано
+    вызывающим), иначе NULL; снятое нами уже USER. Стоящие не трогаем.
+    Общий для «Да» и восстановления (B.9)."""
+    if rows is None:
+        rows = await conditional_rows(
+            session, user_id=action.user_id, trade_id=action.trade_id,
+            position_id=action.position_id,
+        )
     if not rows:
         return
     log = {"action_id": action.id, "trade_id": action.trade_id}
-    result = settle(rows, open_order_ids=live, context=log)
+    result = settle(
+        rows, open_order_ids=live, facts=facts, default=default,
+        exchange_ids=exchange_ids, context=log,
+    )
+    if result.undecided:
+        logger.info("Строки закрытой позиции не решены — нет доказательства по истории",
+                    extra={**log, "ids": result.undecided})
     await session.commit()
     if result.standing:
         logger.warning("Условный ордер ещё стоит после закрытия позиции",

@@ -490,6 +490,11 @@ class OrderFill:
 # ---------------------------------------------------------------------------
 
 
+# Сколько ордеров allOrders отдаёт за запрос (limit в app/exchanges/bingx.py):
+# выдача ровно этой длины может быть обрезана — «нет в истории» по ней не доказать.
+ALL_ORDERS_LIMIT = 500
+
+
 @dataclass(frozen=True, slots=True)
 class HistoryOrder:
     """Ордер из истории (allOrders) — сырьё reconciler.

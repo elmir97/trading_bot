@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -24,8 +24,15 @@ from app.database.models.position_action import PositionAction
 from app.database.repositories.strategy import MistakeTypeRepository, StrategyRepository
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
-from app.exchanges.base import HistoryOrder
-from app.execution.settle import conditional_rows, history_facts, settle
+from app.exchanges.base import ALL_ORDERS_LIMIT, HistoryOrder
+from app.execution.settle import (
+    HISTORY_LIMIT,
+    conditional_rows,
+    exchange_cancelled,
+    history_facts,
+    history_window,
+    settle,
+)
 from app.services.user_service import UserService
 from app.trading.enums import (
     CancelSource,
@@ -58,12 +65,13 @@ def _row(oid: str | None, status: OrderStatus = OrderStatus.SUBMITTED, *,
     )
 
 
-def _hist(oid: str, status: str, trigger: str | None = None) -> HistoryOrder:
+def _hist(oid: str, status: str, trigger: str | None = None, *,
+          updated: datetime = NOW, otype: str = "STOP_MARKET") -> HistoryOrder:
     return HistoryOrder(
         order_id=oid, symbol="XRP-USDT", side="SELL", position_side="LONG",
-        order_type="STOP_MARKET", status=status, avg_price=D(0), executed_qty=D(0), fee=D(0),
+        order_type=otype, status=status, avg_price=D(0), executed_qty=D(0), fee=D(0),
         realized_pnl=D(0), reduce_only=True, trigger_order_id=trigger, position_id=None,
-        created_at=NOW, updated_at=NOW,
+        created_at=NOW - timedelta(hours=2), updated_at=updated,
     )
 
 
@@ -73,7 +81,7 @@ def _hist(oid: str, status: str, trigger: str | None = None) -> HistoryOrder:
 def test_standing_order_is_never_touched() -> None:
     gone, live = _row("1"), _row("2")
     gone.id, live.id = 10, 11
-    result = settle([gone, live], open_order_ids={"2"})
+    result = settle([gone, live], open_order_ids={"2"}, exchange_ids={"1", "2"})
     assert (gone.status, gone.cancel_source) == (OrderStatus.CANCELLED, CancelSource.EXCHANGE)
     assert live.status is OrderStatus.SUBMITTED and live.cancel_source is None
     assert result.settled == [10] and result.standing == [11]
@@ -83,7 +91,7 @@ def test_facts_decide_status_filled_has_no_source() -> None:
     fired, taken = _row("1"), _row("2", role=OrderRole.TAKE_PROFIT)
     fired.id, taken.id = 1, 2
     settle([fired, taken], open_order_ids=set(),
-           facts={"1": OrderStatus.FILLED, "2": OrderStatus.CANCELLED})
+           facts={"1": OrderStatus.FILLED, "2": OrderStatus.CANCELLED}, exchange_ids={"1", "2"})
     assert fired.status is OrderStatus.FILLED and fired.cancel_source is None
     assert taken.status is OrderStatus.CANCELLED and taken.cancel_source is CancelSource.EXCHANGE
 
@@ -100,9 +108,65 @@ def test_rejected_with_order_id_settles_and_keeps_error() -> None:
     приняла — статус по факту, решение «не найден» остаётся историей."""
     row = _row("1", OrderStatus.REJECTED, error_code="NOT_FOUND", error_message="не найден")
     row.id = 1
-    settle([row], open_order_ids=set())
+    settle([row], open_order_ids=set(), exchange_ids={"1"})
     assert row.status is OrderStatus.CANCELLED and row.cancel_source is CancelSource.EXCHANGE
     assert row.error_code == "NOT_FOUND" and row.error_message == "не найден"
+
+
+def test_default_source_is_null_without_proof() -> None:
+    """п.1б (24.10): без доказательства «биржа сняла» — NULL, и по умолчанию
+    (снимок openOrders), и по факту истории; EXCHANGE — только exchange_ids."""
+    by_default, by_fact, proven = _row("1"), _row("2"), _row("3")
+    by_default.id, by_fact.id, proven.id = 1, 2, 3
+    settle([by_default, by_fact, proven], open_order_ids=set(),
+           facts={"2": OrderStatus.CANCELLED, "3": OrderStatus.CANCELLED}, exchange_ids={"3"})
+    assert [(r.status, r.cancel_source) for r in (by_default, by_fact, proven)] == [
+        (OrderStatus.CANCELLED, None), (OrderStatus.CANCELLED, None),
+        (OrderStatus.CANCELLED, CancelSource.EXCHANGE),
+    ]
+
+
+S = timedelta(seconds=1)
+
+
+def test_exchange_cancelled_within_tolerance_of_our_close() -> None:
+    """Разведка 23.10 (XRP #36): стоп/тейк сняты через +1 с после updateTime
+    закрытия — EXCHANGE; мост снят владельцем за 139 с — нет. Границы
+    [T − 1 с, T + 10 с] включительно."""
+    history = [
+        _hist("close", "FILLED", updated=NOW, otype="MARKET"),
+        _hist("stop", "CANCELLED", updated=NOW + S),
+        _hist("take", "CANCELLED", updated=NOW + S),
+        _hist("bridge", "CANCELLED", updated=NOW - 139 * S),
+        _hist("lo", "CANCELLED", updated=NOW - S),
+        _hist("hi", "CANCELLED", updated=NOW + 10 * S),
+        _hist("too_early", "CANCELLED", updated=NOW - 2 * S),
+        _hist("too_late", "CANCELLED", updated=NOW + 11 * S),
+        _hist("expired", "EXPIRED", updated=NOW),
+    ]
+    assert exchange_cancelled(history, "close") == {"stop", "take", "lo", "hi", "expired"}
+
+
+def test_exchange_cancelled_needs_our_closing_order_in_history() -> None:
+    """T — только по orderId нашего закрытия из БД: нет его в выдаче — пусто,
+    даже если рядом есть другой MARKET FILLED."""
+    history = [
+        _hist("someone", "FILLED", updated=NOW, otype="MARKET"),
+        _hist("stop", "CANCELLED", updated=NOW + S),
+    ]
+    assert exchange_cancelled(history, "ours") == frozenset()
+    assert exchange_cancelled(history, None) == frozenset()
+
+
+def test_history_window_from_earliest_row_creation() -> None:
+    """allOrders отбирает по созданию — окно от самой ранней строки минус
+    минута; старше 7 дней — обрезано и неполное; полная выдача — неполная."""
+    early, late = NOW - timedelta(days=3), NOW - timedelta(minutes=5)
+    window = history_window([late, early], NOW)
+    assert window.start == early - timedelta(minutes=1) and window.covers
+    assert window.complete([]) and not window.complete([_hist("x", "NEW")] * ALL_ORDERS_LIMIT)
+    old = history_window([NOW - timedelta(days=8)], NOW)
+    assert old.start == NOW - HISTORY_LIMIT and not old.covers and not old.complete([])
 
 
 def test_rejected_skipped_when_excluded() -> None:

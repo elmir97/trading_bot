@@ -25,6 +25,7 @@ uq_fill_external_id. Ордеров reconciler не отправляет ник�
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -45,8 +46,9 @@ from app.core.security import SecretCipher
 from app.core.timefmt import closed_at_line
 from app.database.models.execution_order import ExecutionOrder
 from app.database.models.outgoing_message import OutgoingMeta
+from app.database.models.position_action import PositionAction
 from app.database.models.reconciliation_event import ReconciliationEvent
-from app.database.models.trade import Trade
+from app.database.models.trade import Trade, TradeFill
 from app.database.models.trade_opening import TradeOpening
 from app.database.models.user import User, UserSettings
 from app.database.repositories.execution_order import ExecutionOrderRepository
@@ -59,11 +61,12 @@ from app.exchanges.base import (
     ExchangeError,
     ExchangeResponseError,
     HistoryOrder,
+    OpenOrder,
     OrderFill,
     Position,
 )
 from app.exchanges.bingx import _QUOTE_ASSET_BY_MODE
-from app.execution.action_recovery import RecoveryNote, recover_actions
+from app.execution.action_recovery import MANUAL_RECONCILE, RecoveryNote, recover_actions
 from app.execution.close_backfill import backfill_close_rows
 from app.execution.position_view import (
     apply_exchange_levels,
@@ -94,20 +97,24 @@ from app.execution.redelivery import (
 )
 from app.execution.settle import (
     CONDITIONAL_ROLES,
+    HISTORY_LIMIT,
+    HISTORY_MARGIN,
     OPEN_STATUSES,
     conditional_rows,
+    exchange_cancelled,
     history_facts,
+    history_window,
     settle,
     settleable,
 )
 from app.services.exchange_factory import ExchangeFactory
 from app.trading.enums import (
     OPENING_ACTIVE,
-    CancelSource,
     ExchangeKeyMode,
     FillSide,
     OrderRole,
     OrderStatus,
+    PositionActionStatus,
     ReconciliationKind,
     TradeSource,
     TradeStatus,
@@ -124,13 +131,17 @@ ZERO = Decimal(0)
 LOCK_PATTERN = "exec:lock:*"
 # 03.10: некритичные расхождения, которые ждут, пока пользователь вводит число.
 JOURNAL_OPEN_PREFIX = "journal_open:"
+# п.1а (24.10): стоп/тейк открытой позиции, которого нет ни в openOrders, ни в
+# полной истории, — CANCELLED только на второй проверке подряд. Отметка первой
+# проверки — в Redis с TTL ≈ 3 интервала проверки стопов (старая не в счёт).
+GONE_MARK_KEY = "recon:gone:{row_id}"
+GONE_MARK_INTERVALS = 3
 
 
 def deferrable(event: ReconciliationEvent) -> bool:
     return event.kind is ReconciliationKind.ORPHAN_POSITION or event.dedup_key.startswith(
         JOURNAL_OPEN_PREFIX
     )
-HISTORY_LIMIT = timedelta(days=7) - timedelta(minutes=1)
 # История ордеров сделки не разбирается дольше — одно событие владельцу
 # (решение 29.09); до того — WARNING и ошибка в пульсе каждый цикл.
 HISTORY_UNPARSED_ALERT_AFTER = timedelta(minutes=30)
@@ -261,6 +272,10 @@ class Reconciler:
         # A.3: строки закрытых сделок, чей ордер ещё стоит на бирже, — WARNING
         # один раз на строку за процесс (обход идёт каждый цикл).
         self._standing_warned: set[int] = set()
+        # п.1а: срок отметки «ордера нет» — 3 интервала проверки стопов.
+        self._gone_mark_ttl = GONE_MARK_INTERVALS * max(
+            settings.reconciler_stop_check_every, 1
+        ) * settings.reconciler_interval_seconds
 
     async def run(self) -> None:
         self._cycle += 1
@@ -524,7 +539,7 @@ class Reconciler:
                 levels_trades = await trades_repo.list_open_for_reconcile(
                     user_id, account_mode=mode
                 )
-                await self._sync_levels(ctx, client, levels_trades, positions)
+                await self._check_open_positions(ctx, client, levels_trades, positions, mode)
             await session.commit()
         finally:
             await client.close()
@@ -601,7 +616,7 @@ class Reconciler:
                     )
             return
 
-        start = max(trade.opened_at - timedelta(minutes=1), ctx.now - HISTORY_LIMIT)
+        start = _trade_history_start(trade, ctx.now)
         try:
             orders = await client.get_all_orders(trade.symbol, start, ctx.now)
         except ExchangeResponseError as exc:
@@ -621,29 +636,218 @@ class Reconciler:
             ctx, client, trade.id, decision.exits, decision.closes_fully, conditionals, orders
         )
 
-    async def _sync_levels(
+    async def _check_open_positions(
         self,
         ctx: _UserCtx,
         client: ExchangeClient,
         open_trades: list[Trade],
         positions: list[Position],
+        mode: ExchangeKeyMode,
     ) -> None:
-        """Этап 3: стоп и тейк сделок журнала следуют за ордерами на бирже
-        (перенос в безубыток, ручная правка) — app/execution/position_view.py.
-        Один openOrders на все символы, только если есть сделки с позицией.
-        Сбой биржи — пропуск до следующей проверки, цикл не роняет."""
+        """Раз в reconciler_stop_check_every циклов: уровни сделок (этап 3) и
+        строки стопов/тейков открытых позиций (п.1а) по одному снимку
+        openOrders на все символы — только если есть что сверять. Сбой
+        биржи — пропуск до следующей проверки, цикл не роняет."""
         tracked = [
             (trade, position)
             for trade in open_trades
             if (position := exchange_position(positions, trade.symbol, trade.side)) is not None
         ]
-        if not tracked:
+        rows = await self._open_position_rows(ctx, [t for t, _ in tracked], positions, mode)
+        if not tracked and not rows:
             return
         try:
             orders = await client.get_open_orders()
         except ExchangeError:
             logger.warning("openOrders для уровней не получены", extra={"user_id": ctx.user_id})
             return
+        self._sync_levels(tracked, orders)
+        if rows:
+            await self._settle_open_rows(ctx, client, rows, orders)
+
+    async def _open_position_rows(
+        self,
+        ctx: _UserCtx,
+        trades: list[Trade],
+        positions: list[Position],
+        mode: ExchangeKeyMode,
+    ) -> list[tuple[ExecutionOrder, Trade | None]]:
+        """п.1а: строки SUBMITTED/UNKNOWN стопов/тейков с orderId при живой
+        позиции этого счёта — сделки журнала с позицией (trade_id или вход
+        по уведомлению) и действия этапа 4 по positionId живых позиций. Не
+        берём: строки идущего действия (B.9 доведёт сам) и активного
+        открытия, MANUAL_RECONCILE, REJECTED. Пара — строка и её открытая
+        сделка (None — сделки в журнале нет)."""
+        by_id = {t.id: t for t in trades}
+        by_notification = {t.notification_id: t for t in trades if t.notification_id is not None}
+        by_pid = {t.external_position_id: t for t in trades if t.external_position_id}
+        live_pids = {p.position_id for p in positions if p.position_id}
+        keys = []
+        if by_id:
+            keys.append(ExecutionOrder.trade_id.in_(by_id))
+        if by_notification:
+            keys.append(ExecutionOrder.notification_id.in_(by_notification))
+        if live_pids:
+            keys.append(ExecutionOrder.position_action_id.in_(
+                select(PositionAction.id).where(
+                    PositionAction.user_id == ctx.user_id,
+                    PositionAction.position_id.in_(live_pids),
+                )
+            ))
+        if not keys:
+            return []
+        busy_actions = select(PositionAction.id).where(
+            PositionAction.user_id == ctx.user_id,
+            PositionAction.status.in_((PositionActionStatus.CARD, PositionActionStatus.SUBMITTED)),
+        )
+        busy_openings = select(TradeOpening.id).where(
+            TradeOpening.user_id == ctx.user_id, TradeOpening.status.in_(OPENING_ACTIVE)
+        )
+        rows = list(await ctx.session.scalars(
+            select(ExecutionOrder).where(
+                ExecutionOrder.user_id == ctx.user_id,
+                ExecutionOrder.account_mode == mode,
+                ExecutionOrder.role.in_(CONDITIONAL_ROLES),
+                ExecutionOrder.exchange_order_id.is_not(None),
+                ExecutionOrder.status.in_(OPEN_STATUSES),
+                or_(ExecutionOrder.error_code.is_(None),
+                    ExecutionOrder.error_code != MANUAL_RECONCILE),
+                or_(ExecutionOrder.position_action_id.is_(None),
+                    ExecutionOrder.position_action_id.not_in(busy_actions)),
+                or_(ExecutionOrder.trade_opening_id.is_(None),
+                    ExecutionOrder.trade_opening_id.not_in(busy_openings)),
+                or_(*keys),
+            ).order_by(ExecutionOrder.id)
+        ))
+        action_ids = {r.position_action_id for r in rows if r.position_action_id is not None}
+        action_pids: dict[int, str | None] = dict((await ctx.session.execute(
+            select(PositionAction.id, PositionAction.position_id)
+            .where(PositionAction.id.in_(action_ids))
+        )).tuples().all()) if action_ids else {}
+        found: list[tuple[ExecutionOrder, Trade | None]] = []
+        for row in rows:
+            pid = action_pids.get(row.position_action_id) if row.position_action_id else None
+            trade = (
+                (by_id.get(row.trade_id) if row.trade_id is not None else None)
+                or (by_notification.get(row.notification_id)
+                    if row.notification_id is not None else None)
+                or (by_pid.get(pid) if pid else None)
+            )
+            # Строка сделки без живой позиции (сделка не в tracked) сюда не
+            # попадает ключом trade_id; по positionId — только живые позиции.
+            if trade is None and pid not in live_pids:
+                continue
+            found.append((row, trade))
+        return found
+
+    async def _settle_open_rows(
+        self,
+        ctx: _UserCtx,
+        client: ExchangeClient,
+        rows: list[tuple[ExecutionOrder, Trade | None]],
+        snapshot: list[OpenOrder],
+    ) -> None:
+        """п.1а (владелец 22–23.10): позиция открыта, а ордера строки нет в
+        общем openOrders — перечитать openOrders(symbol) и allOrders от
+        создания самой ранней строки. В истории снят — CANCELLED/NULL (кто
+        снял, неизвестно: позиция не закрывалась). Исполнен — FILLED, только
+        если выход уже в журнале сделки или сделки нет (частичное закрытие
+        пишет _reconcile_trade, от статуса строки оно не зависит). Нет нигде
+        при полном окне — CANCELLED/NULL на второй проверке подряд (отметка в
+        Redis с TTL). Неполное окно — не трогаем. В чат ничего — INFO."""
+        standing = {o.order_id for o in snapshot}
+        missing: dict[str, list[tuple[ExecutionOrder, Trade | None]]] = {}
+        for row, trade in rows:
+            if row.exchange_order_id in standing:
+                await self._clear_gone_mark(row)
+            else:
+                missing.setdefault(row.symbol, []).append((row, trade))
+        for symbol, items in missing.items():
+            window = history_window((r.created_at for r, _ in items), ctx.now)
+            try:
+                live = {o.order_id for o in await client.get_open_orders(symbol)}
+                history = await client.get_all_orders(symbol, window.start, ctx.now)
+            except ExchangeError:
+                logger.warning(
+                    "Стопы/тейки открытой позиции не сверены — биржа",
+                    extra={"user_id": ctx.user_id, "symbol": symbol},
+                )
+                continue
+            complete = window.complete(history)
+            facts = history_facts(history)
+            for row, trade in items:
+                await self._settle_open_row(ctx, row, trade, live, history, facts, complete)
+
+    async def _settle_open_row(
+        self,
+        ctx: _UserCtx,
+        row: ExecutionOrder,
+        trade: Trade | None,
+        live: set[str],
+        history: list[HistoryOrder],
+        facts: dict[str, OrderStatus],
+        complete: bool,
+    ) -> None:
+        oid = row.exchange_order_id
+        assert oid is not None
+        log = {"execution_order_id": row.id, "order_id": oid,
+               "trade_id": trade.id if trade else None}
+        if oid in live:
+            await self._clear_gone_mark(row)
+            return
+        fact = facts.get(oid)
+        if fact is OrderStatus.FILLED:
+            exits = {
+                h.order_id for h in history
+                if h.status == "FILLED" and oid in (h.order_id, h.trigger_order_id)
+            }
+            recorded = {f.external_fill_id for f in trade.fills} if trade is not None else set()
+            if trade is not None and not exits & recorded:
+                logger.info("Стоп/тейк открытой позиции исполнен, выхода в журнале ещё нет — "
+                            "строку не трогаю до сверки сделки", extra=log)
+                return
+            self._settle_open(row, live, OrderStatus.FILLED, log)
+            await self._clear_gone_mark(row)
+            logger.info("Стоп/тейк открытой позиции исполнен — строка FILLED", extra=log)
+            return
+        if fact is OrderStatus.CANCELLED:
+            self._settle_open(row, live, OrderStatus.CANCELLED, log)
+            await self._clear_gone_mark(row)
+            logger.info("Стоп/тейк открытой позиции снят — строка CANCELLED", extra=log)
+            return
+        if not complete or self._redis is None:
+            return
+        key = GONE_MARK_KEY.format(row_id=row.id)
+        first = await self._redis.get(key)
+        now = ctx.now.timestamp()
+        if first is None or now - float(first) > self._gone_mark_ttl:
+            await self._redis.set(key, now, ex=self._gone_mark_ttl)
+            logger.info("Ордера строки нет ни в openOrders, ни в истории — первая проверка",
+                        extra=log)
+            return
+        self._settle_open(row, live, OrderStatus.CANCELLED, log)
+        await self._redis.delete(key)
+        logger.info("Ордера строки нет ни в openOrders, ни в истории — вторая проверка, "
+                    "строка CANCELLED", extra={**log, "since_first_s": round(now - float(first))})
+
+    @staticmethod
+    def _settle_open(
+        row: ExecutionOrder, live: set[str], status: OrderStatus, log: dict[str, Any]
+    ) -> None:
+        """Статус — только через settle (CLAUDE.md): без exchange_ids, у
+        CANCELLED источник NULL — позиция не закрывалась, кто снял, неизвестно."""
+        assert row.exchange_order_id is not None
+        settle([row], open_order_ids=live, facts={row.exchange_order_id: status}, default=None,
+               include_rejected=False, context=log)
+
+    async def _clear_gone_mark(self, row: ExecutionOrder) -> None:
+        if self._redis is not None:
+            await self._redis.delete(GONE_MARK_KEY.format(row_id=row.id))
+
+    @staticmethod
+    def _sync_levels(tracked: list[tuple[Trade, Position]], orders: list[OpenOrder]) -> None:
+        """Этап 3: стоп и тейк сделок журнала следуют за ордерами на бирже
+        (перенос в безубыток, ручная правка) — app/execution/position_view.py."""
         for trade, position in tracked:
             stops, takes = protective_orders(position, orders)
             changes = apply_exchange_levels(trade, stops, takes)
@@ -791,8 +995,19 @@ class Reconciler:
                 extra={"trade_id": trade.id},
             )
             return
+        # Окно истории сделки (_reconcile_trade) — от входа; «нет в истории»
+        # доказывает, только если оно покрывает создание всех строк (allOrders
+        # отбирает по созданию). Иначе строки доберёт обход закрытых сделок
+        # своим окном. T — updateTime последнего выхода (orderId из журнала).
+        window = history_window((r.created_at for r in rows), ctx.now)
+        closing = max(exits, key=lambda e: e.executed_at).order_id if exits else None
         self._settle_rows(
-            rows, live, history_facts(history), complete=_history_complete(trade, ctx.now),
+            rows, live, history_facts(history),
+            complete=(
+                window.covers and _trade_history_start(trade, ctx.now) <= window.start
+                and window.complete(history)
+            ),
+            exchange_ids=exchange_cancelled(history, closing),
             include_rejected=True, log={"trade_id": trade.id},
         )
 
@@ -832,22 +1047,35 @@ class Reconciler:
         by_symbol: dict[str, dict[int, tuple[ExecutionOrder, Trade]]] = {}
         for row, trade in found:
             by_symbol.setdefault(row.symbol, {})[row.id] = (row, trade)
+        closing = await _closing_order_ids(ctx.session, {t.id for _, t in found})
         for symbol, items in by_symbol.items():
-            start = min(t.opened_at for _, t in items.values()) - timedelta(minutes=1)
+            # allOrders отбирает по созданию ордера — окно от самой ранней
+            # строки (и входа), не от закрытия (разведка 23.10).
+            window = history_window(
+                [*(r.created_at for r, _ in items.values()),
+                 *(t.opened_at for _, t in items.values())],
+                ctx.now,
+            )
             try:
                 live = {o.order_id for o in await client.get_open_orders(symbol)}
-                history = await client.get_all_orders(symbol, start, ctx.now)
+                history = await client.get_all_orders(symbol, window.start, ctx.now)
             except ExchangeError:
                 logger.warning(
                     "Строки закрытых сделок не сверены — биржа",
                     extra={"user_id": ctx.user_id, "symbol": symbol},
                 )
                 continue
-            standing = self._settle_rows(
-                [r for r, _ in items.values()], live, history_facts(history), complete=True,
-                include_rejected=False,
-                log={"symbol": symbol, "trade_ids": sorted({t.id for _, t in items.values()})},
-            )
+            facts, complete = history_facts(history), window.complete(history)
+            by_trade: dict[int, list[ExecutionOrder]] = {}
+            for row, trade in items.values():
+                by_trade.setdefault(trade.id, []).append(row)
+            standing: list[int] = []
+            for trade_id, trade_rows in by_trade.items():
+                standing += self._settle_rows(
+                    trade_rows, live, facts, complete=complete,
+                    exchange_ids=exchange_cancelled(history, closing.get(trade_id)),
+                    include_rejected=False, log={"symbol": symbol, "trade_id": trade_id},
+                )
             fresh = [i for i in standing if i not in self._standing_warned]
             if fresh:
                 self._standing_warned.update(fresh)
@@ -863,21 +1091,23 @@ class Reconciler:
         facts: dict[str, OrderStatus],
         *,
         complete: bool,
+        exchange_ids: Collection[str],
         include_rejected: bool,
         log: dict[str, Any],
     ) -> list[int]:
-        """Есть в истории — статус по ней (снятое — EXCHANGE: позиция закрыта,
-        биржа снимает её условники). Нет ни в истории, ни в openOrders, и
-        история полная — CANCELLED без источника (кто снял, неизвестно).
-        Возвращает id строк, чей ордер ещё стоит."""
+        """Есть в истории — статус по ней; снятое — EXCHANGE, только если
+        orderId в exchange_ids (отмена в допуске от нашего закрытия), иначе
+        NULL. Нет ни в истории, ни в openOrders, и история полная — CANCELLED
+        без источника (кто снял, неизвестно). Возвращает id строк, чей ордер
+        ещё стоит."""
         first = settle(
             rows, open_order_ids=live, facts=facts, default=None,
-            source=CancelSource.EXCHANGE, include_rejected=include_rejected, context=log,
+            exchange_ids=exchange_ids, include_rejected=include_rejected, context=log,
         )
         if complete and first.undecided:
             settle(
                 [r for r in rows if r.id in first.undecided], open_order_ids=live,
-                source=None, include_rejected=include_rejected, context=log,
+                include_rejected=include_rejected, context=log,
             )
         return first.standing
 
@@ -1213,10 +1443,26 @@ def _in_scope(dedup_key: str, prefix: str) -> bool:
     return dedup_key == prefix[:-1] or dedup_key.startswith(prefix)
 
 
-def _history_complete(trade: Trade, now: datetime) -> bool:
-    """Окно истории сделки (_reconcile_trade) начинается не позже входа —
-    отсутствие ордера в ней значит «ордера нет»."""
-    return trade.opened_at - timedelta(minutes=1) >= now - HISTORY_LIMIT
+def _trade_history_start(trade: Trade, now: datetime) -> datetime:
+    """Начало окна истории сделки (_reconcile_trade): от входа, не старше 7 дней."""
+    return max(trade.opened_at - HISTORY_MARGIN, now - HISTORY_LIMIT)
+
+
+async def _closing_order_ids(session: AsyncSession, trade_ids: set[int]) -> dict[int, str]:
+    """trade_id → orderId последнего выхода из журнала (external_fill_id):
+    T допуска EXCHANGE ищется в истории по нему. Выход без orderId (закрыт
+    в журнале руками) — сделки в ответе нет, её строкам NULL."""
+    if not trade_ids:
+        return {}
+    rows = (await session.execute(
+        select(TradeFill.trade_id, TradeFill.external_fill_id)
+        .where(TradeFill.trade_id.in_(trade_ids), TradeFill.fill_side == FillSide.EXIT)
+        .order_by(TradeFill.trade_id, TradeFill.executed_at.desc(), TradeFill.id.desc())
+    )).all()
+    last: dict[int, str | None] = {}
+    for trade_id, fill_id in rows:
+        last.setdefault(trade_id, fill_id)
+    return {t: f for t, f in last.items() if f}
 
 
 def _exits_after(last_fill: datetime | None, cutoff: datetime | None) -> datetime | None:
