@@ -32,12 +32,14 @@ from decimal import Decimal
 from typing import Any
 
 from aiogram import Bot
+from aiogram.types import InlineKeyboardMarkup
 from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import outbox
 from app.bot.action_result import send_action_recovered
+from app.bot.keyboards.positions import orphan_keyboard
 from app.core.config import Settings
 from app.core.input_prompt import InputGate
 from app.core.logging import get_logger
@@ -85,6 +87,7 @@ from app.execution.reconciler import (
     exchange_position,
     needs_history,
     orphan_positions,
+    parse_orphan_key,
     pnl_mismatch,
     resolve_entry,
     stop_missing,
@@ -116,6 +119,7 @@ from app.trading.enums import (
     OrderStatus,
     PositionActionStatus,
     ReconciliationKind,
+    TradeSide,
     TradeSource,
     TradeStatus,
 )
@@ -397,7 +401,8 @@ class Reconciler:
                     self.pulse.log_redelivered += 1
 
     async def _attempt(
-        self, event: ReconciliationEvent, telegram_id: int, now: datetime, text: str
+        self, event: ReconciliationEvent, telegram_id: int, now: datetime, text: str,
+        *, side: TradeSide | None = None,
     ) -> Delivery | None:
         """None — отложено (03.10): пользователь вводит число, событие
         некритичное. Попытка не засчитывается, событие ждёт переотправки."""
@@ -410,7 +415,9 @@ class Reconciler:
                 extra={"event_id": event.id, "kind": event.kind.value},
             )
             return None
-        delivery, sent = await deliver_event(self._bot, event, telegram_id, now, text)
+        delivery, sent = await deliver_event(
+            self._bot, event, telegram_id, now, text, reply_markup=_orphan_markup(event, side)
+        )
         if sent is not None:
             meta = OutgoingMeta(
                 user_id=event.user_id, kind=f"RECON_{event.kind.value}", trade_id=event.trade_id
@@ -1375,7 +1382,7 @@ class Reconciler:
             "Сверка: расхождение",
             extra={"kind": found.kind.value, "dedup_key": found.dedup_key, "symbol": found.symbol},
         )
-        await self._attempt(event, ctx.telegram_id, ctx.now, text)
+        await self._attempt(event, ctx.telegram_id, ctx.now, text, side=found.side)
 
     async def _resolve_missing(
         self,
@@ -1441,6 +1448,22 @@ def _in_scope(dedup_key: str, prefix: str) -> bool:
     if not prefix.endswith(":"):
         raise ValueError(f"Префикс dedup_key без двоеточия: {prefix!r}")
     return dedup_key == prefix[:-1] or dedup_key.startswith(prefix)
+
+
+def _orphan_markup(
+    event: ReconciliationEvent, side: TradeSide | None
+) -> InlineKeyboardMarkup | None:
+    """п.3 (24.10): у «позиция без сделки в журнале» — «📥 В журнал» и «💼
+    Позиции». Сторона — явно из расхождения; у события из базы (переотправка,
+    старые события) — из dedup_key, символ должен совпасть с event.symbol."""
+    if event.kind is not ReconciliationKind.ORPHAN_POSITION:
+        return None
+    if side is None:
+        ref = parse_orphan_key(event.dedup_key)
+        if ref is None or ref[0] != event.symbol:
+            return None
+        side = ref[1]
+    return orphan_keyboard(event.symbol, side)
 
 
 def _trade_history_start(trade: Trade, now: datetime) -> datetime:

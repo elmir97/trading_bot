@@ -16,6 +16,7 @@ from aiogram.types import CallbackQuery, Message
 from app.bot.handlers import positions as screen
 from app.bot.handlers.positions import PositionsCB
 from app.bot.keyboards.main import MenuCallback
+from app.bot.keyboards.positions import IMPORT_ORPHAN, orphan_import_data
 from app.bot.keyboards.trade import TradeCB
 from app.database.models.trade import Trade
 from app.database.repositories.trade import TradeRepository
@@ -28,6 +29,7 @@ from app.exchanges.base import (
     SymbolInfo,
 )
 from app.trading.enums import ExchangeKeyMode, TradeSide, TradeSource, TradeStatus
+from tests.test_locks import FakeRedis
 
 D = Decimal
 NOW = datetime(2026, 10, 2, 6, 30, tzinfo=UTC)
@@ -98,6 +100,7 @@ def env(monkeypatch):  # type: ignore[no-untyped-def]
         client=None, auth_error=False, trades=[], imports=[], import_modes=[],
         import_cutoffs=[], import_balances=[],
         import_outcome=SimpleNamespace(trade=SimpleNamespace(id=21), refusal=None),
+        slow=None,
     )
 
     class Factory:
@@ -119,6 +122,8 @@ def env(monkeypatch):  # type: ignore[no-untyped-def]
                                        position_id=None, account_balance=None):
             state.imports.append((end - start, symbol, side, quantity, position_id))
             state.import_balances.append(account_balance)
+            if state.slow:
+                return await state.slow()
             return state.import_outcome
 
     async def list_open(self, user_id, limit=50):  # type: ignore[no-untyped-def]
@@ -166,12 +171,15 @@ CUTOFF = datetime(2026, 10, 3, 20, 38, 34, tzinfo=UTC)
 async def _open(env, data: str = MenuCallback.OPEN_POSITIONS):  # type: ignore[no-untyped-def]
     callback = _callback(data)
     if data.startswith(PositionsCB.IMPORT):
-        handler = screen.import_position
-    elif data.startswith(PositionsCB.ACTIONS):
-        handler = screen.show_actions
+        await screen.import_position(
+            callback, MagicMock(), _user(), settings=None, cipher=None,  # type: ignore[arg-type]
+            redis=FakeRedis(),
+        )
     else:
-        handler = screen.show_positions
-    await handler(callback, MagicMock(), _user(), settings=None, cipher=None)  # type: ignore[arg-type]
+        handler = screen.show_actions if data.startswith(PositionsCB.ACTIONS) else (
+            screen.show_positions
+        )
+        await handler(callback, MagicMock(), _user(), settings=None, cipher=None)  # type: ignore[arg-type]
     text = callback.message.edit_text.await_args.args[0]
     keyboard = callback.message.edit_text.await_args.kwargs["reply_markup"]
     buttons = {b.text: b.callback_data for row in keyboard.inline_keyboard for b in row}
@@ -286,7 +294,10 @@ async def test_import_refused_while_opening_in_flight(env) -> None:  # type: ign
     env.client = _Client([_position()], [])
     env.openings = {("XRP-USDT", TradeSide.LONG)}
     callback = _callback(f"{PositionsCB.IMPORT}XRP-USDT:L")
-    await screen.import_position(callback, MagicMock(), _user(), settings=None, cipher=None)  # type: ignore[arg-type]
+    await screen.import_position(
+        callback, MagicMock(), _user(), settings=None, cipher=None,  # type: ignore[arg-type]
+        redis=FakeRedis(),
+    )
     assert env.imports == []
     args, kwargs = callback.answer.call_args
     assert "открывается из бота" in args[0] and kwargs.get("show_alert") is True
@@ -424,3 +435,206 @@ def test_start_param_roundtrip() -> None:
             param = start_param(symbol, side)
             assert len(param) <= 64 and parse_start_param(param) == (symbol, side)
     assert start_param("XRP-USDT", TradeSide.LONG) == "pos-XRP-USDT-L"
+
+
+# --- п.3 (24.10): «📥 В журнал» в сообщении сверки ORPHAN_POSITION ------------------------
+
+ORPHAN_TEXT = (
+    "⚠️ Сверка с биржей, XRP-USDT: позиция LONG 30 по 1.5253 на бирже, сделки в журнале нет"
+)
+IMPORT_ROW = [
+    ("📥 В журнал", f"{IMPORT_ORPHAN}XRP-USDT:L"), ("💼 Позиции", MenuCallback.OPEN_POSITIONS),
+]
+DONE_ROW = [("💼 Позиции", MenuCallback.OPEN_POSITIONS)]
+DONE_TEXT = f"{ORPHAN_TEXT}\n\n📥 В журнале — сделка #21."
+
+
+def _orphan_callback(
+    data: str = f"{IMPORT_ORPHAN}XRP-USDT:L", text: str = ORPHAN_TEXT
+) -> MagicMock:
+    callback = _callback(data)
+    callback.message.html_text = text
+    callback.from_user = SimpleNamespace(id=424242)
+    callback.bot = MagicMock()
+    callback.bot.send_message = AsyncMock()
+    return callback
+
+
+async def _orphan(env, callback=None, redis=None):  # type: ignore[no-untyped-def]
+    callback = callback or _orphan_callback()
+    await screen.import_orphan_position(
+        callback, MagicMock(), _user(), settings=None, cipher=None,  # type: ignore[arg-type]
+        redis=redis or FakeRedis(),
+    )
+    return callback
+
+
+def _rows_of(markup) -> list[list[tuple[str, str]]]:  # type: ignore[no-untyped-def]
+    return [[(b.text, b.callback_data) for b in row] for row in markup.inline_keyboard]
+
+
+def _edited(callback) -> tuple[str, list[list[tuple[str, str]]]]:  # type: ignore[no-untyped-def]
+    args, kwargs = callback.message.edit_text.await_args
+    return args[0], _rows_of(kwargs["reply_markup"])
+
+
+def _bad_request(text: str):  # type: ignore[no-untyped-def]
+    from aiogram.exceptions import TelegramBadRequest
+
+    return AsyncMock(side_effect=TelegramBadRequest(method=MagicMock(), message=text))
+
+
+async def test_orphan_import_appends_result_and_keeps_positions_button(env) -> None:  # type: ignore[no-untyped-def]
+    env.client = _Client([_position()], [])
+    callback = await _orphan(env)
+    assert env.imports == [
+        (timedelta(days=screen.IMPORT_DAYS), "XRP-USDT", TradeSide.LONG, D(30),
+         "2105907655281221634")
+    ]
+    assert _edited(callback) == (DONE_TEXT, [DONE_ROW])
+    callback.bot.send_message.assert_not_awaited()
+
+
+async def test_orphan_import_refusal_appended_button_kept(env) -> None:  # type: ignore[no-untyped-def]
+    env.client = _Client([_position()], [])
+    env.import_outcome = SimpleNamespace(trade=None, refusal="Объём <не> сходится.")
+    callback = await _orphan(env)
+    text, rows = _edited(callback)
+    assert text.startswith(
+        f"{ORPHAN_TEXT}\n\n📥 Не занесено: XRP-USDT LONG: Объём &lt;не&gt; сходится."
+    )
+    assert rows == [IMPORT_ROW]
+    callback.bot.send_message.assert_not_awaited()
+
+
+async def test_orphan_repeated_refusal_replaces_previous_reason(env) -> None:  # type: ignore[no-untyped-def]
+    """Второй отказ подряд — прежняя причина заменяется, не копится; успех
+    после отказа — причина тоже убрана."""
+    refused = f"{ORPHAN_TEXT}\n\n📥 Не занесено: старое"
+    env.client = _Client([], [])
+    callback = await _orphan(env, _orphan_callback(text=refused))
+    text, rows = _edited(callback)
+    assert text.count("Не занесено") == 1 and "старое" not in text
+    assert "позиции на бирже уже нет" in text and rows == [IMPORT_ROW]
+
+    env.client = _Client([_position()], [])
+    callback = await _orphan(env, _orphan_callback(text=refused))
+    assert _edited(callback) == (DONE_TEXT, [DONE_ROW])
+
+
+async def test_orphan_import_position_gone_refused(env) -> None:  # type: ignore[no-untyped-def]
+    env.client = _Client([], [])
+    callback = await _orphan(env)
+    assert env.imports == []
+    text, rows = _edited(callback)
+    assert "позиции на бирже уже нет" in text and rows == [IMPORT_ROW]
+
+
+async def test_orphan_import_edit_failed_result_as_new_message(env) -> None:  # type: ignore[no-untyped-def]
+    env.client = _Client([_position()], [])
+    callback = _orphan_callback()
+    callback.message.edit_text = _bad_request("message can't be edited")
+    await _orphan(env, callback)
+    args, kwargs = callback.bot.send_message.await_args
+    assert args == (424242, "XRP-USDT LONG: 📥 В журнале — сделка #21.")
+    assert _rows_of(kwargs["reply_markup"]) == [DONE_ROW]
+
+
+async def test_orphan_refusal_edit_failed_as_new_message_with_button(env) -> None:  # type: ignore[no-untyped-def]
+    env.client = _Client([_position()], [])
+    env.import_outcome = SimpleNamespace(trade=None, refusal="Объём не сходится.")
+    callback = _orphan_callback()
+    callback.message.edit_text = _bad_request("message can't be edited")
+    await _orphan(env, callback)
+    args, kwargs = callback.bot.send_message.await_args
+    assert args[0] == 424242 and "Не занесено" in args[1] and "Объём не сходится." in args[1]
+    assert _rows_of(kwargs["reply_markup"]) == [IMPORT_ROW]
+
+
+async def _until(cond) -> None:  # type: ignore[no-untyped-def]
+    import asyncio
+
+    while not cond():
+        await asyncio.sleep(0)
+
+
+async def test_orphan_double_tap_imports_once(env) -> None:  # type: ignore[no-untyped-def]
+    """Два нажатия разом — один импорт: лок позиции, второе — отказ под
+    текстом, кнопка остаётся; первое — успех."""
+    import asyncio
+
+    env.client = _Client([_position()], [])
+    gate = asyncio.Event()
+    real = env.import_outcome
+
+    async def slow_outcome():  # type: ignore[no-untyped-def]
+        await gate.wait()
+        return real
+
+    env.slow = slow_outcome
+    redis = FakeRedis()
+    first, second = _orphan_callback(), _orphan_callback()
+    task = asyncio.create_task(_orphan(env, first, redis))
+    await asyncio.wait_for(_until(lambda: env.imports), 5)
+    # без лока второе нажатие тоже ждёт gate — таймаут, а не зависание теста
+    await asyncio.wait_for(_orphan(env, second, redis), 5)
+    gate.set()
+    await asyncio.wait_for(task, 5)
+    assert len(env.imports) == 1
+    text, rows = _edited(second)
+    assert "уже идёт действие" in text and rows == [IMPORT_ROW]
+    assert _edited(first) == (DONE_TEXT, [DONE_ROW])
+
+
+async def test_orphan_import_busy_position_lock_refused(env) -> None:  # type: ignore[no-untyped-def]
+    """Идёт действие этапа 4 с позицией (exec:lock) — импорт не начинается."""
+    from app.core.locks import position_lock_key
+
+    env.client = _Client([_position()], [])
+    redis = FakeRedis()
+    await redis.set(position_lock_key(7, "XRP-USDT", "LONG"), "x")
+    callback = await _orphan(env, redis=redis)
+    assert env.imports == []
+    text, rows = _edited(callback)
+    assert "уже идёт действие" in text and rows == [IMPORT_ROW]
+
+
+@pytest.mark.parametrize("side", [TradeSide.LONG, TradeSide.SHORT])
+def test_orphan_callback_data_fits_and_parses(side: TradeSide) -> None:
+    data = orphan_import_data("1000PEPE-USDT", side)
+    assert len(data.encode()) <= 64
+    assert screen._parse_ref(data, IMPORT_ORPHAN) == ("1000PEPE-USDT", side)
+    assert not data.startswith(PositionsCB.IMPORT)   # не перехватит кнопка экрана «Позиции»
+
+
+async def test_orphan_stale_tap_still_edits(env) -> None:  # type: ignore[no-untyped-def]
+    """Нажатие устарело, пока шли запросы к бирже (answer падает) — итог
+    всё равно дописан к сообщению, и успех, и отказ."""
+    for outcome in (env.import_outcome, SimpleNamespace(trade=None, refusal="Объём не сходится.")):
+        env.client = _Client([_position()], [])
+        env.import_outcome = outcome
+        callback = _orphan_callback()
+        callback.answer = _bad_request("query is too old")
+        await _orphan(env, callback)
+        callback.message.edit_text.assert_awaited_once()
+        callback.bot.send_message.assert_not_awaited()
+
+
+async def test_orphan_import_refused_while_opening_in_flight(env) -> None:  # type: ignore[no-untyped-def]
+    """Общие проверки «В журнал» и у кнопки сверки: идёт открытие — отказ."""
+    env.client = _Client([_position()], [])
+    env.openings = {("XRP-USDT", TradeSide.LONG)}
+    callback = await _orphan(env)
+    assert env.imports == []
+    text, rows = _edited(callback)
+    assert "открывается из бота" in text and rows == [IMPORT_ROW]
+
+
+async def test_stale_orphan_button_refused() -> None:
+    callback = _orphan_callback(f"{IMPORT_ORPHAN}XRP-USDT:X")
+    await screen.import_orphan_position(
+        callback, MagicMock(), _user(), settings=None, cipher=None,  # type: ignore[arg-type]
+        redis=FakeRedis(),
+    )
+    assert callback.answer.await_args.kwargs.get("show_alert") is True
+    callback.message.edit_text.assert_not_awaited()

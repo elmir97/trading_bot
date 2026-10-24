@@ -2247,3 +2247,100 @@ async def test_closes_fully_row_older_than_trade_window_left_for_sweep(ctx) -> N
     assert (await _trade(db, sol.id)).status is TradeStatus.CLOSED
     got = (await _orders(db, [extra.id]))[extra.id]
     assert (got.status, got.cancel_source) == (OrderStatus.CANCELLED, CancelSource.EXCHANGE)
+
+
+# --- п.3 (24.10): «📥 В журнал» в сообщении ORPHAN_POSITION -----------------------------
+
+
+class MarkupBot(FakeBot):
+    def __init__(self) -> None:
+        super().__init__()
+        self.markups: list[Any] = []
+
+    async def send_message(self, chat_id: int, text: str, reply_markup=None) -> None:  # type: ignore[no-untyped-def]
+        self.sent.append(text)
+        self.markups.append(reply_markup)
+
+
+def _buttons(markup: Any) -> list[tuple[str, str]]:
+    return [(b.text, b.callback_data) for row in markup.inline_keyboard for b in row]
+
+
+async def test_orphan_message_has_import_and_positions_buttons(ctx) -> None:  # type: ignore[no-untyped-def]
+    settings, db, _session, _user, _demo = ctx
+    bot = MarkupBot()
+
+    await _run_reconciler(settings, db, bot)
+
+    [(text, markup)] = [
+        (t, m) for t, m in zip(bot.sent, bot.markups, strict=True) if "сделки в журнале нет" in t
+    ]
+    assert "LINK-USDT" in text
+    assert _buttons(markup) == [
+        ("📥 В журнал", "pos:impn:LINK-USDT:L"), ("💼 Позиции", "menu:open"),
+    ]
+
+
+def _orphan_event(
+    kind: ReconciliationKind, key: str, symbol: str = "LINK-USDT"
+) -> ReconciliationEvent:
+    return ReconciliationEvent(user_id=1, symbol=symbol, kind=kind, dedup_key=key, detail="d")
+
+
+def test_orphan_markup_from_stored_event_and_only_for_orphan() -> None:
+    """Событие из базы (переотправка, события до 24.10): сторона — из
+    dedup_key, символ сверяется с event.symbol; не разбирается — без кнопок.
+    У прочих событий кнопок нет; явная сторона расхождения важнее ключа."""
+    from app.workers.reconciler import _orphan_markup
+
+    orphan = ReconciliationKind.ORPHAN_POSITION
+    stored = _orphan_markup(_orphan_event(orphan, "orphan:LINK-USDT:SHORT:—"), None)
+    assert stored is not None and _buttons(stored)[0][1] == "pos:impn:LINK-USDT:S"
+    explicit = _orphan_markup(_orphan_event(orphan, "orphan:LINK-USDT:SHORT:1"), TradeSide.LONG)
+    assert explicit is not None and _buttons(explicit)[0][1] == "pos:impn:LINK-USDT:L"
+    for bad in ("orphan:XRP-USDT:LONG:1", "orphan:LINK-USDT:FLAT:1", "orphan:LINK-USDT:LONG",
+                "stop_missing:LINK-USDT:LONG:1"):
+        assert _orphan_markup(_orphan_event(orphan, bad), None) is None, bad
+    assert _orphan_markup(
+        _orphan_event(ReconciliationKind.STOP_MISSING, "orphan:LINK-USDT:LONG:1"), TradeSide.LONG
+    ) is None
+
+
+async def test_orphan_resend_keeps_buttons(ctx, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Переотправка события из базы (Telegram лёг на первой отправке, биржа
+    теперь недоступна): кнопки те же — сторона из dedup_key."""
+    import app.workers.reconciler as reconciler_module
+
+    settings, db, session, user, _demo = ctx
+    now = datetime.now(UTC)
+    event = ReconciliationEvent(
+        user_id=user.id, symbol="LINK-USDT", kind=ReconciliationKind.ORPHAN_POSITION,
+        dedup_key="orphan:LINK-USDT:SHORT:1", detail="d", created_at=now - timedelta(minutes=1),
+        notify_text="⚠️ LINK-USDT: сделки в журнале нет", attempts=1,
+        last_attempt_at=now - timedelta(minutes=1),
+    )
+    session.add(event)
+    await session.commit()
+    monkeypatch.setattr(reconciler_module, "ExchangeFactory", _DownFactory)
+
+    bot = MarkupBot()
+    await _run_reconciler(settings, db, bot)
+
+    assert bot.sent == ["⚠️ LINK-USDT: сделки в журнале нет"]
+    assert _buttons(bot.markups[0]) == [
+        ("📥 В журнал", "pos:impn:LINK-USDT:S"), ("💼 Позиции", "menu:open"),
+    ]
+    assert (await _event(db, event.id)).notified_at is not None
+
+
+async def test_other_events_have_no_buttons(ctx) -> None:  # type: ignore[no-untyped-def]
+    settings, db, session, user, _demo = ctx
+    await _seed_live(session, user.id)
+    bot = MarkupBot()
+
+    await _run_reconciler(settings, db, bot)
+
+    others = [m for t, m in zip(bot.sent, bot.markups, strict=True)
+              if "сделки в журнале нет" not in t]
+    assert any("закрыта по стопу" in t for t in bot.sent)
+    assert others and all(m is None for m in others)

@@ -113,6 +113,9 @@ class Discrepancy:
     detail: str
     trade_id: int | None = None
     execution_order_id: int | None = None
+    # п.3 (24.10): сторона позиции — явно, для кнопки «📥 В журнал» у
+    # ORPHAN_POSITION (символ — в symbol).
+    side: TradeSide | None = None
 
 
 @dataclass(slots=True)
@@ -305,6 +308,26 @@ def stop_missing(
     )
 
 
+ORPHAN_PREFIX = "orphan:"
+
+
+def orphan_key(symbol: str, side: TradeSide, position_id: str | None) -> str:
+    return f"{ORPHAN_PREFIX}{symbol}:{side.value}:{position_id or '—'}"
+
+
+def parse_orphan_key(key: str) -> tuple[str, TradeSide] | None:
+    """Символ и сторона из dedup_key ORPHAN_POSITION — для событий из базы
+    (переотправка, события до 24.10): стороны в таблице нет, миграции не
+    делаем. Не разбирается — None (кнопки не будет)."""
+    parts = key.split(":")
+    if len(parts) != 4 or f"{parts[0]}:" != ORPHAN_PREFIX or not parts[1]:
+        return None
+    try:
+        return parts[1], TradeSide(parts[2])
+    except ValueError:
+        return None
+
+
 def orphan_positions(
     positions: list[Position],
     journal_open: set[tuple[str, TradeSide]],
@@ -320,10 +343,11 @@ def orphan_positions(
         found.append(
             Discrepancy(
                 ReconciliationKind.ORPHAN_POSITION,
-                f"orphan:{p.symbol}:{p.side.value}:{p.position_id or '—'}",
+                orphan_key(p.symbol, p.side, p.position_id),
                 p.symbol,
                 f"позиция {p.side.value} {p.quantity} по {p.entry_price} на бирже, "
                 "сделки в журнале нет — не создаю",
+                side=p.side,
             )
         )
     return found

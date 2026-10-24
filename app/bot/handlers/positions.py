@@ -17,10 +17,14 @@
 
 from __future__ import annotations
 
+import html
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -29,10 +33,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.bot.handlers.exchange import ExchangeCB, _describe, _market_cache
 from app.bot.handlers.position_actions import SIDE_BY_CODE, SIDE_CODE, action_buttons
 from app.bot.keyboards.main import MenuCallback
+from app.bot.keyboards.positions import (
+    IMPORT_ORPHAN,
+    ORPHAN_REFUSED,
+    orphan_done_keyboard,
+    orphan_keyboard,
+)
 from app.bot.keyboards.trade import TradeCB
 from app.bot.messaging import edit_or_replace
 from app.bot.opening_result import POSITION_ACTIONS
 from app.core.config import Settings
+from app.core.locks import LockBusyError, RedisLock, position_lock_key
 from app.core.logging import get_logger
 from app.core.security import SecretCipher
 from app.database.models.trade import Trade
@@ -57,6 +68,10 @@ router = Router(name="positions")
 logger = get_logger(__name__)
 
 IMPORT_DAYS = 30
+# Лок позиции на время «📥 В журнал»: история исполнений за IMPORT_DAYS — до
+# десятка GET; лок снимается сразу по завершении.
+IMPORT_LOCK_TTL_SECONDS = 120
+ALERT_LIMIT = 200   # всплывашка answerCallbackQuery — до 200 символов
 
 
 class PositionsCB:
@@ -302,41 +317,57 @@ async def open_actions(
         await event.answer(text, reply_markup=keyboard)
 
 
-@router.callback_query(F.data.startswith(PositionsCB.IMPORT))
-async def import_position(
-    callback: CallbackQuery,
-    session: AsyncSession,
-    user: User,
-    settings: Settings,
-    cipher: SecretCipher,
-) -> None:
-    """В журнал — только текущая открытая позиция (исполнения её входа за
-    IMPORT_DAYS дней), без закрытых сделок символа: история — /import.
-    Сделку создаёт пользователь кнопкой; reconciler сам их не создаёт
-    (позиция без сделки — только уведомление)."""
-    ref = _parse_ref(str(callback.data), PositionsCB.IMPORT)
-    if ref is None:
-        await callback.answer("Кнопка устарела — открой «Позиции» заново.", show_alert=True)
-        return
-    symbol, side = ref
+@dataclass(frozen=True, slots=True)
+class Imported:
+    """Итог «📥 В журнал»: note — строка для экрана «Позиции»; trade_id — сделка
+    создана; warning — оговорка к созданной; refused_early — отказ до работы
+    (лок, открытие в полёте): всплывашка, экран не перерисовывать."""
+
+    note: str
+    trade_id: int | None = None
+    warning: str | None = None
+    refused_early: bool = False
+
+
+async def import_open_position(
+    session: AsyncSession, user: User, settings: Settings, cipher: SecretCipher, redis: Any,
+    symbol: str, side: TradeSide,
+) -> Imported:
+    """Общая для экрана «Позиции» и сообщения сверки ORPHAN_POSITION (п.3,
+    24.10): текущая позиция в журнал под локом позиции (тот же exec:lock, что
+    у действий этапа 4 — сверка пропускает цикл, второе нажатие получает
+    отказ): двойное нажатие — один импорт."""
     label = f"{symbol} {side.value}"
     if await opening_in_flight(session, user.id, symbol, side):
         # 05.10.2026: позиция открывается из бота (лимит исполнен частично,
         # идёт защита) — сделку запишет само открытие, иначе будет дубль.
-        await callback.answer(
+        return Imported(
             f"{label} сейчас открывается из бота — сделку запишет само открытие.",
-            show_alert=True,
+            refused_early=True,
         )
-        return
-    await callback.answer("Заношу в журнал…")
+    try:
+        async with RedisLock(redis, position_lock_key(user.id, symbol, side.value),
+                             IMPORT_LOCK_TTL_SECONDS):
+            return await _import_locked(session, user, settings, cipher, symbol, side)
+    except LockBusyError:
+        return Imported(f"{label}: с позицией уже идёт действие — подожди и повтори.",
+                        refused_early=True)
+
+
+async def _import_locked(
+    session: AsyncSession, user: User, settings: Settings, cipher: SecretCipher,
+    symbol: str, side: TradeSide,
+) -> Imported:
+    label = f"{symbol} {side.value}"
     try:
         client = await ExchangeFactory(settings, cipher).for_user(
             session, user.id, mode=user.settings.active_exchange_mode
         )
     except ExchangeAuthError as exc:
-        await _show(callback, session, user, settings, cipher, note=_describe(exc))
-        return
+        return Imported(_describe(exc))
     end = datetime.now(UTC)
+    warning = None
+    trade_id = None
     try:
         position = next(
             (p for p in await client.get_positions() if p.symbol == symbol and p.side == side),
@@ -357,12 +388,14 @@ async def import_position(
                 position_id=position.position_id, account_balance=balance,
             )
             if outcome.trade is not None:
-                note = f"📥 {label}: в журнале — сделка #{outcome.trade.id}."
+                trade_id = outcome.trade.id
+                note = f"📥 {label}: в журнале — сделка #{trade_id}."
                 if balance is None:
-                    note += (
-                        " ⚠️ Баланс счёта не получен — сделка не войдёт в процент "
+                    warning = (
+                        "⚠️ Баланс счёта не получен — сделка не войдёт в процент "
                         "лимитов убытка."
                     )
+                    note += f" {warning}"
             else:
                 note = f"📥 {label}: {outcome.refusal} Историю целиком — /import."
     except ExchangeError as exc:
@@ -370,4 +403,85 @@ async def import_position(
         note = _describe(exc)
     finally:
         await client.close()
-    await _show(callback, session, user, settings, cipher, note=note)
+    return Imported(note, trade_id, warning)
+
+
+@router.callback_query(F.data.startswith(PositionsCB.IMPORT))
+async def import_position(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    user: User,
+    settings: Settings,
+    cipher: SecretCipher,
+    redis: Any,
+) -> None:
+    """В журнал — только текущая открытая позиция (исполнения её входа за
+    IMPORT_DAYS дней), без закрытых сделок символа: история — /import.
+    Сделку создаёт пользователь кнопкой; reconciler сам их не создаёт
+    (позиция без сделки — только уведомление с этой же кнопкой)."""
+    ref = _parse_ref(str(callback.data), PositionsCB.IMPORT)
+    if ref is None:
+        await callback.answer("Кнопка устарела — открой «Позиции» заново.", show_alert=True)
+        return
+    result = await import_open_position(session, user, settings, cipher, redis, *ref)
+    if result.refused_early:
+        await callback.answer(result.note, show_alert=True)
+        return
+    await _answer_late(callback)
+    await _show(callback, session, user, settings, cipher, note=result.note)
+
+
+async def _answer_late(
+    callback: CallbackQuery, text: str | None = None, *, alert: bool = False
+) -> bool:
+    """Ответ на нажатие после запросов к бирже: нажатие могло устареть
+    (Telegram отвечает ошибкой), всплывашка — не длиннее ALERT_LIMIT.
+    False — не ответили, итог нужно показать иначе."""
+    if text is not None and len(text) > ALERT_LIMIT:
+        text = None
+    try:
+        await callback.answer(text, show_alert=alert and text is not None)
+    except TelegramAPIError:
+        return False
+    return text is not None or not alert
+
+
+@router.callback_query(F.data.startswith(IMPORT_ORPHAN))
+async def import_orphan_position(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    user: User,
+    settings: Settings,
+    cipher: SecretCipher,
+    redis: Any,
+) -> None:
+    """п.3 (24.10): «📥 В журнал» в сообщении сверки «сделки в журнале нет».
+    Итог дописывается к тексту сообщения: удалось — кнопка импорта убрана,
+    «💼 Позиции» остаётся; отказ — причина, кнопки как были (прежняя причина
+    заменяется). Не отредактировалось — итог новым сообщением."""
+    ref = _parse_ref(str(callback.data), IMPORT_ORPHAN)
+    if ref is None:
+        await callback.answer("Кнопка устарела — открой «Позиции».", show_alert=True)
+        return
+    result = await import_open_position(session, user, settings, cipher, redis, *ref)
+    await _answer_late(callback)
+    if result.trade_id is None:
+        line = f"{ORPHAN_REFUSED}{html.escape(result.note.removeprefix('📥 '))}"
+        keyboard = orphan_keyboard(*ref)
+    else:
+        line = f"📥 В журнале — сделка #{result.trade_id}."
+        if result.warning:
+            line += f" {result.warning}"
+        keyboard = orphan_done_keyboard()
+    message = callback.message
+    if isinstance(message, Message):
+        original = message.html_text.split(f"\n\n{ORPHAN_REFUSED}", 1)[0]
+        try:
+            await message.edit_text(f"{original}\n\n{line}", reply_markup=keyboard)
+            return
+        except TelegramAPIError:
+            logger.warning("Сообщение сверки не отредактировано — итог новым сообщением",
+                           extra={"user_id": user.id, "trade_id": result.trade_id})
+    await callback.bot.send_message(  # type: ignore[union-attr]
+        callback.from_user.id, f"{ref[0]} {ref[1].value}: {line}", reply_markup=keyboard,
+    )

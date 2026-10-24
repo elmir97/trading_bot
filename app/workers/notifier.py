@@ -126,7 +126,8 @@ async def send_notification_message(
 
 
 async def deliver_event(
-    bot: Bot, event: ReconciliationEvent, telegram_id: int, now: datetime, text: str
+    bot: Bot, event: ReconciliationEvent, telegram_id: int, now: datetime, text: str,
+    *, reply_markup: InlineKeyboardMarkup | None = None,
 ) -> tuple[Delivery, Message | None]:
     """Одна попытка доставки события reconciliation_events (28.09): и для
     reconciler, и для тревог read-back на пути «Да». notified_at — только
@@ -135,7 +136,9 @@ async def deliver_event(
     Отправленное сообщение — для журнала исходящих (09.10)."""
     event.attempts = (event.attempts or 0) + 1
     event.last_attempt_at = now
-    delivery, sent = await send_notification_message(bot, telegram_id, text)
+    delivery, sent = await send_notification_message(
+        bot, telegram_id, text, reply_markup=reply_markup
+    )
     if delivery is Delivery.DELIVERED:
         event.notified_at = datetime.now(UTC)
     elif delivery is Delivery.FORBIDDEN:
