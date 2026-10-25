@@ -394,11 +394,16 @@ def _risk_text(loss: Decimal | None, r: Decimal | None) -> str:
         # плюс в доли цента) — «≈0», а не «зафиксировано 0.00».
         locked = _cents(-loss)
         text = f"нет, зафиксировано {fmt_amount(locked)} USDT" if locked > ZERO else "≈0 USDT"
+        if r is not None:
+            r = -r   # 5.0б (25.10): здесь R — результат, не риск: прибыль «+», убыток «−»
     else:
         text = f"{fmt_amount(loss)} USDT"
-    if r is not None and r.is_zero():
-        r = r.copy_abs()   # «-0.00R» → «0.00R»: ноль без знака
-    return f"{text} ({r}R)" if r is not None else text
+    if r is None:
+        return text
+    if r.is_zero():
+        return f"{text} ({r.copy_abs()}R)"   # «-0.00R» → «0.00R»: ноль без знака
+    plus = "+" if loss <= ZERO and r > ZERO else ""   # величина риска — без плюса
+    return f"{text} ({plus}{r}R)"
 
 
 @dataclass(frozen=True, slots=True)

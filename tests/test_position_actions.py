@@ -387,6 +387,13 @@ class TestCardView:
 # --- 5.0а: ноль без знака, «Риск после» только при смене риска (25.10.2026) --------
 
 
+def _plan_and_inputs(kind: Kind, params: dict) -> tuple[ActionPlan, ActionInputs]:
+    inputs = _inputs()
+    plan = plan_action(kind, params, inputs)
+    assert isinstance(plan, ActionPlan)
+    return plan, inputs
+
+
 class TestRiskTextZero:
     def _after(self, level: str) -> str:
         inputs = _inputs()
@@ -407,9 +414,22 @@ class TestRiskTextZero:
         assert "зафиксировано 0.00" not in text
 
     def test_locked_more_than_cent_stays(self) -> None:
-        """Стоп за безубытком: зафиксировано ≥ цента — строка прежняя, R со знаком."""
-        assert self._after("1.535") == "нет, зафиксировано 0.25 USDT (-0.18R)"
-        assert self._after("1.5272") == "нет, зафиксировано 0.01 USDT (-0.01R)"
+        """Стоп за безубытком: зафиксировано ≥ цента. 5.0б — знак R здесь результат:
+        прибыль с плюсом."""
+        assert self._after("1.535") == "нет, зафиксировано 0.25 USDT (+0.18R)"
+        assert self._after("1.5272") == "нет, зафиксировано 0.01 USDT (+0.01R)"
+
+    def test_locked_before_has_plus_risk_has_none(self) -> None:
+        """5.0б: зафиксированная прибыль «до» — с плюсом; величина риска — без."""
+        inputs = _inputs(stops=(_order("1.535"),))
+        plan = plan_action(Kind.MOVE_STOP, {"level": "1.54"}, inputs)
+        assert isinstance(plan, ActionPlan)
+        view = card_view(plan, inputs)
+        assert view.risk is not None
+        assert view.risk.before == "нет, зафиксировано 0.25 USDT (+0.18R)"
+        assert view.risk.after.startswith("нет, зафиксировано ") and "(+0." in view.risk.after
+        plain = render_card(*_plan_and_inputs(Kind.MOVE_STOP, {"level": "1.5"}))
+        assert "Риск: 1.42 USDT (1.03R) → 0.80 USDT (0.59R)" in plain and "(+" not in plain
 
     def test_cent_locked_but_zero_r_has_no_sign(self) -> None:
         # 0.0052 USDT → «0.01», R −0.0038 → округлён к нулю — без знака.
