@@ -155,8 +155,8 @@ def plan_action(
     kind: Kind, params: dict[str, object], inputs: ActionInputs
 ) -> ActionPlan | ExecutionRefusal:
     """План действия или отказ. params: {"breakeven": True} | {"level": "1.5"}
-    (MOVE_STOP), {"level": "…"} (SET_TAKE), {"fraction": "25"|"50"}
-    (CLOSE_PARTIAL), {} (CLOSE_FULL)."""
+    | {"level_percent": "1"} — отступ от mark (MOVE_STOP), {"level": "…"}
+    (SET_TAKE), {"fraction": "25"|"50"} (CLOSE_PARTIAL), {} (CLOSE_FULL)."""
     p = inputs.position
     q = p.quantity
     precision = inputs.symbol_info.price_precision
@@ -175,12 +175,24 @@ def plan_action(
                 Code.STOP_AMBIGUOUS, "На позиции несколько стопов — переставь их на бирже."
             )
         breakeven = bool(params.get("breakeven"))
+        percent: Decimal | None = None
         if breakeven:
             level = breakeven_price(
                 p.side, p.entry_price, inputs.fee_rate, entry_fee_unit(inputs), precision
             )
         else:
             typed = _parse_level(params)
+            if typed is None and "level" not in params and "level_percent" in params:
+                # Чип Mini App (25.10): отступ от mark в сторону убытка — LONG
+                # ниже, SHORT выше. В строку действия — уже цена (params ниже):
+                # «Да» сверяет её, а не отступ от нового mark.
+                percent = _parse_percent(params)
+                if percent is None:
+                    return _refuse(
+                        Code.INVALID_PRICE,
+                        "Отступ стопа — положительное число процентов меньше 100.",
+                    )
+                typed = inputs.mark * (ONE - _sign(p.side) * percent / HUNDRED)
             if typed is None:
                 return _refuse(Code.INVALID_PRICE, "Цена стопа — положительное число.")
             # К шагу цены — ближе к цене: объём фиксирован, риск в $ не растёт.
@@ -208,9 +220,12 @@ def plan_action(
             capped = _check_cap(inputs, risk_after)
             if capped is not None:
                 return capped
+        stored: dict[str, object] = {"breakeven": True} if breakeven else {"level": str(level)}
+        if percent is not None:
+            stored["level_percent"] = str(percent)
         return ActionPlan(
             kind=kind,
-            params={"breakeven": True} if breakeven else {"level": str(level)},
+            params=stored,
             current_stop=current_stop, current_take=current_take, new_level=level,
             replaces_order_id=stop.order_id if stop else None,
             risk_before=risk_now, risk_after=risk_after,
@@ -333,6 +348,16 @@ def _parse_level(params: dict[str, object]) -> Decimal | None:
     return level
 
 
+def _parse_percent(params: dict[str, object]) -> Decimal | None:
+    try:
+        percent = Decimal(str(params.get("level_percent")).strip().replace(",", "."))
+    except (ArithmeticError, ValueError):
+        return None
+    if not percent.is_finite() or percent <= ZERO or percent >= HUNDRED:
+        return None
+    return percent
+
+
 def _cents(value: Decimal) -> Decimal:
     return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
@@ -371,57 +396,121 @@ def _risk_text(loss: Decimal | None, r: Decimal | None) -> str:
     return f"{text} ({r}R)" if r is not None else text
 
 
-def render_card(plan: ActionPlan, inputs: ActionInputs) -> str:
+@dataclass(frozen=True, slots=True)
+class RiskView:
+    """Риск до и после строками карточки. increase — «Да, увеличить риск»:
+    тогда без R в скобках, рост в R — delta («+0.65R»; R не знаем — "")."""
+
+    before: str
+    after: str
+    increase: bool
+    delta: str
+
+
+@dataclass(frozen=True, slots=True)
+class CardView:
+    """Поля карточки действия строками (5.0, 25.10.2026): одно место, где числа
+    плана форматируются (fmt_*). Из него — текст карточки в чате (render_card)
+    и строки карточки Mini App (app/api) — числа совпадают по построению."""
+
+    kind: Kind
+    symbol: str
+    side: str
+    title: str
+    quantity: str
+    entry: str
+    mark: str
+    old_level: str | None = None      # стоп/тейк: что стоит сейчас, «нет» — ничего
+    new_level: str | None = None
+    close_what: str | None = None     # «всю позицию» / «25%»
+    close_qty: str | None = None
+    fee: str = ""                     # комиссия выхода, USDT
+    pnl: str | None = None            # тейк — по тейку, закрытие — по mark
+    remainder: str | None = None      # частичное: что будет со стопом и тейком
+    risk: RiskView | None = None      # тейк — None
+    breakeven: bool = False
+    risk_share: str | None = None     # «0.01% от 10000.00 USDT»
+
+
+def card_view(plan: ActionPlan, inputs: ActionInputs) -> CardView:
     p = inputs.position
     pp = inputs.symbol_info.price_precision
     qp = inputs.symbol_info.quantity_precision
-    title = KIND_TITLE[plan.kind]
-    if plan.kind is Kind.MOVE_STOP and plan.params.get("breakeven"):
-        title = "стоп в безубыток"
-    lines = [
-        f"<b>{p.symbol} {p.side.value} · {title}</b>",
-        f"Позиция {fmt_qty(p.quantity, qp)} · вход {fmt_price(p.entry_price, pp)} · "
-        f"mark {fmt_price(inputs.mark, pp)}",
-    ]
-    if plan.kind is Kind.MOVE_STOP:
-        old = fmt_price(plan.current_stop, pp) if plan.current_stop is not None else "нет"
-        lines.append(f"Стоп: {old} → <b>{fmt_price(plan.new_level, pp)}</b> (на всю позицию)")
-    elif plan.kind is Kind.SET_TAKE:
-        old = fmt_price(plan.current_take, pp) if plan.current_take is not None else "нет"
-        lines.append(f"Тейк: {old} → <b>{fmt_price(plan.new_level, pp)}</b> (на всю позицию)")
-        if plan.pnl_estimate is not None:
-            lines.append(f"PnL по тейку ≈ {fmt_money(plan.pnl_estimate)} USDT (после комиссий)")
+    breakeven = plan.kind is Kind.MOVE_STOP and bool(plan.params.get("breakeven"))
+    title = "стоп в безубыток" if breakeven else KIND_TITLE[plan.kind]
+    old_level = new_level = close_what = close_qty = pnl = remainder = None
+    if plan.kind in (Kind.MOVE_STOP, Kind.SET_TAKE):
+        current = plan.current_stop if plan.kind is Kind.MOVE_STOP else plan.current_take
+        old_level = fmt_price(current, pp) if current is not None else "нет"
+        new_level = fmt_price(plan.new_level, pp)
+        if plan.kind is Kind.SET_TAKE and plan.pnl_estimate is not None:
+            pnl = fmt_money(plan.pnl_estimate)
     else:
-        what = "всю позицию" if plan.kind is Kind.CLOSE_FULL else f"{plan.params.get('fraction')}%"
-        lines.append(
-            f"Закрыть {what}: <b>{fmt_qty(plan.close_qty, qp)}</b> маркетом · "
-            f"комиссия ≈{fmt_amount(plan.fee)} USDT"
+        close_what = (
+            "всю позицию" if plan.kind is Kind.CLOSE_FULL else f"{plan.params.get('fraction')}%"
         )
+        close_qty = fmt_qty(plan.close_qty, qp)
         if plan.pnl_estimate is not None:
-            lines.append(f"PnL ≈ {fmt_money(plan.pnl_estimate)} USDT по mark (после комиссий)")
+            pnl = fmt_money(plan.pnl_estimate)
         if plan.kind is Kind.CLOSE_PARTIAL and plan.remainder is not None:
-            lines.append(levels_after_partial(inputs.stops, inputs.takes, plan.remainder, qp))
+            remainder = levels_after_partial(inputs.stops, inputs.takes, plan.remainder, qp)
+    risk = None
     if plan.kind is not Kind.SET_TAKE:
         if plan.risk_increase:
             delta = (
-                f" (+{(plan.r_after - plan.r_before).quantize(R_STEP)}R)"
+                f"+{(plan.r_after - plan.r_before).quantize(R_STEP)}R"
                 if plan.r_after is not None and plan.r_before is not None else ""
             )
+            risk = RiskView(_risk_text(plan.risk_before, None),
+                            _risk_text(plan.risk_after, None), True, delta)
+        else:
+            risk = RiskView(_risk_text(plan.risk_before, plan.r_before),
+                            _risk_text(plan.risk_after, plan.r_after), False, "")
+    share = None
+    if inputs.equity and plan.risk_after is not None and plan.risk_after > ZERO:
+        pct = (plan.risk_after / inputs.equity * HUNDRED).quantize(R_STEP, ROUND_HALF_UP)
+        share = f"{pct}% от {fmt_amount(inputs.equity)} USDT"
+    return CardView(
+        kind=plan.kind, symbol=p.symbol, side=p.side.value, title=title,
+        quantity=fmt_qty(p.quantity, qp), entry=fmt_price(p.entry_price, pp),
+        mark=fmt_price(inputs.mark, pp), old_level=old_level, new_level=new_level,
+        close_what=close_what, close_qty=close_qty, fee=fmt_amount(plan.fee), pnl=pnl,
+        remainder=remainder, risk=risk, breakeven=breakeven, risk_share=share,
+    )
+
+
+def render_card(plan: ActionPlan, inputs: ActionInputs) -> str:
+    v = card_view(plan, inputs)
+    lines = [
+        f"<b>{v.symbol} {v.side} · {v.title}</b>",
+        f"Позиция {v.quantity} · вход {v.entry} · mark {v.mark}",
+    ]
+    if v.kind in (Kind.MOVE_STOP, Kind.SET_TAKE):
+        name = "Стоп" if v.kind is Kind.MOVE_STOP else "Тейк"
+        lines.append(f"{name}: {v.old_level} → <b>{v.new_level}</b> (на всю позицию)")
+        if v.pnl is not None:
+            lines.append(f"PnL по тейку ≈ {v.pnl} USDT (после комиссий)")
+    else:
+        lines.append(
+            f"Закрыть {v.close_what}: <b>{v.close_qty}</b> маркетом · комиссия ≈{v.fee} USDT"
+        )
+        if v.pnl is not None:
+            lines.append(f"PnL ≈ {v.pnl} USDT по mark (после комиссий)")
+        if v.remainder is not None:
+            lines.append(v.remainder)
+    if v.risk is not None:
+        if v.risk.increase:
+            delta = f" ({v.risk.delta})" if v.risk.delta else ""
             lines.append(
-                f"⚠️ <b>Риск увеличится:</b> {_risk_text(plan.risk_before, None)} → "
-                f"{_risk_text(plan.risk_after, None)}{delta}"
+                f"⚠️ <b>Риск увеличится:</b> {v.risk.before} → {v.risk.after}{delta}"
             )
         else:
-            lines.append(
-                f"Риск: {_risk_text(plan.risk_before, plan.r_before)} → "
-                f"{_risk_text(plan.risk_after, plan.r_after)}"
-            )
-        if plan.kind is Kind.MOVE_STOP:
-            lines.append(f"Комиссия выхода по стопу ≈{fmt_amount(plan.fee)} USDT (учтена в риске)")
-        if plan.kind is Kind.MOVE_STOP and plan.params.get("breakeven"):
+            lines.append(f"Риск: {v.risk.before} → {v.risk.after}")
+        if v.kind is Kind.MOVE_STOP:
+            lines.append(f"Комиссия выхода по стопу ≈{v.fee} USDT (учтена в риске)")
+        if v.breakeven:
             lines.append("≈0 нетто без учёта проскальзывания (стоп исполняется маркетом)")
-    if inputs.equity and plan.risk_after is not None and plan.risk_after > ZERO:
-        share = (plan.risk_after / inputs.equity * HUNDRED).quantize(R_STEP, ROUND_HALF_UP)
-        lines.append(f"Риск после — {share}% от {fmt_amount(inputs.equity)} USDT")
+    if v.risk_share is not None:
+        lines.append(f"Риск после — {v.risk_share}")
     lines += ["", DISCLAIMER]
     return "\n".join(lines)

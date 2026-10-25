@@ -26,6 +26,10 @@ B.9 (19.10.2026): первая строка PENDING коммитится вме�
 REFUSED). Прерванное рестартом доводит до итога только чтением биржи
 app/execution/action_recovery.py; счёт действия — account_mode (M9).
 
+5.0 (25.10.2026, Mini App, экран 5): preview — тот же путь, что у карточки,
+без записи; поля карточки строками — card_view (CardOutcome.view); «Да» и
+«Нет» находят только действие текущего счёта (_load по account_mode).
+
 EXEC_DRY_RUN — на биржу ничего не уходит: строки DRY_RUN с тем, что ушло
 бы. Live — только через существующие флаги (exec_allow_live_mode_orders,
 bingx_trading_mode), по умолчанию демо.
@@ -69,6 +73,8 @@ from app.execution.models import ExecutionRefusalCode as Code
 from app.execution.position_actions import (
     ActionInputs,
     ActionPlan,
+    CardView,
+    card_view,
     levels_after_partial,
     plan_action,
     render_card,
@@ -117,6 +123,9 @@ class CardOutcome:
     text: str
     action: PositionAction | None
     risk_increase: bool = False
+    # Поля карточки строками (Mini App, 5.0); у отказа — None, причина — refusal.
+    view: CardView | None = None
+    refusal: ExecutionRefusal | None = None
 
     @property
     def refused(self) -> bool:
@@ -260,6 +269,40 @@ class PositionActionService:
 
     # --- карточка ----------------------------------------------------------
 
+    async def _plan(
+        self, kind: PositionActionKind, params: dict[str, object], symbol: str, side: TradeSide,
+    ) -> tuple[ActionPlan | None, ActionInputs | None, Trade | None, ExecutionRefusal | None]:
+        """Проверки, чтение биржи и план — общий путь карточки и превью."""
+        refusal = self._gate()
+        if refusal is not None:
+            return None, None, None, refusal
+        client, refusal = await self._client()
+        if client is None:
+            return None, None, None, refusal
+        try:
+            inputs, trade, refusal = await self._inputs(client, symbol, side)
+        finally:
+            await client.close()
+        if inputs is None:
+            return None, None, None, refusal
+        plan = plan_action(kind, params, inputs)
+        if isinstance(plan, ExecutionRefusal):
+            return None, inputs, trade, plan
+        return plan, inputs, trade, None
+
+    async def preview(
+        self, kind: PositionActionKind, params: dict[str, object], symbol: str, side: TradeSide,
+    ) -> CardOutcome:
+        """Живой пересчёт Mini App (5.0): тот же путь, что у карточки, но без
+        строки действия и без REFUSED-строки — в базу действий ничего. Клиент
+        биржи — какой даст фабрика (у API — только чтение, кэш процесса)."""
+        plan, inputs, _, refusal = await self._plan(kind, params, symbol, side)
+        if plan is None or inputs is None:
+            assert refusal is not None
+            return CardOutcome(f"⛔ {refusal.message}", None, refusal=refusal)
+        return CardOutcome(render_card(plan, inputs), None, plan.risk_increase,
+                           view=card_view(plan, inputs))
+
     async def open_card(
         self,
         kind: PositionActionKind,
@@ -269,25 +312,12 @@ class PositionActionService:
         *,
         message_id: int | None,
     ) -> CardOutcome:
-        refusal = self._gate()
-        if refusal is not None:
-            return CardOutcome(await self._refused(kind, params, symbol, side, refusal), None)
-        client, refusal = await self._client()
-        if client is None:
+        plan, inputs, trade, refusal = await self._plan(kind, params, symbol, side)
+        if plan is None:
             assert refusal is not None
-            return CardOutcome(await self._refused(kind, params, symbol, side, refusal), None)
-        try:
-            inputs, trade, refusal = await self._inputs(client, symbol, side)
-        finally:
-            await client.close()
-        if inputs is None:
-            assert refusal is not None
-            return CardOutcome(await self._refused(kind, params, symbol, side, refusal), None)
-        plan = plan_action(kind, params, inputs)
-        if isinstance(plan, ExecutionRefusal):
-            return CardOutcome(
-                await self._refused(kind, params, symbol, side, plan, inputs=inputs), None
-            )
+            text = await self._refused(kind, params, symbol, side, refusal, inputs=inputs)
+            return CardOutcome(text, None, refusal=refusal)
+        assert inputs is not None
         action = PositionAction(
             user_id=self._user.id,
             trade_id=trade.id if trade is not None else None,
@@ -299,7 +329,8 @@ class PositionActionService:
         )
         self._session.add(action)
         await self._session.commit()
-        return CardOutcome(render_card(plan, inputs), action, plan.risk_increase)
+        return CardOutcome(render_card(plan, inputs), action, plan.risk_increase,
+                           view=card_view(plan, inputs))
 
     async def attach_message(self, action: PositionAction, message_id: int) -> None:
         """Карточка отправлена новым сообщением (после ввода цены): «Да»
@@ -330,12 +361,20 @@ class PositionActionService:
     # --- «Да» / «Нет» ------------------------------------------------------
 
     async def _load(self, action_id: int) -> PositionAction | None:
+        """Своё действие текущего счёта (5.0, 25.10): карточка другого счёта
+        (bingx_allowed_exchange_mode сменили) — как чужая: «Да» и «Нет» её не
+        находят, клиент другого режима по ней не отправит."""
         action: PositionAction | None = await self._session.scalar(
             select(PositionAction).where(
-                PositionAction.id == action_id, PositionAction.user_id == self._user.id
+                PositionAction.id == action_id, PositionAction.user_id == self._user.id,
+                PositionAction.account_mode == self._settings.bingx_allowed_exchange_mode,
             )
         )
         return action
+
+    async def load(self, action_id: int) -> PositionAction | None:
+        """Для API Mini App: владение и счёт — те же условия, что у «Да»."""
+        return await self._load(action_id)
 
     async def decline(self, action_id: int) -> str:
         action = await self._load(action_id)
@@ -1018,8 +1057,9 @@ def _drift(action: PositionAction, inputs: ActionInputs) -> ExecutionRefusal | N
     if action.position_qty is not None and p.quantity != action.position_qty:
         return ExecutionRefusal(
             Code.POSITION_CHANGED,
-            f"Объём позиции изменился: {action.position_qty.normalize()} → "
-            f"{p.quantity.normalize()} — открой заново.",
+            # :f — без экспоненты: normalize() у 30 даёт «3E+1» (25.10).
+            f"Объём позиции изменился: {action.position_qty.normalize():f} → "
+            f"{p.quantity.normalize():f} — открой заново.",
         )
     stop = inputs.stops[0].trigger_price if len(inputs.stops) == 1 else None
     take = inputs.takes[0].trigger_price if len(inputs.takes) == 1 else None

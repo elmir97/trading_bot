@@ -16,6 +16,7 @@ from app.execution.position_actions import (
     ActionInputs,
     ActionPlan,
     breakeven_price,
+    card_view,
     loss_at,
     plan_action,
     render_card,
@@ -306,3 +307,78 @@ def test_action_client_order_ids_unique_case_insensitive() -> None:
     ]
     assert len({i.casefold() for i in ids}) == len(ids)
     assert all(1 <= len(i) <= 40 for i in ids)
+
+
+# --- 5.0: чипы стопа в % от mark, card_view (25.10.2026) ---------------------------
+
+
+class TestLevelPercent:
+    def test_long_below_mark(self) -> None:
+        plan = _plan(Kind.MOVE_STOP, {"level_percent": "1"})
+        assert plan.new_level == D("1.5444")          # 1.56 × 0.99
+        assert plan.params == {"level": "1.5444", "level_percent": "1"}
+
+    def test_short_above_mark(self) -> None:
+        plan = _plan(
+            Kind.MOVE_STOP, {"level_percent": "1"},
+            position=_position(TradeSide.SHORT, entry="1.58"), stops=(_order("1.62"),),
+            mark=D("1.55"),
+        )
+        assert plan.new_level == D("1.5655")          # 1.55 × 1.01
+
+    def test_off_step_rounded_closer_to_mark(self) -> None:
+        # LONG: 1.56 × 0.993 = 1.54908 → ближе к mark (вверх) 1.5491;
+        # SHORT: 1.55 × 1.007 = 1.56085 → ближе к mark (вниз) 1.5608.
+        assert _plan(Kind.MOVE_STOP, {"level_percent": "0.7"}).new_level == D("1.5491")
+        short = _plan(
+            Kind.MOVE_STOP, {"level_percent": "0.7"},
+            position=_position(TradeSide.SHORT, entry="1.58"), stops=(_order("1.62"),),
+            mark=D("1.55"),
+        )
+        assert short.new_level == D("1.5608")
+
+    def test_stored_level_wins_over_percent(self) -> None:
+        """«Да» пересчитывает по сохранённой цене, не по отступу от нового mark."""
+        first = _plan(Kind.MOVE_STOP, {"level_percent": "1"})
+        again = _plan(Kind.MOVE_STOP, dict(first.params), mark=D("1.58"))
+        assert again.new_level == first.new_level
+
+    @pytest.mark.parametrize("bad", ["0", "-1", "100", "250", "abc", "NaN", "Infinity", None])
+    def test_bad_percent_refused(self, bad: object) -> None:
+        refusal = _refusal(Kind.MOVE_STOP, {"level_percent": bad})
+        assert refusal.code is Code.INVALID_PRICE and "процентов" in refusal.message
+
+    def test_breakeven_wins(self) -> None:
+        plan = _plan(Kind.MOVE_STOP, {"breakeven": True, "level_percent": "1"})
+        assert plan.params == {"breakeven": True}
+
+
+class TestCardView:
+    def test_fields_are_card_strings(self) -> None:
+        inputs = _inputs()
+        plan = plan_action(Kind.MOVE_STOP, {"level": "1.45"}, inputs)
+        assert isinstance(plan, ActionPlan)
+        view = card_view(plan, inputs)
+        assert (view.old_level, view.new_level, view.fee) == ("1.4795", "1.45", "0.02")
+        assert view.risk is not None and view.risk.increase and view.risk.delta == "+0.65R"
+        assert view.risk.before == "1.42 USDT" and view.risk.after == "2.30 USDT"
+        text = render_card(plan, inputs)
+        for part in (view.old_level, view.new_level, view.risk.before, view.risk.after,
+                     view.risk.delta, view.risk_share):
+            assert part and part in text
+
+    def test_close_partial_fields(self) -> None:
+        inputs = _inputs(position=_position(qty="100"))
+        plan = plan_action(Kind.CLOSE_PARTIAL, {"fraction": "25"}, inputs)
+        assert isinstance(plan, ActionPlan)
+        view = card_view(plan, inputs)
+        assert (view.close_what, view.close_qty, view.pnl) == ("25%", "25", "+0.83")
+        assert view.remainder == "Остаток 75: стоп на всю позицию; тейка нет"
+        assert view.old_level is None and view.new_level is None
+
+    def test_take_has_no_risk(self) -> None:
+        inputs = _inputs()
+        plan = plan_action(Kind.SET_TAKE, {"level": "1.7"}, inputs)
+        assert isinstance(plan, ActionPlan)
+        view = card_view(plan, inputs)
+        assert view.risk is None and view.pnl == "+5.19" and view.old_level == "нет"

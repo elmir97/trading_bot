@@ -227,6 +227,7 @@ async def ctx(unique_telegram_id):  # type: ignore[no-untyped-def]
                                          market_cache=TTLCache())
 
         yield SimpleNamespace(session=session, user=user, uid=uid, exchange=exchange,
+                              settings=settings,
                               service=service, redis=redis, db=db)
         await session.rollback()
         fresh = await UserRepository(session).get_by_id(uid)
@@ -892,3 +893,127 @@ async def test_card_expired_during_yes_nothing_sent(ctx, kind, params) -> None: 
     assert await _rows(ctx, action_id) == []
     action = await ctx.session.get(PositionAction, action_id, populate_existing=True)
     assert action is not None and action.status is PositionActionStatus.EXPIRED
+
+
+# --- 5.0: превью Mini App, счёт карточки, текст объёма (25.10.2026) ----------------
+
+_WRITES = {"market", "place_conditional", "cancel"}
+
+
+async def _action_rows(c) -> list[PositionAction]:  # type: ignore[no-untyped-def]
+    return list(await c.session.scalars(
+        select(PositionAction).where(PositionAction.user_id == c.uid)
+    ))
+
+
+@pytest.mark.parametrize("kind,params", [
+    (PositionActionKind.MOVE_STOP, {"breakeven": True}),
+    (PositionActionKind.MOVE_STOP, {"level_percent": "1"}),
+    (PositionActionKind.SET_TAKE, {"level": "1.7"}),
+    (PositionActionKind.CLOSE_PARTIAL, {"fraction": "50"}),
+    (PositionActionKind.CLOSE_FULL, {}),
+])
+async def test_preview_writes_nothing(ctx, kind, params) -> None:  # type: ignore[no-untyped-def]
+    """Превью — тот же расчёт, что у карточки, но ни строки действия, ни ордеров."""
+    outcome = await ctx.service().preview(kind, params, "XRP-USDT", TradeSide.LONG)
+    assert outcome.action is None and outcome.refusal is None and outcome.view is not None
+    assert await _action_rows(ctx) == []
+    card = await _card(ctx, kind, params)
+    assert outcome.text == card.text and outcome.view == card.view
+    assert [a.id for a in await _action_rows(ctx)] == [card.action.id]   # только карточка
+    assert not _WRITES & set(ctx.exchange.names())
+
+
+async def test_preview_refusal_writes_nothing(ctx) -> None:  # type: ignore[no-untyped-def]
+    ctx.exchange.mark = D("1.5265")   # безубыток ещё не достигнут
+    outcome = await ctx.service().preview(
+        PositionActionKind.MOVE_STOP, {"breakeven": True}, "XRP-USDT", TradeSide.LONG
+    )
+    assert outcome.view is None and outcome.refusal is not None
+    assert outcome.refusal.code.value == "BREAKEVEN_NOT_REACHED"
+    assert outcome.text.startswith("⛔") and await _action_rows(ctx) == []
+
+
+async def test_preview_disabled_execution_no_exchange(ctx) -> None:  # type: ignore[no-untyped-def]
+    outcome = await ctx.service(trading_execution_enabled=False).preview(
+        PositionActionKind.CLOSE_FULL, {}, "XRP-USDT", TradeSide.LONG
+    )
+    assert outcome.refusal is not None and ctx.exchange.calls == []
+    assert await _action_rows(ctx) == []
+
+
+async def test_card_refusal_carries_reason(ctx) -> None:  # type: ignore[no-untyped-def]
+    ctx.exchange.mark = D("1.5265")
+    outcome = await _card(ctx)
+    assert outcome.refused and outcome.view is None
+    assert outcome.refusal is not None and outcome.refusal.code.value == "BREAKEVEN_NOT_REACHED"
+
+
+async def test_level_percent_card_stores_price_and_yes_uses_it(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Чип «1%»: стоп на 1% ниже mark (LONG), в строку — цена; mark ушёл до
+    «Да» — уходит та же цена, что на карточке (не 1% от нового mark)."""
+    card = await _card(ctx, params={"level_percent": "1"})
+    expected = D("1.5444")   # 1.56 × 0.99 — на шаге
+    assert card.action.new_level == expected
+    assert card.action.params == {"level": "1.5444", "level_percent": "1"}
+    ctx.exchange.mark = D("1.58")
+    result = await ctx.service().confirm(card.action.id, message_id=55, risk_confirmed=False)
+    places = _places(ctx)
+    assert places and all(kw["stop_price"] == expected for kw in places), result.text
+    await ctx.session.refresh(card.action)
+    assert card.action.status is PositionActionStatus.DONE
+
+
+async def test_volume_drift_text_has_no_exponent(ctx) -> None:  # type: ignore[no-untyped-def]
+    """normalize() у 30 давал «3E+1» (25.10)."""
+    card = await _card(ctx)
+    ctx.exchange.position = replace(ctx.exchange.position, quantity=D(23))
+    result = await ctx.service().confirm(card.action.id, message_id=55, risk_confirmed=False)
+    assert "Объём позиции изменился: 30 → 23 — открой заново." in result.text
+    assert not _WRITES & set(ctx.exchange.names())
+
+
+async def test_other_account_card_not_found_by_service(ctx) -> None:  # type: ignore[no-untyped-def]
+    """5.0: карточка DEMO, конфиг сменили на live — «Да»/«Нет» её не находят,
+    на биржу ничего; строка остаётся CARD (истечёт воркером)."""
+    card = await _card(ctx)
+    calls_before = len(ctx.exchange.calls)
+    live = ctx.service(bingx_trading_mode="live")
+    assert await live.load(card.action.id) is None
+    result = await live.confirm(card.action.id, message_id=55, risk_confirmed=False)
+    assert result.text == "Карточка уже обработана — открой действие заново."
+    assert await live.decline(card.action.id) == "Карточка уже обработана."
+    assert len(ctx.exchange.calls) == calls_before
+    await ctx.session.refresh(card.action)
+    assert card.action.status is PositionActionStatus.CARD
+    assert await ctx.service().load(card.action.id) is not None
+
+
+async def test_bot_yes_on_other_account_card(ctx, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Поведение бота меняется (5.0): «Да» в чате на карточке другого счёта —
+    «Карточка уже обработана…», 0 запросов к бирже, карточка не исполнена."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from aiogram.types import CallbackQuery, Message
+
+    from app.bot.handlers import position_actions as handlers
+
+    card = await _card(ctx)
+    calls_before = len(ctx.exchange.calls)
+    monkeypatch.setattr(handlers, "record_callback", AsyncMock())
+    edited = AsyncMock()
+    monkeypatch.setattr(handlers.outbox, "edit", edited)
+    callback = MagicMock(spec=CallbackQuery)
+    callback.data = f"pm:y:{card.action.id}"
+    callback.id = "cb-5-0"
+    message = MagicMock(spec=Message)
+    message.message_id = 55
+    message.chat = SimpleNamespace(id=1)
+    callback.message = message
+    callback.answer = AsyncMock()
+    live = ctx.settings.model_copy(update={"bingx_trading_mode": "live"})
+    await handlers.decide(callback, ctx.session, ctx.user, live, None, MagicMock(), ctx.redis)  # type: ignore[arg-type]
+    assert edited.await_args.args[3] == "Карточка уже обработана — открой действие заново."
+    assert len(ctx.exchange.calls) == calls_before
+    await ctx.session.refresh(card.action)
+    assert card.action.status is PositionActionStatus.CARD
