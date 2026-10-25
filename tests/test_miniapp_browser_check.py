@@ -29,7 +29,8 @@ def _response(status: int, url: str) -> dict[str, Any]:
 def _loaded(**extra: Any) -> dict[str, Any]:
     """Состояние догруженной страницы (как отдаёт STATE_EXPR)."""
     return {"title": "Открыть сделку", "visible_screens": ["screen-market"], "charts": 0,
-            "lightweight_charts": "5.2.1", "telegram_sdk": True, **extra}
+            "lightweight_charts": "5.2.1", "telegram_sdk": True, "csp_listener": True,
+            "seed": None, **extra}
 
 
 # --- только 127.0.0.1, путь к Chrome --------------------------------------------
@@ -314,8 +315,10 @@ def test_seed_script_matches_miniapp_storage_key() -> None:
     assert 'storage.load("symbol"' in market
     assert bc.STORAGE_SYMBOL_KEY == "ma:anon:symbol"
     script = bc.seed_script("XRP-USDT")
-    assert script == ('try { localStorage.setItem("ma:anon:symbol", "\\"XRP-USDT\\""); } '
-                      "catch (e) {}")
+    assert script == ('try { localStorage.setItem("ma:anon:symbol", "\\"XRP-USDT\\""); '
+                      'window.__maSeed = "XRP-USDT"; } catch (e) {}')
+    # Метка — только после записи: хранилище недоступно — метки нет.
+    assert script.index("setItem(") < script.index("window.__maSeed")
 
 
 def test_seed_script_refuses_non_symbol() -> None:
@@ -324,7 +327,7 @@ def test_seed_script_refuses_non_symbol() -> None:
 
 
 async def test_symbol_seeds_storage_before_navigate() -> None:
-    t = FakeTransport([], state=_loaded(charts=1))
+    t = FakeTransport([], state=_loaded(charts=1, seed="XRP-USDT"))
     report = await bc.run_check(t, "http://127.0.0.1:8765/", 0.01, symbol="XRP-USDT")
     methods = [m["method"] for m in t.sent]
     sources = [m["params"]["source"] for m in t.sent
@@ -439,8 +442,103 @@ async def test_symbol_check_rereads_until_chart(monkeypatch: pytest.MonkeyPatch,
     START_TIMEOUT; не появился и тогда — замечание «графиков 0»."""
     monkeypatch.setattr(bc, "START_TIMEOUT", 0.6)
     monkeypatch.setattr(bc, "CHART_POLL", 0.05)
-    t = _SeqTransport([_loaded(charts=n) for n in charts])
+    t = _SeqTransport([_loaded(charts=n, seed="XRP-USDT") for n in charts])
     report = await bc.run_check(t, "http://127.0.0.1:8765/", 0.01, symbol="XRP-USDT")
     assert any("графиков на странице 0" in i for i in report.issues) is issue
     if not issue:
         assert report.state["charts"] == 1
+
+
+# --- 5.3а: команды до навигации ждут ответа, сид с меткой (SEED_MISSING) ------------------
+
+
+class _StrictTransport(FakeTransport):
+    """Ответ приходит только при чтении; новая команда до ответа на прошлую (до навигации
+    включительно) — нарушение порядка. 25.10: без ожидания navigate обгонял сид."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.unanswered: set[int] = set()
+        self.violations: list[str] = []
+        self.navigated = False
+
+    async def send(self, msg: dict[str, Any]) -> None:
+        if not self.navigated and self.unanswered:
+            self.violations.append(msg["method"])
+        self.unanswered.add(msg["id"])
+        await super().send(msg)
+
+    async def receive(self) -> dict[str, Any]:
+        msg = await super().receive()
+        if isinstance(msg.get("id"), int):
+            self.unanswered.discard(msg["id"])
+            sent = next(m for m in self.sent if m["id"] == msg["id"])
+            if sent["method"] == "Page.navigate":
+                self.navigated = True
+        return msg
+
+
+async def test_setup_commands_wait_for_reply_before_next() -> None:
+    t = _StrictTransport([], state=_loaded(charts=1, seed="XRP-USDT"))
+    report = await bc.run_check(t, "http://127.0.0.1:8765/", 0.01, symbol="XRP-USDT")
+    assert t.violations == []
+    methods = [m["method"] for m in t.sent]
+    seed = next(i for i, m in enumerate(t.sent)
+                if "ma:anon:symbol" in m["params"].get("source", ""))
+    assert methods.index("Page.enable") < seed < methods.index("Page.navigate")
+    assert report.issues == []
+
+
+class _ErrorTransport(FakeTransport):
+    def __init__(self, failing: str) -> None:
+        super().__init__([])
+        self.failing = failing
+
+    async def send(self, msg: dict[str, Any]) -> None:
+        if msg["method"] == self.failing:
+            self.sent.append(msg)
+            self.queue.put_nowait({"id": msg["id"], "error": {"message": "boom"}})
+            return
+        await super().send(msg)
+
+
+@pytest.mark.parametrize("method", ["Page.enable", "Page.addScriptToEvaluateOnNewDocument",
+                                    "Page.navigate"])
+async def test_setup_error_reply_means_check_not_done(method: str) -> None:
+    t = _ErrorTransport(method)
+    with pytest.raises(bc.EnvironmentNotReadyError, match=method):
+        await bc.run_check(t, "http://127.0.0.1:8765/", 0.01, symbol="XRP-USDT")
+    methods = [m["method"] for m in t.sent]
+    assert methods[-1] == method                  # после отказа — ни одной команды
+    if method != "Page.navigate":
+        assert "Page.navigate" not in methods     # навигации без готовой сессии нет
+
+
+async def test_seed_missing_is_own_error_not_chart_issue() -> None:
+    t = FakeTransport([], state=_loaded(charts=0, seed=None))
+    with pytest.raises(bc.EnvironmentNotReadyError, match=bc.SEED_MISSING) as exc:
+        await bc.run_check(t, "http://127.0.0.1:8765/", 0.01, symbol="XRP-USDT")
+    assert "XRP-USDT" in str(exc.value) and "графиков" not in str(exc.value)
+    # Без --symbol метка не нужна.
+    report = await bc.run_check(FakeTransport([]), "http://127.0.0.1:8765/", 0.01)
+    assert report.issues == []
+
+
+def test_seed_missing_exits_2(monkeypatch: pytest.MonkeyPatch, chrome_exe: Path,
+                              capsys: pytest.CaptureFixture[str]) -> None:
+    async def fake_check(url: str, chrome: Path, wait: float, symbol: str | None = None,
+                         local_sdk: bool = True) -> bc.Report:
+        raise bc.seed_missing("XRP-USDT")
+
+    monkeypatch.setattr(bc, "check", fake_check)
+    assert bc.main(["--chrome", str(chrome_exe), "--symbol", "XRP-USDT"]) == 2
+    err = capsys.readouterr().err
+    assert "Проверка не проведена: SEED_MISSING: монета XRP-USDT" in err
+
+
+def test_csp_listener_marks_page_and_missing_is_issue() -> None:
+    assert bc.CSP_LISTENER.endswith(" window.__maCspListener = true;")
+    assert "csp_listener: window.__maCspListener === true" in bc.STATE_EXPR
+    assert "seed: window.__maSeed === undefined ? null : window.__maSeed" in bc.STATE_EXPR
+    issues = bc.Report(bc.Collector(), _loaded(csp_listener=False)).issues
+    assert issues == ["слушатель CSP не дошёл до страницы — нарушения CSP не проверены"]

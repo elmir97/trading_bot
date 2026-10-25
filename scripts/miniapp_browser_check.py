@@ -17,7 +17,9 @@ ES-модуль, CLAUDE.md), после проверки профиль удал
 запросов (≥ 400 и сбой загрузки — замечание), итог — видимые экраны и число
 графиков. Со свежим профилем монеты нет — Mini App открывает поиск, графика нет;
 `--symbol` кладёт монету в localStorage стенда до скриптов страницы — открывается
-экран рынка, и график обязан быть ровно один (иначе замечание).
+экран рынка, и график обязан быть ровно один (иначе замечание). Сид оставляет метку;
+метки нет — exit 2 `SEED_MISSING` (проверка не состоялась), а не «графиков 0».
+Команды до навигации ждут своего ответа (иначе навигация обгоняет сид, 25.10).
 
 Только 127.0.0.1: и URL страницы, и DevTools Chrome (`--remote-debugging-address`).
 Коды выхода: 0 — чисто; 1 — есть замечания (список в выводе); 2 — окружение не
@@ -55,12 +57,17 @@ STATE_TIMEOUT = 5.0
 START_TIMEOUT = 15.0
 CHART_POLL = 0.5                 # --symbol: дочитывание состояния, пока график не появился
 
-# До любого скрипта страницы: нарушение CSP — строкой в console.error.
+# До любого скрипта страницы: нарушение CSP — строкой в console.error. Метка
+# window.__maCspListener — слушатель дошёл до документа (STATE_EXPR, см. run_check).
 CSP_MARK = "CSP-VIOLATION"
 CSP_LISTENER = (
     "document.addEventListener('securitypolicyviolation', e => console.error("
     f"'{CSP_MARK}', e.violatedDirective, e.blockedURI, e.sourceFile + ':' + e.lineNumber));"
+    " window.__maCspListener = true;"
 )
+# Сид --symbol не дошёл до страницы (25.10: ~половина прогонов) — проверка экрана рынка не
+# состоялась: отказ с этим кодом (exit 2), а не замечание «графиков 0».
+SEED_MISSING = "SEED_MISSING"
 # Ключ «последней монеты» Mini App: storage.js — префикс ma и telegram_id, вне
 # Telegram его нет → anon; market.js — имя symbol, значение JSON-строкой.
 STORAGE_SYMBOL_KEY = "ma:anon:symbol"
@@ -105,6 +112,8 @@ STATE_EXPR = """(() => ({
   charts: document.querySelectorAll('.tv-lightweight-charts').length,
   lightweight_charts: window.LightweightCharts ? window.LightweightCharts.version() : null,
   telegram_sdk: typeof window.Telegram === 'object',
+  csp_listener: window.__maCspListener === true,
+  seed: window.__maSeed === undefined ? null : window.__maSeed,
 }))()"""
 
 
@@ -234,6 +243,8 @@ def page_problems(state: Any, *, expect_chart: bool) -> list[str]:
         out.append("SDK Telegram не загрузился")
     if not state.get("lightweight_charts"):
         out.append("библиотека графиков не загрузилась")
+    if not state.get("csp_listener"):
+        out.append("слушатель CSP не дошёл до страницы — нарушения CSP не проверены")
     if expect_chart and state.get("charts") != 1:
         out.append(f"графиков на странице {state.get('charts')}, ждали 1 (--symbol)")
     return out
@@ -246,10 +257,17 @@ def require_symbol(symbol: str) -> str:
 
 
 def seed_script(symbol: str) -> str:
-    """Монета в localStorage до скриптов страницы; хранилище недоступно — молча."""
+    """Монета в localStorage до скриптов страницы. Метка window.__maSeed — только после
+    записи: хранилище недоступно или скрипт не выполнился — метки нет (SEED_MISSING)."""
     value = json.dumps(json.dumps(require_symbol(symbol)))
-    return (f"try {{ localStorage.setItem({json.dumps(STORAGE_SYMBOL_KEY)}, {value}); }} "
-            "catch (e) {}")
+    return (f"try {{ localStorage.setItem({json.dumps(STORAGE_SYMBOL_KEY)}, {value}); "
+            f"window.__maSeed = {json.dumps(symbol)}; }} catch (e) {{}}")
+
+
+def seed_missing(symbol: str) -> EnvironmentNotReadyError:
+    return EnvironmentNotReadyError(
+        f"{SEED_MISSING}: монета {symbol} не попала в localStorage до скриптов страницы — "
+        "экран рынка не проверен (сбой обвязки DevTools, не страницы); повтори запуск")
 
 
 async def run_check(transport: Transport, url: str, wait: float, *, symbol: str | None = None,
@@ -282,17 +300,31 @@ async def run_check(transport: Transport, url: str, wait: float, *, symbol: str 
                 else:
                     await call("Fetch.continueRequest", {"requestId": rid})
 
+    async def command(method: str, params: dict[str, Any] | None = None) -> None:
+        """Команда до навигации — с ожиданием своего ответа. 25.10: без ожидания
+        Page.navigate (его исполняет процесс браузера, переход about:blank → стенд — в
+        новый процесс рендерера) обгонял Page.enable и addScriptToEvaluateOnNewDocument
+        свежей вкладки: документ грузился без сида, слушателя CSP и событий Page."""
+        my = await call(method, params)
+        await pump(STATE_TIMEOUT, lambda: my in collector.responses)
+        reply = collector.responses.get(my)
+        if reply is None:
+            raise EnvironmentNotReadyError(f"DevTools: {method} не ответил за {STATE_TIMEOUT:g} с")
+        if "error" in reply:
+            raise EnvironmentNotReadyError(f"DevTools: {method} — {reply['error']}")
+
     for method in ("Runtime.enable", "Log.enable", "Network.enable", "Page.enable"):
-        await call(method)
-    await call("Network.setCacheDisabled", {"cacheDisabled": True})
+        await command(method)
+    await command("Network.setCacheDisabled", {"cacheDisabled": True})
     if local_sdk:
-        await call("Fetch.enable", {"patterns": [
+        await command("Fetch.enable", {"patterns": [
             {"urlPattern": "*telegram.org*", "requestStage": "Request"}]})
-    await call("Page.addScriptToEvaluateOnNewDocument", {"source": CSP_LISTENER})
+    await command("Page.addScriptToEvaluateOnNewDocument", {"source": CSP_LISTENER})
     if symbol is not None:
-        await call("Page.addScriptToEvaluateOnNewDocument", {"source": seed_script(symbol)})
-    await call("Page.navigate", {"url": page_url(url)})
-    await pump(wait)
+        await command("Page.addScriptToEvaluateOnNewDocument", {"source": seed_script(symbol)})
+    started = clock()
+    await command("Page.navigate", {"url": page_url(url)})
+    await pump(max(0.0, wait - (clock() - started)))
 
     async def read_state() -> Any:
         eval_id = await call("Runtime.evaluate", {"expression": STATE_EXPR, "returnByValue": True})
@@ -303,6 +335,8 @@ async def run_check(transport: Transport, url: str, wait: float, *, symbol: str 
         return reply.get("result", {}).get("result", {}).get("value")
 
     state = await read_state()
+    if symbol is not None and isinstance(state, dict) and state.get("seed") != symbol:
+        raise seed_missing(symbol)
     # С --symbol график обязан появиться: полное ожидание wait уже прошло (замечания console
     # собраны), но после тяжёлого прогона (--scenario all) первая загрузка иногда дольше 8 с —
     # дочитываем состояние до START_TIMEOUT. Не появился и тогда — замечание, как раньше.
