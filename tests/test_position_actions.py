@@ -382,3 +382,55 @@ class TestCardView:
         assert isinstance(plan, ActionPlan)
         view = card_view(plan, inputs)
         assert view.risk is None and view.pnl == "+5.19" and view.old_level == "нет"
+
+
+# --- 5.0а: ноль без знака, «Риск после» только при смене риска (25.10.2026) --------
+
+
+class TestRiskTextZero:
+    def _after(self, level: str) -> str:
+        inputs = _inputs()
+        plan = plan_action(Kind.MOVE_STOP, {"level": level}, inputs)
+        assert isinstance(plan, ActionPlan)
+        view = card_view(plan, inputs)
+        assert view.risk is not None
+        return view.risk.after
+
+    def test_breakeven_below_cent_is_approx_zero(self) -> None:
+        inputs = _inputs()
+        plan = plan_action(Kind.MOVE_STOP, {"breakeven": True}, inputs)
+        assert isinstance(plan, ActionPlan)
+        assert plan.risk_after is not None and D("-0.005") < plan.risk_after < 0
+        assert plan.r_after is not None and plan.r_after.is_zero()
+        text = render_card(plan, inputs)
+        assert "→ ≈0 USDT (0.00R)" in text and "-0.00" not in text
+        assert "зафиксировано 0.00" not in text
+
+    def test_locked_more_than_cent_stays(self) -> None:
+        """Стоп за безубытком: зафиксировано ≥ цента — строка прежняя, R со знаком."""
+        assert self._after("1.535") == "нет, зафиксировано 0.25 USDT (-0.18R)"
+        assert self._after("1.5272") == "нет, зафиксировано 0.01 USDT (-0.01R)"
+
+    def test_cent_locked_but_zero_r_has_no_sign(self) -> None:
+        # 0.0052 USDT → «0.01», R −0.0038 → округлён к нулю — без знака.
+        assert self._after("1.527") == "нет, зафиксировано 0.01 USDT (0.00R)"
+
+
+class TestRiskShare:
+    @pytest.mark.parametrize("takes", [(), (_order("1.65", "take-1"),)])
+    def test_take_has_no_risk_share(self, takes: tuple) -> None:
+        inputs = _inputs(takes=takes)
+        plan = plan_action(Kind.SET_TAKE, {"level": "1.7"}, inputs)
+        assert isinstance(plan, ActionPlan) and plan.risk_after == plan.risk_before
+        assert card_view(plan, inputs).risk_share is None
+        assert "Риск после" not in render_card(plan, inputs)
+
+    @pytest.mark.parametrize("kind,params", [
+        (Kind.MOVE_STOP, {"level": "1.5"}),
+        (Kind.CLOSE_PARTIAL, {"fraction": "50"}),
+    ])
+    def test_risk_changing_actions_keep_share(self, kind: Kind, params: dict) -> None:
+        inputs = _inputs(position=_position(qty="100"))
+        plan = plan_action(kind, params, inputs)
+        assert isinstance(plan, ActionPlan) and plan.risk_after != plan.risk_before
+        assert card_view(plan, inputs).risk_share is not None

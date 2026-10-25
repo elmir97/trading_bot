@@ -390,9 +390,14 @@ def _risk_text(loss: Decimal | None, r: Decimal | None) -> str:
     if loss is None:
         return "не ограничен (стопа нет)"
     if loss <= ZERO:
-        text = f"нет, зафиксировано {fmt_amount(-loss)} USDT" if loss < ZERO else "≈0 USDT"
+        # 5.0а (25.10): зафиксировано меньше цента (безубыток округлён вверх —
+        # плюс в доли цента) — «≈0», а не «зафиксировано 0.00».
+        locked = _cents(-loss)
+        text = f"нет, зафиксировано {fmt_amount(locked)} USDT" if locked > ZERO else "≈0 USDT"
     else:
         text = f"{fmt_amount(loss)} USDT"
+    if r is not None and r.is_zero():
+        r = r.copy_abs()   # «-0.00R» → «0.00R»: ноль без знака
     return f"{text} ({r}R)" if r is not None else text
 
 
@@ -467,7 +472,9 @@ def card_view(plan: ActionPlan, inputs: ActionInputs) -> CardView:
             risk = RiskView(_risk_text(plan.risk_before, plan.r_before),
                             _risk_text(plan.risk_after, plan.r_after), False, "")
     share = None
-    if inputs.equity and plan.risk_after is not None and plan.risk_after > ZERO:
+    # 5.0а: «Риск после» — только если действие риск меняет (у тейка — нет).
+    if (inputs.equity and plan.risk_after is not None and plan.risk_after > ZERO
+            and plan.risk_after != plan.risk_before):
         pct = (plan.risk_after / inputs.equity * HUNDRED).quantize(R_STEP, ROUND_HALF_UP)
         share = f"{pct}% от {fmt_amount(inputs.equity)} USDT"
     return CardView(
