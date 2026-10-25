@@ -895,7 +895,9 @@ export function createActionsScreen({ api, tg, me, onBack, onFatal }) {
   el.grid.addEventListener("click", (event) => {
     const button = event.target.closest("button[data-code]");
     if (!active || !button || button.disabled) return;
-    if (mode === "sending" || mode === "checking") return;
+    // Карточка готовится, «Да» в полёте или идёт проверка — повторное нажатие (двойной тап)
+    // не создаёт вторую карточку.
+    if (mode === "loading" || mode === "sending" || mode === "checking") return;
     const next = button.dataset.code;
     if (next === "sl" || next === "tp") startEdit(next);
     else direct(next);

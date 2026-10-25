@@ -1,7 +1,8 @@
 """Снимки экранов Mini App на стенде: `miniapp_browser_check --shots DIR [--shot <имя>|all]`.
 
 Подэтап «Дизайн Mini App» (§9а плана): снимки «до» и «после» одним набором — экраны
-1–4 (рынок, форма, подтверждение, позиции) × светлая и тёмная тема × 390 и 320 px.
+1–4 (рынок, форма, подтверждение, позиции) и 5 (действия с позицией, 5.3 — стенд с
+MINIAPP_ACTIONS_ENABLED=true) × светлая и тёмная тема × 390 и 320 px.
 Файл — `<экран>-<тема>-<ширина>.png`, страница целиком (не только окно), масштаб 2.
 
 Каждый экран в каждой теме — свой свежий Chrome (как сценарии): тема задаётся при
@@ -50,12 +51,22 @@ async def _confirm(page: ms.Page) -> None:
     await ms._to_confirm(page, False)
 
 
+async def _actions(page: ms.Page) -> None:
+    """Экран 5 как в макете «Действия»: перенос стопа ближе (риск уменьшается), превью."""
+    await ms._to_actions(page)
+    await page.click('#actions-grid [data-code="sl"]')
+    await page.type("actions-level", "1.4600")
+    await page.wait_for(lambda s: ms._acts(s).get("main") is not None, 6, "превью стопа")
+
+
 SHOTS: dict[str, Shot] = {s.name: s for s in (
     Shot("market", "1 Рынок: XRP, позиция (линии и блок «Позиция»)", ms.Setup(preset="single")),
     Shot("form", "2 Форма: стоп 2 %, превью", ms.Setup(), _form),
     Shot("confirm", "3 Подтверждение: карточка", ms.Setup(), _confirm),
     Shot("positions", "4 Позиции: хедж, лестница стопов, без стопа", ms.Setup(preset="hedge"),
          ms._to_positions),
+    Shot("actions", "5 Действия: перенос стопа 1.4600, превью (стенд с действиями)",
+         ms.Setup(preset="single"), _actions),
 )}
 
 

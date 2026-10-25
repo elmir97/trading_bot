@@ -276,6 +276,14 @@ def test_poll_every_2s_limit_5min_paused_when_hidden() -> None:
         in visibility
 
 
+def test_double_tap_on_action_makes_one_card() -> None:
+    """5.3 (act_double): пока карточка готовится — второе нажатие кнопки действия ничего
+    не шлёт (иначе две карточки и 429)."""
+    grid = _body(_js("actions.js"), 'el.grid.addEventListener("click", (event) => {')
+    assert 'if (mode === "loading" || mode === "sending" || mode === "checking") return;' in grid
+    assert grid.index('mode === "loading"') < grid.index("direct(next)")
+
+
 def test_busy_retries_after_pause_and_back_blocked_while_sending() -> None:
     js = _js("actions.js")
     again = _body(js, "function cardAgain(message, { busy = false } = {}) {")

@@ -45,14 +45,14 @@ from sqlalchemy.engine import make_url
 from app.api.deps import ApiState, Session, current_user
 from app.api.main import create_app
 from app.core.config import Settings, get_settings
-from app.database.models.trade import Trade
+from app.database.models.trade import Trade, TradeFill
 from app.database.models.user import User
 from app.database.repositories.strategy import MistakeTypeRepository, StrategyRepository
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
 from app.exchanges.base import Kline, OpenInterest, OpenOrder, Position, PremiumIndex, Ticker
 from app.services.user_service import UserService
-from app.trading.enums import ExchangeKeyMode, TradeSide, TradeSource
+from app.trading.enums import ExchangeKeyMode, FillSide, TradeSide, TradeSource
 from tests.conftest import cleanup_user
 from tests.opening_fakes import OpeningExchange
 
@@ -189,9 +189,12 @@ async def remove_dev_user(db: Database, telegram_id: int = DEV_TELEGRAM_ID) -> N
         await session.commit()
 
 
-# --- позиции для сценариев «Позиции» и линий (П.1–П.2) ------------------------------------
+# --- позиции для сценариев «Позиции», линий (П.1–П.2) и действий (экран 5) ---------------
+# Позиции фейка — по стороне («LONG»/«SHORT»), как у OpeningExchange: по этому ключу его
+# стоп/тейк (place_conditional_order) и закрытие маркетом (_fill) находят позицию. Ордера
+# сида — с position_id своей позиции: закрыта целиком — биржа снимает их сама.
 
-PRESETS = ("none", "single", "hedge", "unlinked")
+PRESETS = ("none", "single", "hedge", "unlinked", "nostop", "loss")
 
 
 def _dev_position(exchange: DevExchange, side: TradeSide, qty: int, entry: str) -> Position:
@@ -211,6 +214,7 @@ def _dev_order(exchange: DevExchange, side: TradeSide, kind: str, price: str,
                qty: int | None = None) -> OpenOrder:
     exchange._seq += 1
     now = datetime.now(UTC)
+    position = exchange.positions.get(side.value)
     return OpenOrder(
         order_id=str(exchange._seq), client_order_id="", symbol="XRP-USDT",
         side="SELL" if side is TradeSide.LONG else "BUY", position_side=side.value,
@@ -219,6 +223,7 @@ def _dev_order(exchange: DevExchange, side: TradeSide, kind: str, price: str,
         stop_price=Decimal(price), status="NEW", leverage=10, reduce_only=True,
         close_position=qty is None, working_type="MARK_PRICE", created_at=now, updated_at=now,
         take_profit=None, stop_loss=None,
+        position_id=position.position_id if position is not None else None,
     )
 
 
@@ -228,43 +233,69 @@ async def seed_positions(state: ApiState, preset: str, telegram_id: int = DEV_TE
     none — убрать позиции и ордера (сделки журнала остаются); single — XRP LONG со
     стопом и тейком, в журнале; hedge — XRP LONG (лестница из 2 стопов, тейк на часть,
     в журнале) + XRP SHORT без стопа и без сделки, «только в журнале» — ручная без счёта
-    и LIVE; unlinked — XRP LONG, в журнале по нему только ручная (NULL) и LIVE."""
+    и LIVE; unlinked — XRP LONG, в журнале по нему только ручная (NULL) и LIVE;
+    nostop — XRP LONG без стопа, с тейком, в журнале («Поставить стоп →»); loss — XRP
+    LONG в минусе (вход выше mark: безубыток не достигнут), стоп и тейк, в журнале.
+    У сделки со стопом — исходный стоп (initial_stop_loss): PnL в R на экране действий."""
     if preset not in PRESETS:
         raise ValueError(f"preset {preset!r}: нужен один из {PRESETS}")
     if not isinstance(state.factory, DevFactory):
         raise RuntimeError("не стенд: фабрика не DevFactory")
     ex = state.factory.exchange
     long, short = TradeSide.LONG, TradeSide.SHORT
-    trades: list[tuple[str, TradeSide, ExchangeKeyMode | None, Decimal]] = []
+    # (символ, сторона, счёт, вход, исходный стоп)
+    trades: list[tuple[str, TradeSide, ExchangeKeyMode | None, Decimal, Decimal | None]] = []
     positions: list[Position] = []
-    orders: list[OpenOrder] = []
+    orders: list[tuple[TradeSide, str, str, int | None]] = []
+    demo, stop = ExchangeKeyMode.DEMO, Decimal("1.4402")
     if preset == "single":
         positions = [_dev_position(ex, long, 195, "1.4810")]
-        orders = [_dev_order(ex, long, "stop", "1.4402"), _dev_order(ex, long, "take", "1.5631")]
-        trades = [("XRP-USDT", long, ExchangeKeyMode.DEMO, Decimal("1.4810"))]
+        orders = [(long, "stop", "1.4402", None), (long, "take", "1.5631", None)]
+        trades = [("XRP-USDT", long, demo, Decimal("1.4810"), stop)]
     elif preset == "hedge":
         positions = [_dev_position(ex, long, 195, "1.4810"), _dev_position(ex, short, 50, "1.5120")]
-        orders = [_dev_order(ex, long, "stop", "1.4402"), _dev_order(ex, long, "stop", "1.4100"),
-                  _dev_order(ex, long, "take", "1.5631", qty=100)]
-        trades = [("XRP-USDT", long, ExchangeKeyMode.DEMO, Decimal("1.4810")),
-                  ("BTC-USDT", long, None, Decimal("62000")),
-                  ("ETH-USDT", short, ExchangeKeyMode.LIVE, Decimal("2400"))]
+        orders = [(long, "stop", "1.4402", None), (long, "stop", "1.4100", None),
+                  (long, "take", "1.5631", 100)]
+        trades = [("XRP-USDT", long, demo, Decimal("1.4810"), stop),
+                  ("BTC-USDT", long, None, Decimal("62000"), None),
+                  ("ETH-USDT", short, ExchangeKeyMode.LIVE, Decimal("2400"), None)]
     elif preset == "unlinked":
         positions = [_dev_position(ex, long, 195, "1.4810")]
-        trades = [("XRP-USDT", long, None, Decimal("1.4700")),
-                  ("XRP-USDT", long, ExchangeKeyMode.LIVE, Decimal("1.4600"))]
-    ex.positions = {f"seed:{p.symbol}:{p.side.value}": p for p in positions}
-    ex.orders = orders
+        trades = [("XRP-USDT", long, None, Decimal("1.4700"), None),
+                  ("XRP-USDT", long, ExchangeKeyMode.LIVE, Decimal("1.4600"), None)]
+    elif preset == "nostop":
+        positions = [_dev_position(ex, long, 195, "1.4810")]
+        orders = [(long, "take", "1.5631", None)]
+        trades = [("XRP-USDT", long, demo, Decimal("1.4810"), None)]
+    elif preset == "loss":
+        positions = [_dev_position(ex, long, 195, "1.5100")]
+        orders = [(long, "stop", "1.4402", None), (long, "take", "1.5631", None)]
+        trades = [("XRP-USDT", long, demo, Decimal("1.5100"), stop)]
+    ex.positions = {p.side.value: p for p in positions}
+    ex.orders = [_dev_order(ex, side, kind, price, qty) for side, kind, price, qty in orders]
     async with state.db.session() as session:
         user = await UserRepository(session).get_by_telegram_id(telegram_id)
         if user is None:
             raise RuntimeError("пользователя стенда нет — ensure_dev_user не вызван")
-        for symbol, side, mode, entry in trades:
-            session.add(Trade(
-                user_id=user.id, symbol=symbol, side=side, entry_price=entry, quantity=Decimal(1),
+        opened = datetime.now(UTC) - timedelta(hours=1)
+        for symbol, side, mode, entry, initial_stop in trades:
+            # Сделка позиции этого счёта — объём позиции и вход fill-ом (как после импорта):
+            # частичное закрытие пишет выход в журнал, комиссия входа — в безубытке.
+            position = ex.positions.get(side.value) if (
+                symbol == "XRP-USDT" and mode is ExchangeKeyMode.DEMO) else None
+            qty = position.quantity if position is not None else Decimal(1)
+            trade = Trade(
+                user_id=user.id, symbol=symbol, side=side, entry_price=entry, quantity=qty,
                 source=TradeSource.IMPORTED if mode else TradeSource.MANUAL, account_mode=mode,
-                opened_at=datetime.now(UTC) - timedelta(hours=1),
-            ))
+                opened_at=opened, initial_stop_loss=initial_stop,
+            )
+            if position is not None:
+                trade.fills = [TradeFill(
+                    user_id=user.id, fill_side=FillSide.ENTRY, price=entry, quantity=qty,
+                    fee=(qty * entry * ex.taker).quantize(Decimal("0.0001")), executed_at=opened,
+                    external_fill_id=f"seed-{position.position_id}",
+                )]
+            session.add(trade)
         await session.commit()
     state.market_cache.invalidate("api:positions:")
     return {"positions": len(positions), "orders": len(orders), "trades": len(trades)}

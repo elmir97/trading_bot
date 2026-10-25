@@ -239,6 +239,66 @@ async def test_seed_positions_presets(unique_telegram_id) -> None:  # type: igno
         await db.dispose()
 
 
+@needs_db
+async def test_stand_actions_close_move_and_presets(unique_telegram_id) -> None:  # type: ignore[no-untyped-def]
+    """Экран 5 (5.3): позиции фейка — по стороне (по ним стоп/тейк и закрытие находят
+    позицию), ордера сида — с position_id, у сделки — объём и вход fill-ом: «Закрыть 25%»
+    доходит до DONE, остаток 147, выход записан в журнал; nostop — без стопа, loss —
+    безубыток не достигнут."""
+    import asyncio
+
+    from sqlalchemy import select
+
+    from app.database.models.trade import TradeFill
+    from app.trading.enums import FillSide
+
+    settings = _settings(database_url=os.environ["DATABASE_URL"],
+                         miniapp_actions_enabled=True, exec_dry_run=False)
+    db = Database(settings)
+    tid = unique_telegram_id()
+    stand_before = await _stand_user_id(db)
+    try:
+        await stand.ensure_dev_user(db, settings, tid)
+        state = _state(db, settings)
+        app = stand.build_app(state, tid)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+            await client.post("/dev/positions", params={"preset": "single"})
+            ex = state.factory.exchange
+            assert set(ex.positions) == {"LONG"}
+            assert {o.position_id for o in ex.orders} == {ex.positions["LONG"].position_id}
+            card = (await client.post("/api/actions", json={
+                "symbol": "XRP-USDT", "side": "LONG", "kind": "c25"})).json()
+            assert card["status"] == "CARD"
+            await asyncio.sleep(1.05)                 # карточка и «Да» — 1/с
+            done = (await client.post(f"/api/actions/{card['action_id']}/confirm",
+                                      json={"risk_confirmed": False})).json()
+            assert done["action"]["status"] == "DONE", done
+            assert str(ex.positions["LONG"].quantity) == "147"
+            async with db.session() as session:
+                sides = (await session.scalars(select(TradeFill.fill_side).where(
+                    TradeFill.external_fill_id.is_not(None),
+                    TradeFill.user_id == (await UserRepository(session).get_by_telegram_id(
+                        tid)).id))).all()                        # type: ignore[union-attr]
+            assert sorted(sides) == [FillSide.ENTRY, FillSide.EXIT]
+
+            await client.post("/dev/reset")
+            await client.post("/dev/positions", params={"preset": "nostop"})
+            long = (await client.get("/api/positions")).json()["positions"][0]
+            assert (long["stops"], len(long["takes"]), long["trade_id"] is not None) == (
+                [], 1, True)
+            await client.post("/dev/reset")
+            await client.post("/dev/positions", params={"preset": "loss"})
+            screen = (await client.get("/api/positions/XRP-USDT/LONG/actions")).json()
+            be = next(a for a in screen["actions"] if a["code"] == "be")
+            assert be["enabled"] is False and "Безубыток" in be["hint"]
+            assert screen["pnl_r_text"].endswith("R") and screen["pnl_r_text"].startswith("-")
+    finally:
+        await stand.remove_dev_user(db, tid)
+        assert await _stand_user_id(db) == stand_before
+        await db.dispose()
+
+
 def test_reset_lives_only_in_stand() -> None:
     for path in (_ROOT / "app").rglob("*.py"):
         text = path.read_text(encoding="utf-8")

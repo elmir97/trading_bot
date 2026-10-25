@@ -126,6 +126,39 @@ STATE_JS = """(() => {
       ? [...document.querySelectorAll('#market-position-list li')]
         .map((li) => li.textContent.trim()) : null,
     market_position_stale: shown('market-position-stale') ? text('market-position-stale') : null,
+    // Экран 5 — действия с позицией.
+    acts: shown('screen-actions') ? {
+      title: text('actions-title'),
+      state: shown('actions-state') ? text('actions-state-text') : null,
+      chat: shown('actions-chat'),
+      body: shown('actions-body'),
+      mark: text('actions-mark'),
+      pnl: text('actions-pnl'),
+      pnl_class: $('actions-pnl').className,
+      sub: text('actions-sub'),
+      buttons: Object.fromEntries([...document.querySelectorAll('#actions-grid [data-code]')]
+        .map((b) => [b.dataset.code, !b.disabled])),
+      hints: shown('actions-hints') ? text('actions-hints') : null,
+      panel: shown('actions-panel'),
+      panel_title: shown('actions-panel') ? text('actions-panel-title') : null,
+      timer: shown('actions-timer') ? text('actions-timer') : null,
+      editor: shown('actions-editor'),
+      chips: shown('actions-chips'),
+      chip: ($('actions-chips').querySelector('.selected') || {}).dataset?.chip ?? null,
+      rows: shown('actions-panel') ? $('actions-rows').textContent : null,
+      diff: shown('actions-diff-box') ? text('actions-diff') : null,
+      risk: shown('actions-risk'),
+      dry: shown('actions-dry'),
+      status: shown('actions-status') ? $('actions-status').textContent : null,
+      main: shown('actions-main') && !$('actions-main').disabled ? text('actions-main') : null,
+      main_busy: shown('actions-main') && $('actions-main').disabled,
+      cancel: shown('actions-cancel') ? text('actions-cancel') : null,
+      lines: $('actions-chart').dataset.lines !== undefined
+        ? $('actions-chart').dataset.lines.split(' ').filter(Boolean) : null,
+      charts: document.querySelectorAll('#actions-chart .tv-lightweight-charts').length,
+      hands: [...document.querySelectorAll('#screen-actions .hand')]
+        .filter((e) => !e.hidden && !e.closest('[hidden]')).length,
+    } : null,
   };
 })()"""
 
@@ -134,7 +167,8 @@ STATE_JS = """(() => {
 WAIT_KEYS = ("screens", "last", "market_error", "chart_state", "stale", "error_title",
              "blocked", "lev", "lev_max", "pending", "preview_state", "confirm_card",
              "confirm_status", "confirm_action", "main_button", "positions_state",
-             "positions_note", "positions_empty", "lines", "lines_on", "market_position")
+             "positions_note", "positions_empty", "lines", "lines_on", "market_position",
+             "acts")
 
 
 SDK_FAILED = "SDK telegram.org не загрузился (сеть) — повтори сценарий"
@@ -268,48 +302,62 @@ class Page:
         elif method == "Fetch.requestPaused":
             await self._paused(p)
 
+    async def _fetch(self, method: str, params: dict[str, Any]) -> dict[str, Any] | None:
+        """Команда перехвата. Страница могла отменить запрос (AbortController: «последний
+        побеждает» превью) — перехвата уже нет, Chrome отвечает «Invalid InterceptionId»:
+        это не ошибка сценария (5.3), запрос просто не нужен."""
+        try:
+            return await self.call(method, params)
+        except ScenarioError as exc:
+            if "Invalid InterceptionId" in str(exc):
+                return None
+            raise
+
     async def _paused(self, p: dict[str, Any]) -> None:
         rid = p["requestId"]
         url = p.get("request", {}).get("url", "")
         if "responseStatusCode" in p or "responseErrorReason" in p:
             rule = self._by_request.pop(rid, None)
             if rule is None or rule.patch is None or "responseErrorReason" in p:
-                await self.call("Fetch.continueRequest", {"requestId": rid})
+                await self._fetch("Fetch.continueRequest", {"requestId": rid})
                 return
-            got = await self.call("Fetch.getResponseBody", {"requestId": rid})
+            got = await self._fetch("Fetch.getResponseBody", {"requestId": rid})
+            if got is None:
+                return
             raw = got.get("body", "")
             text = base64.b64decode(raw).decode() if got.get("base64Encoded") else raw
             headers = [h for h in p.get("responseHeaders", [])
                        if h.get("name", "").lower() not in _DROP_HEADERS]
-            await self.call("Fetch.fulfillRequest", {
+            await self._fetch("Fetch.fulfillRequest", {
                 "requestId": rid, "responseCode": p["responseStatusCode"],
                 "responseHeaders": headers, "body": _b64(rule.patch(json.loads(text)))})
             return
         method = p.get("request", {}).get("method", "GET")
         rule = next((r for r in self.rules if r.applies(url, method)), None)
         if rule is None:
-            await self.call("Fetch.continueRequest", {"requestId": rid})
+            await self._fetch("Fetch.continueRequest", {"requestId": rid})
             return
         rule.hits += 1
         if rule.action == "fail":
-            await self.call("Fetch.failRequest",
+            await self._fetch("Fetch.failRequest",
                             {"requestId": rid, "errorReason": "InternetDisconnected"})
         elif rule.action == "hang":
             self.hung.append(url)
         elif rule.action == "status" and rule.sdk:
-            await self.call("Fetch.fulfillRequest", bc.sdk_fulfill(rid))
+            await self._fetch("Fetch.fulfillRequest", bc.sdk_fulfill(rid))
         elif rule.action == "status" and rule.raw is not None:
-            await self.call("Fetch.fulfillRequest", {
+            await self._fetch("Fetch.fulfillRequest", {
                 "requestId": rid, "responseCode": rule.status, "responseHeaders": [],
                 "body": base64.b64encode(rule.raw.encode()).decode()})
         elif rule.action == "status":
-            await self.call("Fetch.fulfillRequest", {
+            await self._fetch("Fetch.fulfillRequest", {
                 "requestId": rid, "responseCode": rule.status,
                 "responseHeaders": [{"name": "Content-Type", "value": "application/json"}],
                 "body": _b64(rule.body if rule.body is not None else {})})
         elif rule.action == "patch":
             self._by_request[rid] = rule
-            await self.call("Fetch.continueRequest", {"requestId": rid, "interceptResponse": True})
+            await self._fetch("Fetch.continueRequest",
+                              {"requestId": rid, "interceptResponse": True})
         else:
             raise ScenarioError(f"неизвестное действие правила: {rule.action}")
 
@@ -1229,7 +1277,8 @@ async def pos_empty(page: Page, url: str) -> None:
 
 @scenario("pos_list", "П.1: хедж — лестница стопов, без стопа, журнал, «только в журнале»")
 async def pos_list(page: Page, url: str) -> None:
-    await open_page(page, url, Setup(preset="hedge"))
+    await open_page(page, url, Setup(preset="hedge", rules=[
+        Rule("/api/me", "patch", patch=_actions_off)]))
     s = await _to_positions(page)
     long, short = _card(s, "LONG"), _card(s, "SHORT")
     page.expect(len(s.get("positions") or []) == 2, f"карточек {len(s.get('positions') or [])}")
@@ -1266,8 +1315,8 @@ def _with_bot(data: Any) -> Any:
 
 @scenario("pos_chat", "П.1: «Действия →» — openTelegramLink t.me/<бот>?start=pos-…")
 async def pos_chat(page: Page, url: str) -> None:
-    await open_page(page, url, Setup(native=True, preset="hedge",
-                                     rules=[Rule("/api/me", "patch", patch=_with_bot)]))
+    await open_page(page, url, Setup(native=True, preset="hedge", rules=[
+        Rule("/api/me", "patch", patch=lambda d: _actions_off(_with_bot(d)))]))
     await page.js(FAKE_TG_LINK)
     await page.js(FAKE_POPUP)
     await page.telegram_event("settings_button_pressed")
@@ -2186,7 +2235,7 @@ async def design_positions(page: Page, url: str) -> None:
     tap = PositionsTap()
     await open_page(page, url, Setup(preset="hedge", rules=[
         Rule("/api/positions", "patch", patch=tap),
-        Rule("/api/me", "patch", patch=_with_bot)]))
+        Rule("/api/me", "patch", patch=lambda d: _actions_off(_with_bot(d)))]))
     await _to_positions(page)
     await page.pump(0.5)
     got = await page.js(POSITIONS_DESIGN_JS)
@@ -2248,6 +2297,557 @@ async def design_positions_bar(page: Page, url: str) -> None:
     page.note(f"доля сервера {sbar['mark_at']}, на странице {long['bar']['mark_offset']:.4f}")
     page.expect(abs(long["bar"]["mark_offset"] - at) < 0.02 and sbar["mark_edge"] is None,
                 f"отметка не на доле сервера: {long['bar']} vs {sbar}")
+
+
+# Экран 5 — действия с позицией (5.3). Стенд — с MINIAPP_ACTIONS_ENABLED=true и
+# EXEC_DRY_RUN=false (биржа стенда фейковая): иначе API действий — 403 или сухой прогон.
+
+ACTIONS_OFF_TEXT = ("стенд без действий — для сценариев act_* запусти его с "
+                    "MINIAPP_ACTIONS_ENABLED=true и EXEC_DRY_RUN=false (биржа стенда фейковая)")
+FAKE_SHOW_CONFIRM_ANSWERS = ("window.__asked = []; Telegram.WebApp.showConfirm = (m, cb) => {"
+                             " window.__asked.push(m);"
+                             " const ok = window.__answers.length"
+                             " ? window.__answers.shift() : true;"
+                             " setTimeout(() => cb(ok), 50); }")
+ACT_PATH = re.compile(r"^/api/actions/\d+$")
+
+
+def _actions_off(data: Any) -> Any:
+    """/api/me: действия в Mini App выключены (выключатель) — кнопки ведут в чат."""
+    data["actions"] = {**(data.get("actions") or {}), "enabled": False}
+    return data
+
+
+def _act_confirms(page: Page, since: float = 0.0) -> list[ApiRequest]:
+    return [r for r in page.api("/api/actions/", method="POST", since=since)
+            if r.path.endswith("/confirm")]
+
+
+def _act_cards(page: Page, since: float = 0.0) -> list[ApiRequest]:
+    return [r for r in page.api("/api/actions", method="POST", since=since)
+            if r.path == "/api/actions"]
+
+
+def _act_previews(page: Page, since: float = 0.0) -> list[ApiRequest]:
+    return page.api("/api/actions/preview", method="POST", since=since)
+
+
+def _act_polls(page: Page, since: float = 0.0) -> list[ApiRequest]:
+    return [r for r in page.api("/api/actions/", since=since) if ACT_PATH.match(r.path)]
+
+
+def _acts(s: dict[str, Any]) -> dict[str, Any]:
+    return s.get("acts") or {}
+
+
+def _main(s: dict[str, Any], native: bool) -> str | None:
+    """Главная кнопка экрана 5: нативный MainButton (8.0) или своя (6.0); занята — None."""
+    if native:
+        return s.get("main_button") if s.get("main_active") else None
+    return _acts(s).get("main")
+
+
+async def _press_main(page: Page, native: bool) -> None:
+    if native:
+        await page.telegram_event("main_button_pressed")
+    else:
+        await page.click("#actions-main")
+
+
+async def _require_actions(page: Page, *, dry_ok: bool = False) -> None:
+    """Стенд с действиями и без сухого прогона; dry_ok — сухой прогон подменён сценарием."""
+    me = await page.js("fetch('/api/me').then((r) => r.json())")
+    actions = me.get("actions") or {}
+    if not actions.get("enabled") or (actions.get("dry_run") and not dry_ok):
+        raise ScenarioError(ACTIONS_OFF_TEXT)
+
+
+def _screen_loaded(s: dict[str, Any]) -> bool:
+    a = _acts(s)
+    return "screen-actions" in s["screens"] and bool(a.get("body")) and a.get("charts") == 1
+
+
+async def _open_positions(page: Page) -> dict[str, Any]:
+    """«Позиции»: 8.0 — меню «…» (SettingsButton → showPopup), 6.0 — своя ссылка плашки."""
+    s = await page.state()
+    if s.get("settings_button"):
+        await page.js(FAKE_POPUP)
+        await page.telegram_event("settings_button_pressed")
+        return await page.wait_for(_loaded, 10, "вкладка из меню «…»")
+    return await _to_positions(page)
+
+
+async def _to_actions(page: Page, side: str = "LONG", editor: str = "", *,
+                      dry_ok: bool = False) -> dict[str, Any]:
+    """«Позиции» → «Действия →» (editor "") или «Поставить стоп →» (editor "sl")."""
+    await _require_actions(page, dry_ok=dry_ok)
+    await _open_positions(page)
+    await page.click(f'[data-position="{SYMBOL}:{side}"] [data-act="{editor}"]')
+    return await page.wait_for(_screen_loaded, 10, "экран действий")
+
+
+def _card_ready(native: bool) -> Callable[[dict[str, Any]], bool]:
+    return lambda s: bool(_acts(s).get("timer")) and _main(s, native) is not None
+
+
+async def _open_card(page: Page, code: str, native: bool) -> dict[str, Any]:
+    await page.click(f'#actions-grid [data-code="{code}"]')
+    return await page.wait_for(_card_ready(native), 10, f"карточка {code}")
+
+
+def _act_done(s: dict[str, Any]) -> bool:
+    a = _acts(s)
+    return (a.get("main") == "К позициям" or s.get("main_button") == "К позициям") \
+        and "✅" in (a.get("rows") or "")
+
+
+@scenario("act_be_disabled", "5: безубыток не достигнут — кнопка неактивна, причина сервера, "
+                             "нажатие ничего не шлёт; PnL в R")
+async def act_be_disabled(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(preset="loss"))
+    s = await _to_actions(page)
+    a = _acts(s)
+    page.expect(a.get("buttons", {}).get("be") is False, f"кнопки: {a.get('buttons')}")
+    page.expect(all(a.get("buttons", {}).get(c) for c in ("sl", "tp", "c25", "c50", "cf")),
+                f"остальные кнопки: {a.get('buttons')}")
+    page.expect("Безубыток 1.5116" in (a.get("hints") or ""), f"причина: {a.get('hints')!r}")
+    page.expect((a.get("pnl") or "").endswith("R"), f"PnL без R: {a.get('pnl')!r}")
+    page.expect("down" in (a.get("pnl_class") or ""), f"цвет PnL в минусе: {a.get('pnl_class')}")
+    await page.click('#actions-grid [data-code="be"]')
+    await page.pump(1.0)
+    page.expect(not _act_cards(page) and not _act_previews(page),
+                "неактивная кнопка послала запрос")
+    page.expect(not _acts(await page.state()).get("panel"), "неактивная кнопка открыла панель")
+
+
+class PreviewTapA:
+    """Ответы превью действия — последний (для подписи MainButton)."""
+
+    def __init__(self) -> None:
+        self.last: dict[str, Any] = {}
+
+    def __call__(self, data: Any) -> Any:
+        if isinstance(data, dict):
+            self.last = data
+        return data
+
+
+@scenario("act_stop_preview", "5: «Поставить стоп →» — сразу редактор; 5 правок → 1 превью без "
+                              "таймера; чип — строка level_percent; MainButton — цена сервера")
+async def act_stop_preview(page: Page, url: str) -> None:
+    tap = PreviewTapA()
+    await open_page(page, url, Setup(preset="nostop", rules=[
+        Rule("/api/actions/preview", "patch", method="POST", patch=tap)]))
+    s = await _to_actions(page, editor="sl")
+    a = _acts(s)
+    page.expect(a.get("panel") and a.get("editor") and a.get("panel_title") == "ПЕРЕНОС СТОПА",
+                f"редактор стопа сразу: {a.get('panel_title')!r}, editor={a.get('editor')}")
+    page.expect(a.get("chips") is True, "у стопа нет чипов")
+    since = page.now()
+    for value in ("1", "1.4", "1.45", "1.450", "1.4500"):
+        await page.type("actions-level", value)
+    s = await page.wait_for(lambda s: _acts(s).get("main") is not None, 6, "превью ввода")
+    previews = _act_previews(page, since)
+    page.expect(len(previews) == 1, f"5 правок → превью {len(previews)}, ждали 1")
+    page.expect(bool(previews) and previews[-1].body.get("level") == "1.4500"
+                and "level_percent" not in previews[-1].body,
+                f"тело превью: {previews[-1].body if previews else None}")
+    page.expect(_acts(s).get("timer") is None, f"у превью таймер: {_acts(s).get('timer')!r}")
+    level = tap.last.get("new_level")
+    page.expect(_acts(s).get("main") == f"Перенести стоп на {level}",
+                f"кнопка превью: {_acts(s).get('main')!r}, new_level сервера {level!r}")
+    page.expect(f"new-stop:{level}" in (_acts(s).get("lines") or []),
+                f"пунктир «новый» на графике: {_acts(s).get('lines')}")
+    since = page.now()
+    await page.click('#actions-chips [data-chip="1"]')
+    s = await page.wait_for(lambda s: _acts(s).get("chip") == "1"
+                            and _acts(s).get("main") is not None
+                            and len(_act_previews(page, since)) == 1, 6, "превью чипа 1%")
+    body = _act_previews(page, since)[-1].body
+    page.expect(body.get("level_percent") == "1" and "level" not in body,
+                f"чип ушёл не строкой level_percent: {body}")
+    page.expect(not _act_cards(page) and not _act_confirms(page), "превью создало карточку")
+    await _press_main(page, False)
+    s = await page.wait_for(_card_ready(False), 10, "карточка после «Перенести стоп»")
+    page.expect(len(_act_cards(page)) == 1, f"POST /api/actions: {len(_act_cards(page))}")
+    page.expect(_acts(s).get("timer") in ("1:00", "0:59"), f"таймер: {_acts(s).get('timer')!r}")
+    page.expect(not _act_confirms(page), "«Да» без нажатия")
+
+
+def _ttl_short(data: Any) -> Any:
+    # Срок — ttl_seconds; expires_at — далёкое будущее: таймер от часов телефона не истёк бы.
+    data["ttl_seconds"] = 3
+    data["expires_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 3600))
+    return data
+
+
+# Часы телефона уходят на 2 часа назад: таймер от Date.now()/expires_at показал бы 2:00:xx.
+PHONE_CLOCK_BACK = ("(() => { const real = Date.now.bind(Date); const shift = -7200000;"
+                    " Date.now = () => real() + shift; })()")
+
+
+@scenario("act_card_timer", "5: таймер карточки — от ttl_seconds сервера, не от часов телефона; "
+                            "истёк — «Пересчитать», «Да» не уходит")
+async def act_card_timer(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(preset="single"))
+    page.intercept(Rule("/api/actions", "patch", method="POST", patch=_ttl_short, times=1,
+                        exact=True))
+    await _to_actions(page)
+    await page.js(PHONE_CLOCK_BACK)
+    s = await _open_card(page, "c25", False)
+    page.expect(_acts(s).get("timer") in ("0:03", "0:02"),
+                f"таймер ttl 3: {_acts(s).get('timer')!r}")
+    s = await page.wait_for(lambda s: _acts(s).get("main") == "Пересчитать", 6, "«Пересчитать»")
+    page.expect("устарела" in (_acts(s).get("status") or ""), f"статус: {_acts(s).get('status')!r}")
+    page.expect(not _act_confirms(page), "истёкшую карточку подтвердили")
+    await page.click("#actions-main")
+    s = await page.wait_for(_card_ready(False), 10, "новая карточка")
+    page.expect(len(_act_cards(page)) == 2, f"POST /api/actions: {len(_act_cards(page))}, ждали 2")
+    page.expect(_acts(s).get("timer") in ("1:00", "0:59"),
+                f"таймер при часах телефона −2 ч: {_acts(s).get('timer')!r}")
+    page.expect(not _act_confirms(page), "«Пересчитать» отправил «Да»")
+
+
+@scenario("act_confirm_done", "5: демо, без роста риска — кнопка → MainButton «Закрыть 25% · 48 "
+                              "XRP» → один /confirm без showConfirm → итог, остаток 147")
+async def act_confirm_done(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(native=True, preset="single"))
+    await page.js(FAKE_SHOW_CONFIRM)
+    await _to_actions(page)
+    s = await _open_card(page, "c25", True)
+    page.expect(_main(s, True) == "Закрыть 25% · 48 XRP", f"MainButton: {_main(s, True)!r}")
+    page.expect(not _act_confirms(page), "«Да» ушло по первому нажатию (кнопке действия)")
+    await _press_main(page, True)
+    s = await page.wait_for(_act_done, 20, "итог «✅ Закрыто»")
+    sent = _act_confirms(page)
+    page.expect(len(sent) == 1 and sent[0].body == {"risk_confirmed": False},
+                f"/confirm: {[r.body for r in sent]}")
+    asked = await page.js("window.__asked")
+    page.expect(asked == [], f"showConfirm на демо без роста риска: {asked}")
+    page.expect("Закрыто 48" in (_acts(s).get("rows") or ""), f"итог: {_acts(s).get('rows')!r}")
+    s = await page.wait_for(lambda s: (_acts(s).get("sub") or "").startswith("147 XRP"), 8,
+                            "экран заново после итога: 147 XRP")
+    await page.telegram_event("main_button_pressed")
+    await page.wait_for(lambda s: "screen-positions" in s["screens"], 8, "«К позициям»")
+
+
+def _act_status(status: str, final: bool) -> dict[str, Any]:
+    return {"id": 1, "code": "c25", "kind": "CLOSE_PARTIAL", "symbol": SYMBOL, "side": "LONG",
+            "status": status, "final": final,
+            "text": "✅ Закрыто 48 по 1.495." if status == "DONE" else "⏳ Действие выполняется…",
+            "error_code": None, "expires_at": None, "decided_at": None}
+
+
+def _result(status: str, *, final: bool, pending: bool = False, busy: bool = False,
+            text: str = "") -> dict[str, Any]:
+    return {"text": text or _act_status(status, final)["text"], "final": final,
+            "pending": pending, "busy": busy, "action": _act_status(status, final)}
+
+
+@scenario("act_pending", "5: «Да» идёт — опрос GET раз в 2 с; скрытая вкладка — пауза; итог")
+async def act_pending(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(native=True, preset="single", rules=[
+        Rule("/confirm", "status", method="POST", body=_result("SUBMITTED", final=False,
+                                                               pending=True), times=1),
+        Rule("/api/actions/", "status", method="GET", times=3,
+             body=_act_status("SUBMITTED", False)),
+    ]))
+    await _to_actions(page)
+    await _open_card(page, "c25", True)
+    await _press_main(page, True)
+    await page.wait_for(lambda s: "Проверяю" in (_acts(s).get("status") or ""), 5,
+                        "«Проверяю…»")
+    await page.pump(4.5)                 # три опроса (SUBMITTED) — два интервала до паузы
+    page.intercept(Rule("/api/actions/", "status", method="GET",
+                        body=_act_status("DONE", True)))
+    await page.set_hidden(True)
+    hidden_at = page.now()
+    await page.pump(5)
+    page.expect(not _act_polls(page, hidden_at + 0.3),
+                f"опрос на скрытой вкладке: {len(_act_polls(page, hidden_at + 0.3))}")
+    await page.set_hidden(False)
+    await page.wait_for(_act_done, 15, "итог после паузы")
+    polls = _act_polls(page)
+    gaps = [b.at - a.at for a, b in itertools.pairwise(polls)
+            if a.at < hidden_at and b.at < hidden_at]
+    page.expect(bool(gaps) and min(gaps) >= 1.8, f"интервал опроса: {[round(g, 2) for g in gaps]}")
+    page.expect(len(_act_confirms(page)) == 1, f"/confirm: {len(_act_confirms(page))}, ждали 1")
+    page.note(f"опросов {len(polls)}, интервалы {[round(g, 2) for g in gaps]}")
+
+
+@scenario("act_busy", "5: лок позиции занят — кнопка занята 2 с, потом снова «Да» → итог")
+async def act_busy(page: Page, url: str) -> None:
+    busy_text = "⏳ Идёт другое действие с позицией — повтори через пару секунд."
+    await open_page(page, url, Setup(preset="single", rules=[
+        Rule("/confirm", "status", method="POST", times=1,
+             body=_result("CARD", final=False, busy=True, text=busy_text))]))
+    await _to_actions(page)
+    await _open_card(page, "c25", False)
+    await _press_main(page, False)
+    await page.wait_for(lambda s: _acts(s).get("main_busy") is True
+                        and busy_text in (_acts(s).get("status") or ""), 5, "кнопка занята")
+    first = page.now()
+    await page.wait_for(lambda s: _acts(s).get("main") == "Закрыть 25% · 48 XRP", 5,
+                        "кнопка снова активна")
+    page.expect(page.now() - first >= 1.6, f"кнопка ожила через {page.now() - first:.1f} с")
+    page.expect(len(_act_confirms(page)) == 1, "повтор «Да» сам, без нажатия")
+    await _press_main(page, False)
+    await page.wait_for(_act_done, 20, "итог после повтора")
+    sent = _act_confirms(page)
+    page.expect(len(sent) == 2 and sent[1].at - sent[0].at >= 2.0,
+                f"/confirm: {[round(r.at, 2) for r in sent]}")
+
+
+@scenario("act_risk_increase", "5: стоп дальше — «⚠️ Да, увеличить риск», showConfirm, "
+                               "risk_confirmed = true")
+async def act_risk_increase(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(native=True, preset="single"))
+    await page.js(FAKE_SHOW_CONFIRM)
+    await _to_actions(page)
+    await page.click('#actions-grid [data-code="sl"]')
+    await page.type("actions-level", "1.4000")
+    s = await page.wait_for(lambda s: _main(s, True) is not None, 6, "превью стопа 1.4000")
+    page.expect(_acts(s).get("risk") is True and _acts(s).get("hands") == 1,
+                f"пометка «риск растёт»: {_acts(s).get('risk')}, hand {_acts(s).get('hands')}")
+    await _press_main(page, True)
+    s = await page.wait_for(_card_ready(True), 10, "карточка с ростом риска")
+    page.expect(_main(s, True) == "⚠️ Да, увеличить риск", f"MainButton: {_main(s, True)!r}")
+    await _press_main(page, True)
+    await page.wait_for(_act_done, 20, "итог переноса")
+    asked = await page.js("window.__asked")
+    page.expect(len(asked) == 1 and "Риск увеличится" in asked[0]
+                and "Реальный счёт" not in asked[0], f"showConfirm: {asked}")
+    sent = _act_confirms(page)
+    page.expect(len(sent) == 1 and sent[0].body == {"risk_confirmed": True},
+                f"/confirm: {[r.body for r in sent]}")
+
+
+@scenario("act_double", "5: двойное нажатие кнопки действия — одна карточка; двойное «Да» — "
+                        "один /confirm")
+async def act_double(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(native=True, preset="single"))
+    await _to_actions(page)
+    await page.js("(() => { const b = document.querySelector('#actions-grid [data-code=\"c25\"]');"
+                  " b.click(); b.click(); })()")
+    await page.wait_for(_card_ready(True), 10, "карточка c25")
+    await page.pump(1.2)
+    page.expect(len(_act_cards(page)) == 1, f"POST /api/actions: {len(_act_cards(page))}, ждали 1")
+    await page.js("Telegram.WebView.receiveEvent('main_button_pressed');"
+                  " Telegram.WebView.receiveEvent('main_button_pressed')")
+    await page.wait_for(_act_done, 20, "итог")
+    page.expect(len(_act_confirms(page)) == 1, f"/confirm: {len(_act_confirms(page))}, ждали 1")
+
+
+@scenario("act_double_old", "5: клиент 6.0, рост риска — второе нажатие через ≥ 400 мс = один "
+                            "/confirm, залп быстрее — 0")
+async def act_double_old(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(preset="single"))
+    await _to_actions(page)
+    await page.click('#actions-grid [data-code="sl"]')
+    await page.type("actions-level", "1.4000")
+    await page.wait_for(lambda s: _acts(s).get("main") is not None, 6, "превью стопа 1.4000")
+    await _press_main(page, False)
+    s = await page.wait_for(_card_ready(False), 10, "карточка с ростом риска")
+    page.expect(_acts(s).get("main") == "⚠️ Да, увеличить риск", f"кнопка: {_acts(s).get('main')!r}")
+    await page.js("(() => { const b = document.getElementById('actions-main');"
+                  " b.click(); b.click(); })()")
+    await page.pump(0.8)
+    s = await page.state()
+    page.expect(not _act_confirms(page),
+                f"залп быстрее 400 мс: /confirm {len(_act_confirms(page))}")
+    page.expect("Нажми ещё раз" in (_acts(s).get("status") or ""),
+                f"после залпа: {_acts(s).get('status')!r}")
+    await page.click("#actions-main")
+    await page.wait_for(_act_done, 20, "итог второго нажатия")
+    sent = _act_confirms(page)
+    page.expect(len(sent) == 1 and sent[0].body == {"risk_confirmed": True},
+                f"/confirm: {[r.body for r in sent]}")
+
+
+@scenario("act_network_drop", "5: обрыв на /confirm — POST сам не повторяется, опрос GET; CARD — "
+                              "«Не дошло, нажми ещё раз» → повтор по тому же id")
+async def act_network_drop(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(preset="single"))
+    page.intercept(Rule("/confirm", "fail", method="POST", times=1))
+    await _to_actions(page)
+    await _open_card(page, "c25", False)
+    await _press_main(page, False)
+    s = await page.wait_for(lambda s: "Не дошло" in (_acts(s).get("status") or ""), 10,
+                            "«Не дошло, нажми ещё раз»")
+    page.expect(_acts(s).get("main") == "Закрыть 25% · 48 XRP", f"кнопка: {_acts(s).get('main')!r}")
+    page.expect(bool(_act_polls(page)), "после обрыва не было GET /api/actions/{id}")
+    await page.pump(4)
+    page.expect(len(_act_confirms(page)) == 1,
+                f"POST повторился сам: /confirm {len(_act_confirms(page))}")
+    ids = {r.path for r in _act_confirms(page)}
+    await _press_main(page, False)
+    await page.wait_for(_act_done, 20, "итог после повтора")
+    sent = _act_confirms(page)
+    page.expect(len(sent) == 2 and {r.path for r in sent} == ids,
+                f"/confirm: {[r.path for r in sent]} — ждали 2 по одному id")
+    page.expect(len(_act_cards(page)) == 1, "повтор создал новую карточку")
+
+
+@scenario("act_live", "5: LIVE — MainButton красный, showConfirm «⚠️ Реальный счёт» первой "
+                      "строкой; «Отмена» — ничего не ушло, «ОК» — /confirm")
+async def act_live(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(native=True, preset="single",
+                                     rules=[Rule("/api/me", "patch", patch=_live)]))
+    await page.js("window.__answers = [false, true];")
+    await page.js(FAKE_SHOW_CONFIRM_ANSWERS)
+    await _to_actions(page)
+    await _open_card(page, "c25", True)
+    colors = await page.js("(() => ({ button: Telegram.WebApp.MainButton.color,"
+                           " red: getComputedStyle(document.documentElement)"
+                           ".getPropertyValue('--red-text').trim() }))()")
+    page.expect(colors["button"].lower() == colors["red"].lower(),
+                f"MainButton на LIVE не красный: {colors}")
+    await _press_main(page, True)
+    await page.pump(0.6)
+    asked = await page.js("window.__asked")
+    page.expect(len(asked) == 1 and asked[0].startswith("⚠️ Реальный счёт\n"),
+                f"showConfirm на LIVE: {asked}")
+    page.expect(not _act_confirms(page), "«Отмена» в showConfirm — а /confirm ушёл")
+    await _press_main(page, True)
+    await page.wait_for(_act_done, 20, "итог после «ОК»")
+    page.expect(len(_act_confirms(page)) == 1, f"/confirm: {len(_act_confirms(page))}, ждали 1")
+
+
+def _actions_dry(data: Any) -> Any:
+    data["actions"] = {**(data.get("actions") or {}), "dry_run": True}
+    return data
+
+
+@scenario("act_dry_run", "5: сухой прогон (actions.dry_run) — «сухой прогон — на биржу не уйдёт» "
+                         "на превью и на карточке")
+async def act_dry_run(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(preset="single", rules=[
+        Rule("/api/me", "patch", patch=_actions_dry)]))
+    await _to_actions(page, dry_ok=True)
+    await page.click('#actions-grid [data-code="tp"]')
+    await page.type("actions-level", "1.6000")
+    s = await page.wait_for(lambda s: _acts(s).get("main") is not None, 6, "превью тейка")
+    page.expect(_acts(s).get("dry") is True, "на превью нет «сухой прогон»")
+    await _press_main(page, False)
+    s = await page.wait_for(_card_ready(False), 10, "карточка тейка")
+    page.expect(_acts(s).get("dry") is True, "на карточке нет «сухой прогон»")
+
+
+NOT_FOUND_BODY = {"code": "NOT_FOUND", "message": "Действие не найдено."}
+
+
+@scenario("act_404", "5: /confirm → 404 «Действие не найдено.» — текст сервера, POST сам не "
+                     "повторяется")
+async def act_404(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(preset="single", rules=[
+        Rule("/confirm", "status", method="POST", status=404, body=NOT_FOUND_BODY, times=1)]))
+    await _to_actions(page)
+    await _open_card(page, "c25", False)
+    await _press_main(page, False)
+    s = await page.wait_for(lambda s: "Действие не найдено." in (_acts(s).get("status") or ""), 6,
+                            "«Действие не найдено.»")
+    await page.pump(3)
+    page.expect(len(_act_confirms(page)) == 1, f"/confirm: {len(_act_confirms(page))}, ждали 1")
+    page.expect(_acts(s).get("main") == "Закрыть 25% · 48 XRP", f"кнопка: {_acts(s).get('main')!r}")
+
+
+DISABLED_BODY = {"code": "ACTIONS_DISABLED",
+                 "message": "Действия в Mini App выключены — открой «⚙️ Действия в чате»."}
+
+
+@scenario("act_disabled", "5: выключатель — /api/me actions.enabled=false: «Действия →» и "
+                          "«Поставить стоп →» в чат; 403 на экране — «⚙️ Действия в чате»")
+async def act_disabled(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(native=True, preset="hedge", rules=[
+        Rule("/api/me", "patch", patch=lambda d: _actions_off(_with_bot(d)))]))
+    await page.js(FAKE_TG_LINK)
+    s = await _open_positions(page)
+    short = _card(s, "SHORT")
+    page.expect("Поставить стоп →" in short["text"] and short["chat"] is not None,
+                f"SHORT без стопа: {short}")
+    await page.click(f'[data-position="{SYMBOL}:SHORT"] .position-stop')
+    await page.click(f'[data-position="{SYMBOL}:LONG"] [data-chat]')
+    await page.pump(0.3)
+    links = await page.js("window.__links")
+    page.expect(links == ["https://t.me/testbot?start=pos-XRP-USDT-S",
+                          "https://t.me/testbot?start=pos-XRP-USDT-L"], f"открыто: {links}")
+    page.expect(not page.api("/api/actions") and not [
+        r for r in page.requests if r.path.endswith("/actions")],
+        "выключено, а запросы к API действий ушли")
+    page.expect("screen-positions" in (await page.state())["screens"], "ушли с «Позиций»")
+
+    # Сервер выключен, а /api/me (ответ до выключения) говорит «включено» — 403 на экране.
+    page.rules.clear()
+    since = page.now()
+    # Тот же адрес с хешем — переход внутри документа, без загрузки: сначала about:blank.
+    await page.call("Page.navigate", {"url": "about:blank"})
+    await page.pump(0.5)
+    await open_page(page, url, Setup(native=True, preset="hedge", rules=[
+        Rule("/api/me", "patch", patch=_with_bot),
+        Rule("/actions", "status", method="GET", status=403, body=DISABLED_BODY)]))
+    await page.js(FAKE_TG_LINK)
+    await _open_positions(page)
+    await page.click(f'[data-position="{SYMBOL}:LONG"] [data-act=""]')
+    s = await page.wait_for(lambda s: _acts(s).get("chat") is True, 8, "«⚙️ Действия в чате»")
+    page.expect(DISABLED_BODY["message"] in (_acts(s).get("state") or ""),
+                f"текст 403: {_acts(s).get('state')!r}")
+    await page.click("#actions-chat")
+    await page.pump(0.3)
+    links = await page.js("window.__links")
+    page.expect(links == ["https://t.me/testbot?start=pos-XRP-USDT-L"], f"открыто: {links}")
+    page.expect(not _act_cards(page, since) and not _act_previews(page, since),
+                "после 403 ушли действия")
+
+
+def _design_screen(data: Any) -> Any:
+    """Экран действий: числа подменены — страница обязана показать строки сервера как есть
+    (разряды — только в показе), без пересчёта."""
+    p = data["position"]
+    p.update(mark_price="86482.5", quantity="86482", entry_price="1.2974", leverage=10,
+             pnl_text="+189.40 $", pnl_sign=1)
+    data.update(pnl_r_text="+0.11R", breakeven_price="12345.6")
+    return data
+
+
+def _design_card(data: Any) -> Any:
+    for row in data["card"]["rows"]:
+        if row["label"].startswith("Закрыть "):
+            row["value"] = "21620 маркетом"
+        if row["label"] == "Комиссия":
+            row["value"] = "≈1.23 USDT"
+    return data
+
+
+@scenario("design_actions", "5: экран действий — числа ответа сервера как есть (разряды только в "
+                            "показе), PnL цветом по знаку, Caveat ≤ 1, 390/320 без прокрутки")
+async def design_actions(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(preset="single", rules=[
+        Rule("/LONG/actions", "patch", method="GET", patch=_design_screen),
+        Rule("/api/actions", "patch", method="POST", patch=_design_card, exact=True)]))
+    s = await _to_actions(page)
+    a = _acts(s)
+    page.expect(a.get("title") == "XRP · Лонг", f"заголовок: {a.get('title')!r}")
+    page.expect(a.get("mark") == "86 482.5", f"mark: {a.get('mark')!r}")
+    page.expect(a.get("pnl") == "+189.40 $ · +0.11R" and "up" in (a.get("pnl_class") or ""),
+                f"PnL: {a.get('pnl')!r} {a.get('pnl_class')!r}")
+    page.expect(a.get("sub") == "86 482 XRP · вход 1.2974 · 10×",
+                f"строка позиции: {a.get('sub')!r}")
+    page.expect("безубыток — 12 345.6" in (a.get("hints") or ""), f"безубыток: {a.get('hints')!r}")
+    colors = await page.js("(() => { const cs = getComputedStyle(document.documentElement);"
+                           " return { pnl: getComputedStyle(document.getElementById('actions-pnl'))"
+                           ".color, blue: cs.getPropertyValue('--blue').trim() }; })()")
+    page.expect(colors["pnl"] == _rgb(colors["blue"]), f"цвет PnL в плюсе: {colors}")
+    s = await _open_card(page, "c25", False)
+    a = _acts(s)
+    page.expect(a.get("main") == "Закрыть 25% · 21 620 XRP", f"кнопка: {a.get('main')!r}")
+    page.expect("21620 маркетом" in (a.get("rows") or "") and "≈1.23 USDT" in (a.get("rows") or ""),
+                f"строки карточки не как у сервера: {a.get('rows')!r}")
+    page.expect(a.get("hands", 0) <= 1, f"пометок «от руки» {a.get('hands')}")
+    page.expect(s.get("scroll_x") == 0, f"390 px: прокрутка {s.get('scroll_x')}")
+    await page.viewport(320, 844)
+    await page.pump(1)
+    s = await page.state()
+    page.expect(s.get("scroll_x") == 0, f"320 px: прокрутка {s.get('scroll_x')}")
 
 
 SCENARIO_TIMEOUT = 150.0

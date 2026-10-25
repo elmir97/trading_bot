@@ -128,8 +128,8 @@ async def test_run_shot_stops_on_scenario_error(tmp_path: Path) -> None:
 # --- набор и папка -------------------------------------------------------------------------
 
 
-def test_shots_cover_screens_1_to_4() -> None:
-    assert list(mshots.SHOTS) == ["market", "form", "confirm", "positions"]
+def test_shots_cover_screens_1_to_5() -> None:
+    assert list(mshots.SHOTS) == ["market", "form", "confirm", "positions", "actions"]
     assert mshots.WIDTHS == (390, 320)
     assert [s.name for s in mshots.select("all")] == list(mshots.SHOTS)
     with pytest.raises(bc.EnvironmentNotReadyError, match="нет снимка"):

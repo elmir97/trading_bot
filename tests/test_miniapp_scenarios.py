@@ -143,6 +143,36 @@ async def _intercept(rule: ms.Rule | None, *events: dict[str, Any],
     return t, page
 
 
+class _GoneBrowser(FakeBrowser):
+    """Перехват уже снят: страница отменила запрос (AbortController) до ответа сценария."""
+
+    def __init__(self, error: str) -> None:
+        super().__init__()
+        self.error = error
+
+    async def send(self, msg: dict[str, Any]) -> None:
+        if msg["method"].startswith("Fetch."):
+            self.sent.append(msg)
+            self.push({"id": msg["id"], "error": {"code": -32602, "message": self.error}})
+            return
+        await super().send(msg)
+
+
+async def test_aborted_request_interception_is_not_scenario_error() -> None:
+    """5.3: превью «последний побеждает» отменяет запрос — Chrome отвечает Invalid
+    InterceptionId; сценарий продолжается. Другие ошибки Fetch — по-прежнему ошибка."""
+    t = _GoneBrowser("Invalid InterceptionId.")
+    page = ms.Page(t)
+    t.push(_paused(URL + "api/actions/preview", method="POST"))
+    await page.call("Page.enable")
+    assert t.methods() == ["Page.enable", "Fetch.continueRequest"]
+    t = _GoneBrowser("Some other failure")
+    page = ms.Page(t)
+    t.push(_paused(URL + "api/me"))
+    with pytest.raises(ms.ScenarioError, match="Some other failure"):
+        await page.call("Page.enable")
+
+
 async def test_without_rule_request_continues() -> None:
     t, _ = await _intercept(None, _paused(URL + "api/me"))
     assert t.last("Fetch.continueRequest") == {"requestId": "R1"}
@@ -344,6 +374,11 @@ def test_registry_covers_queue_scenarios() -> None:
         "sdk_real", "design_font_404", "design_font_hang", "design_form", "design_confirm",
         "design_confirm_refused", "confirm_double", "confirm_double_old",
         "confirm_double_burst", "design_positions", "design_positions_bar",
+        # экран 5 — действия с позицией (5.3)
+        "act_be_disabled", "act_stop_preview", "act_card_timer", "act_confirm_done",
+        "act_pending", "act_busy", "act_risk_increase", "act_double", "act_double_old",
+        "act_network_drop", "act_live", "act_dry_run", "act_404", "act_disabled",
+        "design_actions",
     }
     assert [s.name for s in ms.select("all")] == list(ms.SCENARIOS)
     assert ms.select("poll") == [ms.SCENARIOS["poll"]]
