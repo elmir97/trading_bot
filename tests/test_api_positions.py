@@ -309,7 +309,7 @@ async def test_read_bot_username(caplog) -> None:  # type: ignore[no-untyped-def
 async def test_api_starts_when_get_me_fails(api, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """Сбой getMe при старте — API поднимается, bot_username=None, кнопки в чат нет."""
     bot = _Bot(ConnectionError("telegram down"))
-    built = SimpleNamespace(bot=bot, confirm_tasks={}, bot_username="stale",
+    built = SimpleNamespace(bot=bot, confirm_tasks={}, action_tasks={}, bot_username="stale",
                             redis=SimpleNamespace(aclose=_noop), db=SimpleNamespace(dispose=_noop),
                             factory=SimpleNamespace(aclose=_noop))
     worker = SimpleNamespace(close=_noop)

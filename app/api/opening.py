@@ -91,6 +91,7 @@ NOT_FOUND_TEXT = "Открытие не найдено."
 # ключ, что у /api/market), режим маржи — 30 с, баланс — 5 с.
 PREVIEW_TTL = {
     "get_ticker": TTL_PRICE,
+    "get_mark_price": TTL_PRICE,         # превью действий с позицией (экран 5)
     "get_positions": TTL_PRICE,
     "get_open_orders": TTL_PRICE,
     "get_balance": 5,

@@ -173,7 +173,7 @@ async def test_lifespan_closes_shared_http(monkeypatch) -> None:  # type: ignore
 
     built = SimpleNamespace(
         bot=SimpleNamespace(get_me=get_me, session=SimpleNamespace(close=noop)),
-        confirm_tasks={}, bot_username=None, factory=factory,
+        confirm_tasks={}, action_tasks={}, bot_username=None, factory=factory,
         redis=SimpleNamespace(aclose=noop), db=SimpleNamespace(dispose=noop),
     )
     monkeypatch.setattr(api_main, "get_settings", lambda: settings)

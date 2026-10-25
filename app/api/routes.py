@@ -9,13 +9,21 @@ from fastapi import APIRouter
 from fastapi import Path as FastPath
 from sqlalchemy import select
 
+from app.api import actions as actions_api
 from app.api import opening as opening_api
 from app.api import positions as positions_api
 from app.api.deps import ApiError, CurrentUser, Session, State
 from app.api.market import MarketReader, change_from, max_leverage
 from app.api.ratelimit import ACTION_PER_SECOND, PREVIEW_PER_SECOND, limit
 from app.api.schemas import (
+    ActionCardOut,
+    ActionConfirmIn,
+    ActionIn,
+    ActionOpenOut,
     ActionOut,
+    ActionResultOut,
+    ActionsFlags,
+    ActionStatusOut,
     Candle,
     Candles,
     CardOut,
@@ -31,6 +39,7 @@ from app.api.schemas import (
     OpeningOut,
     OpenOut,
     Plan,
+    PositionActionsOut,
     PositionsOut,
     money,
     price,
@@ -44,7 +53,7 @@ from app.execution.opening.service import (
     plan_limits,
 )
 from app.market.contracts import match_contracts
-from app.trading.enums import ExecutionCallbackAction, OpeningStatus
+from app.trading.enums import ExecutionCallbackAction, OpeningStatus, TradeSide
 
 logger = get_logger(__name__)
 
@@ -122,6 +131,9 @@ async def me(user: CurrentUser, state: State, session: Session) -> Me:
         limit_expiry_default=settings.exec_open_limit_expiry_minutes,
         card_ttl_seconds=settings.exec_open_card_ttl_seconds,
         bot_username=state.bot_username,
+        actions=ActionsFlags(enabled=settings.miniapp_actions_enabled,
+                             dry_run=settings.exec_dry_run,
+                             card_ttl_seconds=settings.exec_confirm_ttl_seconds),
     )
 
 
@@ -309,6 +321,86 @@ async def open_active(user: CurrentUser, state: State, session: Session,
         ).order_by(TradeOpening.id.desc())
     )
     return [await _view(state, session, row) for row in rows]
+
+
+# --- действия с позицией (экран 5) -------------------------------------------------------
+# Каждый эндпоинт — сначала выключатель MINIAPP_ACTIONS_ENABLED (403, ни биржи, ни строк).
+
+ActionId = Annotated[int, FastPath(ge=1, le=2**31 - 1)]
+SymbolPath = Annotated[str, FastPath(pattern=r"^[A-Z0-9]{1,24}-USDT$")]
+
+
+@router.get("/positions/{symbol}/{side}/actions")
+async def position_actions(symbol: SymbolPath, side: Literal["LONG", "SHORT"],
+                           user: CurrentUser, state: State,
+                           session: Session) -> PositionActionsOut:
+    """Позиция и план каждого действия на кэше процесса, без записи (5/с).
+    Состояние кнопок — подсказка: решает карточка."""
+    actions_api.require_enabled(state)
+    await limit(state.redis, user.id, "act_list", PREVIEW_PER_SECOND)
+    return await actions_api.actions_out(state, session, user, symbol, TradeSide(side))
+
+
+@router.post("/actions/preview")
+async def action_preview(body: ActionIn, user: CurrentUser, state: State,
+                         session: Session) -> ActionCardOut:
+    actions_api.require_enabled(state)
+    await limit(state.redis, user.id, "act_preview", PREVIEW_PER_SECOND)
+    return await actions_api.preview(state, session, user, body)
+
+
+@router.post("/actions")
+async def action_card(body: ActionIn, user: CurrentUser, state: State,
+                      session: Session) -> ActionOpenOut:
+    actions_api.require_enabled(state)
+    await limit(state.redis, user.id, "act_card", ACTION_PER_SECOND)
+    return await actions_api.open_card(state, session, user, body)
+
+
+@router.post("/actions/{action_id}/confirm")
+async def action_confirm(action_id: ActionId, body: ActionConfirmIn, user: CurrentUser,
+                         state: State, session: Session) -> ActionResultOut:
+    actions_api.require_enabled(state)
+    await limit(state.redis, user.id, "act_confirm", ACTION_PER_SECOND)
+    action = await actions_api.owned(actions_api.service_for(state, session, user), action_id)
+    risk = body.risk_confirmed
+    await actions_api.audit(
+        state, user,
+        ExecutionCallbackAction.PM_YES_RISK if risk else ExecutionCallbackAction.PM_YES,
+        action_id, f"ma:pm:{'r' if risk else 'y'}:{action_id}",
+    )
+    outcome = await actions_api.confirm(state, user.id, action_id, risk)
+    await session.refresh(action)   # «Да» шло в своей сессии
+    status = await actions_api.status_out(state, session, action)
+    if outcome is None:
+        return ActionResultOut(text=status.text, final=False, pending=True, action=status)
+    pending, busy = actions_api.flags(outcome)
+    return ActionResultOut(text=outcome.text, final=outcome.final, pending=pending, busy=busy,
+                           action=status)
+
+
+@router.post("/actions/{action_id}/decline")
+async def action_decline(action_id: ActionId, user: CurrentUser, state: State,
+                         session: Session) -> ActionResultOut:
+    actions_api.require_enabled(state)
+    await limit(state.redis, user.id, "act_decline", ACTION_PER_SECOND)
+    service = actions_api.service_for(state, session, user)
+    action = await actions_api.owned(service, action_id)
+    await actions_api.audit(state, user, ExecutionCallbackAction.PM_NO, action_id,
+                            f"ma:pm:n:{action_id}")
+    text = await service.decline(action_id)
+    await session.refresh(action)
+    return ActionResultOut(text=text, final=True,
+                           action=await actions_api.status_out(state, session, action))
+
+
+@router.get("/actions/{action_id}")
+async def action_status(action_id: ActionId, user: CurrentUser, state: State,
+                        session: Session) -> ActionStatusOut:
+    actions_api.require_enabled(state)
+    service = actions_api.service_for(state, session, user)
+    return await actions_api.status_out(state, session,
+                                        await actions_api.owned(service, action_id))
 
 
 __all__ = ["router"]

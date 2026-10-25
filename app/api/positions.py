@@ -83,7 +83,7 @@ def cache_key(state: ApiState, user_id: int) -> str:
 
 
 def forget(state: ApiState, user_id: int) -> None:
-    """Позиции изменились нашим действием (итог «Открыть», отмена лимита)."""
+    """Позиции изменились нашим действием (итог «Открыть», отмена лимита, «Да» экрана 5)."""
     state.market_cache.invalidate(f"api:positions:{user_id}:")
 
 
@@ -161,7 +161,7 @@ def pnl_text(value: Decimal | None) -> tuple[str | None, int]:
     return f"{'+' if sign > 0 else ''}{v} $", sign
 
 
-def _position(view: PositionView, precision: int | None) -> PositionOut:
+def position_out(view: PositionView, precision: int | None) -> PositionOut:
     p = view.position
     text, sign = pnl_text(p.unrealized_pnl)
     return PositionOut(
@@ -250,11 +250,11 @@ async def positions_out(state: ApiState, session: Any, user: User) -> PositionsO
                                                                              journal)
     return PositionsOut(
         account_mode=mode.value, bot_account_mode=user.settings.active_exchange_mode.value,
-        positions=[_position(v, precision.get(v.position.symbol)) for v in views],
+        positions=[position_out(v, precision.get(v.position.symbol)) for v in views],
         journal_only=[_journal(t, journal_precision) for t in journal],
         exchange_error=None,
     )
 
 
 __all__ = ["TTL_POSITIONS", "ExchangeReads", "cache_key", "forget", "journal_price", "pnl_text",
-           "position_bar", "positions_out"]
+           "position_bar", "position_out", "positions_out"]

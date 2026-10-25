@@ -269,20 +269,27 @@ class PositionActionService:
 
     # --- карточка ----------------------------------------------------------
 
+    async def read_inputs(
+        self, symbol: str, side: TradeSide
+    ) -> tuple[ActionInputs | None, Trade | None, ExecutionRefusal | None]:
+        """Проверки и чтение биржи без плана. Экран действий Mini App (5.1) строит
+        по ним план каждого вида — одно чтение на все кнопки."""
+        refusal = self._gate()
+        if refusal is not None:
+            return None, None, refusal
+        client, refusal = await self._client()
+        if client is None:
+            return None, None, refusal
+        try:
+            return await self._inputs(client, symbol, side)
+        finally:
+            await client.close()
+
     async def _plan(
         self, kind: PositionActionKind, params: dict[str, object], symbol: str, side: TradeSide,
     ) -> tuple[ActionPlan | None, ActionInputs | None, Trade | None, ExecutionRefusal | None]:
         """Проверки, чтение биржи и план — общий путь карточки и превью."""
-        refusal = self._gate()
-        if refusal is not None:
-            return None, None, None, refusal
-        client, refusal = await self._client()
-        if client is None:
-            return None, None, None, refusal
-        try:
-            inputs, trade, refusal = await self._inputs(client, symbol, side)
-        finally:
-            await client.close()
+        inputs, trade, refusal = await self.read_inputs(symbol, side)
         if inputs is None:
             return None, None, None, refusal
         plan = plan_action(kind, params, inputs)

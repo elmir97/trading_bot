@@ -7,7 +7,7 @@ from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 CENT = Decimal("0.01")
 
@@ -45,6 +45,14 @@ class Flags(BaseModel):
     live_allowed: bool                # EXEC_OPEN_ALLOW_LIVE
 
 
+class ActionsFlags(BaseModel):
+    """Действия с позицией (экран 5)."""
+
+    enabled: bool                     # MINIAPP_ACTIONS_ENABLED — иначе кнопки ведут в чат
+    dry_run: bool                     # EXEC_DRY_RUN — действие на биржу не уйдёт
+    card_ttl_seconds: int             # exec_confirm_ttl_seconds
+
+
 class Me(BaseModel):
     account_mode: str                 # DEMO | LIVE
     equity: Decimal | None
@@ -59,6 +67,7 @@ class Me(BaseModel):
     # Имя бота для ссылки «⚙️ Действия в чате» (getMe при старте API); не прочитано — None,
     # кнопки нет.
     bot_username: str | None = None
+    actions: ActionsFlags | None = None   # действия с позицией (экран 5)
 
 
 class Contract(BaseModel):
@@ -316,8 +325,121 @@ class PositionsOut(BaseModel):
     exchange_error: ErrorBody | None    # NO_KEY / KEY_REJECTED — показан только журнал
 
 
+# --- действия с позицией (экран 5, 5.1) ------------------------------------------------
+
+# be — стоп в безубыток, sl — перенос стопа, tp — тейк, c25/c50 — закрыть 25/50 %,
+# cf — закрыть всё (те же коды, что у кнопок чата pa:<код>:…).
+ActionCode = Literal["be", "sl", "tp", "c25", "c50", "cf"]
+LevelText = Annotated[str, Field(min_length=1, max_length=32)]
+
+
+class ActionIn(BaseModel):
+    """Цена (level) или отступ от mark в % (level_percent, чип стопа) — строкой, только
+    для sl/tp и ровно одно из двух; у тейка отступа нет. Перевод и проверка — ядро."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str = Field(pattern=r"^[A-Z0-9]{1,24}-USDT$")
+    side: Literal["LONG", "SHORT"]
+    kind: ActionCode
+    level: LevelText | None = None
+    level_percent: LevelText | None = None
+
+    @model_validator(mode="after")
+    def _levels(self) -> ActionIn:
+        given = [v for v in (self.level, self.level_percent) if v is not None]
+        if self.kind in ("sl", "tp"):
+            if len(given) != 1:
+                raise ValueError("нужна цена или отступ — одно из двух")
+            if self.kind == "tp" and self.level_percent is not None:
+                raise ValueError("у тейка отступа в % нет")
+        elif given:
+            raise ValueError("цена — только у стопа и тейка")
+        return self
+
+
+class ActionConfirmIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    risk_confirmed: bool = False        # «⚠️ Да, увеличить риск» (= card.risk_increase)
+
+
+class ActionRowOut(BaseModel):
+    label: str
+    value: str                          # строка карточки чата (card_view), как есть
+
+
+class ActionCardOut(BaseModel):
+    """Карточка действия: строки — те же, что в чате (render_card из card_view)."""
+
+    text: str                           # карточка как в чате или «⛔ причина»
+    refusal: RefusalOut | None
+    title: str | None                   # «XRP-USDT LONG · перенос стопа»; отказ — None
+    rows: list[ActionRowOut]
+    notes: list[str]
+    risk_increase: bool
+    new_level: str | None               # стоп/тейк после действия — пунктир на графике
+
+
+class ActionHintOut(BaseModel):
+    code: str                           # be | sl | tp | c25 | c50 | cf
+    enabled: bool                       # подсказка; решает карточка
+    hint: str | None                    # почему нельзя (отказ ядра)
+
+
+class PositionActionsOut(BaseModel):
+    """Экран действий позиции: позиция и план каждого вида на одних данных (без записи)."""
+
+    position: PositionOut | None        # отказ до чтения позиции — None, причина — refusal
+    refusal: RefusalOut | None
+    pnl_r_text: str | None              # «+0.71R»; нет сделки или исходного стопа — None
+    breakeven_price: Decimal | None
+    actions: list[ActionHintOut]
+
+
+class ActionOpenOut(BaseModel):
+    action_id: int | None               # REFUSED — None (строка отказа есть, «Да» по ней нет)
+    status: str                         # CARD | REFUSED
+    expires_at: datetime | None         # created_at + exec_confirm_ttl_seconds
+    ttl_seconds: int | None
+    card: ActionCardOut
+
+
+class ActionStatusOut(BaseModel):
+    id: int
+    code: str                           # be | sl | tp | c25 | c50 | cf
+    kind: str                           # MOVE_STOP | SET_TAKE | CLOSE_PARTIAL | CLOSE_FULL
+    symbol: str
+    side: str
+    status: str
+    final: bool                         # дальше статус сам не изменится (не CARD, не SUBMITTED)
+    text: str                           # итог в чате (без тегов) или по статусу
+    error_code: str | None
+    expires_at: datetime | None         # только CARD
+    decided_at: datetime | None
+
+
+class ActionResultOut(BaseModel):
+    """Итог «Да»/«Нет»: pending — идёт, опрашивать GET; busy — лок занят, повторить."""
+
+    text: str
+    final: bool
+    pending: bool = False
+    busy: bool = False
+    action: ActionStatusOut
+
+
 __all__ = [
+    "ActionCardOut",
+    "ActionConfirmIn",
+    "ActionHintOut",
+    "ActionIn",
+    "ActionOpenOut",
     "ActionOut",
+    "ActionResultOut",
+    "ActionRowOut",
+    "ActionStatusOut",
+    "ActionsFlags",
     "CalcOut",
     "Candle",
     "Candles",
@@ -339,6 +461,7 @@ __all__ = [
     "OpenOut",
     "OpeningOut",
     "Plan",
+    "PositionActionsOut",
     "PositionOut",
     "PositionsOut",
     "ProtectiveOut",

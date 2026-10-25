@@ -48,6 +48,9 @@ class ApiState:
     alarm_retry: Callable[[int], None] | None = None
     # «Открыть» в своей задаче: opening_id → задача (повторный запрос ждёт её же).
     confirm_tasks: dict[int, asyncio.Task[Any]] = field(default_factory=dict)
+    # «Да» действия с позицией (экран 5): position_actions.id → задача. Свой словарь:
+    # id открытий и действий — разные последовательности, общий ключ слил бы их.
+    action_tasks: dict[int, asyncio.Task[Any]] = field(default_factory=dict)
 
 
 def get_state(request: Request) -> ApiState:

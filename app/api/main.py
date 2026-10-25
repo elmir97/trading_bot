@@ -58,15 +58,17 @@ def build_state(settings: Settings) -> tuple[ApiState, OpeningsWorker]:
 
 
 async def drain(state: ApiState, timeout: float = CONFIRM_DRAIN_SECONDS) -> None:
-    """Остановка: дать начатым «Открыть» дойти до итога. Не успели — их
-    довосстановит цикл бота (состояние — в trade_openings)."""
-    tasks = [t for t in state.confirm_tasks.values() if not t.done()]
+    """Остановка: дать начатым «Открыть» и «Да» действий дойти до итога. Не
+    успели — их довосстановит цикл бота (trade_openings, position_actions — B.9)."""
+    tasks = [t for t in (*state.confirm_tasks.values(), *state.action_tasks.values())
+             if not t.done()]
     if not tasks:
         return
     _, pending = await asyncio.wait(tasks, timeout=timeout)
     if pending:
-        logger.warning("Остановка API: «Открыть» не завершилось — доведёт цикл бота",
-                       extra={"opening_ids": sorted(state.confirm_tasks)})
+        logger.warning("Остановка API: «Открыть» / «Да» не завершилось — доведёт цикл бота",
+                       extra={"opening_ids": sorted(state.confirm_tasks),
+                              "action_ids": sorted(state.action_tasks)})
 
 
 async def read_bot_username(bot: Bot) -> str | None:
