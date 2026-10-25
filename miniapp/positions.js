@@ -1,7 +1,9 @@
 // Вкладка «Позиции» (П.1): только просмотр. Позиции счёта Mini App со стопом/тейком
-// из openOrders, связь с журналом, «Только в журнале» (все счета с пометкой). Действий
-// этапа 4 здесь нет — кнопка «⚙️ Действия в чате» открывает экран действий позиции в
-// боте ссылкой t.me/<бот>?start=pos-… (параметр строит сервер).
+// из openOrders, связь с журналом, «Только в журнале» (все счета с пометкой). Действия
+// с позицией — экран 5 (actions.js): «Действия →», у позиции без стопа ещё «Поставить
+// стоп →» (сразу редактор стопа). Действия в Mini App выключены (/api/me actions.enabled
+// false, MINIAPP_ACTIONS_ENABLED) — те же кнопки открывают экран действий позиции в боте
+// ссылкой t.me/<бот>?start=pos-… (параметр строит сервер).
 //
 // Опрос: GET /api/positions раз в POLL_MS цепочкой setTimeout (следующий — после ответа,
 // один в полёте). Сервер держит кэш 5 с на пользователя (app/api/positions.py): к BingX
@@ -37,6 +39,12 @@ export function accountLabel(mode) {
 // Ссылка в чат бота; имени бота нет (getMe не прочитан, стенд) — null, кнопки нет.
 export function chatLink(username, param) {
   return username && param ? `${CHAT_URL}${username}?start=${param}` : null;
+}
+
+// Действия в Mini App включены сервером (/api/me → actions.enabled); нет поля (старый
+// сервер) — выключены: кнопки ведут в чат.
+export function actionsEnabled(meData) {
+  return Boolean(meData && meData.actions && meData.actions.enabled);
 }
 
 // Как _level_text в чате: «нет», «1.3402 (на всю позицию)», «2 ордера: …; …».
@@ -87,7 +95,7 @@ export function positionBar(bar) {
   return box;
 }
 
-export function createPositionsScreen({ api, tg, me, onSymbol, onMarket, onFatal }) {
+export function createPositionsScreen({ api, tg, me, onSymbol, onActions, onMarket, onFatal }) {
   const el = {
     state: $("positions-state"),
     stateText: $("positions-state-text"),
@@ -136,7 +144,18 @@ export function createPositionsScreen({ api, tg, me, onSymbol, onMarket, onFatal
     return [dt, dd];
   }
 
-  function card(p, username) {
+  // Кнопка действий: в Mini App — data-act (код редактора или ""), выключено — data-chat.
+  function actButton(label, link, editor, inApp) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `button button-small button-plain position-chat${editor ? " position-stop" : ""}`;
+    if (inApp) button.dataset.act = editor || "";
+    else button.dataset.chat = link;
+    button.textContent = label;
+    return button;
+  }
+
+  function card(p, username, inApp) {
     const item = document.createElement("li");
     // Без стопа — красная рамка и тень (макет «Позиции»).
     item.className = `position-card${p.stops.length ? "" : " danger"}`;
@@ -170,14 +189,11 @@ export function createPositionsScreen({ api, tg, me, onSymbol, onMarket, onFatal
     const bar = positionBar(p.bar);
     if (bar) item.append(bar);
     const link = chatLink(username, p.start_param);
-    if (link) {
-      // До экрана 5 (действия в Mini App) — экран действий позиции в чате бота.
-      const chat = document.createElement("button");
-      chat.type = "button";
-      chat.className = "button button-small button-plain position-chat";
-      chat.dataset.chat = link;
-      chat.textContent = "Действия →";
-      item.append(chat);
+    item.dataset.chatLink = link || "";
+    if (inApp || link) {
+      // Выключено — экран действий позиции в чате бота (те же кнопки).
+      if (!p.stops.length) item.append(actButton("Поставить стоп →", link, "sl", inApp));
+      item.append(actButton("Действия →", link, null, inApp));
     } else {
       const hint = document.createElement("p");
       hint.className = "muted small";
@@ -206,7 +222,8 @@ export function createPositionsScreen({ api, tg, me, onSymbol, onMarket, onFatal
     el.note.hidden = notes.length === 0;
 
     const username = (me() || {}).bot_username || null;
-    el.list.replaceChildren(...data.positions.map((p) => card(p, username)));
+    const inApp = actionsEnabled(me());
+    el.list.replaceChildren(...data.positions.map((p) => card(p, username, inApp)));
     el.list.hidden = data.positions.length === 0;
     el.empty.hidden = data.positions.length > 0 || Boolean(data.exchange_error);
     el.emptyText.textContent = `На ${accountLabel(data.account_mode)} открытых позиций нет.`;
@@ -308,6 +325,14 @@ export function createPositionsScreen({ api, tg, me, onSymbol, onMarket, onFatal
     const chat = event.target.closest("button[data-chat]");
     if (chat) {
       openChat(chat.dataset.chat);
+      return;
+    }
+    const act = event.target.closest("button[data-act]");
+    if (act) {
+      const item = act.closest("li[data-position]");
+      const [symbol, side] = item.dataset.position.split(":");
+      onActions({ symbol, side, editor: act.dataset.act || null,
+        chat: item.dataset.chatLink || null });
       return;
     }
     const head = event.target.closest("button[data-symbol]");

@@ -291,6 +291,79 @@
       </div>
     </section>
 
+    <!-- Действия с позицией (экран 5, макет «Действия»): числа — строки сервера; панель —
+         превью (без таймера) или карточка сервера с таймером до ttl_seconds. -->
+    <section class="screen" id="screen-actions" hidden>
+      <div class="actions-head">
+        <button type="button" class="link-button" id="actions-back">‹ Позиции</button>
+        <h1 class="trade-title" id="actions-title"></h1>
+      </div>
+      <div class="positions-state" id="actions-state">
+        <p id="actions-state-text">Загрузка…</p>
+        <button type="button" class="button button-small" id="actions-retry"
+                hidden>Повторить</button>
+        <button type="button" class="button button-small button-plain" id="actions-chat"
+                hidden>⚙️ Действия в чате</button>
+      </div>
+      <div id="actions-body" hidden>
+        <div class="actions-price">
+          <span class="actions-mark" id="actions-mark">—</span>
+          <span class="position-pnl" id="actions-pnl">—</span>
+        </div>
+        <p class="actions-sub" id="actions-sub"></p>
+        <p class="note" id="actions-stale" hidden></p>
+        <div class="chart-box chart-compact">
+          <div class="chart" id="actions-chart"></div>
+          <div class="chart-state" id="actions-chart-state">
+            <p id="actions-chart-text">Загрузка…</p>
+          </div>
+        </div>
+        <h2 class="section-title">Действия</h2>
+        <div class="action-grid" id="actions-grid">
+          <button type="button" data-code="be">Стоп в безубыток</button>
+          <button type="button" class="action-stop" data-code="sl">Перенести стоп</button>
+          <button type="button" class="action-take" data-code="tp">Изменить тейк</button>
+          <button type="button" data-code="c25">Закрыть 25%</button>
+          <button type="button" data-code="c50">Закрыть 50%</button>
+          <button type="button" class="action-close" data-code="cf">Закрыть всё</button>
+        </div>
+        <ul class="actions-hints" id="actions-hints" hidden></ul>
+      </div>
+      <article class="record card action-panel" id="actions-panel" hidden>
+        <div class="record-head">
+          <span id="actions-panel-title"></span>
+          <span class="record-timer" id="actions-timer" hidden></span>
+        </div>
+        <div class="action-editor" id="actions-editor" hidden>
+          <div class="field">
+            <label class="field-label" for="actions-level" id="actions-level-label">Новый
+              стоп</label>
+            <input class="field-input" id="actions-level" inputmode="decimal" autocomplete="off">
+          </div>
+          <div class="chips" id="actions-chips">
+            <button type="button" data-chip="0.5">0.5%</button>
+            <button type="button" data-chip="1">1%</button>
+            <button type="button" data-chip="1.5">1.5%</button>
+            <button type="button" data-chip="be">БУ</button>
+          </div>
+        </div>
+        <div class="card-text" id="actions-rows"></div>
+        <ul class="issues record-notes" id="actions-notes" hidden></ul>
+        <div class="record-diff" id="actions-diff-box" hidden>
+          <p class="muted small">пересчитано по свежим данным биржи</p>
+          <ul class="record-diff-list" id="actions-diff"></ul>
+        </div>
+        <p class="hand red action-risk" id="actions-risk" hidden>риск растёт — подтверди
+          отдельно</p>
+        <p class="record-dry" id="actions-dry" hidden>сухой прогон — на биржу не уйдёт</p>
+        <p class="note action-status" id="actions-status" hidden></p>
+      </article>
+      <div class="confirm-actions">
+        <button type="button" class="button" id="actions-main" hidden></button>
+        <button type="button" class="button button-plain" id="actions-cancel" hidden></button>
+      </div>
+    </section>
+
     <section class="screen" id="screen-sdk" hidden>
       <p>Не загрузилось. Проверь интернет и открой заново из бота.</p>
       <button type="button" class="button" id="sdk-reload">Обновить</button>

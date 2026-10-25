@@ -136,7 +136,7 @@ def test_legend_markup_and_link_to_positions() -> None:
 
 def test_autoscale_includes_entry_stop_take_not_liq() -> None:
     js = _js("chart.js")
-    assert 'export const SCALED_KINDS = ["entry", "stop", "take"];' in js
+    assert 'export const SCALED_KINDS = ["entry", "stop", "take", "new-stop", "new-take"];' in js
     scaled = _body(js, "export function scaledRange(")
     assert "SCALED_KINDS.includes(level.kind)" in scaled
     assert "if (!range || !range.priceRange) return range;" in scaled     # нет данных — как было

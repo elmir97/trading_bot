@@ -14,8 +14,8 @@
 //   у рынка — открытой позиции (П.2). Рисуются на видимой серии: скрытая серия
 //   (visible: false) прячет и свои price lines, поэтому setType переносит их на линию и
 //   обратно. Что нарисовано — в data-lines / data-lines-on контейнера (сценарии).
-// - Автомасштаб цены включает вход, стоп и тейк (решение владельца 17.10): уровень за
-//   краем графика не виден. Ликвидацию — нет: она бывает далеко и ужимает график; у рынка
+// - Автомасштаб цены включает вход, стоп и тейк (решение владельца 17.10) и «новый» экрана 5:
+//   уровень за краем графика не виден. Ликвидацию — нет: она бывает далеко и ужимает график; у рынка
 //   её значение — строкой в блоке «Позиция».
 
 import { THEME_EVENT, token } from "./theme.js";
@@ -29,7 +29,7 @@ function candleColors(colors) {
     wickDownColor: colors.red };
 }
 
-export const SCALED_KINDS = ["entry", "stop", "take"];
+export const SCALED_KINDS = ["entry", "stop", "take", "new-stop", "new-take"];
 
 // Диапазон цены серии, расширенный уровнями SCALED_KINDS. Нет данных — как у библиотеки.
 export function scaledRange(range, levels) {
@@ -66,11 +66,14 @@ export function themeColors() {
   };
 }
 
-// Вход — пунктир чернилами, стоп — красная, тейк — синяя, ликвидация — серая точками.
+// Вход — пунктир чернилами, стоп — красная, тейк — синяя, ликвидация — серая точками;
+// стоп/тейк после действия (экран 5, new_level сервера) — пунктир своим цветом.
 function lineStyle(kind, colors) {
   const S = LWC.LineStyle;
   if (kind === "stop") return { color: colors.red, lineStyle: S.Solid };
   if (kind === "take") return { color: colors.blue, lineStyle: S.Solid };
+  if (kind === "new-stop") return { color: colors.red, lineStyle: S.Dashed };
+  if (kind === "new-take") return { color: colors.blue, lineStyle: S.Dashed };
   if (kind === "liq") return { color: colors.text, lineStyle: S.Dotted };
   return { color: colors.ink, lineStyle: S.Dashed };
 }

@@ -41,7 +41,9 @@ def test_chat_link_uses_server_param() -> None:
     assert "tg.openTelegramLink(link)" in chat and "tg.openLink(link)" in chat
     # Имени бота нет — вместо кнопки подсказка (getMe не прочитан, стенд).
     card = _body(js, "function card(")
-    assert "chatLink(username, p.start_param)" in card and "if (link) {" in card
+    assert "chatLink(username, p.start_param)" in card and "if (inApp || link) {" in card
+    hint = card[card.index("if (inApp || link) {"):]
+    assert "} else {" in hint and "Действия с позицией — в чате бота: «💼 Позиции»." in hint
 
 
 def test_poll_is_chained_and_not_faster_than_cache() -> None:

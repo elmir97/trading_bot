@@ -177,6 +177,16 @@ function digitsOrDash(value) {
   return value === null || value === undefined ? "—" : groupDigits(value);
 }
 
+// Действие с позицией (экран 5): карточка на свежих данных разошлась с превью — «было →
+// стало» по строкам с той же подписью; значения — строки сервера, сравнение строк.
+export function actionDiff(preview, card) {
+  if (!preview || preview.refusal || !card || card.refusal) return [];
+  const before = new Map(preview.rows.map((r) => [r.label, r.value]));
+  return card.rows
+    .filter((r) => before.has(r.label) && before.get(r.label) !== r.value)
+    .map((r) => `${r.label}: ${before.get(r.label)} → ${r.value}`);
+}
+
 // --- «ЗАПИСЬ» подтверждения (Д.5, макет «Подтверждение») -------------------------------
 
 const ENTRY_TEXT = { MARKET: "маркет", LIMIT: "лимит" };

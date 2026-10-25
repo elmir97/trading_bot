@@ -1,12 +1,13 @@
 // Mini App: Telegram WebApp, экраны, шапка счёта.
 // Своей торговой логики нет — только ввод, показ и вызов API (§1). Экран рынка —
 // market.js (2.3), форма сделки — form.js + render.js (2.4), подтверждение — confirm.js (2.5),
-// вкладка «Позиции» — positions.js (П.1).
+// вкладка «Позиции» — positions.js (П.1), действия с позицией — actions.js (экран 5).
 // Меню «…» (§5а): SettingsButton Telegram (7.0+) → showPopup «💼 Позиции» / «🔄 Обновить»;
 // без SettingsButton — своя ссылка «💼 Позиции» в шапке счёта.
 // Экран с подписками (опрос, график, кнопки Telegram) отдаёт {enter, leave}: show()
 // зовёт leave у прежнего экрана до enter у нового — график снимается при уходе.
 
+import { createActionsScreen } from "./actions.js";
 import { ApiError, createApi } from "./api.js";
 import { createConfirmScreen } from "./confirm.js";
 import { createTradeScreen } from "./form.js";
@@ -19,7 +20,7 @@ import { initTheme } from "./theme.js";
 const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
 const TV_URL = "https://www.tradingview.com/";
 const BOT_USERNAME = "postfactumTrade_bot";
-const SCREENS = ["loading", "market", "trade", "confirm", "positions", "error"];
+const SCREENS = ["loading", "market", "trade", "confirm", "positions", "actions", "error"];
 // BackButton — с Bot API 6.1; на старом клиенте (и вне Telegram SDK говорит 6.0) не трогаем.
 const backButton = tg && tg.isVersionAtLeast("6.1") ? tg.BackButton : null;
 // Меню «…» — SettingsButton с 7.0, выбор пункта — showPopup (6.2+, у 7.0 есть).
@@ -161,6 +162,13 @@ function openPositions() {
   }
 }
 
+// «Действия →» / «Поставить стоп →» карточки позиции — экран 5; «Назад» — к позициям.
+function openActions(target) {
+  if (busy()) return;
+  screens.actions.open(target);
+  show("actions");
+}
+
 // Карточка позиции → рынок этой монеты с линиями позиции (П.2); «Назад» — к позициям.
 function openSymbol(symbol) {
   screens.market.setSymbol(symbol);
@@ -277,7 +285,11 @@ function init() {
       onFatal: (err) => showError(err, start),
     }),
     positions: createPositionsScreen({
-      api, tg, me: () => me, onSymbol: openSymbol, onMarket: toMarket,
+      api, tg, me: () => me, onSymbol: openSymbol, onActions: openActions, onMarket: toMarket,
+      onFatal: (err) => showError(err, start),
+    }),
+    actions: createActionsScreen({
+      api, tg, me: () => me, onBack: back,
       onFatal: (err) => showError(err, start),
     }),
   };
