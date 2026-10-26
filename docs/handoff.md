@@ -1,5 +1,38 @@
 # Trading Journal Bot — передача в новый чат
 
+**26.10.2026: прод — деплой экрана 5 `2452d88` (без миграций), bot+api 06:49:26 UTC, статика 08:17:58 UTC, каждый шаг по «да».**
+Прод = образ `trading_bot-bot:latest` **`8f924c8674b8`** (bot и api), код на диске `2452d88` (md5 353/353 без `miniapp/`, статика 7/7
+= HEAD, `chmod -R go-w deploy miniapp`, записей с /022 — 0), alembic `919ae8ad384e` (head). Бэкап
+`/opt/backups/trading_bot_pre_deploy_20261025_192411.{sql.gz,tar.gz}` (600, `gzip -t`). **Тег отката `rollback_20261025_192613` →
+`a21a452007a3` — снимать после отчёта и «да» владельца.**
+- **Override (шаг 4а, по «да»):** у api в `environment` после `MINIAPP_ALLOWED_TELEGRAM_IDS` — `MINIAPP_ACTIONS_ENABLED: "false"` (с
+  комментарием; не в якоре `x-exec-env`). Копия до правки `/opt/backups/override_pre_actions_20261026_064830.yml` (600); md5
+  `9e0be6f9…` → `732bdb22…`. `docker compose config`: у api `'false'`, у bot переменной нет, EXEC_*/TRADING_* (3) совпадают.
+  Внутри api `get_settings().miniapp_actions_enabled` = False, источник — env контейнера (override), в `.env` нет
+- **Проверки после:** RestartCount 0/0, api healthy; W/E/Traceback bot и api с 06:49:26 — 0; пульс 07:49:44 — монитор (циклов 239,
+  по локу 0, ошибок 0), reconciler (циклов 60, по локу 0, ошибок 0); `GET /api/actions/1` без initData — 401; статика снаружи —
+  `/`, `/actions.js` 200, `app.js` импортирует `./actions.js`, заголовки CSP и `cache-control: no-cache` — те же, что до
+- **Память — базы на `8f924c8674b8`:**
+  - api (лимит `mem_limit` 256 МиБ, swap +256): сразу после старта RssAnon 187.6 МБ (RSS 214, swap 0, `docker stats` 192.2 МиБ);
+    через ~1.5 ч, после открытия Mini App владельцем (`/api/me`, позиции, рынок, свечи) — RssAnon 195.4 МБ (+7.8), RSS 223.1, swap 0,
+    `docker stats` 200.4 МиБ, пик cgroup 228.4 МБ (217.8 МиБ), OOM 0. Порог доклада владельца — > 230 МиБ
+  - **bot — `mem_limit` нет** (Memory=0, swap не ограничен, OOM-лимит только хоста): через ~1.5 ч `docker stats` 299.1 МиБ,
+    RSS 291.0 МБ, RssAnon 244.0 МБ, swap 0; cgroup 344.7 МБ (anon 249.9 + file 88.7), пик 400.1 МБ. Это база, раньше не замерялась
+  - хост: available 874 МБ
+  - **Задача: замер через 24 ч (≈ 27.10 07:00 UTC)** — те же поля для api и bot, сравнить с базами выше
+- **План включения экрана 5 на демо (принят как план; выполнять отдельной серией «да», после снятия тега):**
+  1. Перед: SELECT активных CARD/SUBMITTED в `position_actions` = 0, демо 0 позиций/0 ордеров (GET)
+  2. `MINIAPP_ACTIONS_ENABLED: "true"` только у api (diff override, 600, «да») → «не нажимай в Mini App» → `up -d --no-deps
+     --force-recreate api`. Внимание: `EXEC_DRY_RUN: "false"` в якоре — действия на демо живые сразу
+  3. Позицию XRP LONG со стопом и тейком открывает владелец в BingX + «📥 В журнал»
+  4. **Первая проверка — кнопка «Действия →» на позиции во вкладке «Позиции»** открывает экран 5 (при `"false"` она вела в чат; на
+     деплое 26.10 владелец проверял только «Mini App открывается, экраны без ошибок» — демо-позиции не было)
+  5. Экран/R/БУ; стоп ближе чипом 1%; стоп дальше («⚠️ Да, увеличить риск»; `showConfirm` — только LIVE); тейк; БУ; «Отмена» →
+     decline; истечение → «Пересчитать»; 25%; гонка с чатом; «Закрыть всё»
+  6. После каждой проверки: openOrders (GET), строка `position_actions`, `ACTION_RESULT` в чат ровно один, **W/E в логе api — 0**
+  7. После серии — сверка журнала: сделка CLOSED, PnL сходится с BingX
+  8. Откат — `"false"` + пересоздать api
+
 **26.10.2026: экран 5 Mini App (действия с позицией) — 5.0–5.4 сделаны в ветке `miniapp`, без деплоя; прод по-прежнему
 `437b5f9`.** Как сделано — §9а `docs/miniapp-plan.md`, «Экран 5 — как сделано».
 - **Коммиты:** 5.0 `4167917` (+5.0а `5a5eb63`, 5.0б `ebfb527`) ядро · 5.1 `cfd17d6` API · 5.2 `eb4cc01` фронт (`actions.js`,
