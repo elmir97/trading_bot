@@ -155,7 +155,7 @@ async def test_stop_80_percent_long(ctx) -> None:  # type: ignore[no-untyped-def
     [text] = await ctx.step("92")                # 80%
     assert "SOL-USDT LONG</b> приближается к стопу" in text
     assert "стоп 90" in text and "осталось 2.17%" in text
-    assert "PnL -16.00 USDT" in text and "н/д" in text   # позиция не в журнале — R н/д
+    assert "PnL -16.00 USDT" in text and "R не определён" in text   # позиции нет в журнале
     assert await ctx.alerts() == [("SL", D(90))]
 
 

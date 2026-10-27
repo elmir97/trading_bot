@@ -93,6 +93,7 @@ from app.market.data import MarketDataService
 from app.services.exchange_factory import ExchangeFactory
 from app.services.permissions import refresh_permissions
 from app.services.position_mode import refresh_position_mode
+from app.trading.calculations import risk_per_unit
 from app.trading.enums import (
     CancelSource,
     FillSide,
@@ -257,8 +258,8 @@ class PositionActionService:
             entry_qty = sum((f.quantity for f in entries), ZERO)
             if entry_qty > ZERO:
                 fee_unit = sum((f.fee for f in entries), ZERO) / entry_qty
-            if trade.risk_stop is not None and trade.entry_price is not None:
-                one_r = abs(trade.entry_price - trade.risk_stop) or None
+            if trade.entry_price is not None:
+                one_r = risk_per_unit(trade.side, trade.entry_price, trade.risk_stop)
         return ActionInputs(
             position=position, stops=stops, takes=takes, mark=mark, symbol_info=info,
             fee_rate=self._settings.exec_taker_fee_rate,

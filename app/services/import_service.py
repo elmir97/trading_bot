@@ -20,17 +20,28 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from app.core.logging import get_logger
+from app.database.models.position_action import PositionAction
 from app.database.models.trade import Trade, TradeFill
 from app.database.repositories.execution_order import ExecutionOrderRepository
+from app.database.repositories.position_action import PositionActionRepository
 from app.database.repositories.trade import TradeRepository
 from app.exchanges.base import ExchangeClient, ExchangeError, Fill, Position
+from app.execution.position_view import ProtectiveOrder
 from app.trading.calculations import (
     FillData,
     aggregate_fills,
     calculate_pnl,
     calculate_pnl_percent_of_balance,
 )
-from app.trading.enums import ExchangeKeyMode, FillSide, TradeSide, TradeSource, TradeStatus
+from app.trading.enums import (
+    ExchangeKeyMode,
+    FillSide,
+    PositionActionKind,
+    PositionActionStatus,
+    TradeSide,
+    TradeSource,
+    TradeStatus,
+)
 
 logger = get_logger(__name__)
 
@@ -108,6 +119,35 @@ class OpenPositionImport:
 
     trade: Trade | None
     refusal: str | None
+    # К3: строк действий позиции, сделанных до импорта и связанных со сделкой.
+    linked_actions: int = 0
+
+
+def first_bot_stop(actions: list[PositionAction]) -> Decimal | None:
+    """К3 (владелец 27.10): начальный стоп по действиям бота до импорта —
+    самая ранняя исполненная (DONE) смена стопа (перенос, безубыток): стоп
+    до неё, а если стопа не было («нет → X») — X. Тейк и закрытия не в счёт,
+    отменённые/истёкшие/неудачные — тоже. actions — от ранней к поздней."""
+    for action in actions:
+        if (action.kind is PositionActionKind.MOVE_STOP
+                and action.status is PositionActionStatus.DONE):
+            return action.current_stop if action.current_stop is not None else action.new_level
+    return None
+
+
+def apply_import_levels(
+    trade: Trade, stops: tuple[ProtectiveOrder, ...], takes: tuple[ProtectiveOrder, ...],
+    initial: Decimal | None,
+) -> None:
+    """К3: уровни новой сделки из openOrders того же снимка — правило сверки
+    (apply_exchange_levels): стоп/тейк — только при единственном ордере,
+    лестница журнал не правит. Начальный стоп — по действиям бота (initial),
+    иначе текущий стоп. Хранится как факт и тогда, когда он не в убытке:
+    R такой сделки «не определён» (risk_per_unit), а сверка непустой
+    initial_stop_loss не перезапишет."""
+    trade.stop_loss = stops[0].trigger_price if len(stops) == 1 else None
+    trade.take_profit = takes[0].trigger_price if len(takes) == 1 else None
+    trade.initial_stop_loss = initial if initial is not None else trade.stop_loss
 
 
 @dataclass(slots=True)
@@ -315,6 +355,7 @@ class HistoryImporter:
     async def import_open_position(
         self, start: datetime, end: datetime, *, symbol: str, side: TradeSide, quantity: Decimal,
         position_id: str | None = None, account_balance: Decimal | None = None,
+        stops: tuple[ProtectiveOrder, ...] = (), takes: tuple[ProtectiveOrder, ...] = (),
     ) -> OpenPositionImport:
         """Кнопка «📥 В журнал» (экран «Позиции»): только ТЕКУЩАЯ открытая
         позиция — исполнения её входа (и частичных выходов, если были).
@@ -324,7 +365,12 @@ class HistoryImporter:
         текущая позиция — незакрытая группа. Её открытый объём обязан
         совпасть с объёмом позиции на бирже, иначе отказ без записи: вход
         старше периода или исполнения не все — сделка с чужой ценой входа
-        испортила бы статистику."""
+        испортила бы статистику.
+
+        stops/takes — стоп и тейк позиции из openOrders того же снимка (К3):
+        уровни и начальный стоп ставятся сразу, а не следующим циклом сверки.
+        Действия этой позиции до импорта (по positionId) связываются со
+        сделкой в той же транзакции."""
         fills, errors = await self.fetch_fills(start, end)
         if errors:
             return OpenPositionImport(None, "Биржа отдала историю не полностью: " + errors[0])
@@ -365,11 +411,26 @@ class HistoryImporter:
             trade.external_position_id = position_id
         self._trades.add(trade)
         await self._trades.flush()
+        actions: list[PositionAction] = []
+        if position_id:
+            session = self._trades.session
+            actions = await PositionActionRepository(session).link_to_trade(
+                self._user_id, trade.id, symbol=symbol, side=side,
+                account_mode=self._account_mode, position_id=position_id,
+                since=trade.opened_at,
+            )
+            await ExecutionOrderRepository(session).link_actions_to_trade(
+                self._user_id, [a.id for a in actions], trade.id
+            )
+        apply_import_levels(trade, stops, takes, first_bot_stop(actions))
+        await self._trades.flush()
         logger.info(
             "Позиция занесена в журнал",
-            extra={"user_id": self._user_id, "symbol": symbol, "fills": len(pending.fills)},
+            extra={"user_id": self._user_id, "symbol": symbol, "fills": len(pending.fills),
+                   "linked_actions": len(actions), "stop": str(trade.stop_loss),
+                   "initial_stop": str(trade.initial_stop_loss)},
         )
-        return OpenPositionImport(trade, None)
+        return OpenPositionImport(trade, None, len(actions))
 
     async def _drop_bot_fills(self, fills: list[Fill], result: ImportResult) -> list[Fill]:
         """Шаг 15.5.4: исполнения ордеров бота (вход, стоп, тейк) не

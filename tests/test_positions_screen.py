@@ -28,6 +28,7 @@ from app.exchanges.base import (
     Position,
     SymbolInfo,
 )
+from app.services.import_service import apply_import_levels
 from app.trading.enums import ExchangeKeyMode, TradeSide, TradeSource, TradeStatus
 from tests.test_locks import FakeRedis
 
@@ -68,6 +69,7 @@ class _Client:
     def __init__(self, positions: list[Position], orders: list[OpenOrder],
                  error: Exception | None = None) -> None:
         self._positions, self._orders, self._error = positions, orders, error
+        self.orders_error: Exception | None = None
         self.closed = False
         self.balance_error: Exception | None = None
         self.open_orders_symbols: list[str | None] = []
@@ -80,6 +82,8 @@ class _Client:
 
     async def get_open_orders(self, symbol=None, *, max_attempts=None) -> list[OpenOrder]:  # type: ignore[no-untyped-def]
         self.open_orders_symbols.append(symbol)
+        if self.orders_error is not None:
+            raise self.orders_error
         return self._orders
 
     async def get_symbols(self, *, max_attempts=None) -> list[SymbolInfo]:  # type: ignore[no-untyped-def]
@@ -98,9 +102,9 @@ class _Client:
 def env(monkeypatch):  # type: ignore[no-untyped-def]
     state = SimpleNamespace(
         client=None, auth_error=False, trades=[], imports=[], import_modes=[],
-        import_cutoffs=[], import_balances=[],
-        import_outcome=SimpleNamespace(trade=SimpleNamespace(id=21), refusal=None),
-        slow=None,
+        import_cutoffs=[], import_balances=[], import_levels=[], first_stop=None,
+        import_outcome=SimpleNamespace(trade=True, refusal=None),
+        slow=None, records=[],
     )
 
     class Factory:
@@ -119,12 +123,23 @@ def env(monkeypatch):  # type: ignore[no-untyped-def]
             state.import_cutoffs.append((journal_cutoff, tz_offset))
 
         async def import_open_position(self, start, end, *, symbol, side, quantity,  # type: ignore[no-untyped-def]
-                                       position_id=None, account_balance=None):
+                                       position_id=None, account_balance=None,
+                                       stops=(), takes=()):
             state.imports.append((end - start, symbol, side, quantity, position_id))
             state.import_balances.append(account_balance)
-            if state.slow:
-                return await state.slow()
-            return state.import_outcome
+            state.import_levels.append((stops, takes))
+            outcome = await state.slow() if state.slow else state.import_outcome
+            if outcome.trade is not True:
+                return outcome
+            # Уровни — настоящим правилом импорта (К3), начальный стоп по
+            # действиям бота — state.first_stop.
+            trade = Trade(id=21, user_id=7, symbol=symbol, side=side,
+                          entry_price=D("1.5253"), quantity=quantity)
+            apply_import_levels(trade, stops, takes, state.first_stop)
+            return SimpleNamespace(trade=trade, refusal=None)
+
+    async def record(db, meta, *, chat_id, message_id, text):  # type: ignore[no-untyped-def]
+        state.records.append((meta.kind, meta.trade_id, chat_id, message_id, text))
 
     async def list_open(self, user_id, limit=50):  # type: ignore[no-untyped-def]
         return list(state.trades)
@@ -136,6 +151,7 @@ def env(monkeypatch):  # type: ignore[no-untyped-def]
     monkeypatch.setattr(screen, "ExchangeFactory", Factory)
     monkeypatch.setattr(screen, "HistoryImporter", Importer)
     monkeypatch.setattr(screen, "opening_in_flight", opening_in_flight)
+    monkeypatch.setattr(screen.outbox, "record", record)
     monkeypatch.setattr(TradeRepository, "list_open", list_open)
     screen._market_cache.invalidate("symbols")
     return state
@@ -281,7 +297,7 @@ async def test_import_button_imports_current_position_only(env) -> None:  # type
         (timedelta(days=screen.IMPORT_DAYS), "XRP-USDT", TradeSide.LONG, D(30),
          "2105907655281221634")
     ]
-    assert "📥 XRP-USDT LONG: в журнале — сделка #21." in text
+    assert "📥 XRP-USDT LONG: в журнале — сделка #21. Стопа на бирже нет" in text
     # 03.10.2026: счёт из настроек пишется в сделку — лимиты по своему счёту.
     assert env.import_modes == [ExchangeKeyMode.DEMO]
     # M4: отсечка журнала и пояс пользователя передаются импортёру.
@@ -351,7 +367,7 @@ async def test_import_without_balance_marked_and_warned(env, caplog) -> None:  #
     with caplog.at_level("WARNING"):
         text, _ = await _open(env, f"{PositionsCB.IMPORT}XRP-USDT:L")
     assert env.import_balances == [None]
-    assert "в журнале — сделка #21. ⚠️ Баланс счёта не получен" in text
+    assert "тейка на бирже нет. ⚠️ Баланс счёта не получен" in text
     assert any("баланс счёта не получен" in r.getMessage() for r in caplog.records)
 
 
@@ -446,7 +462,11 @@ IMPORT_ROW = [
     ("📥 В журнал", f"{IMPORT_ORPHAN}XRP-USDT:L"), ("💼 Позиции", MenuCallback.OPEN_POSITIONS),
 ]
 DONE_ROW = [("💼 Позиции", MenuCallback.OPEN_POSITIONS)]
-DONE_TEXT = f"{ORPHAN_TEXT}\n\n📥 В журнале — сделка #21."
+# К3: итог вместо текста сверки («…журнал не изменён» ему противоречил).
+DONE_TEXT = (
+    "✅ XRP-USDT LONG: позиция занесена в журнал — сделка #21.\n"
+    "Стопа на бирже нет · тейка на бирже нет."
+)
 
 
 def _orphan_callback(
@@ -454,6 +474,8 @@ def _orphan_callback(
 ) -> MagicMock:
     callback = _callback(data)
     callback.message.html_text = text
+    callback.message.chat = SimpleNamespace(id=424242)
+    callback.message.message_id = 555
     callback.from_user = SimpleNamespace(id=424242)
     callback.bot = MagicMock()
     callback.bot.send_message = AsyncMock()
@@ -464,7 +486,7 @@ async def _orphan(env, callback=None, redis=None):  # type: ignore[no-untyped-de
     callback = callback or _orphan_callback()
     await screen.import_orphan_position(
         callback, MagicMock(), _user(), settings=None, cipher=None,  # type: ignore[arg-type]
-        redis=redis or FakeRedis(),
+        redis=redis or FakeRedis(), db=None,  # type: ignore[arg-type]
     )
     return callback
 
@@ -536,7 +558,7 @@ async def test_orphan_import_edit_failed_result_as_new_message(env) -> None:  # 
     callback.message.edit_text = _bad_request("message can't be edited")
     await _orphan(env, callback)
     args, kwargs = callback.bot.send_message.await_args
-    assert args == (424242, "XRP-USDT LONG: 📥 В журнале — сделка #21.")
+    assert args == (424242, DONE_TEXT)
     assert _rows_of(kwargs["reply_markup"]) == [DONE_ROW]
 
 
@@ -634,7 +656,97 @@ async def test_stale_orphan_button_refused() -> None:
     callback = _orphan_callback(f"{IMPORT_ORPHAN}XRP-USDT:X")
     await screen.import_orphan_position(
         callback, MagicMock(), _user(), settings=None, cipher=None,  # type: ignore[arg-type]
-        redis=FakeRedis(),
+        redis=FakeRedis(), db=None,  # type: ignore[arg-type]
     )
     assert callback.answer.await_args.kwargs.get("show_alert") is True
     callback.message.edit_text.assert_not_awaited()
+
+
+# --- К3 (27.10): уровни из openOrders того же снимка, итог ORPHAN, outgoing_messages ------
+
+
+def _take(price: str = "1.60") -> OpenOrder:
+    from dataclasses import replace
+
+    return replace(_stop(), order_id="2105910661355233281", order_type="TAKE_PROFIT_MARKET",
+                   stop_price=D(price))
+
+
+async def test_import_passes_levels_from_same_snapshot(env) -> None:  # type: ignore[no-untyped-def]
+    """openOrders — под тем же локом, сразу после позиций, по символу; стоп и
+    тейк уходят импортёру, итог называет их."""
+    env.client = _Client([_position()], [_stop(), _take()])
+    text, _ = await _open(env, f"{PositionsCB.IMPORT}XRP-USDT:L")
+    [(stops, takes)] = env.import_levels
+    assert [s.trigger_price for s in stops] == [D("1.5241")]
+    assert [t.trigger_price for t in takes] == [D("1.60")]
+    assert env.client.open_orders_symbols[0] == "XRP-USDT"   # дальше — экран заново
+    # формат — как у экрана (fmt_price; хвостовые нули — К4)
+    assert "сделка #21. Стоп 1.5241 · тейк 1.6." in text
+
+
+async def test_import_refused_when_open_orders_unavailable(env) -> None:  # type: ignore[no-untyped-def]
+    """К3, владелец 27.10: openOrders не получен — отказ, сделки нет (иначе
+    начальный стоп поставила бы сверка позже и R исказился бы)."""
+    env.client = _Client([_position()], [_stop()])
+    env.client.orders_error = ExchangeUnavailableError("down")
+    text, _ = await _open(env, f"{PositionsCB.IMPORT}XRP-USDT:L")
+    assert env.imports == []
+    assert f"📥 XRP-USDT LONG: {screen.NO_LEVELS}" in text
+    assert env.client.closed
+
+
+async def test_orphan_open_orders_unavailable_refused_button_kept(env) -> None:  # type: ignore[no-untyped-def]
+    env.client = _Client([_position()], [])
+    env.client.orders_error = ExchangeUnavailableError("down")
+    callback = await _orphan(env)
+    assert env.imports == []
+    text, rows = _edited(callback)
+    assert text.startswith(f"{ORPHAN_TEXT}\n\n📥 Не занесено: XRP-USDT LONG: Не удалось получить")
+    assert rows == [IMPORT_ROW]
+
+
+async def test_orphan_done_text_ladder_and_initial_from_actions(env) -> None:  # type: ignore[no-untyped-def]
+    """Лестница стопов — стоп не занесён (правило сверки), начальный стоп — по
+    действиям бота; он не в убытке — «R не определён»."""
+    from dataclasses import replace
+
+    env.client = _Client([_position()], [_stop(), replace(_stop(), order_id="9",
+                                                          stop_price=D("1.50"))])
+    env.first_stop = D("1.5300")
+    callback = await _orphan(env)
+    text, _ = _edited(callback)
+    assert text == (
+        "✅ XRP-USDT LONG: позиция занесена в журнал — сделка #21.\n"
+        "Стопов на бирже 2 — в журнал не занесён · тейка на бирже нет. "
+        "Начальный стоп 1.53 — по действиям бота. "
+        "R не определён: начальный стоп не в убытке."
+    )
+
+
+async def test_orphan_edit_recorded_in_outgoing_messages(env) -> None:  # type: ignore[no-untyped-def]
+    """Правка сообщения сверки пишется в outgoing_messages тем же видом и тем
+    же message_id (правка, прежний текст — в edits), с trade_id."""
+    env.client = _Client([_position()], [])
+    await _orphan(env)
+    assert env.records == [("RECON_ORPHAN_POSITION", 21, 424242, 555, DONE_TEXT)]
+
+
+async def test_orphan_refusal_edit_recorded_without_trade(env) -> None:  # type: ignore[no-untyped-def]
+    env.client = _Client([_position()], [])
+    env.import_outcome = SimpleNamespace(trade=None, refusal="Объём не сходится.")
+    await _orphan(env)
+    [(kind, trade_id, chat_id, message_id, text)] = env.records
+    assert (kind, trade_id, chat_id, message_id) == ("RECON_ORPHAN_POSITION", None, 424242, 555)
+    assert "Не занесено" in text
+
+
+async def test_orphan_new_message_recorded_when_edit_failed(env) -> None:  # type: ignore[no-untyped-def]
+    env.client = _Client([_position()], [])
+    callback = _orphan_callback()
+    callback.message.edit_text = _bad_request("message can't be edited")
+    callback.bot.send_message = AsyncMock(
+        return_value=SimpleNamespace(chat=SimpleNamespace(id=424242), message_id=777)
+    )
+    await _orphan(env, callback)
+    assert env.records == [("RECON_ORPHAN_POSITION", 21, 424242, 777, DONE_TEXT)]

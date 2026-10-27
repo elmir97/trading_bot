@@ -18,6 +18,7 @@ from sqlalchemy import select
 
 from app.core.config import Settings
 from app.database.models.execution_order import ExecutionOrder
+from app.database.models.position_action import PositionAction
 from app.database.models.trade import Trade, TradeFill
 from app.database.repositories.strategy import (
     MistakeTypeRepository,
@@ -37,8 +38,10 @@ from app.exchanges.base import (
     SymbolInfo,
     Ticker,
 )
+from app.execution.position_view import ProtectiveOrder, apply_exchange_levels
 from app.services.import_service import HistoryImporter
 from app.services.user_service import UserService
+from app.trading.calculations import risk_per_unit
 from app.trading.enums import (
     ExchangeKeyMode,
     FillSide,
@@ -46,6 +49,8 @@ from app.trading.enums import (
     OrderSide,
     OrderStatus,
     OrderType,
+    PositionActionKind,
+    PositionActionStatus,
     TradeSide,
     TradeSource,
     TradeStatus,
@@ -618,3 +623,162 @@ async def test_open_position_import_writes_entry_balance(ctx) -> None:  # type: 
     )
     assert outcome.trade is not None
     assert outcome.trade.account_balance_at_entry == D("9999.97")
+
+
+# --- К3 (27.10): уровни из openOrders и действия бота до импорта ---------------------------
+
+PID = "2115069838267260930"
+OPENED = BASE + timedelta(minutes=90)   # c1 — первое исполнение входа текущей позиции
+XRP_ARGS = {"symbol": "XRP-USDT", "side": TradeSide.LONG, "quantity": D(40), "position_id": PID}
+
+
+def _level(price: str, order_id: str = "1") -> ProtectiveOrder:
+    return ProtectiveOrder(order_id=order_id, trigger_price=D(price), close_position=True,
+                           quantity=None, working_type="MARK_PRICE")
+
+
+async def _action(  # type: ignore[no-untyped-def]
+    session, user_id: int, *, kind=PositionActionKind.MOVE_STOP,
+    status=PositionActionStatus.DONE, current_stop: str | None = None,
+    new_level: str | None = None, position_id: str | None = PID,
+    created_at: datetime | None = None, side: TradeSide = TradeSide.LONG,
+) -> PositionAction:
+    """Строка действия Mini App/чата до импорта (trade_id NULL) и её ордер."""
+    action = PositionAction(
+        user_id=user_id, symbol="XRP-USDT", side=side, account_mode=DEMO,
+        position_id=position_id, kind=kind, status=status,
+        current_stop=D(current_stop) if current_stop else None,
+        new_level=D(new_level) if new_level else None,
+    )
+    if created_at is not None:
+        action.created_at = created_at
+    session.add(action)
+    await session.flush()
+    session.add(ExecutionOrder(
+        account_mode=DEMO, user_id=user_id, position_action_id=action.id,
+        client_order_id=f"tm{action.id}u{user_id}S", symbol="XRP-USDT",
+        side=OrderSide.SELL, position_side=side, order_type=OrderType.STOP_MARKET,
+        role=OrderRole.STOP_LOSS, status=OrderStatus.SUBMITTED,
+        trigger_price=D(new_level) if new_level else None,
+    ))
+    await session.flush()
+    return action
+
+
+def _importer(user, repo) -> HistoryImporter:  # type: ignore[no-untyped-def]
+    return HistoryImporter(FakeExchange(XRP_HISTORY), repo, user.id, account_mode=DEMO)
+
+
+async def test_import_levels_from_same_snapshot(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Единственный стоп и тейк — в сделку сразу, начальный стоп = стоп."""
+    user, repo, _ = ctx
+    outcome = await _importer(user, repo).import_open_position(
+        *WINDOW, **XRP_ARGS, stops=(_level("1.50"),), takes=(_level("1.60", "2"),),
+    )
+    trade = outcome.trade
+    assert (trade.stop_loss, trade.take_profit, trade.initial_stop_loss) == (
+        D("1.50"), D("1.60"), D("1.50"))
+
+
+async def test_import_ladder_not_taken_no_levels_is_normal(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Лестница — правило сверки: в журнал не заносится. Уровней нет вовсе —
+    импорт без них (норма)."""
+    user, repo, _ = ctx
+    outcome = await _importer(user, repo).import_open_position(
+        *WINDOW, **XRP_ARGS, stops=(_level("1.50"), _level("1.45", "3")),
+        takes=(_level("1.60", "2"), _level("1.70", "4")),
+    )
+    trade = outcome.trade
+    assert (trade.stop_loss, trade.take_profit, trade.initial_stop_loss) == (None, None, None)
+
+
+async def test_import_links_actions_and_orders_of_this_position(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Строки действий этой позиции (positionId, не раньше открытия) и их
+    ордера получают trade_id в той же транзакции; чужие — нет."""
+    user, repo, session = ctx
+    mine = await _action(session, user.id, new_level="1.52")
+    other_pid = await _action(session, user.id, new_level="1.51", position_id="999")
+    no_pid = await _action(session, user.id, new_level="1.51", position_id=None)
+    before_open = await _action(session, user.id, new_level="1.51",
+                                created_at=OPENED - timedelta(minutes=1))
+    short = await _action(session, user.id, new_level="1.60", side=TradeSide.SHORT)
+    outcome = await _importer(user, repo).import_open_position(
+        *WINDOW, **XRP_ARGS, stops=(_level("1.52"),),
+    )
+    trade_id = outcome.trade.id
+    assert outcome.linked_actions == 1
+    assert mine.trade_id == trade_id
+    for action in (other_pid, no_pid, before_open, short):
+        assert action.trade_id is None
+    rows = await session.execute(
+        select(ExecutionOrder.position_action_id, ExecutionOrder.trade_id)
+        .where(ExecutionOrder.user_id == user.id)
+    )
+    assert dict(rows.tuples().all()) == {
+        mine.id: trade_id, other_pid.id: None, no_pid.id: None,
+        before_open.id: None, short.id: None,
+    }
+
+
+async def test_import_without_position_id_links_nothing(ctx) -> None:  # type: ignore[no-untyped-def]
+    user, repo, session = ctx
+    action = await _action(session, user.id, new_level="1.52")
+    no_pid = await _action(session, user.id, new_level="1.51", position_id=None)
+    outcome = await _importer(user, repo).import_open_position(
+        *WINDOW, **{**XRP_ARGS, "position_id": None}, stops=(_level("1.53"),),
+    )
+    assert action.trade_id is None and no_pid.trade_id is None
+    assert outcome.linked_actions == 0
+    assert outcome.trade.initial_stop_loss == D("1.53")
+
+
+@pytest.mark.parametrize(("before", "new", "initial"), [
+    (None, "1.52", "1.52"),       # «нет → X» — начальный X
+    ("1.50", "1.52", "1.50"),     # стоп был до первого действия — он
+])
+async def test_initial_stop_from_first_done_bot_stop(ctx, before, new, initial) -> None:  # type: ignore[no-untyped-def]
+    """Владелец 27.10: начальный стоп — по самой ранней исполненной смене стопа
+    ботом, а не текущий стоп из openOrders; отменённые/истёкшие/неудачные,
+    тейк и закрытия не в счёт."""
+    user, repo, session = ctx
+    for status in (PositionActionStatus.EXPIRED, PositionActionStatus.FAILED,
+                   PositionActionStatus.DECLINED, PositionActionStatus.DRY_RUN):
+        await _action(session, user.id, status=status, current_stop="1.40", new_level="1.41")
+    await _action(session, user.id, kind=PositionActionKind.SET_TAKE,
+                  current_stop="1.39", new_level="1.70")
+    await _action(session, user.id, kind=PositionActionKind.CLOSE_PARTIAL, current_stop="1.38")
+    await _action(session, user.id, current_stop=before, new_level=new)
+    await _action(session, user.id, current_stop=new, new_level="1.53")   # позже — не он
+    outcome = await _importer(user, repo).import_open_position(
+        *WINDOW, **XRP_ARGS, stops=(_level("1.53"),),
+    )
+    trade = outcome.trade
+    assert trade.initial_stop_loss == D(initial) and trade.stop_loss == D("1.53")
+    assert outcome.linked_actions == 8
+
+
+async def test_initial_from_actions_kept_with_ladder(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Лестница сейчас — текущий стоп пуст, начальный по действиям остаётся
+    (исторический факт)."""
+    user, repo, session = ctx
+    await _action(session, user.id, new_level="1.52")
+    outcome = await _importer(user, repo).import_open_position(
+        *WINDOW, **XRP_ARGS, stops=(_level("1.52"), _level("1.45", "3")),
+    )
+    assert outcome.trade.stop_loss is None
+    assert outcome.trade.initial_stop_loss == D("1.52")
+
+
+async def test_initial_not_in_loss_stored_as_fact_r_undefined(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Риск от начального стопа ≤ 0 — стоп хранится как есть (сверка его не
+    перезапишет), R не определён (risk_per_unit)."""
+    user, repo, session = ctx
+    await _action(session, user.id, new_level="1.55")   # выше входа ~1.5395
+    outcome = await _importer(user, repo).import_open_position(
+        *WINDOW, **XRP_ARGS, stops=(_level("1.50"),),
+    )
+    trade = outcome.trade
+    assert trade.initial_stop_loss == D("1.55") and trade.stop_loss == D("1.50")
+    assert risk_per_unit(trade.side, trade.entry_price, trade.risk_stop) is None
+    apply_exchange_levels(trade, (_level("1.48"),), ())     # сверка двинула стоп
+    assert trade.initial_stop_loss == D("1.55")

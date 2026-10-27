@@ -261,6 +261,28 @@ async def test_actions_screen_on_process_cache(ctx) -> None:  # type: ignore[no-
     assert ctx.exchange.names().count("positions") == 1
 
 
+@pytest.mark.parametrize(("initial", "expected"), [
+    ("1.53", "R не определён"),     # К3: начальный стоп в прибыли — не |вход − стоп|
+    ("1.5253", "R не определён"),   # безубыток — без деления на ноль
+    ("1.4795", "+0.73R"),           # стоп в убытке: PnL 1 / (0.0458 × 30) — R считается
+])
+async def test_actions_screen_r_from_journal_initial_stop(ctx, initial, expected) -> None:  # type: ignore[no-untyped-def]
+    from app.database.repositories.trade import TradeRepository
+    from app.trading.enums import TradeSource
+    from app.trading.journal import TradeJournal
+    from tests.test_position_action_service import PID
+
+    trade = await TradeJournal(TradeRepository(ctx.session)).open_trade(
+        user_id=ctx.uid, symbol="XRP-USDT", side=TradeSide.LONG, entry_price=ENTRY,
+        quantity=D(30), stop_loss=D("1.4795"), source=TradeSource.IMPORTED,
+        account_mode=ExchangeKeyMode.DEMO, external_position_id=PID, external_fill_id="f1",
+    )
+    trade.initial_stop_loss = D(initial)
+    await ctx.session.commit()
+    body = (await ctx.client.get("/api/positions/XRP-USDT/LONG/actions", headers=ctx.h)).json()
+    assert body["pnl_r_text"] == expected
+
+
 def test_pnl_r_text_sign_is_result() -> None:
     from tests.test_position_actions import _inputs, _position
 

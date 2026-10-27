@@ -65,6 +65,7 @@ from app.execution.position_view import PositionView, build_views
 from app.market.cache import TTLCache
 from app.market.data import MarketDataService
 from app.services.exchange_factory import ExchangeFactory
+from app.trading.calculations import R_UNDEFINED, risk_per_unit
 from app.trading.enums import TradeSide
 from app.workers.notifier import approach_enabled, send_notification
 
@@ -119,11 +120,8 @@ def risk_unit(side: TradeSide, entry: Decimal, risk_stop: Decimal | None) -> Dec
     """1R на единицу — от исходного стопа журнала, только если он с
     убыточной стороны входа. Сделка, у которой первым стопом стал безубыток
     (02.10, #11: стоп 1.5053 при входе SHORT 1.5069), R не имеет: 0.0016 —
-    не риск, R «неизвестен»."""
-    if risk_stop is None:
-        return None
-    loss_side = risk_stop < entry if side is TradeSide.LONG else risk_stop > entry
-    return abs(entry - risk_stop) if loss_side else None
+    не риск, R «неизвестен». Правило — общее (calculations.risk_per_unit)."""
+    return risk_per_unit(side, entry, risk_stop)
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,7 +163,7 @@ def render_alert(
 
     def r(value: Decimal) -> str:
         if not r_unit:
-            return "н/д"
+            return R_UNDEFINED
         return f"{(value / r_unit).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP):f}R"
 
     distance = (
@@ -176,7 +174,7 @@ def render_alert(
         f"{icon} <b>{p.symbol} {p.side.value}</b> приближается к {name}",
         f"Mark {fmt_price(mark, precision)} · {level_name} {fmt_price(level, precision)} — "
         f"{distance}",
-        f"PnL {fmt_money(pnl)} USDT ({r(pnl / p.quantity) if p.quantity else 'н/д'})",
+        f"PnL {fmt_money(pnl)} USDT ({r(pnl / p.quantity) if p.quantity else R_UNDEFINED})",
         "",
         DISCLAIMER,
     ])

@@ -96,6 +96,8 @@ def render_statistics(stats: Statistics, title: str) -> str:
     lines.append(f"Expectancy: {fmt_money(stats.expectancy)} на сделку")
     if stats.average_rr is not None:
         lines.append(f"Средний R: {fmt_ratio(stats.average_rr)}")
+    else:
+        lines.append("Средний R: не определён")
 
     lines += [
         "",

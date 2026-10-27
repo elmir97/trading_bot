@@ -392,7 +392,8 @@ class PositionActionsOut(BaseModel):
 
     position: PositionOut | None        # отказ до чтения позиции — None, причина — refusal
     refusal: RefusalOut | None
-    pnl_r_text: str | None              # «+0.71R»; нет сделки или исходного стопа — None
+    # «+0.71R»; сделка без 1R — «R не определён»; сделки в журнале нет — None
+    pnl_r_text: str | None
     breakeven_price: Decimal | None
     actions: list[ActionHintOut]
 

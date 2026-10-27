@@ -30,6 +30,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot import outbox
 from app.bot.handlers.exchange import ExchangeCB, _describe, _market_cache
 from app.bot.handlers.position_actions import SIDE_BY_CODE, SIDE_CODE, action_buttons
 from app.bot.keyboards.main import MenuCallback
@@ -45,22 +46,28 @@ from app.bot.opening_result import POSITION_ACTIONS
 from app.core.config import Settings
 from app.core.locks import LockBusyError, RedisLock, position_lock_key
 from app.core.logging import get_logger
+from app.core.numfmt import fmt_price
 from app.core.security import SecretCipher
+from app.database.models.outgoing_message import OutgoingMeta
 from app.database.models.trade import Trade
 from app.database.models.user import User
 from app.database.repositories.trade import TradeRepository
+from app.database.session import Database
 from app.exchanges.base import ExchangeAuthError, ExchangeClient, ExchangeError, Position
 from app.execution.opening.recovery import opening_in_flight
 from app.execution.position_view import (
     PositionView,
+    ProtectiveOrder,
     build_views,
     journal_only,
+    protective_orders,
     render_journal_trade,
     render_position,
 )
 from app.market.data import MarketDataService
 from app.services.exchange_factory import ExchangeFactory
 from app.services.import_service import HistoryImporter
+from app.trading.calculations import R_UNDEFINED, risk_per_unit
 from app.trading.enums import TradeSide
 from app.trading.risk import tz_offset_for
 
@@ -72,6 +79,9 @@ IMPORT_DAYS = 30
 # десятка GET; лок снимается сразу по завершении.
 IMPORT_LOCK_TTL_SECONDS = 120
 ALERT_LIMIT = 200   # всплывашка answerCallbackQuery — до 200 символов
+# К3 (владелец 27.10): без openOrders сделку не создаём — начальный стоп
+# поставила бы сверка позже, и R исказился бы (#37).
+NO_LEVELS = "Не удалось получить стоп/тейк с биржи — сделка не создана, повтори."
 
 
 class PositionsCB:
@@ -194,6 +204,16 @@ async def _entry_balance(
         )
         return None
     return equity - position.unrealized_pnl
+
+
+async def _price_precision(client: ExchangeClient, symbol: str) -> int | None:
+    """Знаков цены символа для итога импорта; справочник недоступен — без него
+    (формат по порядку величины), импорт из-за этого не отказывает."""
+    try:
+        infos = await MarketDataService(client, _market_cache).get_symbols()
+    except ExchangeError:
+        return None
+    return next((i.price_precision for i in infos if i.symbol == symbol), None)
 
 
 async def _load(
@@ -327,6 +347,35 @@ class Imported:
     trade_id: int | None = None
     warning: str | None = None
     refused_early: bool = False
+    levels: str | None = None   # К3: уровни созданной сделки — строка итога
+
+
+def _level_part(
+    name: str, plural: str, orders: tuple[ProtectiveOrder, ...], precision: int | None
+) -> str:
+    if len(orders) == 1:
+        return f"{name} {fmt_price(orders[0].trigger_price, precision)}"
+    if not orders:
+        return f"{name}а на бирже нет"
+    return f"{plural} на бирже {len(orders)} — в журнал не занесён"
+
+
+def levels_line(
+    trade: Trade, stops: tuple[ProtectiveOrder, ...], takes: tuple[ProtectiveOrder, ...],
+    precision: int | None = None,
+) -> str:
+    """К3: что занесено в сделку из openOrders — стоп, тейк, начальный стоп
+    (если он не равен текущему: по действиям бота до импорта) и оговорка,
+    когда R не определён."""
+    line = (f"{_level_part('Стоп', 'Стопов', stops, precision)} · "
+            f"{_level_part('тейк', 'тейков', takes, precision)}.")
+    initial = trade.initial_stop_loss
+    if initial is not None and initial != trade.stop_loss:
+        line += f" Начальный стоп {fmt_price(initial, precision)} — по действиям бота."
+    if (initial is not None and trade.entry_price is not None
+            and risk_per_unit(trade.side, trade.entry_price, initial) is None):
+        line += f" {R_UNDEFINED}: начальный стоп не в убытке."
+    return line
 
 
 async def import_open_position(
@@ -368,6 +417,7 @@ async def _import_locked(
     end = datetime.now(UTC)
     warning = None
     trade_id = None
+    levels = None
     try:
         position = next(
             (p for p in await client.get_positions() if p.symbol == symbol and p.side == side),
@@ -375,35 +425,45 @@ async def _import_locked(
         )
         if position is None:
             note = f"📥 {label}: позиции на бирже уже нет — в журнал ничего не занесено."
+            return Imported(note)
+        try:
+            orders = await client.get_open_orders(symbol)
+        except ExchangeError:
+            logger.warning("Позиция в журнал не занесена: openOrders не получен",
+                           extra={"user_id": user.id, "symbol": symbol})
+            return Imported(f"📥 {label}: {NO_LEVELS}")
+        stops, takes = protective_orders(position, orders)
+        precision = await _price_precision(client, symbol)
+        balance = await _entry_balance(client, position, user.id)
+        outcome = await HistoryImporter(
+            client, TradeRepository(session), user.id,
+            account_mode=user.settings.active_exchange_mode,
+            journal_cutoff=user.settings.journal_cutoff_at,
+            tz_offset=tz_offset_for(user.settings.timezone),
+        ).import_open_position(
+            end - timedelta(days=IMPORT_DAYS), end,
+            symbol=symbol, side=side, quantity=position.quantity,
+            position_id=position.position_id, account_balance=balance,
+            stops=stops, takes=takes,
+        )
+        if outcome.trade is not None:
+            trade_id = outcome.trade.id
+            levels = levels_line(outcome.trade, stops, takes, precision)
+            note = f"📥 {label}: в журнале — сделка #{trade_id}. {levels}"
+            if balance is None:
+                warning = (
+                    "⚠️ Баланс счёта не получен — сделка не войдёт в процент "
+                    "лимитов убытка."
+                )
+                note += f" {warning}"
         else:
-            balance = await _entry_balance(client, position, user.id)
-            outcome = await HistoryImporter(
-                client, TradeRepository(session), user.id,
-                account_mode=user.settings.active_exchange_mode,
-                journal_cutoff=user.settings.journal_cutoff_at,
-                tz_offset=tz_offset_for(user.settings.timezone),
-            ).import_open_position(
-                end - timedelta(days=IMPORT_DAYS), end,
-                symbol=symbol, side=side, quantity=position.quantity,
-                position_id=position.position_id, account_balance=balance,
-            )
-            if outcome.trade is not None:
-                trade_id = outcome.trade.id
-                note = f"📥 {label}: в журнале — сделка #{trade_id}."
-                if balance is None:
-                    warning = (
-                        "⚠️ Баланс счёта не получен — сделка не войдёт в процент "
-                        "лимитов убытка."
-                    )
-                    note += f" {warning}"
-            else:
-                note = f"📥 {label}: {outcome.refusal} Историю целиком — /import."
+            note = f"📥 {label}: {outcome.refusal} Историю целиком — /import."
     except ExchangeError as exc:
         logger.warning("Позиция в журнал не занесена", extra={"user_id": user.id})
         note = _describe(exc)
     finally:
         await client.close()
-    return Imported(note, trade_id, warning)
+    return Imported(note, trade_id, warning, levels=levels)
 
 
 @router.callback_query(F.data.startswith(PositionsCB.IMPORT))
@@ -454,34 +514,61 @@ async def import_orphan_position(
     settings: Settings,
     cipher: SecretCipher,
     redis: Any,
+    db: Database,
 ) -> None:
     """п.3 (24.10): «📥 В журнал» в сообщении сверки «сделки в журнале нет».
-    Итог дописывается к тексту сообщения: удалось — кнопка импорта убрана,
-    «💼 Позиции» остаётся; отказ — причина, кнопки как были (прежняя причина
-    заменяется). Не отредактировалось — итог новым сообщением."""
+    Удалось — текст сообщения заменяется итогом (К3, 27.10: прежний «журнал
+    не изменён» ему противоречил), кнопка импорта убрана, «💼 Позиции»
+    остаётся; отказ — причина под исходным текстом, кнопки как были (прежняя
+    причина заменяется). Не отредактировалось — итог новым сообщением.
+    Правка и новое сообщение пишутся в outgoing_messages (RECON_ORPHAN_POSITION)."""
     ref = _parse_ref(str(callback.data), IMPORT_ORPHAN)
     if ref is None:
         await callback.answer("Кнопка устарела — открой «Позиции».", show_alert=True)
         return
     result = await import_open_position(session, user, settings, cipher, redis, *ref)
     await _answer_late(callback)
+    label = f"{ref[0]} {ref[1].value}"
+    message = callback.message
     if result.trade_id is None:
         line = f"{ORPHAN_REFUSED}{html.escape(result.note.removeprefix('📥 '))}"
         keyboard = orphan_keyboard(*ref)
+        original = message.html_text if isinstance(message, Message) else ""
+        original = original.split(f"\n\n{ORPHAN_REFUSED}", 1)[0]
+        text = f"{original}\n\n{line}"
+        fallback = f"{label}: {line}"
     else:
-        line = f"📥 В журнале — сделка #{result.trade_id}."
-        if result.warning:
-            line += f" {result.warning}"
+        text = orphan_done_text(label, result)
         keyboard = orphan_done_keyboard()
-    message = callback.message
+        fallback = text
+    meta = OutgoingMeta(user_id=user.id, kind=ORPHAN_KIND, trade_id=result.trade_id)
     if isinstance(message, Message):
-        original = message.html_text.split(f"\n\n{ORPHAN_REFUSED}", 1)[0]
         try:
-            await message.edit_text(f"{original}\n\n{line}", reply_markup=keyboard)
-            return
+            await message.edit_text(text, reply_markup=keyboard)
         except TelegramAPIError:
             logger.warning("Сообщение сверки не отредактировано — итог новым сообщением",
                            extra={"user_id": user.id, "trade_id": result.trade_id})
-    await callback.bot.send_message(  # type: ignore[union-attr]
-        callback.from_user.id, f"{ref[0]} {ref[1].value}: {line}", reply_markup=keyboard,
+        else:
+            await outbox.record(db, meta, chat_id=message.chat.id,
+                                message_id=message.message_id, text=text)
+            return
+    sent = await callback.bot.send_message(  # type: ignore[union-attr]
+        callback.from_user.id, fallback, reply_markup=keyboard,
     )
+    await outbox.record(db, meta, chat_id=sent.chat.id, message_id=sent.message_id,
+                        text=fallback)
+
+
+# Вид строки outgoing_messages у сообщения сверки ORPHAN_POSITION (reconciler:
+# RECON_<вид события>) — правка после «📥 В журнал» пишется тем же видом.
+ORPHAN_KIND = "RECON_ORPHAN_POSITION"
+
+
+def orphan_done_text(label: str, result: Imported) -> str:
+    """К3: итог вместо текста сверки — сделка, уровни, оговорка о балансе."""
+    lines = [f"✅ {label}: позиция занесена в журнал — сделка #{result.trade_id}."]
+    if result.levels:
+        lines.append(result.levels)
+    if result.warning:
+        lines.append(result.warning)
+    return "\n".join(lines)

@@ -77,6 +77,7 @@ from app.execution.position_actions import (
     plan_action,
 )
 from app.execution.position_view import PositionView
+from app.trading.calculations import R_UNDEFINED
 from app.trading.enums import (
     ExecutionCallbackAction,
     PositionActionKind,
@@ -218,11 +219,15 @@ def card_out(outcome: CardOutcome) -> ActionCardOut:
 # --- экран действий ---------------------------------------------------------------------
 
 
-def pnl_r_text(inputs: ActionInputs) -> str | None:
-    """PnL позиции в R (результат: прибыль «+», убыток «-», ноль без знака)."""
+def pnl_r_text(inputs: ActionInputs, *, in_journal: bool = False) -> str | None:
+    """PnL позиции в R (результат: прибыль «+», убыток «-», ноль без знака).
+    Сделка в журнале есть, а 1R нет (стопа нет или он не в убытке) — «R не
+    определён»; сделки нет — None (К3, 27.10)."""
     p = inputs.position
-    if not inputs.one_r_per_unit or p.unrealized_pnl is None or p.quantity <= 0:
+    if p.unrealized_pnl is None or p.quantity <= 0:
         return None
+    if not inputs.one_r_per_unit:
+        return R_UNDEFINED if in_journal else None
     r = (p.unrealized_pnl / (inputs.one_r_per_unit * p.quantity)).quantize(
         R_STEP, rounding=ROUND_HALF_UP
     )
@@ -262,7 +267,7 @@ async def actions_out(
     be = breakeven_price(p.side, p.entry_price, inputs.fee_rate, entry_fee_unit(inputs), pp)
     return PositionActionsOut(
         position=positions_api.position_out(view, pp), refusal=None,
-        pnl_r_text=pnl_r_text(inputs), breakeven_price=price(be, pp),
+        pnl_r_text=pnl_r_text(inputs, in_journal=trade is not None), breakeven_price=price(be, pp),
         actions=[_hint(code, inputs) for code in CODES],
     )
 

@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models.execution_order import ExecutionOrder
@@ -154,6 +154,25 @@ class ExecutionOrderRepository:
             ExecutionOrder.exchange_order_id.is_not(None),
         )
         return {value for value in await self.session.scalars(stmt) if value}
+
+    async def link_actions_to_trade(
+        self, user_id: int, action_ids: list[int], trade_id: int
+    ) -> int:
+        """К3 (27.10): ордера действий, сделанных до импорта позиции, — к
+        новой сделке (только строки без trade_id). Возвращает число строк."""
+        if not action_ids:
+            return 0
+        result = await self.session.execute(
+            update(ExecutionOrder)
+            .where(
+                ExecutionOrder.user_id == user_id,
+                ExecutionOrder.position_action_id.in_(action_ids),
+                ExecutionOrder.trade_id.is_(None),
+            )
+            .values(trade_id=trade_id)
+            .execution_options(synchronize_session="fetch")
+        )
+        return int(result.rowcount or 0)  # type: ignore[attr-defined]
 
     def add(self, order: ExecutionOrder) -> ExecutionOrder:
         self.session.add(order)

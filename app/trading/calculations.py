@@ -151,6 +151,21 @@ def stop_distance(
     return distance
 
 
+# Подпись там, где R посчитать нечем: нет стопа или он не в убытке.
+R_UNDEFINED = "R не определён"
+
+
+def risk_per_unit(side: TradeSide, entry: Decimal, risk_stop: Decimal | None) -> Decimal | None:
+    """1R на единицу объёма открытой/закрытой сделки — только от стопа с
+    убыточной стороны входа. Стоп в безубытке или в прибыли (02.10, #11:
+    первым стопом стал безубыток) риска не задаёт: R «не определён», а не
+    |вход − стоп| (К3, 27.10)."""
+    if risk_stop is None:
+        return None
+    distance = (entry - risk_stop) * side.direction
+    return distance if distance > ZERO else None
+
+
 def calculate_risk_amount(
     *,
     entry_price: Decimal,

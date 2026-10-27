@@ -111,6 +111,7 @@ from app.execution.settle import (
     settleable,
 )
 from app.services.exchange_factory import ExchangeFactory
+from app.trading.calculations import risk_per_unit
 from app.trading.enums import (
     OPENING_ACTIVE,
     ExchangeKeyMode,
@@ -1128,12 +1129,17 @@ class Reconciler:
             ctx.user_id, trade.id
         )
         risk_amount = entry.risk_amount if entry is not None else None
-        risk_stop = trade.risk_stop
-        if (risk_amount is None or risk_amount <= 0) and trade.entry_price and risk_stop:
+        # 1R — только от стопа в убытке: стоп в безубытке/прибыли риска не
+        # задаёт, сверять не с чем (К3, 27.10; раньше |вход − стоп|).
+        one_r = (
+            risk_per_unit(trade.side, trade.entry_price, trade.risk_stop)
+            if trade.entry_price else None
+        )
+        if (risk_amount is None or risk_amount <= 0) and one_r is not None:
             entry_qty = sum(
                 (f.quantity for f in trade.fills if f.fill_side is FillSide.ENTRY), Decimal(0)
             )
-            risk_amount = abs(trade.entry_price - risk_stop) * entry_qty
+            risk_amount = one_r * entry_qty
         if (
             trade.pnl is None
             or not exits

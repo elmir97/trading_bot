@@ -10,6 +10,7 @@ from app.core.numfmt import fmt_rr
 from app.database.models.mistake import MistakeType
 from app.database.models.strategy import Strategy
 from app.database.models.trade import Trade
+from app.trading.calculations import R_UNDEFINED
 from app.trading.enums import TradeSide, TradeSource, TradeStatus
 
 
@@ -186,6 +187,9 @@ def trade_card(trade: Trade) -> str:
         ]
         if trade.risk_reward is not None:
             lines.append(f"Результат: {fmt_ratio(trade.risk_reward)}R")
+        else:
+            # Стопа не было или он не в убытке — R не посчитать (К3, 27.10).
+            lines.append(f"Результат: {R_UNDEFINED}")
     else:
         lines.append("")
         lines.append("Статус: открыта")
