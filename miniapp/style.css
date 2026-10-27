@@ -963,6 +963,11 @@ main {
 .action-grid button.action-close { border-color: var(--ink); background: var(--ink); color: var(--paper); }
 .action-grid button:disabled { color: var(--muted); opacity: 0.6; }
 
+/* К6: «Да» карточки — синяя заливка (цвет нативной роли confirm), не цвет превью; первую
+   секунду после карточки кнопка неактивна — видно тусклостью (клиент без нативной кнопки). */
+#actions-main.button-confirm { background: var(--blue); color: var(--paper); }
+#actions-main:disabled { opacity: 0.45; }
+
 .actions-hints {
   list-style: none;
   margin: 6px 0 0;

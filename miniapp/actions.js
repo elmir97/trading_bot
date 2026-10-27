@@ -42,6 +42,10 @@ export const MAX_BACKOFF_MS = 30000;
 export const POLL_MS = 2000;
 export const POLL_LIMIT_MS = 300000;      // 5 мин: лок 187 с + цикл восстановления (§9а)
 export const RISK_TEXT = "⚠️ Да, увеличить риск";
+// К6 (27.10, владелец): «Перенести стоп на X» и «Да» — одна MainButton в одном месте, второе
+// нажатие легко сделать по инерции. Новая карточка (и после «Пересчитать») — кнопка неактивна
+// CARD_ARM_MS, и «Да» другого цвета, чем подпись превью.
+export const CARD_ARM_MS = 1000;
 export const STOP_CHIPS = ["0.5", "1", "1.5"];
 const SIDE_TEXT = { LONG: "Лонг", SHORT: "Шорт" };
 const TITLES = {
@@ -172,6 +176,7 @@ export function createActionsScreen({ api, tg, me, onBack, onFatal }) {
   let action = null;         // что делает главная кнопка
   let armed = false;         // клиент без showConfirm: второе нажатие подтверждает
   let armedAt = 0;
+  let cardReadyAt = 0;       // «Да» новой карточки — не раньше (performance.now)
   let asking = false;        // открыт вопрос showConfirm
   let timer = null;
   let pollTimer = null;
@@ -192,12 +197,15 @@ export function createActionsScreen({ api, tg, me, onBack, onFatal }) {
 
   // --- кнопки --------------------------------------------------------------------------
 
-  function mainButton(textValue, { progress = false } = {}) {
+  // confirm — «Да» карточки: на LIVE красная (реальный счёт), на демо синяя; остальные
+  // подписи (превью, «Пересчитать», «К позициям») — чернилами: «Да» всегда другого цвета.
+  function mainButton(textValue, { progress = false, confirm = false } = {}) {
     if (native) {
       if (!textValue) {
         tg.MainButton.setParams({ is_visible: false });
       } else {
-        paintButton(tg.MainButton, live() ? "live" : "main",
+        const role = confirm ? (live() ? "live" : "confirm") : "main";
+        paintButton(tg.MainButton, role,
           { text: textValue, is_active: !progress, is_visible: true });
       }
       tg.SecondaryButton.setParams({ is_visible: false });
@@ -205,6 +213,7 @@ export function createActionsScreen({ api, tg, me, onBack, onFatal }) {
       el.main.textContent = textValue || "";
       el.main.disabled = progress;
       el.main.hidden = !textValue;
+      el.main.classList.toggle("button-confirm", confirm);
     }
   }
 
@@ -648,7 +657,17 @@ export function createActionsScreen({ api, tg, me, onBack, onFatal }) {
     }
     mode = "card";
     startDeadline(res.ttl_seconds);
-    setAction(cardLabel(code, card, target.symbol), confirmPressed);
+    // Каждая новая карточка (и после «Пересчитать») — «Да» не раньше CARD_ARM_MS: кнопка
+    // неактивна (видно), нажатие раньше — ничего (проверка cardReadyAt при «Да»).
+    cardReadyAt = performance.now() + CARD_ARM_MS;
+    setAction(cardLabel(code, card, target.symbol), confirmPressed,
+      { progress: true, confirm: true });
+    const myGen = panelGen;
+    setTimeout(() => {
+      if (active && myGen === panelGen && mode === "card") {
+        setAction(cardLabel(code, card, target.symbol), confirmPressed, { confirm: true });
+      }
+    }, CARD_ARM_MS);
     cancelButton("Отмена");
     countdown();
   }
@@ -707,13 +726,14 @@ export function createActionsScreen({ api, tg, me, onBack, onFatal }) {
     backAllowed(true);
     status(message || "");
     cancelButton("Отмена");
-    setAction(cardLabel(code, card, target.symbol), confirmPressed, { progress: busy });
+    setAction(cardLabel(code, card, target.symbol), confirmPressed,
+      { progress: busy, confirm: true });
     if (timer === null) countdown();
     if (busy) {
       const myGen = panelGen;
       setTimeout(() => {
         if (active && myGen === panelGen && mode === "card") {
-          setAction(cardLabel(code, card, target.symbol), confirmPressed);
+          setAction(cardLabel(code, card, target.symbol), confirmPressed, { confirm: true });
         }
       }, BUSY_RETRY_MS);
     }
@@ -813,6 +833,7 @@ export function createActionsScreen({ api, tg, me, onBack, onFatal }) {
   // истёк — не подтверждаем, «Пересчитать».
   async function confirmPressed() {
     if (mode !== "card" || asking) return;
+    if (performance.now() < cardReadyAt) return;     // по инерции — сразу после карточки
     if (secondsLeft() <= 0) {
       expired(EXPIRED_TEXT);
       return;

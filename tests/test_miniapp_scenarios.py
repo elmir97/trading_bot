@@ -383,6 +383,8 @@ def test_registry_covers_queue_scenarios() -> None:
         "act_result_lines", "act_close_all", "act_decline",
         # К5 (27.10): подписи шкалы под плашками, «пересчитано» без шума
         "chart_tick_labels", "act_diff_noise",
+        # К6 (27.10): «Да» по инерции — пауза и цвет
+        "act_card_pause", "act_card_pause_nodisable",
     }
     assert [s.name for s in ms.select("all")] == list(ms.SCENARIOS)
     assert ms.select("poll") == [ms.SCENARIOS["poll"]]
@@ -442,6 +444,12 @@ def test_scenarios_not_in_docker_image() -> None:
     root = Path(__file__).resolve().parents[1]
     ignored = (root / ".dockerignore").read_text(encoding="utf-8").split()
     assert "scripts/miniapp_scenarios.py" in ignored
+
+
+def test_card_arm_matches_actions() -> None:
+    actions = (Path(__file__).resolve().parents[1] / "miniapp" / "actions.js").read_text(
+        encoding="utf-8")
+    assert f"export const CARD_ARM_MS = {round(ms.CARD_ARM_S * 1000)};" in actions
 
 
 def test_tick_gap_matches_chart() -> None:

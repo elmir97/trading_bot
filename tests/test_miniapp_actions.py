@@ -55,6 +55,8 @@ _ALLOWED_ARITHMETIC = (
     "const wait = Math.min(INFO_POLL_MS * 2 ** failures, MAX_BACKOFF_MS) / 1000;",
     # срок карточки: ttl_seconds сервера от ответа, монотонные часы
     "deadline = performance.now() + ttlSeconds * 1000;",
+    # К6: «Да» новой карточки — не раньше CARD_ARM_MS (монотонные часы)
+    "cardReadyAt = performance.now() + CARD_ARM_MS;",
     "return Math.ceil((deadline - performance.now()) / 1000);",
     # предел опроса итога
     "if (!pollUntil) pollUntil = performance.now() + POLL_LIMIT_MS;",
@@ -234,11 +236,12 @@ def test_demo_two_presses_show_confirm_only_live_or_risk() -> None:
     # Прямое действие: кнопка → карточка (POST /api/actions), «Да» — только с MainButton карточки.
     direct = _body(js, "function direct(nextCode)")
     assert "createCard(" in direct and "confirm" not in direct
-    # confirmPressed — главной кнопкой только у карточки (showCard и cardAgain).
-    assert len(re.findall(r"confirmPressed\b(?!\()", js.replace("async function confirmPressed()",
-                                                                ""))) == 3
-    assert "setAction(cardLabel(code, card, target.symbol), confirmPressed);" in _body(
-        js, "function showCard(res)")
+    # confirmPressed — главной кнопкой только у карточки (showCard: пауза и после неё;
+    # cardAgain: сразу и после busy).
+    refs = re.findall(r"confirmPressed\b(?!\()", js.replace("async function confirmPressed()", ""))
+    assert len(refs) == 4
+    show = _body(js, "function showCard(res)")
+    assert show.count("setAction(cardLabel(code, card, target.symbol), confirmPressed,") == 2
 
 
 def test_risk_confirmed_equals_card_risk_increase() -> None:
@@ -318,7 +321,7 @@ def test_double_tap_on_action_makes_one_card() -> None:
 def test_busy_retries_after_pause_and_back_blocked_while_sending() -> None:
     js = _js("actions.js")
     again = _body(js, "function cardAgain(message, { busy = false } = {}) {")
-    assert "BUSY_RETRY_MS" in again and "{ progress: busy }" in again
+    assert "BUSY_RETRY_MS" in again and "{ progress: busy, confirm: true }" in again
     assert 'busy: () => active && (mode === "sending" || mode === "checking"),' in js
     assert "backAllowed(false);" in _body(js, "async function confirmPressed()")
     assert "backAllowed(false);" in _body(js, "function checking({ afterFailure = false } = {}) {")
@@ -427,6 +430,45 @@ def test_close_all_done_shows_closed_not_gone() -> None:
     tick = _body(js, "async function infoTick()")
     assert "if (!active || closed || document.hidden) return;" in tick
     assert "closed = false;" in _body(js, "open(next) {")
+
+
+def test_card_yes_paused_and_colored() -> None:
+    """К6 (27.10, владелец, «Да» по инерции — 4 из 4): «Перенести стоп на X» и «Да» — одна
+    MainButton в одном месте. Каждая новая карточка (и после «Пересчитать» — тот же showCard)
+    — кнопка неактивна CARD_ARM_MS (видно), нажатие раньше ничего не шлёт; «Да» — другого
+    цвета, чем подпись превью (роль confirm, на LIVE — live)."""
+    js = _js("actions.js")
+    assert _const(js, "CARD_ARM_MS") == 1000
+    show = _body(js, "function showCard(res)")
+    arm = show.index("cardReadyAt = performance.now() + CARD_ARM_MS;")
+    paused = show.index("confirmPressed,\n      { progress: true, confirm: true });")
+    assert arm < paused < show.index("}, CARD_ARM_MS);")
+    rearm = _body(show, "setTimeout(() => {")
+    assert 'if (active && myGen === panelGen && mode === "card") {' in rearm
+    assert "confirmPressed, { confirm: true });" in rearm
+    # «Пересчитать» — новая карточка через тот же showCard: пауза заново.
+    assert "showCard(res);" in _body(js, "async function createCard(nextBody, previewCard) {")
+    assert "createCard(body, preview);" in _body(js, "function recalc()")
+    pressed = _body(js, "async function confirmPressed()")
+    guard = "if (performance.now() < cardReadyAt) return;"
+    assert pressed.index('if (mode !== "card" || asking) return;') < pressed.index(guard)
+    assert pressed.index(guard) < pressed.index("api.post(")
+    # Пауза — только у новой карточки: cardAgain (busy, «Не дошло») её не ставит.
+    assert "cardReadyAt" not in _body(js, "function cardAgain(message, { busy = false } = {}) {")
+    # Цвет: «Да» — confirm (демо) / live (LIVE), остальные подписи — main.
+    button = _body(js,
+                   "function mainButton(textValue, { progress = false, confirm = false } = {}) {")
+    assert 'const role = confirm ? (live() ? "live" : "confirm") : "main";' in button
+    assert 'el.main.classList.toggle("button-confirm", confirm);' in button
+    # Превью («Перенести стоп на X») — без confirm: цвет main.
+    preview = _body(js, "async function runPreview()")
+    assert "setAction(label, label ? editPressed : null);" in preview
+    theme = _js("theme.js")
+    assert 'confirm: ["--blue", "--paper"],' in theme
+    assert 'main: ["--ink", "--paper"],' in theme
+    css = _js("style.css")
+    assert "#actions-main.button-confirm { background: var(--blue); color: var(--paper); }" in css
+    assert "#actions-main:disabled { opacity: 0.45; }" in css
 
 
 def test_leave_releases_everything() -> None:

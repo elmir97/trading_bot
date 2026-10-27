@@ -84,6 +84,7 @@ STATE_JS = """(() => {
     fallback: shown('fallback-buttons') ? text('fallback-main') : null,
     main_button: tg && tg.MainButton && tg.MainButton.isVisible ? tg.MainButton.text : null,
     main_active: tg && tg.MainButton ? tg.MainButton.isActive : null,
+    main_color: tg && tg.MainButton && tg.MainButton.isVisible ? tg.MainButton.color : null,
     confirm_live: shown('confirm-live'),
     confirm_title: text('confirm-title'),
     confirm_card: shown('screen-confirm') ? $('confirm-card').textContent : null,
@@ -153,6 +154,7 @@ STATE_JS = """(() => {
       status: shown('actions-status') ? $('actions-status').textContent : null,
       main: shown('actions-main') && !$('actions-main').disabled ? text('actions-main') : null,
       main_busy: shown('actions-main') && $('actions-main').disabled,
+      main_confirm: $('actions-main').classList.contains('button-confirm'),
       cancel: shown('actions-cancel') ? text('actions-cancel') : null,
       lines: $('actions-chart').dataset.lines !== undefined
         ? $('actions-chart').dataset.lines.split(' ').filter(Boolean) : null,
@@ -2623,18 +2625,45 @@ async def act_risk_increase(page: Page, url: str) -> None:
                 f"/confirm: {[r.body for r in sent]}")
 
 
-@scenario("act_double", "5: двойное нажатие кнопки действия — одна карточка; двойное «Да» — "
-                        "один /confirm")
+# К6: «Да» новой карточки — не раньше CARD_ARM_MS (miniapp/actions.js; тест сверяет).
+CARD_ARM_S = 1.0
+DOUBLE_PRESS_JS = ("Telegram.WebView.receiveEvent('main_button_pressed');"
+                   " Telegram.WebView.receiveEvent('main_button_pressed')")
+
+
+def _card_shown(s: dict[str, Any]) -> bool:
+    """Карточка на экране (таймер) — кнопка «Да» может быть ещё неактивна (К6)."""
+    return bool(_acts(s).get("timer"))
+
+
+async def _armed_after(page: Page, native: bool, since: float, what: str) -> dict[str, Any]:
+    """Ждать активную «Да»; пауза от запроса карточки — не меньше CARD_ARM_S."""
+    card = _act_cards(page, since)
+    s = await page.wait_for(_card_ready(native), 5, f"«Да» активна: {what}")
+    waited = page.now() - card[-1].at if card else 0.0
+    page.expect(bool(card) and waited >= CARD_ARM_S,
+                f"{what}: «Да» активна через {waited:.2f} с от запроса карточки, "
+                f"ждали ≥ {CARD_ARM_S} с")
+    return s
+
+
+@scenario("act_double", "5: двойное нажатие кнопки действия — одна карточка; «Да» по инерции "
+                        "сразу после карточки — 0; двойное «Да» после паузы — один /confirm")
 async def act_double(page: Page, url: str) -> None:
     await open_page(page, url, Setup(native=True, preset="single"))
     await _to_actions(page)
+    since = page.now()
     await page.js("(() => { const b = document.querySelector('#actions-grid [data-code=\"c25\"]');"
                   " b.click(); b.click(); })()")
-    await page.wait_for(_card_ready(True), 10, "карточка c25")
-    await page.pump(1.2)
+    s = await page.wait_for(_card_shown, 10, "карточка c25")
+    page.expect(s.get("main_active") is False,
+                f"«Да» активна сразу после карточки: {s.get('main_button')!r}")
+    await page.js(DOUBLE_PRESS_JS)                     # по инерции — сразу после карточки
+    await page.pump(0.3)
+    page.expect(not _act_confirms(page), f"«Да» по инерции: /confirm {len(_act_confirms(page))}")
+    await _armed_after(page, True, since, "c25")
     page.expect(len(_act_cards(page)) == 1, f"POST /api/actions: {len(_act_cards(page))}, ждали 1")
-    await page.js("Telegram.WebView.receiveEvent('main_button_pressed');"
-                  " Telegram.WebView.receiveEvent('main_button_pressed')")
+    await page.js(DOUBLE_PRESS_JS)
     await page.wait_for(_act_done, 20, "итог")
     page.expect(len(_act_confirms(page)) == 1, f"/confirm: {len(_act_confirms(page))}, ждали 1")
 
@@ -2647,8 +2676,14 @@ async def act_double_old(page: Page, url: str) -> None:
     await page.click('#actions-grid [data-code="sl"]')
     await page.type("actions-level", "1.4000")
     await page.wait_for(lambda s: _acts(s).get("main") is not None, 6, "превью стопа 1.4000")
+    since = page.now()
     await _press_main(page, False)
-    s = await page.wait_for(_card_ready(False), 10, "карточка с ростом риска")
+    # К6: своя кнопка сразу после карточки — неактивна (тусклая), цвет «Да».
+    s = await page.wait_for(_card_shown, 10, "карточка с ростом риска")
+    page.expect(_acts(s).get("main_busy") is True and _acts(s).get("main_confirm") is True,
+                f"сразу после карточки: занята {_acts(s).get('main_busy')}, "
+                f"цвет «Да» {_acts(s).get('main_confirm')}")
+    s = await _armed_after(page, False, since, "рост риска, клиент 6.0")
     page.expect(_acts(s).get("main") == "⚠️ Да, увеличить риск", f"кнопка: {_acts(s).get('main')!r}")
     await page.js("(() => { const b = document.getElementById('actions-main');"
                   " b.click(); b.click(); })()")
@@ -2663,6 +2698,106 @@ async def act_double_old(page: Page, url: str) -> None:
     sent = _act_confirms(page)
     page.expect(len(sent) == 1 and sent[0].body == {"risk_confirmed": True},
                 f"/confirm: {[r.body for r in sent]}")
+
+
+@scenario("act_card_pause", "К6: «Да» другого цвета, чем превью; первую секунду неактивна — "
+                            "по инерции ничего; «Пересчитать» — новая карточка снова ждёт")
+async def act_card_pause(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(native=True, preset="single", rules=[
+        Rule("/api/actions", "patch", method="POST", patch=_ttl_short, times=1, exact=True)]))
+    await _to_actions(page)
+    await page.click('#actions-grid [data-code="sl"]')
+    await page.click('#actions-chips [data-chip="1"]')
+    s = await page.wait_for(lambda s: (_main(s, True) or "").startswith("Перенести стоп"), 6,
+                            "превью чипа 1%")
+    preview_color = s.get("main_color")
+    since = page.now()
+    await _press_main(page, True)
+    s = await page.wait_for(_card_shown, 10, "карточка переноса")
+    page.expect(s.get("main_active") is False and (s.get("main_button") or "").startswith("Да, "),
+                f"сразу после карточки: {s.get('main_button')!r}, активна {s.get('main_active')}")
+    page.expect(bool(preview_color) and s.get("main_color") not in (None, preview_color),
+                f"цвет «Да» {s.get('main_color')!r} = цвет превью {preview_color!r}")
+    await page.js(DOUBLE_PRESS_JS)                     # «Перенести» → «Да» по инерции
+    await page.pump(0.3)
+    page.expect(not _act_confirms(page), f"«Да» по инерции: /confirm {len(_act_confirms(page))}")
+    s = await _armed_after(page, True, since, "первая карточка")
+    yes_color = s.get("main_color")
+    # Срок 3 с (_ttl_short) — «Пересчитать» цветом превью, новая карточка снова ждёт.
+    s = await page.wait_for(lambda s: _main(s, True) == "Пересчитать", 6, "«Пересчитать»")
+    page.expect(s.get("main_color") == preview_color,
+                f"«Пересчитать» цветом {s.get('main_color')!r}, превью {preview_color!r}")
+    since = page.now()
+    await _press_main(page, True)
+    s = await page.wait_for(lambda s: _card_shown(s) and len(_act_cards(page, since)) == 1, 10,
+                            "новая карточка")
+    page.expect(s.get("main_active") is False, "после «Пересчитать» «Да» активна сразу")
+    await page.js(DOUBLE_PRESS_JS)
+    await page.pump(0.3)
+    page.expect(not _act_confirms(page),
+                f"«Да» по инерции после «Пересчитать»: /confirm {len(_act_confirms(page))}")
+    s = await _armed_after(page, True, since, "после «Пересчитать»")
+    page.expect(s.get("main_color") == yes_color, f"цвет «Да» {s.get('main_color')!r}")
+    await _press_main(page, True)
+    await page.wait_for(_act_done, 20, "итог")
+    page.expect(len(_act_confirms(page)) == 1, f"/confirm: {len(_act_confirms(page))}, ждали 1")
+
+
+# Клиент, у которого блокировка кнопки не работает (старый Telegram, сбой SDK): setParams
+# is_active и disable — no-op, нажатие всегда доходит до кода. Остаётся только проверка «Да»
+# по сроку карточки (cardReadyAt).
+NO_DISABLE_JS = ("(() => { const b = Telegram.WebApp.MainButton; const set = b.setParams.bind(b);"
+                 " b.setParams = (p) => set({ ...p, is_active: true });"
+                 " b.disable = () => b; window.__noDisable = true; })()")
+
+
+async def _press_after(page: Page, since: float, seconds: float) -> None:
+    """Нажать MainButton не раньше `seconds` от запроса карточки."""
+    card = _act_cards(page, since)
+    if card:
+        await page.pump(max(0.0, card[-1].at + seconds - page.now()))
+    await _press_main(page, True)
+
+
+@scenario("act_card_pause_nodisable", "К6: клиент без блокировки кнопки — «Да» раньше 1 с ничего "
+                                      "не шлёт, позже — шлёт; так же после «Пересчитать»")
+async def act_card_pause_nodisable(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(native=True, preset="single"))
+    await page.js(NO_DISABLE_JS)
+    await _to_actions(page)
+    page.expect(await page.js("window.__noDisable === true"), "подмена блокировки не встала")
+    # Первая карточка: по инерции — 0, после паузы — один /confirm.
+    since = page.now()
+    await page.click('#actions-grid [data-code="c25"]')
+    s = await page.wait_for(_card_shown, 10, "карточка c25")
+    page.expect(s.get("main_active") is True, "блокировка сработала — эмуляция не та")
+    await page.js(DOUBLE_PRESS_JS)
+    await page.pump(0.3)
+    page.expect(not _act_confirms(page), f"«Да» по инерции: /confirm {len(_act_confirms(page))}")
+    await _press_after(page, since, CARD_ARM_S + 0.1)
+    await page.wait_for(_act_done, 20, "итог первой карточки")
+    page.expect(len(_act_confirms(page)) == 1, f"/confirm после паузы: {len(_act_confirms(page))}")
+    # Карточка после «Пересчитать» — снова пауза.
+    await page.click("#actions-cancel")
+    await page.wait_for(lambda s: not _acts(s).get("panel"), 5, "панель закрыта")
+    await page.pump(1.1)                         # окно 1/с (app/api/ratelimit.py)
+    page.intercept(Rule("/api/actions", "patch", method="POST", patch=_ttl_short, times=1,
+                        exact=True))
+    await page.click('#actions-grid [data-code="c25"]')
+    await page.wait_for(lambda s: _main(s, True) == "Пересчитать", 10, "«Пересчитать»")
+    confirms = len(_act_confirms(page))
+    since = page.now()
+    await _press_main(page, True)
+    await page.wait_for(lambda s: _card_shown(s) and len(_act_cards(page, since)) == 1, 10,
+                        "новая карточка")
+    await page.js(DOUBLE_PRESS_JS)
+    await page.pump(0.3)
+    page.expect(len(_act_confirms(page)) == confirms,
+                f"«Да» по инерции после «Пересчитать»: /confirm "
+                f"{len(_act_confirms(page)) - confirms}")
+    await _press_after(page, since, CARD_ARM_S + 0.1)
+    await page.wait_for(lambda s: len(_act_confirms(page)) == confirms + 1, 10,
+                        "/confirm после паузы второй карточки")
 
 
 @scenario("act_network_drop", "5: обрыв на /confirm — POST сам не повторяется, опрос GET; CARD — "
