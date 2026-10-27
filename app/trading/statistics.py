@@ -11,7 +11,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -71,10 +71,22 @@ class Statistics:
     largest_loss: Decimal
     profit_factor: Decimal | None  # None = убытков не было
     expectancy: Decimal
-    average_rr: Decimal | None
+    average_rr: Decimal | None     # по сделкам с R; None — R нет ни у одной
     max_win_streak: int
     max_loss_streak: int
     drawdown: DrawdownResult
+    rr_trades: int = 0             # у скольких сделок R есть (основа average_rr)
+
+    def average_rr_text(self, fmt: Callable[[Decimal], str]) -> str:
+        """«Средний R: …» (28.10, владелец): сделки без R (стоп не в убытке или
+        его не было) в среднее не входят — тогда «(по N из M сделок)»; R нет ни
+        у одной — «не определён», а не обнуление среднего."""
+        if self.average_rr is None:
+            return "Средний R: не определён"
+        text = f"Средний R: {fmt(self.average_rr)}"
+        if self.rr_trades < self.total_trades:
+            text += f" (по {self.rr_trades} из {self.total_trades} сделок)"
+        return text
 
     @property
     def loss_rate(self) -> Decimal:
@@ -245,6 +257,7 @@ def calculate_statistics(
         profit_factor=profit_factor,
         expectancy=expectancy.quantize(MONEY),
         average_rr=average_rr,
+        rr_trades=len(rr_values),
         max_win_streak=max_win_streak,
         max_loss_streak=max_loss_streak,
         drawdown=calculate_drawdown(trades, starting_equity),

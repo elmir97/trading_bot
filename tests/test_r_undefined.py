@@ -134,3 +134,30 @@ async def test_check_pnl_skips_when_initial_not_in_loss(caplog) -> None:  # type
         mp.undo()
     assert called == []
     assert any("не хватает данных" in r.getMessage() for r in caplog.records)
+
+
+def _snap(rr: str | None) -> TradeSnapshot:
+    return TradeSnapshot(pnl=D(10), closed_at=AT, symbol="X", side="LONG", strategy=None,
+                         timeframe=None, risk_reward=D(rr) if rr is not None else None,
+                         account_balance=None)
+
+
+def test_average_r_over_trades_with_r_n_of_m() -> None:
+    """Владелец 28.10: сделка без R не обнуляет средний — исключается, рядом
+    «по N из M сделок»; в статистике и в итогах дня одинаково."""
+    from app.workers.daily import render_daily_summary
+
+    stats = calculate_statistics([_snap("1"), _snap(None), _snap("2")])
+    assert (stats.average_rr, stats.rr_trades) == (D("1.50"), 2)
+    for text in (render_statistics(stats, "Статистика"), render_daily_summary(stats)):
+        assert "Средний R: 1.5" in text and "(по 2 из 3 сделок)" in text
+
+
+def test_average_r_all_with_r_no_note_none_with_r_undefined() -> None:
+    from app.workers.daily import render_daily_summary
+
+    full = calculate_statistics([_snap("1"), _snap("2")])
+    assert "Средний R: 1.5" in render_statistics(full, "С") and "из" not in (
+        full.average_rr_text(str))
+    empty = calculate_statistics([_snap(None), _snap(None)])
+    assert "Средний R: не определён" in render_daily_summary(empty)

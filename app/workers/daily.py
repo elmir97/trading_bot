@@ -70,8 +70,7 @@ def render_daily_summary(stats: Statistics) -> str:
         f"Win Rate: {fmt_decimal(stats.win_rate)}%",
         f"PnL: {fmt_decimal(stats.total_pnl)} USDT",
     ]
-    if stats.average_rr is not None:
-        lines.append(f"Средний R: {fmt_decimal(stats.average_rr)}")
+    lines.append(stats.average_rr_text(fmt_decimal))
     return "\n".join(lines)
 
 
