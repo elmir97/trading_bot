@@ -318,6 +318,12 @@ Remote `origin` — приватный резервный репозиторий
    `miniapp/` читается с диска — достаточно `git archive`
 6. `alembic upgrade head`
 7. Показать `docker compose ps` и последние 50 строк логов
+8. **Остановка старых контейнеров (с graceful SIGTERM, план 27.10):** в логе старого bot (`logs/bot.log`) и старого api
+   (`logs/api.log`) — строка «Остановка завершена за X с» (WARNING «не уложились — доведёт восстановление» — флаг, список в
+   строке); код выхода старых контейнеров — **0, не 137** (137 — SIGKILL по `stop_grace_period`). Старый контейнер при
+   `--force-recreate` удаляется, `docker inspect` его не покажет — код брать из события `die`:
+   `docker events --since <время до up> --until "$(date -u +%FT%TZ)" --filter event=die --filter container=trading_bot
+   --filter container=trading_bot_api --format '{{.Actor.Attributes.name}} {{.Actor.Attributes.exitCode}}'`
 
 Откат кода: `docker tag trading_bot-bot:rollback_<ts> trading_bot-bot:latest
 && docker compose up -d --no-deps bot` (с Mini App — `--no-deps bot api`: один образ).
