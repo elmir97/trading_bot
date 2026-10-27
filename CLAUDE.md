@@ -323,12 +323,22 @@ Remote `origin` — приватный резервный репозиторий
    `miniapp/` читается с диска — достаточно `git archive`
 6. `alembic upgrade head`
 7. Показать `docker compose ps` и последние 50 строк логов
-8. **Остановка старых контейнеров (с graceful SIGTERM, план 27.10):** в логе старого bot (`logs/bot.log`) и старого api
-   (`logs/api.log`) — строка «Остановка завершена за X с» (WARNING «не уложились — доведёт восстановление» — флаг, список в
-   строке); код выхода старых контейнеров — **0, не 137** (137 — SIGKILL по `stop_grace_period`). Старый контейнер при
-   `--force-recreate` удаляется, `docker inspect` его не покажет — код брать из события `die`:
-   `docker events --since <время до up> --until "$(date -u +%FT%TZ)" --filter event=die --filter container=trading_bot
-   --filter container=trading_bot_api --format '{{.Actor.Attributes.name}} {{.Actor.Attributes.exitCode}}'`
+8. **Проверка graceful SIGTERM — контролируемым рестартом НОВЫХ контейнеров (план 27.10, поправка владельца 27.10).**
+   На шаге 5 останавливаются **старые** контейнеры — на коде до SIGTERM строки «Остановка завершена» у них нет, ExitCode
+   может быть 137; по ним SIGTERM не проверить (их код выхода из события `die` — только для сведения). Поэтому — после того
+   как новые bot+api подняты и прошли шаги 6–7, **отдельным «да» владельца**, в момент без открытых карточек действий:
+   1. Только чтение: `position_actions` в CARD/SUBMITTED и `trade_openings` в CARD/CONFIRMED/SUBMITTING/UNKNOWN/FILLED/
+      PROTECTED/ALARM — 0;
+      `SCAN exec:lock:*` — 0 (как F.18). Не 0 — рестарт не делать, доклад
+   2. «Не нажимай кнопки, перезапускаю» → «ок» владельца; запомнить `T0=$(date -u +%FT%TZ)`
+   3. `docker compose restart -t 40 bot` → дождаться «бот запущен» в логе; затем `docker compose restart -t 60 api` →
+      api healthy (по одному, не вместе)
+   4. Проверка по каждому: в `logs/bot.log` / `logs/api.log` после T0 — «Остановка завершена за X с», **X < срока**
+      (bot — < 40, ожидаемо ~1–2 с без нагрузки; api — < 60); WARNING «не уложились — доведёт восстановление» — флаг;
+      код выхода — **0, не 137**: `docker events --since "$T0" --until "$(date -u +%FT%TZ)" --filter event=die
+      --filter container=trading_bot --filter container=trading_bot_api --format '{{.Actor.Attributes.name}}
+      {{.Actor.Attributes.exitCode}}'`; `SCAN exec:lock:*` после рестарта — 0 (лок позиций не остался)
+   Рестарт бота сбрасывает замер памяти — делать в том же окне, что деплой
 
 Откат кода: `docker tag trading_bot-bot:rollback_<ts> trading_bot-bot:latest
 && docker compose up -d --no-deps bot` (с Mini App — `--no-deps bot api`: один образ).

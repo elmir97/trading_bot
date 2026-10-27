@@ -342,12 +342,8 @@ def test_log_finished_line(caplog) -> None:  # type: ignore[no-untyped-def]
 # --- проводка run() ----------------------------------------------------------------------
 
 
-async def test_run_wires_inflight_and_closes_after_handler(monkeypatch, caplog) -> None:  # type: ignore[no-untyped-def]
-    """run(): учёт обработчиков на диспетчере и циклов в BackgroundJobs — один и
-    тот же; планировщик — до стопа поллинга; обработчик в полёте доживает до
-    закрытия ресурсов; ресурсы — в порядке плана."""
-    log: list[str] = []
-    seen: dict[str, Any] = {}
+def _patch_run(monkeypatch: Any, log: list[str], seen: dict[str, Any], poll: Any) -> None:
+    """run() на подделках: ресурсы пишут в log своё закрытие, poll — вместо поллинга."""
 
     class FakeSession:
         async def close(self) -> None:
@@ -394,20 +390,6 @@ async def test_run_wires_inflight_and_closes_after_handler(monkeypatch, caplog) 
         def start(self) -> None:
             log.append("start")
 
-    async def fake_poll(dp: Dispatcher, bot: Any, stop: StopSignal, *, before_stop: Any) -> None:
-        [middleware] = [m for m in dp.update.outer_middleware if isinstance(m, InFlightMiddleware)]
-        seen["dp_inflight"] = middleware._inflight
-
-        async def handler(event: Any, data: Any) -> None:
-            await asyncio.sleep(0.2)
-            log.append("handler_done")
-
-        seen["handler"] = asyncio.create_task(middleware(handler, _update(3), {}))
-        await asyncio.sleep(0)
-        log.append("polling")
-        before_stop()
-        stop.trigger()
-
     async def noop(*args: Any, **kwargs: Any) -> None:
         return None
 
@@ -421,8 +403,36 @@ async def test_run_wires_inflight_and_closes_after_handler(monkeypatch, caplog) 
     monkeypatch.setattr(bot_main, "build_dispatcher", lambda *a: Dispatcher())
     monkeypatch.setattr(bot_main, "BackgroundJobs", Jobs)
     monkeypatch.setattr(bot_main, "setup_bot_ui", noop)
-    monkeypatch.setattr(bot_main, "poll_until_stopped", fake_poll)
+    monkeypatch.setattr(bot_main, "poll_until_stopped", poll)
 
+
+def _inflight_middleware(dp: Dispatcher) -> InFlightMiddleware:
+    [middleware] = [m for m in dp.update.outer_middleware if isinstance(m, InFlightMiddleware)]
+    return middleware
+
+
+async def test_run_wires_inflight_and_closes_after_handler(monkeypatch, caplog) -> None:  # type: ignore[no-untyped-def]
+    """run(): учёт обработчиков на диспетчере и циклов в BackgroundJobs — один и
+    тот же; планировщик — до стопа поллинга; обработчик в полёте доживает до
+    закрытия ресурсов; ресурсы — в порядке плана."""
+    log: list[str] = []
+    seen: dict[str, Any] = {}
+
+    async def fake_poll(dp: Dispatcher, bot: Any, stop: StopSignal, *, before_stop: Any) -> None:
+        middleware = _inflight_middleware(dp)
+        seen["dp_inflight"] = middleware._inflight
+
+        async def handler(event: Any, data: Any) -> None:
+            await asyncio.sleep(0.2)
+            log.append("handler_done")
+
+        seen["handler"] = asyncio.create_task(middleware(handler, _update(3), {}))
+        await asyncio.sleep(0)
+        log.append("polling")
+        before_stop()
+        stop.trigger()
+
+    _patch_run(monkeypatch, log, seen, fake_poll)
     with caplog.at_level(logging.INFO):
         await bot_main.run()
     assert re.fullmatch(r"Остановка завершена за \d+\.\d с", caplog.messages[-1])
@@ -430,6 +440,106 @@ async def test_run_wires_inflight_and_closes_after_handler(monkeypatch, caplog) 
     assert seen["handler"].done() and not seen["handler"].cancelled()
     assert log == ["recover_openings", "recover_actions", "start", "delete_webhook", "polling",
                    "pause", "pause", "handler_done", "background_jobs", "telegram", "redis", "db"]
+
+
+async def test_run_polling_failure_still_closes_resources(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Поллинг упал сам — исключение наверх, сессия Telegram, Redis и БД закрыты."""
+    log: list[str] = []
+
+    async def failing_poll(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("поллинг упал")
+
+    _patch_run(monkeypatch, log, {}, failing_poll)
+    with pytest.raises(RuntimeError, match="поллинг упал"):
+        await bot_main.run()
+    assert log[-4:] == ["background_jobs", "telegram", "redis", "db"]
+
+
+async def test_run_second_signal_cancels_at_once(monkeypatch, caplog) -> None:  # type: ignore[no-untyped-def]
+    """Ctrl+C дважды: второй сигнал во время ожидания — зависший обработчик
+    отменён сразу (не через 25 с), ресурсы закрыты, без исключения наружу."""
+    log: list[str] = []
+    seen: dict[str, Any] = {}
+
+    async def fake_poll(dp: Dispatcher, bot: Any, stop: StopSignal, *, before_stop: Any) -> None:
+        async def hung(event: Any, data: Any) -> None:
+            await asyncio.sleep(3600)
+
+        seen["handler"] = asyncio.create_task(_inflight_middleware(dp)(hung, _update(8), {}))
+        await asyncio.sleep(0)
+        stop.trigger()
+        asyncio.get_running_loop().call_later(0.1, stop.trigger)
+
+    _patch_run(monkeypatch, log, seen, fake_poll)
+    with caplog.at_level(logging.INFO):
+        await asyncio.wait_for(bot_main.run(), 5)
+    assert seen["handler"].cancelled()
+    assert log[-4:] == ["background_jobs", "telegram", "redis", "db"]
+    assert "Повторный сигнал остановки — не жду, отменяю" in caplog.messages
+    assert ("Остановка: повторный сигнал — доведёт восстановление: update update_id=8"
+            in caplog.messages)
+    assert re.fullmatch(r"Остановка завершена за 0\.\d с", caplog.messages[-1])
+
+
+async def test_drain_failure_still_closes_resources(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    log: list[str] = []
+    jobs = FakeJobs(log)
+
+    async def broken(*args: Any, **kwargs: Any) -> list[str]:
+        raise RuntimeError("ожидание упало")
+
+    monkeypatch.setattr(bot_main, "drain", broken)
+    with pytest.raises(RuntimeError, match="ожидание упало"):
+        await bot_main.shutdown(jobs, InFlight(), closers(log, jobs))  # type: ignore[arg-type]
+    assert log == ["pause", "background_jobs", "telegram", "redis", "db"]
+
+
+async def test_second_signal_cuts_drain_short(caplog) -> None:  # type: ignore[no-untyped-def]
+    inflight = InFlight()
+    stop = StopSignal()
+    task = asyncio.create_task(tracked(inflight, UPDATE, "update_id=4",
+                                       lambda: asyncio.sleep(3600)))
+    await asyncio.sleep(0)
+    stop.trigger()
+    asyncio.get_running_loop().call_later(0.1, stop.trigger)
+    with caplog.at_level(logging.INFO):
+        labels = await asyncio.wait_for(drain(inflight, timeout=60, stop=stop), 5)
+    assert labels == ["update update_id=4"] and task.cancelled()
+    stop.trigger()                     # третий — без нового сообщения и без исключения
+    assert caplog.messages.count("Повторный сигнал остановки — не жду, отменяю") == 1
+
+
+async def test_hung_cycle_cancelled_by_deadline_while_resources_open(caplog) -> None:  # type: ignore[no-untyped-def]
+    """Цикл на паузе планировщика, не уложившийся в срок, отменяется тем же
+    механизмом, что обработчик, — до закрытия ресурсов (его finally видит их
+    открытыми)."""
+    inflight = InFlight()
+    jobs = BackgroundJobs(None, None, Settings(**BASE), None, None, inflight=inflight)  # type: ignore[arg-type]
+    log: list[str] = []
+    started = asyncio.Event()
+
+    async def hung_cycle() -> None:
+        started.set()
+        try:
+            await asyncio.sleep(3600)
+        finally:
+            log.append("cycle_finally")
+
+    jobs._scheduler.add_job(job_wrapper("test_hung", hung_cycle, inflight=inflight), "interval",
+                            seconds=60, id="test_hung", coalesce=True, max_instances=1,
+                            next_run_time=datetime.now(UTC))
+    jobs._scheduler.start()
+    await asyncio.wait_for(started.wait(), 2)
+
+    async def close_db() -> None:
+        log.append("db")
+
+    with caplog.at_level(logging.INFO):
+        await bot_main.shutdown(jobs, inflight, [("background_jobs", jobs.shutdown),
+                                                 ("db", close_db)], timeout=0.2)
+    assert log == ["cycle_finally", "db"]
+    assert ("Остановка: не уложились за 0 с — доведёт восстановление: cycle test_hung"
+            in caplog.messages)
 
 
 # --- compose -----------------------------------------------------------------------------

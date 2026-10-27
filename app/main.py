@@ -318,8 +318,10 @@ async def run() -> None:
     finally:
         logger.info("Остановка приложения")
         started = stop.at if stop.at is not None else time.monotonic()
-        await shutdown(background_jobs, inflight, closers)
-        stop.uninstall()
+        try:
+            await shutdown(background_jobs, inflight, closers, stop=stop)
+        finally:
+            stop.uninstall()
         log_finished(started)
 
 
@@ -353,13 +355,17 @@ async def shutdown(
     closers: Sequence[tuple[str, Callable[[], Awaitable[None]]]],
     *,
     timeout: float = BOT_SHUTDOWN_DRAIN_SECONDS,
+    stop: StopSignal | None = None,
 ) -> None:
     """Порядок: новых циклов нет → ожидание обработчиков, циклов и быстрых
-    повторов тревоги общим сроком → отмена не уложившихся, пока Redis и БД
-    открыты (их finally снимает локи) → только потом ресурсы."""
-    background_jobs.pause()
-    await drain(inflight, background_jobs.alarm_retries(), timeout=timeout)
-    await close_all(closers)
+    повторов тревоги общим сроком (повторный сигнал — отмена сразу) → отмена
+    не уложившихся, пока Redis и БД открыты (их finally снимает локи) → только
+    потом ресурсы. Ресурсы закрываются и при сбое паузы или ожидания."""
+    try:
+        background_jobs.pause()
+        await drain(inflight, background_jobs.alarm_retries(), timeout=timeout, stop=stop)
+    finally:
+        await close_all(closers)
 
 
 def main() -> None:

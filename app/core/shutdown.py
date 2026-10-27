@@ -44,15 +44,21 @@ ALARM_RETRY = "alarm_retry"
 class StopSignal:
     """SIGTERM/SIGINT → флаг остановки. Свой обработчик вместо aiogram
     (`start_polling(handle_signals=False)`): сигнал во время восстановления на
-    старте тоже ловится — следующий шаг не начинается."""
+    старте тоже ловится — следующий шаг не начинается. Повторный сигнал (Ctrl+C
+    дважды) — ожидание обрывается, не уложившиеся отменяются сразу."""
 
     def __init__(self) -> None:
         self._event = asyncio.Event()
+        self._again = asyncio.Event()
         self.at: float | None = None
         self._installed: list[signal.Signals] = []
 
     def trigger(self, sig: signal.Signals | None = None) -> None:
         if self._event.is_set():
+            if not self._again.is_set():
+                self._again.set()
+                logger.info("Повторный сигнал остановки — не жду, отменяю",
+                            extra={"signal": sig.name if sig is not None else None})
             return
         self.at = time.monotonic()
         self._event.set()
@@ -64,6 +70,12 @@ class StopSignal:
 
     async def wait(self) -> None:
         await self._event.wait()
+
+    def again(self) -> bool:
+        return self._again.is_set()
+
+    async def wait_again(self) -> None:
+        await self._again.wait()
 
     def install(self) -> None:
         loop = asyncio.get_running_loop()
@@ -157,9 +169,11 @@ async def drain(
     *,
     timeout: float = BOT_SHUTDOWN_DRAIN_SECONDS,
     cancel_wait: float = SHUTDOWN_CANCEL_WAIT_SECONDS,
+    stop: StopSignal | None = None,
 ) -> list[str]:
     """Ждёт задачи в полёте общим сроком; не уложившиеся — отмена и короткое
-    ожидание их finally. Возвращает подписи отменённых."""
+    ожидание их finally. Повторный сигнал (stop) обрывает ожидание — отмена
+    сразу. Возвращает подписи отменённых."""
     tasks = {**inflight.pending(), **{t: v for t, v in (extra or {}).items() if not t.done()}}
     kinds = [kind for kind, _ in tasks.values()]
     logger.info(
@@ -168,14 +182,26 @@ async def drain(
     )
     if not tasks:
         return []
-    _, pending = await asyncio.wait(tasks, timeout=timeout)
+    again = asyncio.create_task(stop.wait_again()) if stop is not None else None
+    try:
+        loop = asyncio.get_running_loop()
+        end = loop.time() + timeout
+        while True:
+            pending = {t for t in tasks if not t.done()}
+            remaining = end - loop.time()
+            if not pending or remaining <= 0 or (again is not None and again.done()):
+                break
+            waiters: set[asyncio.Task[Any]] = pending | ({again} if again is not None else set())
+            await asyncio.wait(waiters, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        if again is not None:
+            again.cancel()
     if not pending:
         return []
     labels = sorted(f"{tasks[t][0]} {tasks[t][1]}" for t in pending)
-    logger.warning(
-        f"Остановка: не уложились за {timeout:.0f} с — доведёт восстановление: "
-        + ", ".join(labels)
-    )
+    reason = ("повторный сигнал" if stop is not None and stop.again()
+              else f"не уложились за {timeout:.0f} с")
+    logger.warning(f"Остановка: {reason} — доведёт восстановление: " + ", ".join(labels))
     for task in pending:
         task.cancel()
     await asyncio.wait(pending, timeout=cancel_wait)
