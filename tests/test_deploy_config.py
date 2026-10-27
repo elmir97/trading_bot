@@ -7,6 +7,7 @@ Docker и Caddy на этой машине не запускаются — пр�
 
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -147,9 +148,10 @@ class _RecordingBot(Bot):
         raise AssertionError(f"API при старте/остановке вызвал {type(method).__name__}")
 
 
-async def test_api_lifespan_never_polls_telegram(api, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+async def test_api_lifespan_never_polls_telegram(api, monkeypatch, caplog) -> None:  # type: ignore[no-untyped-def]
     """Настоящий build_state: за старт и остановку — только getMe; ни getUpdates,
-    ни deleteWebhook, ни цикла воркера открытий."""
+    ни deleteWebhook, ни цикла воркера открытий. В конце остановки — «Остановка
+    завершена за X с» (чек-лист деплоя, CLAUDE.md п.8)."""
     _CALLS.clear()
     monkeypatch.setattr(api_main, "Bot", _RecordingBot)
     monkeypatch.setattr(api_main, "get_settings", lambda: api.settings)
@@ -160,10 +162,12 @@ async def test_api_lifespan_never_polls_telegram(api, monkeypatch) -> None:  # t
 
     monkeypatch.setattr(OpeningsWorker, "run", no_loop)
     app = api_main.create_app()
-    async with app.router.lifespan_context(app):
-        assert isinstance(app.state.api.bot, _RecordingBot)
-        assert app.state.api.bot_username == "test_bot"
+    with caplog.at_level(logging.INFO, logger="app.core.shutdown"):
+        async with app.router.lifespan_context(app):
+            assert isinstance(app.state.api.bot, _RecordingBot)
+            assert app.state.api.bot_username == "test_bot"
     assert _CALLS == ["GetMe"]
+    assert re.fullmatch(r"Остановка завершена за \d+\.\d с", caplog.messages[-1])
 
 
 @pytest.mark.parametrize("needle", ["Dispatcher", "start_polling", "get_updates", "GetUpdates",

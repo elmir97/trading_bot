@@ -78,6 +78,9 @@ services:
         condition: service_healthy
     volumes:
       - ./logs:/app/logs
+    # План 27.10 (graceful SIGTERM): дренаж BOT_SHUTDOWN_DRAIN_SECONDS (25) + отмена (3)
+    # + закрытие ресурсов; меньше — SIGKILL (ExitCode 137) посреди «Да».
+    stop_grace_period: 40s
 
   # API Mini App (docs/miniapp-plan.md §2, §6): тот же образ, что у бота (своей сборки
   # нет — одна точка отката rollback_<ts> на оба), без поллинга, планировщика и
@@ -91,7 +94,10 @@ services:
     restart: unless-stopped
     command: ["uvicorn", "--factory", "app.api.main:create_app", "--host", "0.0.0.0",
               "--port", "8000", "--workers", "1", "--proxy-headers",
-              "--forwarded-allow-ips", "*"]
+              "--forwarded-allow-ips", "*", "--timeout-graceful-shutdown", "20"]
+    # План 27.10: запросы uvicorn (20) + дренаж «Открыть»/«Да» CONFIRM_DRAIN_SECONDS (30)
+    # + закрытие; по умолчанию docker ждал 10 с и слал SIGKILL.
+    stop_grace_period: 60s
     env_file: .env
     environment:
       REDIS_URL: redis://redis:6379/0

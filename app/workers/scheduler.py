@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from aiogram import Bot
@@ -17,6 +18,7 @@ from app.core.config import Settings
 from app.core.input_prompt import InputGate
 from app.core.logging import get_logger
 from app.core.security import SecretCipher
+from app.core.shutdown import ALARM_RETRY, InFlight
 from app.database.session import Database
 from app.workers.base import job_wrapper
 from app.workers.daily import DailyJobs
@@ -36,8 +38,11 @@ class BackgroundJobs:
         cipher: SecretCipher,
         redis: Any = None,
         input_gate: InputGate | None = None,
+        inflight: InFlight | None = None,
     ) -> None:
         self._settings = settings
+        # План 27.10: идущий цикл при остановке доживает (app/core/shutdown.py).
+        self._inflight = inflight
         self._scheduler = AsyncIOScheduler(timezone="UTC")
         # Этап 5: позиции биржи (ключи пользователя) и пропуск цикла, пока
         # жив лок действия с позицией.
@@ -62,7 +67,8 @@ class BackgroundJobs:
         self._scheduler.add_job(
             # quiet: цикл раз в 15 с; на INFO монитор пишет сам — уведомления
             # и пульс раз в час.
-            job_wrapper("position_monitor", self._positions.run, quiet=True),
+            job_wrapper("position_monitor", self._positions.run, quiet=True,
+                        inflight=self._inflight),
             "interval",
             seconds=self._settings.position_monitor_price_seconds,
             id="position_monitor",
@@ -70,7 +76,7 @@ class BackgroundJobs:
             max_instances=1,
         )
         self._scheduler.add_job(
-            job_wrapper("reconciler", self._reconciler.run, quiet=True),
+            job_wrapper("reconciler", self._reconciler.run, quiet=True, inflight=self._inflight),
             "interval",
             seconds=self._settings.reconciler_interval_seconds,
             id="reconciler",
@@ -78,7 +84,7 @@ class BackgroundJobs:
             max_instances=1,
         )
         self._scheduler.add_job(
-            job_wrapper("openings", self.openings.run, quiet=True),
+            job_wrapper("openings", self.openings.run, quiet=True, inflight=self._inflight),
             "interval",
             seconds=self._settings.openings_interval_seconds,
             id="openings",
@@ -86,7 +92,7 @@ class BackgroundJobs:
             max_instances=1,
         )
         self._scheduler.add_job(
-            job_wrapper("daily_jobs", self._daily.run),
+            job_wrapper("daily_jobs", self._daily.run, inflight=self._inflight),
             "interval",
             minutes=self._settings.daily_jobs_interval_minutes,
             id="daily_jobs",
@@ -108,7 +114,19 @@ class BackgroundJobs:
         """B.9: восстановление действий этапа 4 — при старте до поллинга."""
         return await self._reconciler.recover_actions()
 
+    def pause(self) -> None:
+        """Остановка, шаг 1: новых циклов нет, идущие доживают. Не shutdown:
+        asyncio-исполнитель APScheduler на shutdown отменяет идущие циклы."""
+        if self._scheduler.running:
+            self._scheduler.pause()
+
+    def alarm_retries(self) -> dict[asyncio.Task[None], tuple[str, str]]:
+        """Быстрые повторы тревоги в полёте — для общего срока остановки."""
+        return {task: (ALARM_RETRY, f"opening_id={opening_id}")
+                for task, opening_id in self.openings.alarm_tasks().items()}
+
     async def shutdown(self) -> None:
+        """После ожидания (app/core/shutdown.py): остаток снимается, пока БД открыта."""
         await self.openings.close()
         if self._scheduler.running:
             self._scheduler.shutdown(wait=False)

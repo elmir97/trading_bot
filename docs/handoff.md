@@ -25,6 +25,35 @@
      mark), и подписать так, чтобы не путать
 - **Дальше (владелец 27.10):** реализация SIGTERM (план ниже) — код и гейт сейчас; деплой bot+api ~03.11 вместе с
   К3+К4+К7+К9 (после замера bot)
+- **Graceful SIGTERM — реализован (этот коммит), не на проде; деплой ~03.11 с К3+К4+К7+К9.** `app/core/shutdown.py`:
+  `StopSignal` (свой SIGTERM/SIGINT с начала `run()`, после настроек), `InFlight` + `InFlightMiddleware` (outer на
+  `dp.update`), `job_wrapper(inflight=…)` у четырёх циклов, `poll_until_stopped` (`start_polling(handle_signals=False,
+  close_bot_session=False)`), `drain` (срок `BOT_SHUTDOWN_DRAIN_SECONDS` 25, отмена + `SHUTDOWN_CANCEL_WAIT_SECONDS` 3),
+  `close_all`, `log_finished`. В `app/main.py`: `recover_on_start` (флаг между шагами), `shutdown` (пауза планировщика →
+  дренаж обработчиков, циклов и быстрых повторов тревоги → ресурсы: фоновые задачи, LLM, Telegram, Redis, БД).
+  `BackgroundJobs.pause()`, `alarm_retries()`; `OpeningsWorker.alarm_tasks()`. api — «Остановка завершена за X с» в конце
+  lifespan (время — от начала lifespan-остановки, ожидание запросов uvicorn до неё). compose: bot `stop_grace_period: 40s`;
+  api `--timeout-graceful-shutdown 20`, `stop_grace_period: 60s`
+  - **Найдено при реализации, сверх плана:** (1) `start_polling` по умолчанию сам закрывает сессию Telegram сразу после стопа
+    поллинга — под обработчиками в полёте; теперь `close_bot_session=False`, закрывает `close_all`; (2) `shutdown(wait=False)`
+    asyncio-исполнителя APScheduler 3.11 **отменяет** идущие циклы — вместо него на остановке сначала `pause()`, `shutdown` —
+    после дренажа
+  - **Логи:** INFO «Получен сигнал остановки» (signal), «Остановка: обработчиков N, циклов M, повторов тревоги K»,
+    «Остановка завершена за X с»; WARNING «Остановка: не уложились за 25 с — доведёт восстановление: update update_id=…, cycle
+    reconciler, alarm_retry opening_id=…» (список — в тексте: на проде `LOG_JSON=false`)
+  - **Тесты** `tests/test_shutdown.py` (16) + строка остановки api в `test_deploy_config`: обработчик доживает, ресурсы после
+    него по порядку; зависший отменяется по сроку + WARNING; **лок позиции снят отменённым обработчиком до закрытия Redis**
+    (FakeRedis, `RedisLock`); повторы тревоги ждутся; настоящий `BackgroundJobs` + APScheduler — идущий цикл доживает, новый
+    не стартует; сигнал на старте — второй шаг не начат; `handle_signals`/`close_bot_session` False, пауза до стопа
+    поллинга; проводка `run()` (один `InFlight` у диспетчера и фоновых задач); compose grace ≥ дренаж + запас. Сигнал на
+    Windows не послать — путь `add_signal_handler` проверяется на деплое (CLAUDE.md п.8)
+  - **Мутации** (`scripts/mutation_runner.py`): исходные по плану 6/6 CAUGHT (нет ожидания; ресурсы до ожидания; нет отмены
+    по сроку; `handle_signals=True`; флаг на старте; grace меньше дренажа); дополнительные 8/8 (`close_bot_session=True`;
+    `pause` → `shutdown`; middleware не подключён; повторы тревоги не ждутся; `before_stop` не вызван; нет ожидания finally
+    отменённых; api без строки остановки; `inflight` не передан в `BackgroundJobs`); INCONCLUSIVE 0 (M4/A1 в первом прогоне
+    — INCONCLUSIVE «вхождений 2» из-за докстринга; замены уточнены, перепрогнаны — CAUGHT)
+  - **Гейт:** pytest 2450 / 0 skipped (6 частей: 519+317+400+416+394+404 = collect 2450), smoke 102/102 ×2, mypy 60, ruff
+    4715 (= 4681 + 34, только RUF001–003)
 
 **27.10.2026 (вечер): разбор бэклога серии — порядок и решения владельца приняты; К1 сделан.** Прод не менялся.
 - **Порядок (да владельца):** К1 прогонщик мутаций → К2 баги экрана 5 (пунктир после итога; экран после «Закрыть всё» —

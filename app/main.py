@@ -7,12 +7,18 @@
   4. справочники        — системные типы ошибок, идемпотентно;
   5. сборка бота        — зависимости через workflow_data;
   6. polling            — с корректным закрытием ресурсов в finally.
+
+Остановка по SIGTERM (план 27.10): поллинг и планировщик стоп → обработчики и
+циклы в полёте доживают (срок BOT_SHUTDOWN_DRAIN_SECONDS) → ресурсы. В логе —
+«Остановка завершена за X с» (чек-лист деплоя, CLAUDE.md п.8).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from collections.abc import Awaitable, Callable, Sequence
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -52,6 +58,16 @@ from app.core.config import Settings, get_settings
 from app.core.input_prompt import InputGate
 from app.core.logging import get_logger, setup_logging
 from app.core.security import SecretCipher
+from app.core.shutdown import (
+    BOT_SHUTDOWN_DRAIN_SECONDS,
+    InFlight,
+    InFlightMiddleware,
+    StopSignal,
+    close_all,
+    drain,
+    log_finished,
+    poll_until_stopped,
+)
 from app.database.repositories.strategy import (
     MistakeTypeRepository,
     StrategyRepository,
@@ -213,6 +229,11 @@ async def run() -> None:
         extra={"confirm_lock_ttl_seconds": settings.confirm_lock_ttl_seconds},
     )
 
+    # Свой обработчик SIGTERM/SIGINT с самого начала: сигнал во время
+    # восстановления на старте не обрывает процесс без finally.
+    stop = StopSignal()
+    stop.install()
+
     db = Database(settings)
     try:
         await db.healthcheck()
@@ -221,6 +242,7 @@ async def run() -> None:
     except Exception:
         logger.exception("Не удалось инициализировать базу данных. Остановка.")
         await db.dispose()
+        stop.uninstall()
         raise
 
     # Прокси нужен там, где хостинг режет трафик до IP Telegram — типичная
@@ -259,6 +281,11 @@ async def run() -> None:
             "ALLOWED_TELEGRAM_IDS не задан — бот отвечает любому пользователю"
         )
 
+    # План 27.10 (graceful SIGTERM): обработчики и циклы в полёте доживают до
+    # конца, ресурсы закрываются после них (app/core/shutdown.py).
+    inflight = InFlight()
+    dp.update.outer_middleware(InFlightMiddleware(inflight))
+
     # Отдельный SecretCipher, не тот, что в dp["cipher"]: фоновые задачи не
     # зависят от build_dispatcher, а сам шифр не хранит состояния — второй
     # экземпляр с тем же ключом безвреден.
@@ -266,37 +293,73 @@ async def run() -> None:
         bot, db, settings, SecretCipher(settings.encryption_key.get_secret_value()), redis,
         # 03.10: хранилище FSM того же процесса — «пользователь вводит число».
         input_gate=InputGate(dp.storage, bot.id),
+        inflight=inflight,
     )
-    # Открытия сделок из бота, прерванные рестартом (вход ушёл без ответа,
-    # исполнен без подтверждённого стопа) — до поллинга и до первого цикла.
-    if settings.background_jobs_enabled:
-        try:
-            await background_jobs.openings.run()
-        except Exception:
-            logger.exception("Восстановление открытий при старте упало — повторит цикл")
-        # B.9: действия этапа 4, прерванные посреди «Да» (только чтение биржи).
-        try:
-            await background_jobs.recover_actions()
-        except Exception:
-            logger.exception("Восстановление действий при старте упало — повторит цикл")
     # B.1: «Открыть» с тревогой — быстрые повторы защиты тем же воркером.
     dp["alarm_retry"] = background_jobs.openings.retry_alarm
-    background_jobs.start()
+
+    closers: list[tuple[str, Callable[[], Awaitable[None]]]] = [
+        ("background_jobs", background_jobs.shutdown),
+    ]
+    if llm_client is not None:
+        closers.append(("llm", llm_client.aclose))
+    closers += [("telegram", bot.session.close), ("redis", redis.aclose), ("db", db.dispose)]
 
     try:
-        await setup_bot_ui(bot, settings)
-        # Сбрасываем накопившиеся за простой апдейты: обрабатывать команды
-        # недельной давности бессмысленно и потенциально вредно.
-        await bot.delete_webhook(drop_pending_updates=True)
-        await dp.start_polling(bot)
+        await recover_on_start(background_jobs, settings, stop)
+        if not stop.is_set():
+            background_jobs.start()
+            await setup_bot_ui(bot, settings)
+            # Сбрасываем накопившиеся за простой апдейты: обрабатывать команды
+            # недельной давности бессмысленно и потенциально вредно.
+            await bot.delete_webhook(drop_pending_updates=True)
+        if not stop.is_set():
+            await poll_until_stopped(dp, bot, stop, before_stop=background_jobs.pause)
     finally:
         logger.info("Остановка приложения")
-        await background_jobs.shutdown()
-        if llm_client is not None:
-            await llm_client.aclose()
-        await bot.session.close()
-        await redis.aclose()
-        await db.dispose()
+        started = stop.at if stop.at is not None else time.monotonic()
+        await shutdown(background_jobs, inflight, closers)
+        stop.uninstall()
+        log_finished(started)
+
+
+async def recover_on_start(
+    background_jobs: BackgroundJobs, settings: Settings, stop: StopSignal
+) -> None:
+    """Открытия сделок из бота, прерванные рестартом (вход ушёл без ответа,
+    исполнен без подтверждённого стопа), и действия этапа 4, прерванные
+    посреди «Да» (B.9, только чтение биржи), — до поллинга и до первого цикла.
+    Сигнал остановки между шагами — следующий шаг не начинается (его дело
+    возьмёт следующий старт)."""
+    if not settings.background_jobs_enabled:
+        return
+    if stop.is_set():
+        return
+    try:
+        await background_jobs.openings.run()
+    except Exception:
+        logger.exception("Восстановление открытий при старте упало — повторит цикл")
+    if stop.is_set():
+        return
+    try:
+        await background_jobs.recover_actions()
+    except Exception:
+        logger.exception("Восстановление действий при старте упало — повторит цикл")
+
+
+async def shutdown(
+    background_jobs: BackgroundJobs,
+    inflight: InFlight,
+    closers: Sequence[tuple[str, Callable[[], Awaitable[None]]]],
+    *,
+    timeout: float = BOT_SHUTDOWN_DRAIN_SECONDS,
+) -> None:
+    """Порядок: новых циклов нет → ожидание обработчиков, циклов и быстрых
+    повторов тревоги общим сроком → отмена не уложившихся, пока Redis и БД
+    открыты (их finally снимает локи) → только потом ресурсы."""
+    background_jobs.pause()
+    await drain(inflight, background_jobs.alarm_retries(), timeout=timeout)
+    await close_all(closers)
 
 
 def main() -> None:

@@ -15,6 +15,7 @@ from collections.abc import Awaitable, Callable
 from decimal import Decimal
 
 from app.core.logging import get_logger
+from app.core.shutdown import CYCLE, InFlight
 
 logger = get_logger(__name__)
 
@@ -36,7 +37,8 @@ def fmt_decimal(value: Decimal | None) -> str:
 
 
 def job_wrapper(
-    name: str, func: Callable[[], Awaitable[None]], *, quiet: bool = False
+    name: str, func: Callable[[], Awaitable[None]], *, quiet: bool = False,
+    inflight: InFlight | None = None,
 ) -> Callable[[], Awaitable[None]]:
     """Оборачивает job логированием начала/конца цикла и перехватом исключений.
 
@@ -46,10 +48,20 @@ def job_wrapper(
 
     quiet — начало/конец цикла на DEBUG (reconciler: цикл раз в минуту, на
     INFO он сам пишет только действия). Падение — ERROR всегда.
+
+    inflight — учёт цикла в полёте для мягкой остановки (app/core/shutdown.py):
+    идущий цикл доживает до конца, а не отменяется под закрытой БД.
     """
     level = logging.DEBUG if quiet else logging.INFO
 
     async def wrapped() -> None:
+        if inflight is None:
+            await run_logged()
+            return
+        with inflight.track(CYCLE, name):
+            await run_logged()
+
+    async def run_logged() -> None:
         started = time.monotonic()
         # Имя job'ы — в самом тексте сообщения, а не только в extra: при
         # LOG_JSON=false (как на проде) форматтер печатает только message,

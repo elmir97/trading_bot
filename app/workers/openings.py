@@ -133,6 +133,11 @@ class OpeningsWorker:
         finally:
             self._alarm_tasks.pop(opening_id, None)
 
+    def alarm_tasks(self) -> dict[asyncio.Task[None], int]:
+        """Быстрые повторы в полёте — мягкая остановка ждёт их общим сроком."""
+        return {task: opening_id for opening_id, task in self._alarm_tasks.items()
+                if not task.done()}
+
     async def close(self) -> None:
         """Остановка бота: незавершённые повторы снимаются (их дело возьмёт
         восстановление при старте)."""

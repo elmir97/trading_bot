@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -26,6 +27,7 @@ from app.api.routes import router
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger, setup_logging
 from app.core.security import SecretCipher
+from app.core.shutdown import log_finished
 from app.database.session import Database
 from app.services.exchange_factory import ExchangeFactory, SharedHttp
 from app.workers.openings import OpeningsWorker
@@ -106,12 +108,16 @@ def create_app(state: ApiState | None = None) -> FastAPI:
         try:
             yield
         finally:
+            # План 27.10: время — от начала lifespan-остановки; ожидание
+            # запросов uvicorn (--timeout-graceful-shutdown) идёт до неё.
+            started = time.monotonic()
             await drain(built)
             await worker.close()   # повторы защиты — дальше цикл бота
             await built.bot.session.close()
             await built.factory.aclose()
             await built.redis.aclose()
             await built.db.dispose()
+            log_finished(started)
 
     app = FastAPI(
         title="trading_bot Mini App API", lifespan=lifespan,
