@@ -366,6 +366,38 @@ def test_new_level_dashed_on_chart() -> None:
     assert 'if (kind === "new-take") return { color: colors.blue, lineStyle: S.Dashed };' in chart
 
 
+def test_result_drops_dashed_new_level() -> None:
+    """К2 (#49–#51): после итога пунктира «новый» нет — карточка и превью обнулены до
+    перерисовки, иначе `drawLines` рисует `card || preview` до закрытия панели."""
+    result = _body(_js("actions.js"), "function result(view, serverText) {")
+    assert "card = null;" in result and "preview = null;" in result
+    assert result.index("preview = null;") < result.index("drawLines();")
+    assert result.index("card = null;") < result.index("drawLines();")
+
+
+def test_close_all_done_shows_closed_not_gone() -> None:
+    """К2 (27.10, #62): «Закрыть всё» DONE — «✅ Позиция закрыта» и «К позициям»; экран не
+    грузится и не опрашивается (сервер ответил бы «Позиции … на бирже нет» + «Повторить»)."""
+    js = _js("actions.js")
+    assert 'export const CLOSED_TEXT = "✅ Позиция закрыта";' in js
+    result = _body(js, "function result(view, serverText) {")
+    branch = _body(result, 'if (view.status === "DONE" && code === "cf") {')
+    assert "positionClosed();" in branch and "return;" in branch
+    assert result.index('setAction("К позициям"') < result.index("positionClosed();")
+    assert result.index("positionClosed();") < result.index("loadInfo();")
+    closed = _body(js, "function positionClosed() {")
+    for part in ("closed = true;", "gen += 1;", "stopInfo();", "cancelButton(null);",
+                 "showState(CLOSED_TEXT);"):
+        assert part in closed, part
+    assert "retry: true" not in closed
+    # Опрос, возврат на вкладку, refresh и «Повторить» — не перезагружают закрытую позицию.
+    load = _body(js, "async function loadInfo() {")
+    assert load.splitlines()[1].strip() == "if (closed) return;"
+    tick = _body(js, "async function infoTick()")
+    assert "if (!active || closed || document.hidden) return;" in tick
+    assert "closed = false;" in _body(js, "open(next) {")
+
+
 def test_leave_releases_everything() -> None:
     js = _js("actions.js")
     leave = _body(js, "leave() {")

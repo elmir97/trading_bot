@@ -130,6 +130,7 @@ STATE_JS = """(() => {
     acts: shown('screen-actions') ? {
       title: text('actions-title'),
       state: shown('actions-state') ? text('actions-state-text') : null,
+      retry: shown('actions-retry'),
       chat: shown('actions-chat'),
       body: shown('actions-body'),
       mark: text('actions-mark'),
@@ -2797,6 +2798,119 @@ async def act_disabled(page: Page, url: str) -> None:
     page.expect(links == ["https://t.me/testbot?start=pos-XRP-USDT-L"], f"открыто: {links}")
     page.expect(not _act_cards(page, since) and not _act_previews(page, since),
                 "после 403 ушли действия")
+
+
+def _act_declines(page: Page, since: float = 0.0) -> list[ApiRequest]:
+    return [r for r in page.api("/api/actions/", method="POST", since=since)
+            if r.path.endswith("/decline")]
+
+
+def _new_lines(s: dict[str, Any]) -> list[str]:
+    return [x for x in (_acts(s).get("lines") or []) if x.startswith("new-")]
+
+
+def _act_final(s: dict[str, Any]) -> bool:
+    a = _acts(s)
+    return a.get("main") == "К позициям" and bool(a.get("panel"))
+
+
+async def _stop_chip_card(page: Page) -> str:
+    """Чип стопа 1% → превью → карточка; уровень — из пунктира «новый» карточки."""
+    await page.click('#actions-grid [data-code="sl"]')
+    await page.click('#actions-chips [data-chip="1"]')
+    await page.wait_for(lambda s: (_acts(s).get("main") or "").startswith("Перенести стоп"), 6,
+                        "превью чипа 1%")
+    await _press_main(page, False)
+    s = await page.wait_for(_card_ready(False), 10, "карточка переноса")
+    new = _new_lines(s)
+    page.expect(len(new) == 1 and new[0].startswith("new-stop:"), f"пунктир карточки: {new}")
+    return new[0].removeprefix("new-stop:") if new else ""
+
+
+@scenario("act_result_lines", "5: после итога пунктира «новый» нет — FAILED: ни пунктира, ни линии "
+                              "на уровне; DONE: стоп сплошной на новом уровне")
+async def act_result_lines(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(preset="single", rules=[
+        Rule("/confirm", "status", method="POST", times=1,
+             body=_result("FAILED", final=True, text="❌ Стоп не перенесён: биржа отказала."))]))
+    await _to_actions(page)
+    level = await _stop_chip_card(page)
+    # Экран после итога не отвечает (медленная сеть): пунктир снимает сам итог, а не
+    # перерисовка по ответу GET …/actions.
+    hang = page.intercept(Rule(f"/api/positions/{SYMBOL}/LONG/actions", "hang", method="GET"))
+    await _press_main(page, False)
+    s = await page.wait_for(_act_final, 10, "итог FAILED")
+    page.expect(not _new_lines(s), f"FAILED: пунктир сразу после итога: {_new_lines(s)}")
+    await page.pump(1.5)
+    s = await page.state()
+    page.expect(not _new_lines(s) and f"stop:{level}" not in (_acts(s).get("lines") or []),
+                f"FAILED: линии без ответа экрана: {_acts(s).get('lines')}")
+    page.rules.remove(hang)
+    await page.click("#actions-cancel")
+    await page.wait_for(lambda s: not _acts(s).get("panel"), 5, "панель закрыта")
+
+    level = await _stop_chip_card(page)
+    await _press_main(page, False)
+    s = await page.wait_for(_act_done, 20, "итог DONE")
+    page.expect(not _new_lines(s), f"DONE: пунктир сразу после итога: {_new_lines(s)}")
+    s = await page.wait_for(lambda s: f"stop:{level}" in (_acts(s).get("lines") or []), 8,
+                            f"стоп {level} линией позиции")
+    page.expect(not _new_lines(s), f"DONE: пунктир после обновления: {_new_lines(s)}")
+    page.expect(len(_act_confirms(page)) == 2, f"/confirm: {len(_act_confirms(page))}, ждали 2")
+
+
+@scenario("act_close_all", "5: «Закрыть всё» → «✅ Позиция закрыта» и «К позициям», без «Позиции "
+                           "нет» и «Повторить»; опрос и возврат на вкладку его не меняют")
+async def act_close_all(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(native=True, preset="single"))
+    await _to_actions(page)
+    await _open_card(page, "cf", True)
+    await _press_main(page, True)
+    s = await page.wait_for(lambda s: _acts(s).get("state") is not None
+                            and _main(s, True) == "К позициям", 20, "итог «Закрыть всё»")
+    done = page.now()
+    a = _acts(s)
+    page.expect(a.get("state") == "✅ Позиция закрыта", f"состояние экрана: {a.get('state')!r}")
+    page.expect(not a.get("retry") and not a.get("chat") and not a.get("body"),
+                f"«Повторить» {a.get('retry')}, чат {a.get('chat')}, тело {a.get('body')}")
+    page.expect("Закрыто 195" in (a.get("rows") or ""), f"итог в панели: {a.get('rows')!r}")
+    page.expect(a.get("cancel") is None, f"вторая кнопка: {a.get('cancel')!r}")
+    await page.pump(6)                           # дольше паузы опроса экрана (5 с)
+    await page.set_hidden(True)
+    await page.pump(0.5)
+    await page.set_hidden(False)
+    await page.pump(1.5)
+    s = await page.state()
+    page.expect(_acts(s).get("state") == "✅ Позиция закрыта" and not _acts(s).get("retry"),
+                f"после опроса и возврата: {_acts(s).get('state')!r}, "
+                f"«Повторить» {_acts(s).get('retry')}")
+    info = [r for r in page.api("/api/positions/", since=done) if r.path.endswith("/actions")]
+    page.expect(not info, f"экран опрашивается после закрытия: {len(info)}")
+    page.expect(len(_act_confirms(page)) == 1, f"/confirm: {len(_act_confirms(page))}, ждали 1")
+    await _press_main(page, True)
+    await page.wait_for(lambda s: "screen-positions" in s["screens"], 8, "«К позициям»")
+
+
+@scenario("act_decline", "5: «Отмена» на карточке — один POST decline, 0 /confirm, панель "
+                         "закрыта, экран на месте")
+async def act_decline(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(preset="single"))
+    await _to_actions(page)
+    s = await _open_card(page, "c25", False)
+    page.expect(_acts(s).get("cancel") == "Отмена", f"кнопка: {_acts(s).get('cancel')!r}")
+    await page.click("#actions-cancel")
+    s = await page.wait_for(lambda s: not _acts(s).get("panel") and _acts(s).get("main") is None,
+                            5, "панель закрыта")
+    await page.pump(1.0)
+    declines = _act_declines(page)
+    page.expect(len(declines) == 1, f"POST decline: {len(declines)}, ждали 1")
+    cards = _act_cards(page)
+    page.expect(bool(declines) and bool(cards)
+                and declines[0].path.startswith("/api/actions/"), f"decline: {declines}")
+    page.expect(not _act_confirms(page), f"/confirm: {len(_act_confirms(page))}, ждали 0")
+    s = await page.state()
+    page.expect(bool(_acts(s).get("body")) and _acts(s).get("state") is None,
+                f"экран после отмены: тело {_acts(s).get('body')}, {_acts(s).get('state')!r}")
 
 
 def _design_screen(data: Any) -> Any:

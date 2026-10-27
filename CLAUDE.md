@@ -209,11 +209,13 @@ python -m scripts.miniapp_dev [--port 8765]
   подменяется через `Fetch` (свой статус, правка ответа, обрыв, зависание, `exact` — путь целиком) — следы своих
   правил замечанием не считаются. SDK с telegram.org не загрузился (сеть) — сценарий прерывается с этим текстом,
   повторить; так же `wait_for`, если посреди сценария показан `screen-sdk`. Стенд вне Telegram — initData-заглушка в хеше (`#tgWebAppData=…`, `page_url`), без неё — экран «Открой Mini
-  App из бота» (`no_init_data`, `Setup(init_data=False)`); `me_502` — прокси без api (502 без JSON). `all` (75, 26.10); exit 0/1/2 как выше. Новый экран — новый сценарий там же.
+  App из бота» (`no_init_data`, `Setup(init_data=False)`); `me_502` — прокси без api (502 без JSON). `all` (78, 27.10); exit 0/1/2 как выше. Новый экран — новый сценарий там же.
   Экран 5 (действия с позицией, 5.3): `act_be_disabled`, `act_stop_preview` (5 правок → 1 превью, чип — строка
   `level_percent`), `act_card_timer` (ttl, часы телефона −2 ч), `act_confirm_done` (демо — без `showConfirm`),
   `act_pending` (2 с, скрытая вкладка — пауза), `act_busy`, `act_risk_increase`, `act_double`, `act_double_old`,
-  `act_network_drop`, `act_live`, `act_dry_run`, `act_404`, `act_disabled` (выключатель → в чат; 403 на экране),
+  `act_network_drop`, `act_live`, `act_dry_run`, `act_404`, `act_disabled` (выключатель → в чат; 403 на экране);
+  К2 (27.10): `act_result_lines` (после итога пунктира нет, FAILED — с зависшим `GET …/actions`), `act_close_all` («✅ Позиция
+  закрыта», экран не опрашивается), `act_decline` («Отмена» → один decline, 0 `/confirm`),
   `design_actions` (числа ответа как есть). **Для `act_*`/`design_actions` и `--shot actions` стенд — с
   `MINIAPP_ACTIONS_ENABLED=true` и `EXEC_DRY_RUN=false`** (иначе сценарий прерывается с этим текстом); `pos_list`,
   `pos_chat`, `design_positions` сами выключают действия патчем `/api/me` (проверяют путь «в чат»). Перехват запроса,

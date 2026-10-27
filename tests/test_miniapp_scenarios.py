@@ -379,6 +379,8 @@ def test_registry_covers_queue_scenarios() -> None:
         "act_pending", "act_busy", "act_risk_increase", "act_double", "act_double_old",
         "act_network_drop", "act_live", "act_dry_run", "act_404", "act_disabled",
         "design_actions",
+        # К2 (27.10): итог без пунктира, «Закрыть всё», «Отмена» на карточке
+        "act_result_lines", "act_close_all", "act_decline",
     }
     assert [s.name for s in ms.select("all")] == list(ms.SCENARIOS)
     assert ms.select("poll") == [ms.SCENARIOS["poll"]]

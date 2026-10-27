@@ -53,6 +53,7 @@ const NAMES = {
   c25: "Закрыть 25%", c50: "Закрыть 50%", cf: "Закрыть всё",
 };
 const EXPIRED_TEXT = "⌛ Карточка устарела — цены могли уйти. Пересчитай.";
+export const CLOSED_TEXT = "✅ Позиция закрыта";
 const CANDLES_INTERVAL = "5m";
 
 function $(id) {
@@ -153,6 +154,7 @@ export function createActionsScreen({ api, tg, me, onBack, onFatal }) {
   let infoTimer = null;
   let infoController = null;
   let failures = 0;
+  let closed = false;        // «Закрыть всё» исполнено: позиции нет — итог, не «на бирже нет»
 
   let panelGen = 0;          // панель: превью, карточка, «Да», опрос итога
   let mode = "idle";         // idle | edit | loading | card | sending | checking | result | expired | refused
@@ -306,6 +308,7 @@ export function createActionsScreen({ api, tg, me, onBack, onFatal }) {
   }
 
   async function loadInfo() {
+    if (closed) return;
     stopInfo();
     const myGen = ++gen;
     failures = 0;
@@ -350,7 +353,7 @@ export function createActionsScreen({ api, tg, me, onBack, onFatal }) {
 
   async function infoTick() {
     infoTimer = null;
-    if (!active || document.hidden) return;
+    if (!active || closed || document.hidden) return;
     const myGen = gen;
     infoController = new AbortController();
     try {
@@ -667,6 +670,10 @@ export function createActionsScreen({ api, tg, me, onBack, onFatal }) {
   function result(view, serverText) {
     stopTimers();
     mode = "result";
+    // Итог — пунктира «новый» нет: уровень встал (линия позиции) или не встал (линии нет).
+    card = null;
+    preview = null;
+    drawLines();
     el.timer.hidden = true;
     showText(serverText || view.text);
     status("");
@@ -674,10 +681,24 @@ export function createActionsScreen({ api, tg, me, onBack, onFatal }) {
       tg.HapticFeedback.notificationOccurred(view.status === "DONE" ? "success" : "error");
     }
     setAction("К позициям", () => onBack());
-    cancelButton("Закрыть");
     backAllowed(true);
+    if (view.status === "DONE" && code === "cf") {
+      positionClosed();
+      return;
+    }
+    cancelButton("Закрыть");
     // Позиция изменилась: экран и линии — заново.
     loadInfo();
+  }
+
+  // Позицию закрыло наше «Закрыть всё»: экран не грузим и не опрашиваем — сервер ответил бы
+  // «Позиции … на бирже нет» с «Повторить», а это читается как ошибка.
+  function positionClosed() {
+    closed = true;
+    gen += 1;
+    stopInfo();
+    cancelButton(null);
+    showState(CLOSED_TEXT);
   }
 
   // Карточка снова ждёт «Да» (лок занят, ошибка, «Не дошло»): отсчёт — к тому же сроку.
@@ -936,6 +957,7 @@ export function createActionsScreen({ api, tg, me, onBack, onFatal }) {
     open(next) {
       target = next;
       info = null;
+      closed = false;
     },
     enter() {
       if (active || !target) return;
