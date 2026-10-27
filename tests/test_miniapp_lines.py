@@ -30,7 +30,10 @@ def _js(name: str) -> str:
 def test_lines_drawn_on_visible_series() -> None:
     js = _js("chart.js")
     draw = _body(js, "function drawLines(")
-    assert 'const host = type === "line" ? line : candles;' in draw
+    # К5: серия линий — общая переменная (по ней же прячутся деления под плашками):
+    # присваивание, а не своя `const host` внутри (подстрока совпала бы и с ней — мутация К5).
+    assert re.search(r'^\s*host = type === "line" \? line : candles;$', draw, re.M)
+    assert "const host" not in draw and "let host" not in draw
     assert "host.createPriceLine(" in draw and "candles.createPriceLine" not in draw
     # Снимаются с той серии, на которой нарисованы, а не с текущей.
     assert "for (const [series, priceLine] of priceLines) series.removePriceLine(priceLine);" \
@@ -47,6 +50,24 @@ def test_set_type_redraws_lines() -> None:
     assert set_type.index("type = ") < set_type.index("drawLines();")
     assert 'candles.applyOptions({ visible: type === "candles" });' in set_type
     assert 'line.applyOptions({ visible: type === "line" });' in set_type
+
+
+def test_tick_labels_hidden_under_price_labels() -> None:
+    """К5 (26.10, экран 5 и рынок): подпись деления ближе высоты плашки к уровню линии или
+    последней цене выглядывала из-под неё хвостами — такое деление без подписи. Только
+    деления (tickmarksPriceFormatter), плашки форматирует серия."""
+    js = _js("chart.js")
+    assert re.search(r"export const LABEL_GAP_PX = (\d+);", js).group(1) == "18"
+    assert "tickmarksPriceFormatter: (prices) => tickLabels(prices)," in _body(js, "localization:")
+    options = _body(js, "localization:")
+    assert "priceFormatter:" not in options.replace("tickmarksPriceFormatter", "")
+    ticks = _body(js, "function tickLabels(prices) {")
+    assert "const busy = levels.map((level) => Number(level.price));" in ticks
+    assert "if (last) busy.push(last.close);" in ticks
+    assert "Math.abs(c - y) < LABEL_GAP_PX" in ticks
+    assert 'text: hidden ? "" : price.toFixed(digits)' in ticks
+    assert "digits = next;" in _body(js, "setPrecision(next) {")
+    assert "delete container.tickLabels;" in _body(js, "destroy() {")
 
 
 def test_destroy_clears_lines_attributes() -> None:

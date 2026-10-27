@@ -117,9 +117,40 @@ def test_render_helpers_only_format_server_strings() -> None:
         for banned in ("Number(", "parseFloat", "toFixed", "Math."):
             assert banned not in body, (name, banned)
         assert not _ARITH.search(_strip(body)), name
-    diff = _body(_js("render.js"), "export function actionDiff(")
-    assert "before.get(r.label) !== r.value" in diff
-    assert "Number(" not in diff and "Math." not in diff and not _ARITH.search(_strip(diff))
+    render = _js("render.js")
+    for name in ("export function actionDiff(", "function diffLabel(", "function diffValue("):
+        body = _body(render, name)
+        assert "Number(" not in body and "Math." not in body and not _ARITH.search(_strip(body))
+
+
+def test_action_diff_only_significant_rows() -> None:
+    """К5 (26.10, владелец): «пересчитано» — только значимое для решения (объём, вход,
+    уровень, что закрываем, риск); mark, комиссии и PnL не сравниваются; у «Риск после» —
+    только доля (equity плывёт с uPnL), строки с тем же видимым смыслом не показываются."""
+    render = _js("render.js")
+    labels = re.search(r"export const DIFF_ACTION_LABELS = \[([^\]]*)\];", render).group(1)
+    assert re.findall(r'"([^"]+)"', labels) == [
+        "Позиция", "Вход", "Стоп", "Тейк", "Риск", "Риск увеличится", "Риск после"]
+    assert 'label.startsWith("Закрыть ")' in _body(render, "function diffLabel(")
+    assert 'label === "Риск после" ? value.split(" от ")[0] : value' in \
+        _body(render, "function diffValue(")
+    diff = _body(render, "export function actionDiff(")
+    assert "preview.rows.filter((r) => diffLabel(r.label))" in diff
+    assert "before.get(r.label) !== diffValue(r.label, r.value)" in diff
+    # Подписи строк карточки сервера — те же, что в списке (Mark и комиссии — вне его).
+    server = (_ROOT / "app" / "api" / "actions.py").read_text(encoding="utf-8")
+    for label in ("Позиция", "Вход", "Mark", "Риск", "Риск увеличится", "Риск после",
+                  "Комиссия", "PnL по mark"):
+        assert f'"{label}"' in server, label
+
+
+def test_actions_header_mark_label() -> None:
+    """К5: цена шапки экрана 5 — mark позиции (на «Позициях» снимок может отличаться на
+    тик — разный момент опроса); подпись «mark» рядом с ценой."""
+    html = (_MINIAPP / "index.html").read_text(encoding="utf-8")
+    screen = html[html.index('id="screen-actions"'):html.index('id="screen-sdk"')]
+    assert '<span class="actions-mark-label">mark</span>' in screen
+    assert screen.index("actions-mark-label") < screen.index('id="actions-mark"')
 
 
 def test_stop_chip_goes_to_server_as_string_percent() -> None:

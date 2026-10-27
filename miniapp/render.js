@@ -177,14 +177,30 @@ function digitsOrDash(value) {
   return value === null || value === undefined ? "—" : groupDigits(value);
 }
 
+// Строки карточки, значимые для решения (К5, владелец 27.10): объём и вход позиции,
+// уровень, что закрываем, риск. Mark, комиссии и PnL плывут вместе с mark — не сравниваем.
+export const DIFF_ACTION_LABELS = ["Позиция", "Вход", "Стоп", "Тейк", "Риск",
+  "Риск увеличится", "Риск после"];
+
+function diffLabel(label) {
+  return DIFF_ACTION_LABELS.includes(label) || label.startsWith("Закрыть ");
+}
+
+// «Риск после» — «0.01% от 84172.80 USDT»: equity плывёт с uPnL, а для решения видна доля —
+// сравниваем и показываем только её (часть до « от »).
+function diffValue(label, value) {
+  return label === "Риск после" ? value.split(" от ")[0] : value;
+}
+
 // Действие с позицией (экран 5): карточка на свежих данных разошлась с превью — «было →
-// стало» по строкам с той же подписью; значения — строки сервера, сравнение строк.
+// стало» по значимым строкам с той же подписью; значения — строки сервера, сравнение строк.
 export function actionDiff(preview, card) {
   if (!preview || preview.refusal || !card || card.refusal) return [];
-  const before = new Map(preview.rows.map((r) => [r.label, r.value]));
+  const before = new Map(preview.rows.filter((r) => diffLabel(r.label))
+    .map((r) => [r.label, diffValue(r.label, r.value)]));
   return card.rows
-    .filter((r) => before.has(r.label) && before.get(r.label) !== r.value)
-    .map((r) => `${r.label}: ${before.get(r.label)} → ${r.value}`);
+    .filter((r) => before.has(r.label) && before.get(r.label) !== diffValue(r.label, r.value))
+    .map((r) => `${r.label}: ${before.get(r.label)} → ${diffValue(r.label, r.value)}`);
 }
 
 // --- «ЗАПИСЬ» подтверждения (Д.5, макет «Подтверждение») -------------------------------

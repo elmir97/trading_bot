@@ -108,6 +108,11 @@ function priceFormat(precision) {
   return { type: "price", precision, minMove: Number(`1e-${precision}`) };
 }
 
+// Высота ценовой плашки на шкале (шрифт 11 + поля): деление ближе к плашке линии или
+// последней цены по вертикали выглядывало из-под неё хвостами («1.5500» под «1.5631») —
+// такое деление не подписываем.
+export const LABEL_GAP_PX = 18;
+
 export function createPriceChart(container, { precision = 4, interval = "5m" } = {}) {
   let colors = themeColors();
   let current = formatters(interval);
@@ -116,6 +121,9 @@ export function createPriceChart(container, { precision = 4, interval = "5m" } =
   let levels = [];            // уровни: [{kind, price, title}] строками сервера
   let priceLines = [];        // [[серия, price line]] — снимать с той, на которой нарисованы
   let type = "candles";
+  let digits = precision;
+  let host = null;            // серия, на которой линии (свечи или «линия»); до серий — null
+  let ticks = [];             // последние подписи делений — для сценариев (--scenario)
 
   const chart = LWC.createChart(container, {
     autoSize: true,
@@ -135,6 +143,8 @@ export function createPriceChart(container, { precision = 4, interval = "5m" } =
     localization: {
       locale: "ru-RU",
       timeFormatter: (time) => current.timeFormatter(time),
+      // Только деления шкалы: плашки линий и последней цены форматирует серия.
+      tickmarksPriceFormatter: (prices) => tickLabels(prices),
     },
     handleScale: { axisPressedMouseMove: { time: true, price: false } },
   });
@@ -148,6 +158,36 @@ export function createPriceChart(container, { precision = 4, interval = "5m" } =
     color: colors.ink, lineWidth: 2, visible: false, autoscaleInfoProvider,
     priceFormat: priceFormat(precision), lastValueVisible: true, priceLineVisible: true,
   });
+
+  host = candles;
+
+  // Подписи делений: ближе LABEL_GAP_PX к плашке (уровень линии или последняя цена) — пусто.
+  function tickLabels(prices) {
+    const busy = levels.map((level) => Number(level.price));
+    if (last) busy.push(last.close);
+    const covered = host ? busy.map((p) => host.priceToCoordinate(p)).filter((y) => y !== null)
+      : [];
+    ticks = prices.map((price) => {
+      const y = host ? host.priceToCoordinate(price) : null;
+      const hidden = y !== null && covered.some((c) => Math.abs(c - y) < LABEL_GAP_PX);
+      return { price, y, text: hidden ? "" : price.toFixed(digits) };
+    });
+    return ticks.map((t) => t.text);
+  }
+
+  // Для сценариев (--scenario): подписи делений (текст — последнего форматирования,
+  // координата — сейчас: не пересчитались после смены линий — видно) и координаты плашек.
+  // Серия — своя, по видимому типу, а не `host` форматтера: иначе ошибка в `host` не видна.
+  container.tickLabels = () => {
+    const shown = type === "line" ? line : candles;
+    const y = (p) => shown.priceToCoordinate(p);
+    return {
+      type,
+      ticks: ticks.map((t) => ({ ...t, y: y(t.price) })),
+      labels: [...levels.map((level) => Number(level.price)), ...(last ? [last.close] : [])]
+        .map(y),
+    };
+  };
 
   // Для сценариев (--scenario): какие уровни сейчас в видимом диапазоне цены.
   container.levelsInView = () => {
@@ -176,7 +216,7 @@ export function createPriceChart(container, { precision = 4, interval = "5m" } =
 
   function drawLines() {
     for (const [series, priceLine] of priceLines) series.removePriceLine(priceLine);
-    const host = type === "line" ? line : candles;
+    host = type === "line" ? line : candles;
     priceLines = levels.map((level) => [host, host.createPriceLine({
       price: Number(level.price), title: level.title, lineWidth: 1, axisLabelVisible: true,
       ...lineStyle(level.kind, colors),
@@ -196,6 +236,7 @@ export function createPriceChart(container, { precision = 4, interval = "5m" } =
       chart.applyOptions({ timeScale: { timeVisible: next !== "1d" } });
     },
     setPrecision(next) {
+      digits = next;
       candles.applyOptions({ priceFormat: priceFormat(next) });
       line.applyOptions({ priceFormat: priceFormat(next) });
     },
@@ -243,6 +284,7 @@ export function createPriceChart(container, { precision = 4, interval = "5m" } =
       delete container.dataset.lines;
       delete container.dataset.linesOn;
       delete container.levelsInView;
+      delete container.tickLabels;
       chart.remove();
     },
   };

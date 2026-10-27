@@ -2913,6 +2913,105 @@ async def act_decline(page: Page, url: str) -> None:
                 f"экран после отмены: тело {_acts(s).get('body')}, {_acts(s).get('state')!r}")
 
 
+# К5: высота плашки шкалы — как LABEL_GAP_PX в miniapp/chart.js (тест сверяет).
+TICK_GAP_PX = 18
+TICKS_JS = ("(() => {{ const b = document.getElementById('{box}');"
+            " return b && b.tickLabels ? b.tickLabels() : null; }})()")
+
+
+def _tick_issues(data: Any, where: str) -> list[str]:
+    """Видимая подпись деления ближе TICK_GAP_PX к плашке линии или последней цены."""
+    if not data:
+        return [f"{where}: подписей делений нет (tickLabels)"]
+    labels = [y for y in data.get("labels") or [] if y is not None]
+    shown = [t for t in data.get("ticks") or [] if t.get("text") and t.get("y") is not None]
+    issues = [] if len(shown) >= 2 else [f"{where}: видимых подписей делений {len(shown)}"]
+    for t in shown:
+        near = [round(abs(t["y"] - y), 1) for y in labels if abs(t["y"] - y) < TICK_GAP_PX]
+        if near:
+            issues.append(f"{where}: деление {t['text']} в {near} px от плашки")
+    return issues
+
+
+async def _expect_ticks(page: Page, box: str, where: str) -> None:
+    for issue in _tick_issues(await page.js(TICKS_JS.format(box=box)), where):
+        page.expect(False, issue)
+
+
+@scenario("chart_tick_labels", "К5: подписи делений шкалы не выглядывают из-под плашек линий и "
+                               "цены — рынок, экран 5, экран 5 с пунктиром превью")
+async def chart_tick_labels(page: Page, url: str) -> None:
+    # single: у LONG один стоп — «Перенести стоп» активна (у hedge их два).
+    await open_page(page, url, Setup(preset="single"))
+    await page.wait_for(lambda s: len(_lines(s)) >= 3, 10, "линии позиции на рынке")
+    await page.pump(1.0)
+    await _expect_ticks(page, "market-chart", "рынок")
+    # Тип «Линия»: линии и плашки на другой серии — деления прячутся по ней же.
+    await page.click('#market-types [data-type="line"]')
+    await page.wait_for(lambda s: s["lines_on"] == "line", 5, "линии на «линии»")
+    await page.pump(1.0)
+    data = await page.js(TICKS_JS.format(box="market-chart"))
+    page.expect(bool(data) and data.get("type") == "line",
+                f"тип графика: {data and data.get('type')}")
+    for issue in _tick_issues(data, "рынок, «линия»"):
+        page.expect(False, issue)
+    await page.click('#market-types [data-type="candles"]')
+    await page.wait_for(lambda s: s["lines_on"] == "candles", 5, "обратно на свечи")
+    await _to_actions(page)
+    await page.pump(1.0)
+    await _expect_ticks(page, "actions-chart", "экран 5")
+    await page.click('#actions-grid [data-code="sl"]')
+    await page.click('#actions-chips [data-chip="1"]')
+    await page.wait_for(lambda s: any(x.startswith("new-stop:") for x in _new_lines(s)), 6,
+                        "пунктир превью")
+    await page.pump(0.5)
+    await _expect_ticks(page, "actions-chart", "экран 5, пунктир превью")
+
+
+def _card_noise(data: Any) -> Any:
+    """Карточка разошлась с превью только шумом: mark, комиссия, equity в «Риск после»."""
+    for row in data["card"]["rows"]:
+        if row["label"] == "Mark":
+            row["value"] = "1.4999"
+        elif row["label"].startswith("Комиссия"):
+            row["value"] = "≈9.99 USDT"
+        elif row["label"] == "Риск после":
+            row["value"] = row["value"].split(" от ")[0] + " от 1499.37 USDT"
+    return data
+
+
+def _card_risk(data: Any) -> Any:
+    for row in data["card"]["rows"]:
+        if row["label"] == "Риск":
+            row["value"] = "9.99 USDT (1.25R)"
+    return data
+
+
+@scenario("act_diff_noise", "К5: «пересчитано» — без mark, комиссии и equity; разошёлся риск — "
+                            "ровно его строка")
+async def act_diff_noise(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(preset="single", rules=[
+        Rule("/api/actions", "patch", method="POST", exact=True, patch=_card_noise, times=1)]))
+    await _to_actions(page)
+    await _stop_chip_card(page)
+    s = await page.state()
+    page.expect("1.4999" in (_acts(s).get("rows") or ""), "подмена карточки не применилась")
+    page.expect(_acts(s).get("diff") is None,
+                f"блок «пересчитано» на шуме: {_acts(s).get('diff')!r}")
+    await page.click("#actions-cancel")
+    await page.wait_for(lambda s: not _acts(s).get("panel"), 5, "панель закрыта")
+    await page.pump(1.1)          # decline и карточка — одно окно 1/с (app/api/ratelimit.py)
+    page.intercept(Rule("/api/actions", "patch", method="POST", exact=True, patch=_card_risk,
+                        times=1))
+    await _stop_chip_card(page)
+    s = await page.state()
+    diff = _acts(s).get("diff") or ""
+    # Одна строка (значение «Риск» само «было → стало»): только риск, без mark и комиссии.
+    page.expect(diff.startswith("Риск: ") and diff.endswith("→ 9.99 USDT (1.25R)")
+                and "\n" not in diff.strip() and "Mark" not in diff and "Комиссия" not in diff,
+                f"«пересчитано» при другом риске: {diff!r}")
+
+
 def _design_screen(data: Any) -> Any:
     """Экран действий: числа подменены — страница обязана показать строки сервера как есть
     (разряды — только в показе), без пересчёта."""

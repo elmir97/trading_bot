@@ -381,6 +381,8 @@ def test_registry_covers_queue_scenarios() -> None:
         "design_actions",
         # К2 (27.10): итог без пунктира, «Закрыть всё», «Отмена» на карточке
         "act_result_lines", "act_close_all", "act_decline",
+        # К5 (27.10): подписи шкалы под плашками, «пересчитано» без шума
+        "chart_tick_labels", "act_diff_noise",
     }
     assert [s.name for s in ms.select("all")] == list(ms.SCENARIOS)
     assert ms.select("poll") == [ms.SCENARIOS["poll"]]
@@ -440,6 +442,12 @@ def test_scenarios_not_in_docker_image() -> None:
     root = Path(__file__).resolve().parents[1]
     ignored = (root / ".dockerignore").read_text(encoding="utf-8").split()
     assert "scripts/miniapp_scenarios.py" in ignored
+
+
+def test_tick_gap_matches_chart() -> None:
+    chart = (Path(__file__).resolve().parents[1] / "miniapp" / "chart.js").read_text(
+        encoding="utf-8")
+    assert f"export const LABEL_GAP_PX = {ms.TICK_GAP_PX};" in chart
 
 
 async def test_exact_rule_matches_path_not_prefix() -> None:

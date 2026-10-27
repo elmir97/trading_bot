@@ -912,9 +912,19 @@ main {
 .actions-price {
   display: flex;
   justify-content: space-between;
-  align-items: baseline;
+  align-items: last baseline;     /* PnL — по строке цены, не по подписи «mark» над ней */
   gap: 12px;
   margin: 12px 0 0;
+}
+
+/* Подпись «mark»: цена шапки — mark позиции, а не последняя сделка (К5, 27.10). Над ценой,
+   не перед ней: на 320 px строкой она переносила PnL на вторую строку. */
+.actions-mark-box { display: flex; flex-direction: column; }
+.actions-mark-label {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.2;
 }
 
 .actions-mark {
