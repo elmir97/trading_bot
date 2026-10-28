@@ -43,6 +43,12 @@ DATABASE_URL=postgresql+asyncpg://test:test@localhost:5432/trading_bot_test
 **Прогон зелёный только при нуле skipped.** Без `DATABASE_URL` молча
 пропускается ~115 интеграционных тестов, и счёт врёт.
 
+**Части гейта — только в переднем плане, по одной (владелец 28.10).** Полный pytest — частями (списки файлов
+part1..6; объединение = файлы collect, сумма passed = collect), каждая часть — отдельным вызовом в переднем
+плане, не фоном; перед каждой — свободная память в отчёт, < 300 МБ — стоп и доклад. 28.10 фоновый прогон снят
+системой по нехватке памяти, а скрипт частей пережил снятие оболочки и шёл дальше без родителя (бэклог: скрипт
+гейта должен умирать вместе с оболочкой). Пик части 28.10 — 290–355 МБ (+ до 270 МБ дочерних процессов).
+
 Ориентир на 12.10.2026 (код деплоя 6, A.4): 1643 passed, 0 skipped, 0 failed; smoke 102/102; mypy 60.
 
 Число тестов в этом файле — ориентир на момент записи, а не факт. Перед
@@ -341,6 +347,8 @@ Remote `origin` — приватный резервный репозиторий
    3. `docker compose restart -t 40 bot` → дождаться «бот запущен» в логе; затем `docker compose restart -t 60 api` →
       api healthy (по одному, не вместе)
    4. Проверка по каждому: в `logs/bot.log` / `logs/api.log` после T0 — «Остановка завершена за X с», **X < срока**
+      (api.log с К7 — по дате: `awk -F' [|] ' -v t="$(date -u -d "$T0" +'%F %TZ')" '$1 ~ /^20[0-9][0-9]-/ &&
+      $1 >= t' logs/api.log`, раздел D; bot.log — без даты, по `docker logs --since "$T0" trading_bot`)
       (bot — < 40, ожидаемо ~1–2 с без нагрузки; api — < 60); WARNING «не уложились — доведёт восстановление» — флаг;
       код выхода — **0, не 137**: `docker events --since "$T0" --until "$(date -u +%FT%TZ)" --filter event=die
       --filter container=trading_bot --filter container=trading_bot_api --format '{{.Actor.Attributes.name}}
@@ -628,6 +636,15 @@ PY
 строки — `HH:MM:SS | LEVEL | logger | message | extra`, в awk
 разделитель `-F' [|] '`.
 
+`logs/api.log` (К7, с деплоя ~03.11) — **с датой, в UTC, метка `Z`**: `2026-10-28 07:42:42Z | LEVEL |
+logger | message | extra` (не путать с поясом владельца UTC+5). Ширина фиксированная — «с момента T»
+сравнивается строкой: `T=$(date -u -d '24 hours ago' +'%F %TZ')` (или `T0=$(date -u +'%F %TZ')` перед
+рестартом), `awk -F' [|] ' -v t="$T" '$1 ~ /^20[0-9][0-9]-/ && $1 >= t' logs/api.log`. **Проверка года
+обязательна:** строки до деплоя К7 — старый формат `HH:MM:SS` без даты, и строкой «21:00:00» > «2026-…» (без
+неё старые строки с 20–23 ч прошли бы фильтр). Строки трейсбека (без даты в начале) фильтр тоже отсекает —
+`Traceback` считать отдельно, `grep -c`. Ошибки и доступ uvicorn в `api.log` не попадают (свои обработчики,
+`propagate: false`) — они в `docker logs trading_bot_api`.
+
 9. Счётчики по уровням и `уровень + логгер` для WARNING/ERROR; для
    ERROR — до 10 уникальных `message` (без хвоста extra)
 10. `grep -c Traceback`
@@ -650,7 +667,8 @@ PY
     (с `e194bb7`) писал путь входа; с этапа 4 — живые действия с позициями
     (при `EXEC_DRY_RUN=true` строк нет)
 
-12а. С Mini App: `logs/api.log` — счётчики по уровням, `Traceback`; `docker logs --since 24h
+12а. С Mini App: `logs/api.log` за 24 ч (с К7 — по дате, фильтр раздела D, проверка года обязательна) —
+   счётчики по уровням, `Traceback`; `docker logs --since 24h trading_bot_api` — ошибки uvicorn; `docker logs --since 24h
    trading_bot_caddy` — ошибки ACME/TLS. Срок сертификата: `echo | openssl s_client -connect
    app.postfactumtrade.ru:443 -servername app.postfactumtrade.ru 2>/dev/null | openssl x509
    -noout -enddate` — не меньше 30 дней (Caddy продлевает сам); `curl -sI` — заголовки как в

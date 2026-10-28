@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import logging.handlers
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,10 @@ _REDACTED = "***REDACTED***"
 # то, чтобы цикл ошибок с потоком одинаковых записей не забил диск молча.
 _LOG_FILE_MAX_BYTES = 10 * 1024 * 1024
 _LOG_FILE_BACKUP_COUNT = 5
+
+# api.log (К7): дата и «Z» — время UTC, не пояс владельца (UTC+5); фиксированная ширина —
+# «после T0» сравнивается строкой: awk -F' [|] ' -v t="$T0" '$1 >= t'.
+_UTC_DATEFMT = "%Y-%m-%d %H:%M:%SZ"
 
 # Единый источник "что считать полем extra={...}", а не отдельный список у
 # каждого потребителя (SecretRedactingFilter/JsonFormatter/TextFormatter) —
@@ -91,9 +96,16 @@ class JsonFormatter(logging.Formatter):
 
     _RESERVED = _RESERVED_LOG_RECORD_KEYS
 
+    def __init__(self, *, utc: bool = False) -> None:
+        super().__init__()
+        # UTC — метка «+00:00» явно: %z от gmtime на Windows подставил бы местный пояс.
+        self._ts_fmt = "%Y-%m-%dT%H:%M:%S+00:00" if utc else "%Y-%m-%dT%H:%M:%S%z"
+        if utc:
+            self.converter = time.gmtime
+
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
-            "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S%z"),
+            "ts": self.formatTime(record, self._ts_fmt),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
@@ -157,6 +169,7 @@ def setup_logging(
     secrets: tuple[str, ...] = (),
     log_dir: str = "logs",
     log_file: str = "bot.log",
+    utc_date: bool = False,
 ) -> None:
     """Конфигурирует корневой логгер. Вызывать один раз при старте.
 
@@ -164,15 +177,20 @@ def setup_logging(
     пересоздание контейнера — теряется при каждом деплое), и в файл в
     смонтированной ./logs — та переживает пересборку образа, потому что
     живёт на хосте, а не внутри контейнера.
+
+    utc_date (К7, 28.10.2026; api) — время в UTC с датой и явной меткой: текст
+    «2026-10-28 07:42:42Z | …», JSON «…+0000». Без него (бот) — как было: текст
+    «HH:MM:SS» без даты — на этом формате стоит чек-ап D (CLAUDE.md).
     """
-    formatter = (
-        JsonFormatter()
-        if json_output
-        else TextFormatter(
+    if json_output:
+        formatter: logging.Formatter = JsonFormatter(utc=utc_date)
+    else:
+        formatter = TextFormatter(
             "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-            datefmt="%H:%M:%S",
+            datefmt=_UTC_DATEFMT if utc_date else "%H:%M:%S",
         )
-    )
+        if utc_date:
+            formatter.converter = time.gmtime
     # Один фильтр на оба хендлера: секрет не должен просочиться ни туда,
     # ни туда — а не только в тот вывод, который проверили при разработке.
     secret_filter = SecretRedactingFilter(secrets)

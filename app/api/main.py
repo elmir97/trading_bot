@@ -95,9 +95,10 @@ def create_app(state: ApiState | None = None) -> FastAPI:
             yield
             return
         settings = get_settings()
-        # Свой файл: чек-ап читает logs/bot.log, строки API туда не мешаются.
+        # Свой файл: чек-ап читает logs/bot.log, строки API туда не мешаются. Дата в UTC (К7):
+        # проверки «после рестарта» по api.log — по дате, не по одному времени суток.
         setup_logging(level=settings.log_level, json_output=settings.log_json,
-                      secrets=settings.secret_values, log_file="api.log")
+                      secrets=settings.secret_values, log_file="api.log", utc_date=True)
         built, worker = build_state(settings)
         built.bot_username = await read_bot_username(built.bot)
         app.state.api = built
