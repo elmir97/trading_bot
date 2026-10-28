@@ -14,6 +14,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import pytest
+
 from app.database.models.trade import Trade
 from app.exchanges.base import SymbolInfo
 from app.execution.reconciler import ExitFill
@@ -215,4 +217,8 @@ async def test_price_precision_from_symbols_cached_once() -> None:
 async def test_price_precision_failure_is_none_not_error() -> None:
     """Сбой справочника — None (цена как раньше), уведомление о закрытии не теряется."""
     client = _SymbolsClient("k4-precision-fail", fail=True)
-    assert await Reconciler._price_precision(client, "LINK-USDT") is None  # type: ignore[arg-type]
+    try:
+        precision = await Reconciler._price_precision(client, "LINK-USDT")  # type: ignore[arg-type]
+    except Exception as exc:   # проверка, а не голое исключение: прогонщик мутаций (28.10)
+        pytest.fail(f"сбой справочника вышел наружу: {exc!r}")
+    assert precision is None

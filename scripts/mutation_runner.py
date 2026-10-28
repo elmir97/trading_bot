@@ -27,15 +27,20 @@
 - исходник восстанавливается в `finally` с проверкой md5; до записи мутации — журнал во
   временной папке системы: прогонщик убит жёстко — следующий запуск откажется (exit 2),
   `--restore` вернёт файл;
-- исход тестом: CAUGHT — pytest exit 1 с failed, MISSED — exit 0, остальное (exit 2, только errors)
-  — INCONCLUSIVE; исход сценарием: CAUGHT — exit 1 замечанием проверки, MISSED — exit 0; exit 2,
+- исход тестом: CAUGHT — pytest exit 1 с failed и падение на проверке (assert, AssertionError,
+  pytest.fail / «DID NOT RAISE»); BROKEN_MUTANT — мутант сломал код, а не поведение (NameError,
+  ImportError, ModuleNotFoundError, SyntaxError, IndentationError, ошибка сбора — владелец 28.10:
+  такое не «поймана»); иное исключение (RuntimeError, KeyError…) и только errors без признака
+  поломки — INCONCLUSIVE с типом (разобрать руками); MISSED — exit 0; исход сценарием: CAUGHT —
+  exit 1 замечанием проверки, MISSED — exit 0; exit 2,
   «SDK … не загрузился», сбой обвязки (сценарий упал/не уложился, сброс стенда) — INCONCLUSIVE.
 
 Сценарии — при запущенном стенде (`scripts/miniapp_dev.py`), статика читается с диска; стенд, Chrome
 и pytest не параллельно. Эквивалентную мутацию (поведение не меняется) прогонщик не распознаёт — её
 заменяют поведенческой и говорят об этом в отчёте.
 
-Коды выхода: 0 — все CAUGHT; 1 — есть MISSED или INCONCLUSIVE; 2 — прогон не состоялся (спека,
+Коды выхода: 0 — все CAUGHT; 1 — есть MISSED, BROKEN_MUTANT или INCONCLUSIVE; 2 — прогон не
+состоялся (спека,
 журнал оборванного прогона, база не зелёная, стенд не отвечает). В образ не попадает
 (`.dockerignore`).
 """
@@ -48,6 +53,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -65,6 +71,18 @@ JOURNAL = Path(tempfile.gettempdir()) / "trading_bot_mutation_pending.json"
 CAUGHT = "CAUGHT"
 MISSED = "MISSED"
 INCONCLUSIVE = "INCONCLUSIVE"
+BROKEN_MUTANT = "BROKEN_MUTANT"
+
+# Падение на проверке — «поймана»: assert (pytest пишет AssertionError) и pytest.fail /
+# pytest.raises «DID NOT RAISE» (Failed).
+_CHECK_FAILURES = frozenset({"AssertionError", "Failed"})
+# Мутант не загрузился или сослался на несуществующее имя — поломка кода, не поведение.
+_BROKEN_ERRORS = frozenset({"NameError", "ImportError", "ModuleNotFoundError", "SyntaxError",
+                            "IndentationError", "TabError", "UnboundLocalError"})
+# Строка места в трассировке pytest: «tests/test_x.py:12: NameError».
+_TB_PLACE = re.compile(r"^\S[^\n]*:\d+: ([A-Za-z_][\w.]*)$", re.MULTILINE)
+_E_TYPE = re.compile(r"^E\s+([A-Za-z_][\w.]*)(?::|$)", re.MULTILINE)
+_E_ASSERT = re.compile(r"^E\s+assert\b", re.MULTILINE)
 
 # Сценарий прерван не проверкой, а окружением или обвязкой — «пойман» не считается.
 _HARNESS_MARKS = ("SDK telegram.org не загрузился", "SDK Telegram не загрузился",
@@ -108,11 +126,33 @@ class Tests:
         last = lines[-1] if lines else "?"
         if code == 0:
             return Outcome(MISSED, last)
+        kind = failure_type(out)
+        if code == 2 and "ERROR collecting" in out:
+            return Outcome(BROKEN_MUTANT, f"ошибка сбора{f': {kind}' if kind else ''}")
+        if kind in _BROKEN_ERRORS:
+            return Outcome(BROKEN_MUTANT, kind)
         if code == 1 and " failed" in f" {last}":
             first = next((ln.removeprefix("FAILED ") for ln in lines if ln.startswith("FAILED ")),
                          last)
-            return Outcome(CAUGHT, first[:140])
+            if kind in _CHECK_FAILURES:
+                return Outcome(CAUGHT, first[:140])
+            return Outcome(INCONCLUSIVE, f"исключение {kind or '?'} — не проверка: {first[:100]}")
         return Outcome(INCONCLUSIVE, f"exit {code}: {last[:120]}")
+
+
+def failure_type(out: str) -> str | None:
+    """Тип падения в выводе pytest (-x — падение одно): по последней строке места трассировки —
+    в цепочке («During handling of the above exception…») тест валит последнее исключение,
+    исходное печатается первым (28.10: pytest.fail поверх TimeoutExpired); иначе по первой строке
+    «E Тип: …» или «E assert …». Вывод на Windows — с CRLF: без замены «$» строки места не видит."""
+    out = out.replace("\r\n", "\n")
+    places = _TB_PLACE.findall(out)
+    if places:
+        return str(places[-1]).rsplit(".", 1)[-1]
+    m = _E_TYPE.search(out)
+    if m:
+        return m.group(1).rsplit(".", 1)[-1]
+    return "AssertionError" if _E_ASSERT.search(out) else None
 
 
 @dataclass(frozen=True)
@@ -334,7 +374,7 @@ def baseline(mutations: list[Mutation], root: Path, url: str, timeout: float) ->
 def run_all(mutations: list[Mutation], root: Path, url: str, timeout: float,
             journal: Path = JOURNAL) -> dict[str, int]:
     width = max(len(m.name) for m in mutations)
-    counts = {CAUGHT: 0, MISSED: 0, INCONCLUSIVE: 0}
+    counts = {CAUGHT: 0, MISSED: 0, BROKEN_MUTANT: 0, INCONCLUSIVE: 0}
     for m in mutations:
         outcome = run_mutation(m, root, url, timeout, journal)
         counts[outcome.verdict] += 1
@@ -387,7 +427,8 @@ def main(argv: list[str] | None = None, root: Path = ROOT, journal: Path = JOURN
         print(f"✗ Прогон не состоялся: {exc}", file=sys.stderr)
         return 2
     print(f"итог: CAUGHT {counts[CAUGHT]}, MISSED {counts[MISSED]}, "
-          f"INCONCLUSIVE {counts[INCONCLUSIVE]} из {sum(counts.values())}")
+          f"BROKEN_MUTANT {counts[BROKEN_MUTANT]}, INCONCLUSIVE {counts[INCONCLUSIVE]} "
+          f"из {sum(counts.values())}")
     return 0 if counts[CAUGHT] == sum(counts.values()) else 1
 
 
