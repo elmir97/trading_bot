@@ -112,6 +112,8 @@ class FakeExchange:
         self.auto_cancel_on_close = True
         self._seq = 0
         self.fills: dict[str, OrderFill] = {}
+        # Комиссия исполнения закрытия; по умолчанию — прежнее значение (К4: «<0.01» — меньше).
+        self.close_fee = D("0.0234")
         # Деплой 4: ошибки чтения по cid — по одной на вызов, пока не кончатся.
         self.fill_errors: list[Exception] = []
         # Деплой 4, 4.2: статус и поля ответа на POST маркета.
@@ -180,7 +182,7 @@ class FakeExchange:
             self.orders = []
         self.fills[kw["client_order_id"]] = OrderFill(
             oid, kw["client_order_id"], "FILLED", D("1.5600"), kw["quantity"], kw["quantity"],
-            D("0.0234"), {}, NOW,
+            self.close_fee, {}, NOW,
         )
         return OrderResult(oid, kw["client_order_id"], kw["symbol"], kw["side"].value,
                            kw["position_side"], "MARKET", self.post_status, self.post_raw)
@@ -349,7 +351,7 @@ async def test_move_take_four_steps(ctx) -> None:  # type: ignore[no-untyped-def
     assert bridge_kw["client_order_id"] == f"tm{action.id}u{ctx.uid}TB"
     takes = [o for o in ctx.exchange.orders if o.order_type == "TAKE_PROFIT_MARKET"]
     assert [(o.stop_price, o.close_position) for o in takes] == [(D("1.65"), True)]
-    assert action.status is PositionActionStatus.DONE and "Тейк 1.6 → 1.65" in text
+    assert action.status is PositionActionStatus.DONE and "Тейк 1.6000 → 1.6500" in text
 
 
 async def test_set_take_without_old_is_one_order(ctx) -> None:  # type: ignore[no-untyped-def]
@@ -357,7 +359,7 @@ async def test_set_take_without_old_is_one_order(ctx) -> None:  # type: ignore[n
     [kw] = _places(ctx)
     assert kw["close_position"] is True and kw["client_order_id"] == f"tm{action.id}u{ctx.uid}T"
     assert "cancel" not in ctx.exchange.names()
-    assert action.status is PositionActionStatus.DONE and "Тейк 1.65 (на всю позицию)" in text
+    assert action.status is PositionActionStatus.DONE and "Тейк 1.6500 (на всю позицию)" in text
 
 
 async def test_set_take_rounded_closer_on_exchange(ctx) -> None:  # type: ignore[no-untyped-def]
@@ -368,7 +370,7 @@ async def test_set_take_rounded_closer_on_exchange(ctx) -> None:  # type: ignore
     assert action.new_level == D("1.6500") and action.params == {"level": "1.6500"}
     [row] = await _rows(ctx, action.id)
     assert row.trigger_price == D("1.6500")
-    assert action.status is PositionActionStatus.DONE and "Тейк 1.65 (на всю позицию)" in text
+    assert action.status is PositionActionStatus.DONE and "Тейк 1.6500 (на всю позицию)" in text
 
 
 @pytest.mark.parametrize(
@@ -810,6 +812,15 @@ async def test_close_post_not_filled_read_down_stays_unconfirmed(ctx) -> None:  
     assert card.action.status is PositionActionStatus.FAILED
     [row] = [r for r in await _rows(ctx, card.action.id) if r.role is OrderRole.CLOSE]
     assert row.status is OrderStatus.UNKNOWN
+
+
+async def test_close_fee_below_cent_text(ctx) -> None:  # type: ignore[no-untyped-def]
+    """К4 (28.10.2026): комиссия исполнения меньше цента — «<0.01», не «0.00» (текст чата —
+    HTML: «&lt;0.01»)."""
+    ctx.exchange.close_fee = D("0.0042")
+    card = await _card(ctx, PositionActionKind.CLOSE_FULL, {})
+    result = await ctx.service().confirm(card.action.id, message_id=55, risk_confirmed=False)
+    assert "✅ Закрыто 30 по 1.5600 · комиссия &lt;0.01 USDT." in result.text
 
 
 async def test_close_post_filled_read_ok_journals_exit(ctx) -> None:  # type: ignore[no-untyped-def]

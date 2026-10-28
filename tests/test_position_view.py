@@ -120,14 +120,14 @@ class TestRender:
     def test_quantity_order_shows_volume(self) -> None:
         order = _order("STOP_MARKET", "1.47", close_position=False)
         (view,) = build_views([_position()], [order], [], account_mode=DEMO)
-        assert "Стоп: 1.47 (40)" in render_position(view, 4)
+        assert "Стоп: 1.4700 (40)" in render_position(view, 4)
 
     def test_no_orders_and_ladder(self) -> None:
         orders = [_order("STOP_MARKET", "1.50", order_id="a"),
                   _order("STOP_MARKET", "1.45", order_id="b", close_position=False)]
         (view,) = build_views([_position()], orders, [], account_mode=DEMO)
         text = render_position(view, 4)
-        assert "Стоп: 2 ордера: 1.5 (на всю позицию); 1.45 (40)" in text
+        assert "Стоп: 2 ордера: 1.5000 (на всю позицию); 1.4500 (40)" in text
         assert "Тейк: нет" in text
         assert view.stop is None  # лестница — нет «единственного» стопа
 

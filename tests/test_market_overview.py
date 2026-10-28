@@ -255,9 +255,9 @@ class TestRender:
     def test_layout(self) -> None:
         text = render_overview(_overview(), 2, NOW)
         lines = text.splitlines()
-        assert lines[0] == "🔎 <b>BTC-USDT</b> · цена 101.5"
+        assert lines[0] == "🔎 <b>BTC-USDT</b> · цена 101.50"
         assert [ln[:10] for ln in lines[2:5]] == ["<b>H1</b> ", "<b>H4</b> ", "<b>D1</b> "]
-        assert "Сопротивление: 103.5 (H4) · 110 (D1)" in lines
+        assert "Сопротивление: 103.50 (H4) · 110.00 (D1)" in lines
         assert "Поддержка: 98.25 (H4)" in lines
         assert "Funding: +0.0100% · следующее через 3 ч 12 мин" in lines
         assert "Open interest: 908.4 млн USDT" in lines

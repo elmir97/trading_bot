@@ -51,7 +51,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.core.locks import LockBusyError, RedisLock, position_lock_key
 from app.core.logging import get_logger
-from app.core.numfmt import fmt_amount, fmt_price, fmt_qty
+from app.core.numfmt import fmt_fee_html, fmt_price, fmt_qty
 from app.database.models.execution_order import ExecutionOrder
 from app.database.models.position_action import PositionAction
 from app.database.models.trade import TradeFill
@@ -556,7 +556,7 @@ class _Pass:
             f"♻️ После перезапуска бота — {_WHAT[a.kind]} {a.symbol} {a.side.value}: "
             f"действие #{a.id} {CLOSED_AFTER_ALL}\n"
             f"✅ Закрыто {fmt_qty(fill.executed_qty, qp)} по {fmt_price(fill.avg_price, pp)} · "
-            f"комиссия {fmt_amount(fill.fee)} USDT."
+            f"комиссия {fmt_fee_html(fill.fee)} USDT."
         )
 
     async def _journal(self, row: ExecutionOrder) -> None:
@@ -593,7 +593,7 @@ class _Pass:
         if state is Seen.FILLED and fill is not None:
             await self._journal(row)
             text = (f"✅ Закрыто {fmt_qty(fill.executed_qty, qp)} по "
-                    f"{fmt_price(fill.avg_price, pp)} · комиссия {fmt_amount(fill.fee)} USDT.")
+                    f"{fmt_price(fill.avg_price, pp)} · комиссия {fmt_fee_html(fill.fee)} USDT.")
         elif state is None and row.status is OrderStatus.FILLED and row.price is not None:
             # Дочитано «Да» до обрыва (строка полная) — выход в журнал допишет
             # сверка по orderId строки.

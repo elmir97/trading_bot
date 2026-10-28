@@ -852,7 +852,7 @@ async def _run_open_trade(sim, tg, db, settings) -> None:  # type: ignore[no-unt
         await sim.tap("Без тейка")
         await sim.tap("По плану")
         text = await sim.tap("предложено")
-        check("карточка лимита", has(text, "Лимит 2950 · срок 4 ч", "без тейка"), text[:300])
+        check("карточка лимита", has(text, "Лимит 2950.00 · срок 4 ч", "без тейка"), text[:300])
         text = await sim.tap("Отмена")
         check("«Отмена» на карточке", has(text, "ничего не отправлено"), text[:200])
     finally:

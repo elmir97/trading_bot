@@ -359,6 +359,26 @@ async def test_sol_stop_notification_text(ctx) -> None:  # type: ignore[no-untyp
     ]
 
 
+async def test_sol_stop_exit_price_to_symbol_step(ctx) -> None:  # type: ignore[no-untyped-def]
+    """К4 (28.10.2026): справочник инструментов есть (общий кэш процесса) — цена выхода в
+    уведомлении до шага символа («121.6110» при точности 4), путь сверки целиком."""
+    from app.exchanges.base import SymbolInfo
+    from app.market.cache import market_cache
+    from app.market.data import symbols_key
+
+    settings, db, session, user, _demo = ctx
+    await _seed_live(session, user.id)
+    bot = FakeBot()
+    market_cache.set(symbols_key("bingx"), [SymbolInfo("SOL-USDT", 4, 2, D(1), D(5))], 60)
+    try:
+        await _run_reconciler(settings, db, bot)
+    finally:
+        market_cache.invalidate(symbols_key("bingx"))
+
+    [text] = bot.sent
+    assert "Выход: 121.6110 · объём 1362.07" in text.splitlines()
+
+
 async def test_second_run_writes_and_notifies_nothing(ctx) -> None:  # type: ignore[no-untyped-def]
     settings, db, session, user, _demo = ctx
     sol_id, _link_id = await _seed_live(session, user.id)

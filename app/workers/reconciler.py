@@ -43,7 +43,7 @@ from app.bot.keyboards.positions import orphan_keyboard
 from app.core.config import Settings
 from app.core.input_prompt import InputGate
 from app.core.logging import get_logger
-from app.core.numfmt import fmt_amount, fmt_money, fmt_price, fmt_qty
+from app.core.numfmt import fmt_fee_html, fmt_money, fmt_price, fmt_qty
 from app.core.security import SecretCipher
 from app.core.timefmt import closed_at_line
 from app.database.models.execution_order import ExecutionOrder
@@ -110,6 +110,8 @@ from app.execution.settle import (
     settle,
     settleable,
 )
+from app.market.cache import market_cache
+from app.market.data import MarketDataService
 from app.services.exchange_factory import ExchangeFactory
 from app.trading.calculations import risk_per_unit
 from app.trading.enums import (
@@ -640,8 +642,11 @@ class Reconciler:
             return
         if not decision.exits:
             return
+        # До лока строки в _record_exits: справочник может пойти в сеть (раз в час на процесс).
+        precision = await self._price_precision(client, trade.symbol)
         await self._record_exits(
-            ctx, client, trade.id, decision.exits, decision.closes_fully, conditionals, orders
+            ctx, client, trade.id, decision.exits, decision.closes_fully, conditionals, orders,
+            price_precision=precision,
         )
 
     async def _check_open_positions(
@@ -906,6 +911,8 @@ class Reconciler:
         closes_fully: bool,
         conditionals: list[ExecutionOrder],
         history: list[HistoryOrder],
+        *,
+        price_precision: int | None = None,
     ) -> None:
         trades = TradeRepository(ctx.session)
         trade = await trades.lock_for_reconcile(trade_id)
@@ -939,7 +946,9 @@ class Reconciler:
                     kind=exit_fill.kind, dedup_key=f"close:{trade.id}:{exit_fill.order_id}",
                     detail=f"{exit_fill.reason}: {exit_fill.quantity} по {exit_fill.price}",
                 ),
-                self._close_text(trade, exit_fill, ctx.asset, ctx.tz_offset_hours),
+                self._close_text(
+                    trade, exit_fill, ctx.asset, ctx.tz_offset_hours, price_precision
+                ),
             )
         if closes_fully:
             await self._settle_trade(ctx, client, trade, exits, conditionals, history)
@@ -1166,13 +1175,33 @@ class Reconciler:
             await self._discrepancy(ctx, found, resolve_now=True)
 
     @staticmethod
+    async def _price_precision(client: ExchangeClient, symbol: str) -> int | None:
+        """Точность цены выхода для уведомления о закрытии (К4, 28.10.2026): справочник из
+        общего кэша процесса, промах — один запрос в час. Сбой — None: цена выводится как
+        раньше, уведомление о закрытии важнее формата."""
+        try:
+            info = await MarketDataService(client, market_cache).get_symbol_info(
+                symbol, max_attempts=1
+            )
+        except Exception as exc:
+            logger.warning(
+                "Сверка: точность цены не получена — цена выхода без шага",
+                extra={"symbol": symbol, "error": str(exc)},
+            )
+            return None
+        return info.price_precision if info is not None else None
+
+    @staticmethod
     def _close_text(
-        trade: Trade, exit_fill: ExitFill, asset: str, tz_offset_hours: int = 5
+        trade: Trade, exit_fill: ExitFill, asset: str, tz_offset_hours: int = 5,
+        price_precision: int | None = None,
     ) -> str:
         """Уведомление о закрытии — одно для всех видов (стоп/тейк бота,
         вне бота, частичное): время исполнения ордера в поясе пользователя
         (app.core.timefmt), суммы — форматтерами app.core.numfmt; комиссии —
-        fmt_amount (без «+»), PnL — fmt_money (знак несёт смысл)."""
+        fmt_fee_html (без «+», меньше цента — «&lt;0.01»: текст в HTML), PnL — fmt_money
+        (знак несёт смысл); цена выхода — до шага символа, если справочник получен (К4),
+        иначе как раньше."""
         lines = [_CLOSE_TEXT[exit_fill.kind].format(symbol=trade.symbol, side=trade.side.value)]
         if exit_fill.kind is ReconciliationKind.CLOSED_OUTSIDE_BOT:
             reason = _NOTIFY_REASON.get(exit_fill.reason)
@@ -1180,13 +1209,14 @@ class Reconciler:
                 lines.append(reason)
         lines += [
             closed_at_line(exit_fill.executed_at, tz_offset_hours),
-            f"Выход: {fmt_price(exit_fill.price)} · объём {fmt_qty(exit_fill.quantity)}",
-            f"Комиссия выхода: {fmt_amount(exit_fill.fee)} {asset}",
+            f"Выход: {fmt_price(exit_fill.price, price_precision)} · "
+            f"объём {fmt_qty(exit_fill.quantity)}",
+            f"Комиссия выхода: {fmt_fee_html(exit_fill.fee)} {asset}",
         ]
         if trade.status is TradeStatus.CLOSED and trade.pnl is not None:
             lines.append(
                 f"PnL: {fmt_money(trade.pnl)} {asset} · комиссии вход+выход "
-                f"{fmt_amount(trade.fees)} {asset}"
+                f"{fmt_fee_html(trade.fees)} {asset}"
             )
             lines.append(f"📒 Сделка #{trade.id} закрыта в журнале")
         else:

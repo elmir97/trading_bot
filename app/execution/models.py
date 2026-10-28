@@ -123,6 +123,9 @@ class ExecutionRefusalCode(StrEnum):
 class ExecutionRefusal:
     code: ExecutionRefusalCode
     message: str
+    # Короткая подсказка под кнопкой (Mini App, «Стоп в безубыток: доступно, когда mark
+    # выше X»); None — подсказка = message (К4, 28.10.2026).
+    hint: str | None = None
 
 
 def client_order_id(*, notification_id: int, user_id: int, role: OrderRole) -> str:

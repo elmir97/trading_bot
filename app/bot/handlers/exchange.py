@@ -31,7 +31,7 @@ from app.exchanges.base import (
     ExchangeUnavailableError,
     UnsupportedPositionMode,
 )
-from app.market.cache import TTLCache
+from app.market.cache import market_cache
 from app.market.data import MarketDataService
 from app.services.exchange_factory import ExchangeFactory
 from app.services.import_service import HistoryImporter, default_import_range
@@ -40,9 +40,9 @@ from app.trading.risk import tz_offset_for
 router = Router(name="exchange")
 logger = get_logger(__name__)
 
-# Кэш общий на процесс: рыночные данные одинаковы для всех пользователей,
-# а лимиты биржи считаются по IP сервера, а не по аккаунту.
-_market_cache = TTLCache()
+# Кэш общий на процесс (app.market.cache.market_cache): рыночные данные одинаковы для всех
+# пользователей, а лимиты биржи считаются по IP сервера, а не по аккаунту.
+_market_cache = market_cache
 
 T = TypeVar("T")
 

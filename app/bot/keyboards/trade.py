@@ -154,8 +154,9 @@ BOT_TRADE_WARNING = (
 )
 
 
-def trade_card(trade: Trade) -> str:
-    """Подробная карточка сделки."""
+def trade_card(trade: Trade, price_precision: int | None = None) -> str:
+    """Подробная карточка сделки. price_precision — точность цены символа из справочника в
+    кэше (К4, 28.10.2026: цены до шага, «1.6000»); None — как раньше, по порядку величины."""
     lines = [
         f"<b>{trade.symbol} — {trade.side.label}</b>",
         "",
@@ -169,16 +170,17 @@ def trade_card(trade: Trade) -> str:
         # раньше биржи, она откроет дорогу второй позиции. Автозакрытие по
         # факту с биржи — reconciler 15.6.
         lines.extend([BOT_TRADE_WARNING, ""])
-    lines.append(f"Вход: {fmt_price(trade.entry_price)}")
+    pp = price_precision
+    lines.append(f"Вход: {fmt_price(trade.entry_price, pp)}")
     if trade.exit_price is not None:
-        lines.append(f"Выход: {fmt_price(trade.exit_price)}")
+        lines.append(f"Выход: {fmt_price(trade.exit_price, pp)}")
     lines.append(f"Объём: {fmt_qty(trade.quantity)}")
     if trade.leverage > 1:
         lines.append(f"Плечо: {trade.leverage}x")
     if trade.stop_loss is not None:
-        lines.append(f"Стоп: {fmt_price(trade.stop_loss)}")
+        lines.append(f"Стоп: {fmt_price(trade.stop_loss, pp)}")
     if trade.take_profit is not None:
-        lines.append(f"Цель: {fmt_price(trade.take_profit)}")
+        lines.append(f"Цель: {fmt_price(trade.take_profit, pp)}")
 
     if trade.status is TradeStatus.CLOSED:
         lines += [

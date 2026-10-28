@@ -265,7 +265,7 @@ async def test_limit_card(ctx) -> None:  # type: ignore[no-untyped-def]
     row = outcome.opening
     assert row is not None and row.status is OpeningStatus.CARD
     assert row.limit_price == D("1.4800") and row.expiry_minutes == 240
-    assert "Лимит 1.48 · срок 4 ч" in outcome.text
+    assert "Лимит 1.4800 · срок 4 ч" in outcome.text
 
 
 # --- A.4: шаг цены --------------------------------------------------------------------

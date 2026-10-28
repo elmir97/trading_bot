@@ -375,8 +375,10 @@ async def action_confirm(action_id: ActionId, body: ActionConfirmIn, user: Curre
     if outcome is None:
         return ActionResultOut(text=status.text, final=False, pending=True, action=status)
     pending, busy = actions_api.flags(outcome)
-    return ActionResultOut(text=outcome.text, final=outcome.final, pending=pending, busy=busy,
-                           action=status)
+    # Текст итога — для чата (HTML, «&lt;0.01»); Mini App выводит textContent — без разметки,
+    # как итог из журнала исходящих (actions_api._text).
+    return ActionResultOut(text=actions_api.plain_text(outcome.text), final=outcome.final,
+                           pending=pending, busy=busy, action=status)
 
 
 @router.post("/actions/{action_id}/decline")

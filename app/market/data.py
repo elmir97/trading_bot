@@ -35,6 +35,22 @@ from app.market.cache import (
 logger = get_logger(__name__)
 
 
+def symbols_key(exchange: str) -> str:
+    """Ключ справочника инструментов биржи в TTLCache."""
+    return f"symbols:{exchange}"
+
+
+def cached_price_precision(cache: TTLCache, exchange: str, symbol: str) -> int | None:
+    """Точность цены символа из уже загруженного справочника — без запроса к бирже (К4,
+    28.10.2026): путь рендера (карточка сделки журнала, итог лимита) в сеть не ходит.
+    Справочника в кэше нет (истёк, процесс только стартовал) или символа в нём нет — None:
+    цена выводится как раньше, по порядку величины."""
+    infos = cache.get(symbols_key(exchange))
+    if not infos:
+        return None
+    return next((i.price_precision for i in infos if i.symbol == symbol), None)
+
+
 class MarketDataService:
     def __init__(self, client: ExchangeClient, cache: TTLCache | None = None) -> None:
         self._client = client
@@ -120,7 +136,7 @@ class MarketDataService:
         быстро его достали, а промах по кэшу и так бьёт по сети не чаще,
         чем раз в TTL_SYMBOLS."""
         return await self._cache.get_or_fetch(
-            f"symbols:{self._client.name}",
+            symbols_key(self._client.name),
             TTL_SYMBOLS,
             lambda: self._client.get_symbols(max_attempts=max_attempts),
         )

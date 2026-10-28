@@ -380,7 +380,7 @@ class TestPriceLabels:
             ],
         )
         labels = self._labels(monkeypatch, lambda: render_analysis_chart(context, 2))
-        assert "Поддержка 95" in labels
-        assert "Сопротивление 105" in labels
-        assert "Сопротивление 95" not in labels
-        assert "Поддержка 105" not in labels
+        assert "Поддержка 95.00" in labels
+        assert "Сопротивление 105.00" in labels
+        assert "Сопротивление 95.00" not in labels
+        assert "Поддержка 105.00" not in labels

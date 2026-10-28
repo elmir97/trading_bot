@@ -298,7 +298,7 @@ async def test_close_sent_done_first_pass_journal_once(ctx) -> None:  # type: ig
     assert row.exchange_order_id and row.raw_response["source"] == RECOVERED_MARK
     assert (await _action(ctx, action.id)).status is PositionActionStatus.DONE
     [note] = ctx.notes
-    assert "✅ Закрыто 30 по 1.56 · комиссия" in note.text   # как итог «Да» (C.20 — нули шага)
+    assert "✅ Закрыто 30 по 1.5600 · комиссия" in note.text   # как итог «Да» (C.20 — нули шага)
     assert "биржа сняла сама" in note.text
     fresh = await ctx.session.scalar(
         select(Trade).where(Trade.id == trade.id).execution_options(populate_existing=True)
@@ -475,6 +475,27 @@ async def test_expired_but_close_filled_becomes_done_with_note(ctx) -> None:  # 
     assert (f"действие #{action.id} ранее было отмечено как неудачное, но закрытие исполнилось "
             "на бирже.") in note.text
     assert "✅ Закрыто 30 по 1.55" in note.text
+
+
+async def test_expired_but_close_filled_fee_below_cent(ctx) -> None:  # type: ignore[no-untyped-def]
+    """К4 (28.10.2026): комиссия меньше цента в сообщении восстановления — «<0.01»."""
+    _, row = await _finished(ctx, PositionActionStatus.EXPIRED)
+    ctx.exchange.fills[row.client_order_id] = OrderFill(
+        "2106099", row.client_order_id, "FILLED", D("1.5500"), D(30), D(30), D("0.004"), {}, T0,
+    )
+    await ctx.recover(T0)
+    [note] = ctx.notes
+    assert "✅ Закрыто 30 по 1.5500 · комиссия &lt;0.01 USDT." in note.text   # HTML
+
+
+async def test_close_sent_done_fee_below_cent(ctx) -> None:  # type: ignore[no-untyped-def]
+    """К4: то же в итоге восстановления закрытия, отправленного до обрыва."""
+    await _trade(ctx)
+    ctx.exchange.close_fee = D("0.004")
+    await _confirm(ctx, fault="interrupt_action_after_post")
+    assert await ctx.recover(T0) == 1
+    [note] = ctx.notes
+    assert "✅ Закрыто 30 по 1.5600 · комиссия &lt;0.01 USDT." in note.text
 
 
 async def test_failed_unconfirmed_done_silently(ctx) -> None:  # type: ignore[no-untyped-def]

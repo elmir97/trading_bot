@@ -2413,7 +2413,9 @@ async def act_be_disabled(page: Page, url: str) -> None:
     page.expect(a.get("buttons", {}).get("be") is False, f"кнопки: {a.get('buttons')}")
     page.expect(all(a.get("buttons", {}).get(c) for c in ("sl", "tp", "c25", "c50", "cf")),
                 f"остальные кнопки: {a.get('buttons')}")
-    page.expect("Безубыток 1.5116" in (a.get("hints") or ""), f"причина: {a.get('hints')!r}")
+    page.expect(bool(re.search(r"Стоп в безубыток: доступно, когда mark выше \d+\.\d{4}(?!\d)",
+                               a.get("hints") or "")) and "безубыток — 1.5116" in a["hints"],
+                f"причина: {a.get('hints')!r}")
     page.expect((a.get("pnl") or "").endswith("R"), f"PnL без R: {a.get('pnl')!r}")
     page.expect("down" in (a.get("pnl_class") or ""), f"цвет PnL в минусе: {a.get('pnl_class')}")
     await page.click('#actions-grid [data-code="be"]')
@@ -3131,6 +3133,26 @@ RANGE_JS = ("(() => {{ const b = document.getElementById('{box}');"
             " b.setPriceRange({lo}, {hi}); return true; }})()")
 
 
+# Ширины диапазона по очереди: с первой, где противоположный край свободен (ниже), случай и
+# строится. Близкие к 0.1 — шаг делений LWC тот же, меняется только px на деление.
+EDGE_WIDTHS = (0.1, 0.09, 0.11, 0.085, 0.115, 0.08, 0.12)
+# Деление у противоположного края — не ближе этого (вдвое дальше полосы TICK_EDGE_PX): каждый
+# случай проверяет ровно свой край. Владелец 28.10: в верхнем случае нижнее деление было
+# далеко от края не по построению — мутацию «только нижний край» ловила общая проверка
+# (верхнее деление нижнего случая само встало в 3.1 px), а не проверка верхнего края.
+OPPOSITE_MIN_PX = 2 * TICK_EDGE_PX
+
+
+def _opposite_gap(data: Any, bottom: bool) -> float:
+    """Расстояние от ближайшего к противоположному краю деления внутри панели до этого края."""
+    height = data.get("height") or 0
+    ys = [t["y"] for t in data.get("ticks") or [] if t.get("y") is not None
+          and 0 <= t["y"] <= height]
+    if not ys:
+        return 0.0
+    return min(ys) if bottom else height - max(ys)
+
+
 def _edge_pair(data: Any, bottom: bool) -> tuple[dict[str, Any], dict[str, Any]] | None:
     """Крайнее деление у нужного края и его сосед (по координате хука, не по тексту)."""
     ticks = sorted((t for t in data.get("ticks") or [] if t.get("y") is not None),
@@ -3145,17 +3167,16 @@ async def _ticks_at_range(page: Page, box: str, lo: float, hi: float) -> Any:
     return await page.js(TICKS_JS.format(box=box))
 
 
-async def _expect_edge(page: Page, box: str, where: str, bottom: bool) -> None:
-    """Деление ставится к краю детерминированно: диапазон EDGE_RANGE, по двум соседним делениям —
-    px на единицу цены, диапазон сдвигается (ширина та же — шаг делений тот же) так, что крайнее
-    встаёт в EDGE_TARGET_PX от края. Его подпись пуста, у соседа — есть."""
-    side = "нижний" if bottom else "верхний"
-    lo, hi = EDGE_RANGE
+async def _build_edge(page: Page, box: str, bottom: bool, width: float) -> tuple[Any, ...] | None:
+    """Диапазон EDGE_RANGE[0] + width; по двум соседним делениям — px на единицу цены; диапазон
+    сдвигается (ширина та же — шаг делений тот же) так, что крайнее деление встаёт в
+    EDGE_TARGET_PX от края. None — случай с этой шириной не построен."""
+    lo = EDGE_RANGE[0]
+    hi = lo + width
     data = await _ticks_at_range(page, box, lo, hi)
     pair = _edge_pair(data or {}, bottom)
     if pair is None:
-        page.expect(False, f"{where}, {side} край: делений меньше двух ({data})")
-        return
+        return None
     edge, near = pair
     px_per_price = abs(edge["y"] - near["y"]) / abs(near["price"] - edge["price"])
     target = data["height"] - EDGE_TARGET_PX if bottom else EDGE_TARGET_PX
@@ -3165,13 +3186,33 @@ async def _expect_edge(page: Page, box: str, where: str, bottom: bool) -> None:
     ticks = {round(t["price"], 9): t for t in data.get("ticks") or [] if t.get("y") is not None}
     at_edge, neighbour = ticks.get(round(edge["price"], 9)), ticks.get(round(near["price"], 9))
     if at_edge is None or neighbour is None:
-        page.expect(False, f"{where}, {side} край: после сдвига нет делений {edge['price']}/"
-                           f"{near['price']} ({data})")
-        return
+        return None
     gap = data["height"] - at_edge["y"] if bottom else at_edge["y"]
-    page.expect(abs(gap - EDGE_TARGET_PX) < 1,
-                f"{where}, {side} край: деление {edge['price']} в {gap:.1f} px от края, "
-                f"ждали {EDGE_TARGET_PX} — случай не построен")
+    return data, edge, near, at_edge, neighbour, gap
+
+
+async def _expect_edge(page: Page, box: str, where: str, bottom: bool) -> None:
+    """Деление ставится к краю детерминированно (_build_edge), у противоположного края делений
+    ближе OPPOSITE_MIN_PX нет — иначе следующая ширина из EDGE_WIDTHS. У края подпись пуста, у
+    соседа — есть."""
+    side = "нижний" if bottom else "верхний"
+    built, tried = None, []
+    for width in EDGE_WIDTHS:
+        case = await _build_edge(page, box, bottom, width)
+        if case is None:
+            tried.append(f"{width}: не построен")
+            continue
+        data, gap = case[0], case[5]
+        opposite = _opposite_gap(data, bottom)
+        tried.append(f"{width}: край {gap:.1f}, напротив {opposite:.1f}")
+        if abs(gap - EDGE_TARGET_PX) < 1 and opposite >= OPPOSITE_MIN_PX:
+            built = case
+            break
+    if built is None:
+        page.expect(False, f"{where}, {side} край: случай не построен ни с одной шириной "
+                           f"({'; '.join(tried)})")
+        return
+    data, edge, near, at_edge, neighbour, gap = built
     page.expect(not at_edge["text"],
                 f"{where}, {side} край: деление {edge['price']} в {gap:.1f} px от края подписано "
                 f"«{at_edge['text']}» — обрежется")

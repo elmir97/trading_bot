@@ -51,7 +51,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.core.locks import LockBusyError, RedisLock, position_lock_key
 from app.core.logging import get_logger
-from app.core.numfmt import fmt_amount, fmt_price, fmt_qty
+from app.core.numfmt import fmt_fee_html, fmt_price, fmt_qty
 from app.core.security import SecretCipher
 from app.database.models.execution_order import ExecutionOrder
 from app.database.models.position_action import PositionAction
@@ -924,7 +924,7 @@ class PositionActionService:
                 await self._journal_exit(trade.id, fill, full)
             text = (
                 f"✅ Закрыто {fmt_qty(fill.executed_qty, qp)} по {fmt_price(fill.avg_price, pp)} · "
-                f"комиссия {fmt_amount(fill.fee)} USDT."
+                f"комиссия {fmt_fee_html(fill.fee)} USDT."
             )
         if not full:
             rest = p.quantity - closed_qty

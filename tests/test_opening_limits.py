@@ -326,6 +326,23 @@ async def test_worker_retires_working_card(ctx) -> None:  # type: ignore[no-unty
     assert rows[901].kind == "OPEN_EXPIRED"
 
 
+async def test_worker_retire_price_to_step_from_cached_symbols(ctx) -> None:  # type: ignore[no-untyped-def]
+    """К4 (28.10.2026): справочник уже в кэше процесса — цена лимита до шага («1.4800»), без
+    запроса к бирже; без справочника — как раньше («1.48», тест выше)."""
+    from app.exchanges.base import SymbolInfo
+    from app.market.cache import market_cache
+    from app.market.data import symbols_key
+
+    market_cache.set(symbols_key("bingx"), [SymbolInfo("XRP-USDT", 4, 0, D(1), D(5))], 60)
+    try:
+        bot = _Bot()
+        await _retire(ctx, bot, OpeningStatus.EXPIRED)
+    finally:
+        market_cache.invalidate(symbols_key("bingx"))
+    [(_, text, _)] = bot.edits
+    assert text == "⏳ Лимит XRP-USDT LONG @ 1.4800: ⌛ срок вышел, лимит снят."
+
+
 async def test_worker_retire_failure_still_sends(ctx) -> None:  # type: ignore[no-untyped-def]
     """«message to edit not found» (удалено, старше 48 ч) — WARNING, цикл не
     падает, полный итог уходит."""

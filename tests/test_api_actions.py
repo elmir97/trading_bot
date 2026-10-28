@@ -33,7 +33,13 @@ from app.database.repositories.strategy import MistakeTypeRepository, StrategyRe
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
 from app.execution.position_action_service import PositionActionService
-from app.execution.position_actions import ActionPlan, breakeven_price, plan_action, render_card
+from app.execution.position_actions import (
+    ActionPlan,
+    breakeven_price,
+    breakeven_threshold,
+    plan_action,
+    render_card,
+)
 from app.market.cache import TTLCache
 from app.services.user_service import UserService
 from app.trading.enums import (
@@ -247,6 +253,24 @@ async def test_actions_screen_hints_are_core_refusals(ctx) -> None:  # type: ign
     assert hints["tp"]["enabled"] and hints["cf"]["enabled"]
 
 
+
+async def test_actions_screen_breakeven_hint_is_threshold(ctx) -> None:  # type: ignore[no-untyped-def]
+    """К4 (28.10.2026): безубыток не достигнут — под кнопкой короткая подсказка с порогом mark
+    (hint ядра), а не полный текст отказа; карточка «Да» отдаёт полный текст."""
+    ctx.exchange.mark = D("1.5265")
+    body = (await ctx.client.get("/api/positions/XRP-USDT/LONG/actions", headers=ctx.h)).json()
+    be = next(a for a in body["actions"] if a["code"] == "be")
+    settings = ctx.state.settings
+    level = breakeven_price(TradeSide.LONG, ENTRY, settings.exec_taker_fee_rate,
+                            ENTRY * settings.exec_taker_fee_rate, 4)
+    x = breakeven_threshold(TradeSide.LONG, level, settings.exec_min_stop_distance_percent, 4)
+    assert be["enabled"] is False and be["hint"] == f"доступно, когда mark выше {x}"
+    data = await _card(ctx)
+    assert data["card"]["refusal"]["message"].startswith(
+        f"Стоп в безубыток доступен, когда mark выше {x} (сейчас 1.5265, безубыток {level})"
+    )
+
+
 async def test_actions_screen_position_gone(ctx) -> None:  # type: ignore[no-untyped-def]
     ctx.exchange.position = None
     body = (await ctx.client.get("/api/positions/XRP-USDT/LONG/actions", headers=ctx.h)).json()
@@ -417,6 +441,19 @@ async def test_card_rate_limit(ctx) -> None:  # type: ignore[no-untyped-def]
 
 
 # --- «Да» ------------------------------------------------------------------------------------
+
+
+async def test_confirm_close_fee_below_cent_html_in_chat_plain_in_app(ctx) -> None:  # type: ignore[no-untyped-def]
+    """К4 (28.10.2026): комиссия меньше цента — в чат (HTML) «&lt;0.01», иначе Telegram
+    отклонит сообщение; в Mini App (textContent) — «<0.01», без сущностей."""
+    ctx.exchange.close_fee = D("0.0042")
+    data = await _card(ctx, {"symbol": "XRP-USDT", "side": "LONG", "kind": "cf"})
+    result = await _confirm(ctx, data["action_id"])
+    assert result["final"] and "комиссия <0.01 USDT." in result["text"]
+    [msg] = ctx.sent
+    assert "комиссия &lt;0.01 USDT." in msg["text"]
+    status = (await ctx.client.get(f"/api/actions/{data['action_id']}", headers=ctx.h)).json()
+    assert "комиссия <0.01 USDT." in status["text"]
 
 
 async def test_confirm_done_result_to_chat_once(ctx) -> None:  # type: ignore[no-untyped-def]
@@ -714,3 +751,25 @@ def test_card_rows_are_chat_card_strings(name: str) -> None:
     assert out.rows and all(row.value in plain for row in out.rows), name
     own = ("Стоп — на всю позицию", "Тейк — на всю позицию", "Комиссия выхода учтена в риске")
     assert all(note in plain or note in own for note in out.notes), name
+
+
+@pytest.mark.parametrize("kind,params", [
+    (PositionActionKind.MOVE_STOP, {"level": "1.5"}),
+    (PositionActionKind.CLOSE_FULL, {}),
+])
+def test_card_rows_fee_below_cent_as_chat(kind: PositionActionKind, params: dict) -> None:
+    """К4 (28.10.2026): комиссия меньше цента — в строках Mini App «<0.01 USDT» без «≈», как в
+    карточке чата."""
+    from app.execution.position_action_service import CardOutcome
+    from app.execution.position_actions import card_view
+    from tests.test_position_actions import _inputs, _position
+
+    inputs = _inputs(position=_position(qty="1"), one_r_per_unit=None)
+    plan = plan_action(kind, params, inputs)
+    assert isinstance(plan, ActionPlan), plan
+    text = render_card(plan, inputs)
+    out = actions_api.card_out(CardOutcome(text, None, plan.risk_increase,
+                                           view=card_view(plan, inputs)))
+    fees = [row.value for row in out.rows if row.label.startswith("Комиссия")]
+    assert fees == ["<0.01 USDT"]
+    assert "<0.01 USDT" in actions_api.plain_text(text)

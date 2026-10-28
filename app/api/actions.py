@@ -191,7 +191,7 @@ def card_out(outcome: CardOutcome) -> ActionCardOut:
             rows.append(("PnL по тейку", f"≈ {v.pnl} USDT"))
     else:
         rows.append((f"Закрыть {v.close_what}", f"{v.close_qty} маркетом"))
-        rows.append(("Комиссия", f"≈{v.fee} USDT"))
+        rows.append(("Комиссия", f"{v.fee_text} USDT"))
         if v.pnl is not None:
             rows.append(("PnL по mark", f"≈ {v.pnl} USDT"))
         if v.remainder is not None:
@@ -203,7 +203,7 @@ def card_out(outcome: CardOutcome) -> ActionCardOut:
         else:
             rows.append(("Риск", f"{v.risk.before} → {v.risk.after}"))
         if v.kind is Kind.MOVE_STOP:
-            rows.append(("Комиссия выхода по стопу", f"≈{v.fee} USDT"))
+            rows.append(("Комиссия выхода по стопу", f"{v.fee_text} USDT"))
             notes.append("Комиссия выхода учтена в риске")
         if v.breakeven:
             notes.append("≈0 нетто без учёта проскальзывания (стоп исполняется маркетом)")
@@ -244,7 +244,9 @@ def _hint(code: str, inputs: ActionInputs) -> ActionHintOut:
     if not isinstance(plan, ExecutionRefusal):
         return ActionHintOut(code=code, enabled=True, hint=None)
     needs_input = code in ("sl", "tp") and plan.code is Code.INVALID_PRICE
-    return ActionHintOut(code=code, enabled=needs_input, hint=None if needs_input else plan.message)
+    # Короткая подсказка отказа, если есть (К4: «доступно, когда mark выше X»), иначе текст.
+    hint = plan.hint or plan.message
+    return ActionHintOut(code=code, enabled=needs_input, hint=None if needs_input else hint)
 
 
 async def actions_out(

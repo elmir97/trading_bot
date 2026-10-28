@@ -113,3 +113,10 @@ class TTLCache:
 
     def stats(self) -> dict[str, int]:
         return {"size": self.size, "hits": self.hits, "misses": self.misses}
+
+
+# Кэш общий на процесс бота: рыночные данные одинаковы для всех пользователей, а лимиты биржи
+# считаются по IP сервера. Здесь, а не в app/bot/handlers/exchange (там прежнее имя
+# _market_cache — тот же объект): справочник инструментов из него читают и не-обработчики
+# (итог лимита, К4) — без запроса к бирже.
+market_cache = TTLCache()

@@ -291,7 +291,7 @@ async def test_stand_actions_close_move_and_presets(unique_telegram_id) -> None:
             await client.post("/dev/positions", params={"preset": "loss"})
             screen = (await client.get("/api/positions/XRP-USDT/LONG/actions")).json()
             be = next(a for a in screen["actions"] if a["code"] == "be")
-            assert be["enabled"] is False and "Безубыток" in be["hint"]
+            assert be["enabled"] is False and "доступно, когда mark выше" in be["hint"]
             assert screen["pnl_r_text"].endswith("R") and screen["pnl_r_text"].startswith("-")
     finally:
         await stand.remove_dev_user(db, tid)

@@ -43,6 +43,7 @@ from app.bot.wizard_trail import owned, remember
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.numfmt import fmt_rr
+from app.database.models.trade import Trade
 from app.database.models.user import User
 from app.database.repositories.strategy import (
     MistakeTypeRepository,
@@ -50,6 +51,8 @@ from app.database.repositories.strategy import (
 )
 from app.database.repositories.trade import TradeRepository
 from app.database.repositories.user import UserRepository
+from app.market.cache import market_cache
+from app.market.data import cached_price_precision
 from app.trading.calculations import (
     CalculationError,
     calculate_position_size,
@@ -62,6 +65,13 @@ from app.trading.risk import PlanValidator
 
 router = Router(name="trades")
 logger = get_logger(__name__)
+
+
+def _precision(trade: Trade) -> int | None:
+    """Точность цены для карточки сделки — из справочника в кэше процесса, без запроса к
+    бирже (К4, 28.10.2026): карточка рисуется на каждое нажатие, сеть в этом пути не нужна.
+    Справочника в кэше нет — None, цены как раньше."""
+    return cached_price_precision(market_cache, trade.exchange, trade.symbol)
 
 
 async def _parse_decimal(
@@ -607,7 +617,7 @@ async def _save_trade(
         return
 
     await session.refresh(trade, ["strategy"])
-    text = "✅ <b>Сделка записана</b>\n\n" + trade_card(trade) + warning
+    text = "✅ <b>Сделка записана</b>\n\n" + trade_card(trade, _precision(trade)) + warning
 
     if isinstance(event, CallbackQuery):
         if isinstance(event.message, Message):
@@ -655,7 +665,10 @@ async def _show_exit_price_prompt(
     data = await state.get_data()
     trade = await TradeRepository(session).get(int(data["trade_id"]), user.id)
     await state.set_state(CloseTradeStates.exit_price)
-    text = "Сделка не найдена." if trade is None else trade_card(trade) + "\n\nЦена выхода:"
+    text = (
+        "Сделка не найдена." if trade is None
+        else trade_card(trade, _precision(trade)) + "\n\nЦена выхода:"
+    )
     await _reply_close(event, text, back_to(MenuCallback.OPEN_POSITIONS))
     if trade is not None:
         await ask_number(event, state, "Цена выхода числом")
@@ -791,7 +804,7 @@ async def _finish_close(
         await _reply_close(event, f"⚠️ {exc}", main_menu())
         return
 
-    card = "✅ <b>Сделка закрыта</b>\n\n" + trade_card(trade)
+    card = "✅ <b>Сделка закрыта</b>\n\n" + trade_card(trade, _precision(trade))
 
     mistake_repo = MistakeTypeRepository(session)
     mistakes = await mistake_repo.list_available(user.id)
@@ -890,7 +903,7 @@ async def finish_mistakes(
         await session.refresh(trade, ["mistakes"])
 
     text = (
-        "✅ <b>Сделка закрыта</b>\n\n" + trade_card(trade)
+        "✅ <b>Сделка закрыта</b>\n\n" + trade_card(trade, _precision(trade))
         if trade is not None
         else "Сделка не найдена."
     )

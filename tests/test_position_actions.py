@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -16,10 +17,12 @@ from app.execution.position_actions import (
     ActionInputs,
     ActionPlan,
     breakeven_price,
+    breakeven_threshold,
     card_view,
     loss_at,
     plan_action,
     render_card,
+    stop_clear_of_mark,
 )
 from app.execution.position_view import ProtectiveOrder
 from app.trading.enums import PositionActionKind as Kind
@@ -359,8 +362,8 @@ class TestCardView:
         plan = plan_action(Kind.MOVE_STOP, {"level": "1.45"}, inputs)
         assert isinstance(plan, ActionPlan)
         view = card_view(plan, inputs)
-        assert (view.old_level, view.new_level, view.fee) == ("1.4795", "1.45", "0.02")
-        assert view.risk is not None and view.risk.increase and view.risk.delta == "+0.65R"
+        assert (view.old_level, view.new_level, view.fee) == ("1.4795", "1.4500", "0.02")
+        assert view.risk is not None and view.risk.increase and view.risk.delta == "на 0.65R больше"
         assert view.risk.before == "1.42 USDT" and view.risk.after == "2.30 USDT"
         text = render_card(plan, inputs)
         for part in (view.old_level, view.new_level, view.risk.before, view.risk.after,
@@ -454,3 +457,101 @@ class TestRiskShare:
         plan = plan_action(kind, params, inputs)
         assert isinstance(plan, ActionPlan) and plan.risk_after != plan.risk_before
         assert card_view(plan, inputs).risk_share is not None
+
+
+class TestBreakevenThreshold:
+    """К4 (осмотр 27.10, 28.10.2026): «Стоп в безубыток» не достигнут — порог mark прямо:
+    LONG — БУ / (1 − m) вверх до шага, SHORT — БУ / (1 + m) вниз. Ровно то условие, по
+    которому план отказывает: при mark = порогу проходит, на шаг хуже — отказ. Только Decimal."""
+
+    LONG_BE = D("1.5269")       # breakeven_price LONG от 1.5253 (эталон «breakeven»)
+
+    def test_long_threshold_value(self) -> None:
+        # 1.5269 / 0.999 = 1.52842842… → вверх 1.5285
+        x = breakeven_threshold(TradeSide.LONG, self.LONG_BE, D("0.1"), 4)
+        assert x == D("1.5285") and isinstance(x, Decimal) and x.as_tuple().exponent == -4
+
+    def test_short_threshold_value(self) -> None:
+        # 1.5784 / 1.001 = 1.57682317… → вниз 1.5768
+        assert breakeven_threshold(TradeSide.SHORT, D("1.5784"), D("0.1"), 4) == D("1.5768")
+
+    def test_long_plan_passes_at_threshold_refuses_one_step_below(self) -> None:
+        assert _plan(Kind.MOVE_STOP, {"breakeven": True}, mark=D("1.5285")).new_level == (
+            self.LONG_BE
+        )
+        refusal = _refusal(Kind.MOVE_STOP, {"breakeven": True}, mark=D("1.5284"))
+        assert refusal.code is Code.BREAKEVEN_NOT_REACHED
+
+    def test_short_plan_passes_at_threshold_refuses_one_step_above(self) -> None:
+        short = {"position": _position(TradeSide.SHORT, entry="1.58"),
+                 "stops": (_order("1.62"),)}
+        be = breakeven_price(TradeSide.SHORT, D("1.58"), F, D("1.58") * F, 4)
+        assert be == D("1.5784")
+        assert _plan(Kind.MOVE_STOP, {"breakeven": True}, mark=D("1.5768"), **short).new_level == be
+        refusal = _refusal(Kind.MOVE_STOP, {"breakeven": True}, mark=D("1.5769"), **short)
+        assert refusal.code is Code.BREAKEVEN_NOT_REACHED
+
+    def test_long_message_and_hint(self) -> None:
+        refusal = _refusal(Kind.MOVE_STOP, {"breakeven": True}, mark=D("1.5265"))
+        assert refusal.message == (
+            "Стоп в безубыток доступен, когда mark выше 1.5285 (сейчас 1.5265, безубыток 1.5269)."
+        )
+        assert refusal.hint == "доступно, когда mark выше 1.5285"
+
+    def test_short_message_says_below(self) -> None:
+        refusal = _refusal(
+            Kind.MOVE_STOP, {"breakeven": True}, mark=D("1.5790"),
+            position=_position(TradeSide.SHORT, entry="1.58"), stops=(_order("1.62"),),
+        )
+        assert refusal.message == (
+            "Стоп в безубыток доступен, когда mark ниже 1.5768 (сейчас 1.5790, безубыток 1.5784)."
+        )
+        assert refusal.hint == "доступно, когда mark ниже 1.5768"
+
+    @pytest.mark.parametrize("side", [TradeSide.LONG, TradeSide.SHORT])
+    @pytest.mark.parametrize("percent", ["0.1", "0.15", "0.2", "0.33", "1"])
+    @pytest.mark.parametrize("precision", [2, 4, 6])
+    def test_threshold_is_exact_boundary(self, side: TradeSide, percent: str,
+                                         precision: int) -> None:
+        """Сетка уровней: порог проходит проверку плана, шаг в сторону хуже — нет."""
+        step = D(1).scaleb(-precision)
+        worse = -step if side is TradeSide.LONG else step
+        for raw in ("1", "1.5269", "0.0731", "97.123456", "64012.5"):
+            level = D(raw).quantize(step, ROUND_HALF_UP)
+            x = breakeven_threshold(side, level, D(percent), precision)
+            assert x.as_tuple().exponent == -precision
+            assert stop_clear_of_mark(level, x, D(percent), side)
+            assert not stop_clear_of_mark(level, x + worse, D(percent), side)
+
+    def test_other_refusals_have_no_hint(self) -> None:
+        assert _refusal(Kind.MOVE_STOP, {"level": "1.5595"}).hint is None
+
+
+class TestSmallAmounts:
+    """К4: комиссия меньше цента — «<0.01» без «≈»; «Риск после» меньше 0.01% — «<0.01%»."""
+
+    def test_fee_below_cent(self) -> None:
+        inputs = _inputs(position=_position(qty="1"), one_r_per_unit=None)
+        plan = plan_action(Kind.MOVE_STOP, {"level": "1.5"}, inputs)
+        assert isinstance(plan, ActionPlan)
+        view = card_view(plan, inputs)
+        assert view.fee == "<0.01" and view.fee_text == "<0.01"
+        text = render_card(plan, inputs)
+        # Текст чата — HTML: «<» экранирован, иначе Telegram отклонит сообщение.
+        assert "Комиссия выхода по стопу &lt;0.01 USDT (учтена в риске)" in text
+        assert re.findall(r"<(?!/?[bi]>)", text) == []
+
+    def test_fee_cent_and_more_keeps_approx(self) -> None:
+        inputs = _inputs()
+        plan = plan_action(Kind.MOVE_STOP, {"level": "1.5"}, inputs)
+        assert isinstance(plan, ActionPlan)
+        assert card_view(plan, inputs).fee_text == "≈0.02"
+
+    def test_risk_share_below_hundredth_percent(self) -> None:
+        inputs = _inputs(equity=D(10) ** 8)
+        plan = plan_action(Kind.MOVE_STOP, {"level": "1.5"}, inputs)
+        assert isinstance(plan, ActionPlan)
+        assert card_view(plan, inputs).risk_share == "<0.01% от 100000000.00 USDT"
+        text = render_card(plan, inputs)
+        assert "Риск после — &lt;0.01% от 100000000.00 USDT" in text
+        assert re.findall(r"<(?!/?[bi]>)", text) == []

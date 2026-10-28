@@ -20,10 +20,19 @@ SymbolInfo) и журнала (комиссия входа, исходный с�
 
 from __future__ import annotations
 
+import html
 from dataclasses import dataclass, field
 from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_FLOOR, ROUND_HALF_UP, Decimal
 
-from app.core.numfmt import fmt_amount, fmt_money, fmt_pct, fmt_price, fmt_qty
+from app.core.numfmt import (
+    fmt_amount,
+    fmt_fee,
+    fmt_money,
+    fmt_pct,
+    fmt_price,
+    fmt_qty,
+    fmt_small_pct,
+)
 from app.exchanges.base import Position, SymbolInfo
 from app.execution.models import ExecutionRefusal
 from app.execution.models import ExecutionRefusalCode as Code
@@ -126,6 +135,38 @@ def breakeven_price(
     return ((entry - entry_fee_per_unit) / (ONE + fee_rate)).quantize(step, ROUND_FLOOR)
 
 
+def stop_clear_of_mark(
+    level: Decimal, mark: Decimal, min_distance_percent: Decimal, side: TradeSide
+) -> bool:
+    """Стоп level не сработает сразу: LONG — не выше mark − дистанция, SHORT — не ниже
+    mark + дистанция (дистанция — min_distance_percent от mark). Одна формула для плана и
+    порога безубытка."""
+    dist = mark * min_distance_percent / HUNDRED
+    return level <= mark - dist if side is TradeSide.LONG else level >= mark + dist
+
+
+def breakeven_threshold(
+    side: TradeSide, level: Decimal, min_distance_percent: Decimal, precision: int
+) -> Decimal:
+    """Mark на шаге цены, начиная с которого стоп на level проходит stop_clear_of_mark (К4,
+    28.10.2026): LONG — level / (1 − m) вверх до шага, SHORT — level / (1 + m) вниз (m — доля).
+    Только Decimal; затем шагом до границы по той же проверке, что у плана: при mark = порогу
+    стоп проходит, на шаг хуже — нет, без зазора от округления деления."""
+    step = _step(precision)
+    m = min_distance_percent / HUNDRED
+    long = side is TradeSide.LONG
+    worse = -step if long else step
+    if long:
+        x = (level / (ONE - m)).quantize(step, ROUND_CEILING)
+    else:
+        x = (level / (ONE + m)).quantize(step, ROUND_FLOOR)
+    while not stop_clear_of_mark(level, x, min_distance_percent, side):
+        x -= worse
+    while stop_clear_of_mark(level, x + worse, min_distance_percent, side):
+        x += worse
+    return x
+
+
 def loss_at(inputs: ActionInputs, level: Decimal, qty: Decimal) -> Decimal:
     """Убыток объёма qty, если позиция закроется по level, с комиссией входа
     (доля) и выхода. Отрицательный — по этому уровню прибыль."""
@@ -197,14 +238,18 @@ def plan_action(
                 return _refuse(Code.INVALID_PRICE, "Цена стопа — положительное число.")
             # К шагу цены — ближе к цене: объём фиксирован, риск в $ не растёт.
             level = stop_closer(typed, p.side, step)
-        ok = level <= inputs.mark - dist if long else level >= inputs.mark + dist
-        if not ok:
+        if not stop_clear_of_mark(level, inputs.mark, inputs.min_distance_percent, p.side):
             if breakeven:
-                return _refuse(
+                # К4 (осмотр 27.10): порог прямо — «доступно, когда mark выше X», а не
+                # «безубыток Z: mark ещё не ушёл за него на 0.20%».
+                x = breakeven_threshold(p.side, level, inputs.min_distance_percent, precision)
+                when = f"когда mark {'выше' if long else 'ниже'} {fmt_price(x, precision)}"
+                return ExecutionRefusal(
                     Code.BREAKEVEN_NOT_REACHED,
-                    f"Безубыток {fmt_price(level, precision)}: mark "
-                    f"{fmt_price(inputs.mark, precision)} ещё не ушёл за него на "
-                    f"{fmt_pct(inputs.min_distance_percent)} — стоп сработал бы сразу.",
+                    f"Стоп в безубыток доступен, {when} (сейчас "
+                    f"{fmt_price(inputs.mark, precision)}, безубыток "
+                    f"{fmt_price(level, precision)}).",
+                    hint=f"доступно, {when}",
                 )
             return _refuse(
                 Code.STOP_WRONG_SIDE,
@@ -409,7 +454,8 @@ def _risk_text(loss: Decimal | None, r: Decimal | None) -> str:
 @dataclass(frozen=True, slots=True)
 class RiskView:
     """Риск до и после строками карточки. increase — «Да, увеличить риск»:
-    тогда без R в скобках, рост в R — delta («+0.65R»; R не знаем — "")."""
+    тогда без R в скобках, рост в R — delta («на 0.65R больше» — прирост, не абсолют, К4;
+    R не знаем — "")."""
 
     before: str
     after: str
@@ -441,6 +487,11 @@ class CardView:
     breakeven: bool = False
     risk_share: str | None = None     # «0.01% от 10000.00 USDT»
 
+    @property
+    def fee_text(self) -> str:
+        """Комиссия в строке карточки: «≈0.02»; меньше цента — «<0.01» без «≈» (К4)."""
+        return self.fee if "<" in self.fee else f"≈{self.fee}"
+
 
 def card_view(plan: ActionPlan, inputs: ActionInputs) -> CardView:
     p = inputs.position
@@ -468,7 +519,7 @@ def card_view(plan: ActionPlan, inputs: ActionInputs) -> CardView:
     if plan.kind is not Kind.SET_TAKE:
         if plan.risk_increase:
             delta = (
-                f"+{(plan.r_after - plan.r_before).quantize(R_STEP)}R"
+                f"на {(plan.r_after - plan.r_before).quantize(R_STEP)}R больше"
                 if plan.r_after is not None and plan.r_before is not None else ""
             )
             risk = RiskView(_risk_text(plan.risk_before, None),
@@ -480,19 +531,23 @@ def card_view(plan: ActionPlan, inputs: ActionInputs) -> CardView:
     # 5.0а: «Риск после» — только если действие риск меняет (у тейка — нет).
     if (inputs.equity and plan.risk_after is not None and plan.risk_after > ZERO
             and plan.risk_after != plan.risk_before):
-        pct = (plan.risk_after / inputs.equity * HUNDRED).quantize(R_STEP, ROUND_HALF_UP)
-        share = f"{pct}% от {fmt_amount(inputs.equity)} USDT"
+        # К4: доля меньше 0.01% — «<0.01%», не «0.00%» (риск есть, просто мал).
+        pct = fmt_small_pct(plan.risk_after / inputs.equity * HUNDRED)
+        share = f"{pct} от {fmt_amount(inputs.equity)} USDT"
     return CardView(
         kind=plan.kind, symbol=p.symbol, side=p.side.value, title=title,
         quantity=fmt_qty(p.quantity, qp), entry=fmt_price(p.entry_price, pp),
         mark=fmt_price(inputs.mark, pp), old_level=old_level, new_level=new_level,
-        close_what=close_what, close_qty=close_qty, fee=fmt_amount(plan.fee), pnl=pnl,
+        close_what=close_what, close_qty=close_qty, fee=fmt_fee(plan.fee), pnl=pnl,
         remainder=remainder, risk=risk, breakeven=breakeven, risk_share=share,
     )
 
 
 def render_card(plan: ActionPlan, inputs: ActionInputs) -> str:
     v = card_view(plan, inputs)
+    # Текст чата — HTML: «<0.01» в комиссии и «Риск после» экранируется (К4), иначе Telegram
+    # читает «<» как тег и отклоняет сообщение. Строки Mini App (card_view) — без экранирования.
+    fee = html.escape(v.fee_text, quote=False)
     lines = [
         f"<b>{v.symbol} {v.side} · {v.title}</b>",
         f"Позиция {v.quantity} · вход {v.entry} · mark {v.mark}",
@@ -504,7 +559,7 @@ def render_card(plan: ActionPlan, inputs: ActionInputs) -> str:
             lines.append(f"PnL по тейку ≈ {v.pnl} USDT (после комиссий)")
     else:
         lines.append(
-            f"Закрыть {v.close_what}: <b>{v.close_qty}</b> маркетом · комиссия ≈{v.fee} USDT"
+            f"Закрыть {v.close_what}: <b>{v.close_qty}</b> маркетом · комиссия {fee} USDT"
         )
         if v.pnl is not None:
             lines.append(f"PnL ≈ {v.pnl} USDT по mark (после комиссий)")
@@ -519,10 +574,10 @@ def render_card(plan: ActionPlan, inputs: ActionInputs) -> str:
         else:
             lines.append(f"Риск: {v.risk.before} → {v.risk.after}")
         if v.kind is Kind.MOVE_STOP:
-            lines.append(f"Комиссия выхода по стопу ≈{v.fee} USDT (учтена в риске)")
+            lines.append(f"Комиссия выхода по стопу {fee} USDT (учтена в риске)")
         if v.breakeven:
             lines.append("≈0 нетто без учёта проскальзывания (стоп исполняется маркетом)")
     if v.risk_share is not None:
-        lines.append(f"Риск после — {v.risk_share}")
+        lines.append(f"Риск после — {html.escape(v.risk_share, quote=False)}")
     lines += ["", DISCLAIMER]
     return "\n".join(lines)

@@ -319,13 +319,15 @@ _WORKING_EXIT = {
 }
 
 
-def working_exit_text(opening: TradeOpening, status: OpeningStatus) -> str:
+def working_exit_text(
+    opening: TradeOpening, status: OpeningStatus, price_precision: int | None = None
+) -> str:
     """Короткий итог на месте ⏳ (Л3, решение владельца 09.10): лимит больше не
     стоит — кнопка «Отменить лимит» снимается, полный итог — новым сообщением."""
     state = _WORKING_EXIT.get(status, "завершён — итог ниже")
     return (
         f"⏳ Лимит {opening.symbol} {opening.side.value} @ "
-        f"{fmt_price(opening.limit_price)}: {state}."
+        f"{fmt_price(opening.limit_price, price_precision)}: {state}."
     )
 
 

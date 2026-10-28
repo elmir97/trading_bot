@@ -11,6 +11,7 @@ fmt_qty, fmt_money, fmt_amount перенесены сюда 29.09: уведом
 
 from __future__ import annotations
 
+import html
 from decimal import ROUND_HALF_UP, Decimal
 
 
@@ -70,16 +71,22 @@ def _fallback_price_precision(value: Decimal) -> int:
 def fmt_price(value: Decimal | None, precision: int | None = None) -> str:
     """Цена/EMA/ATR/уровень — округление по price_precision символа.
 
+    precision задана — ровно столько знаков, хвостовые нули остаются до
+    шага цены (К4, 28.10.2026): «1.2990», не «1.299» — цена читается так же,
+    как в BingX и на графике.
+
     precision=None — работаем без SymbolInfo (публичный экран, символ
     не с биржи и т.п.): знаков после запятой столько, сколько разумно
-    для порядка величины (см. _fallback_price_precision).
+    для порядка величины (см. _fallback_price_precision), без хвостовых
+    нулей — шаг цены неизвестен.
     """
     if value is None:
         return "—"
-    digits = precision if precision is not None else _fallback_price_precision(value)
-    step = Decimal(1).scaleb(-digits)
-    rounded = value.quantize(step, rounding=ROUND_HALF_UP)
-    return fmt_num(rounded)
+    if precision is None:
+        step = Decimal(1).scaleb(-_fallback_price_precision(value))
+        return fmt_num(value.quantize(step, rounding=ROUND_HALF_UP))
+    rounded = value.quantize(Decimal(1).scaleb(-precision), rounding=ROUND_HALF_UP)
+    return f"{rounded:f}"
 
 
 def fmt_qty(value: Decimal | None, precision: int = 8) -> str:
@@ -119,3 +126,28 @@ def fmt_amount(value: Decimal | None) -> str:
         return "—"
     rounded = value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     return "0.00" if rounded == 0 else f"{rounded:f}"
+
+
+def fmt_fee(value: Decimal | None) -> str:
+    """Комиссия: как fmt_amount, но не ноль меньше цента — «<0.01», а не «0.00» (К4,
+    28.10.2026: «комиссия 0.00» читалась как «без комиссии»). Рибейт (отрицательная) меньше
+    цента — «-<0.01»: знак тот же, что у «-0.05». Ровно 0 — «0.00»."""
+    if value is None:
+        return "—"
+    if value != 0 and value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) == 0:
+        return "<0.01" if value > 0 else "-<0.01"
+    return fmt_amount(value)
+
+
+def fmt_fee_html(value: Decimal | None) -> str:
+    """fmt_fee для текста чата: бот шлёт с parse_mode HTML, «<0.01» без экранирования
+    Telegram читает как начало тега и отклоняет сообщение — «&lt;0.01»."""
+    return html.escape(fmt_fee(value), quote=False)
+
+
+def fmt_small_pct(value: Decimal) -> str:
+    """Доля в процентах, два знака: не ноль меньше 0.01% — «<0.01%» (К4: «Риск после 0.00%»
+    при риске в доли цента). Ровно 0 — «0.00%»."""
+    if value > 0 and value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) == 0:
+        return "<0.01%"
+    return fmt_pct(value)

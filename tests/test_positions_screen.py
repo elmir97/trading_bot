@@ -682,7 +682,7 @@ async def test_import_passes_levels_from_same_snapshot(env) -> None:  # type: ig
     assert [t.trigger_price for t in takes] == [D("1.60")]
     assert env.client.open_orders_symbols[0] == "XRP-USDT"   # дальше — экран заново
     # формат — как у экрана (fmt_price; хвостовые нули — К4)
-    assert "сделка #21. Стоп 1.5241 · тейк 1.6." in text
+    assert "сделка #21. Стоп 1.5241 · тейк 1.6000." in text
 
 
 async def test_import_refused_when_open_orders_unavailable(env) -> None:  # type: ignore[no-untyped-def]
@@ -719,7 +719,7 @@ async def test_orphan_done_text_ladder_and_initial_from_actions(env) -> None:  #
     assert text == (
         "✅ XRP-USDT LONG: позиция занесена в журнал — сделка #21.\n"
         "Стопов на бирже 2 — в журнал не занесён · тейка на бирже нет. "
-        "Начальный стоп 1.53 — по действиям бота. "
+        "Начальный стоп 1.5300 — по действиям бота. "
         "R не определён: начальный стоп не в убытке."
     )
 

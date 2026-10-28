@@ -29,7 +29,10 @@ from app.database.models.outgoing_message import OutgoingMessage, OutgoingMeta
 from app.database.models.trade_opening import TradeOpening
 from app.database.models.user import User
 from app.database.session import Database
+from app.exchanges.bingx import BingXClient
 from app.execution.opening.flow import working_exit_text
+from app.market.cache import market_cache
+from app.market.data import cached_price_precision
 from app.trading.enums import OpeningStatus
 from app.trading.risk import tz_offset_for
 
@@ -90,7 +93,9 @@ async def retire_working(
         user_id=opening.user_id, kind=f"OPEN_WORKING_{final.value}",
         trade_opening_id=opening.id, trade_id=opening.trade_id,
     )
-    return await _rewrite(bot, db, targets, working_exit_text(opening, final), meta,
+    # Точность цены лимита — из справочника в кэше процесса, без запроса к бирже (К4).
+    precision = cached_price_precision(market_cache, BingXClient.name, opening.symbol)
+    return await _rewrite(bot, db, targets, working_exit_text(opening, final, precision), meta,
                           "⏳ лимита")
 
 

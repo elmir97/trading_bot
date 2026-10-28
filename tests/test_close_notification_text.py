@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from app.database.models.trade import Trade
+from app.exchanges.base import SymbolInfo
 from app.execution.reconciler import ExitFill
 from app.trading.enums import ReconciliationKind, TradeSide, TradeStatus
 from app.trading.exit_reasons import (
@@ -171,3 +172,47 @@ def test_partial_close_text() -> None:
         "Комиссия выхода: 7.39 VST",
         "📒 Сделка #3 остаётся открытой",
     ]
+
+
+def test_exit_price_to_symbol_step_and_fee_below_cent() -> None:
+    """К4 (28.10.2026): точность символа известна — цена выхода до шага («15.200»); комиссия
+    меньше цента — «<0.01», не «0.00»."""
+    trade = _link_closed(pnl="1.6", fees="0.004")
+    fill = _exit(
+        price="15.2", qty="2", fee="0.003", at=LINK_CLOSED_AT,
+        reason=EXIT_TAKE_PROFIT, kind=ReconciliationKind.CLOSED_TAKE_PROFIT,
+    )
+    lines = Reconciler._close_text(trade, fill, "VST", EKB, 3).splitlines()
+    assert lines[2:5] == [
+        "Выход: 15.200 · объём 2",
+        "Комиссия выхода: &lt;0.01 VST",              # HTML: «<» экранирован
+        "PnL: +1.60 VST · комиссии вход+выход &lt;0.01 VST",
+    ]
+
+
+class _SymbolsClient:
+    def __init__(self, name: str, fail: bool = False) -> None:
+        self.name = name
+        self.fail = fail
+        self.calls = 0
+
+    async def get_symbols(self, *, max_attempts: int | None = None) -> list[SymbolInfo]:
+        self.calls += 1
+        if self.fail:
+            raise RuntimeError("биржа недоступна")
+        return [SymbolInfo("LINK-USDT", 3, 1, D(1), D(5))]
+
+
+async def test_price_precision_from_symbols_cached_once() -> None:
+    """Справочник — через общий кэш процесса: второй вызов без запроса к бирже."""
+    client = _SymbolsClient("k4-precision-ok")
+    assert await Reconciler._price_precision(client, "LINK-USDT") == 3  # type: ignore[arg-type]
+    assert await Reconciler._price_precision(client, "LINK-USDT") == 3  # type: ignore[arg-type]
+    assert await Reconciler._price_precision(client, "SOL-USDT") is None  # type: ignore[arg-type]
+    assert client.calls == 1
+
+
+async def test_price_precision_failure_is_none_not_error() -> None:
+    """Сбой справочника — None (цена как раньше), уведомление о закрытии не теряется."""
+    client = _SymbolsClient("k4-precision-fail", fail=True)
+    assert await Reconciler._price_precision(client, "LINK-USDT") is None  # type: ignore[arg-type]
