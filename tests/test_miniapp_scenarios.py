@@ -385,6 +385,8 @@ def test_registry_covers_queue_scenarios() -> None:
         "chart_tick_labels", "act_diff_noise",
         # К6 (27.10): «Да» по инерции — пауза и цвет
         "act_card_pause", "act_card_pause_nodisable",
+        # К4 (28.10): подпись шкалы у края панели
+        "chart_tick_edge",
     }
     assert [s.name for s in ms.select("all")] == list(ms.SCENARIOS)
     assert ms.select("poll") == [ms.SCENARIOS["poll"]]
@@ -456,6 +458,35 @@ def test_tick_gap_matches_chart() -> None:
     chart = (Path(__file__).resolve().parents[1] / "miniapp" / "chart.js").read_text(
         encoding="utf-8")
     assert f"export const LABEL_GAP_PX = {ms.TICK_GAP_PX};" in chart
+    assert f"export const EDGE_GAP_PX = {ms.TICK_EDGE_PX};" in chart
+    assert f'export const LAST_TITLE = "{ms.LAST_TITLE}";' in chart
+
+
+def test_tick_issues_edge_and_last_title() -> None:
+    """К4: видимое деление в полосе TICK_EDGE_PX у края панели и плашка без «last» — замечания;
+    спрятанное у края деление — не замечание."""
+    ticks = [{"price": 1.0, "y": 50.0, "text": "1.0000"},
+             {"price": 1.1, "y": 120.0, "text": "1.1000"}]
+    ok = {"height": 200, "lastTitle": "last", "labels": [], "ticks": ticks}
+    assert ms._tick_issues(ok, "w") == []
+    hidden = {**ok, "ticks": [*ticks, {"price": 0.9, "y": 196.0, "text": ""}]}
+    assert ms._tick_issues(hidden, "w") == []
+    # Крайнее и сосед — по координате, не по тексту (пустая подпись у края не мешает выбору).
+    assert ms._edge_pair(hidden, bottom=True) == (hidden["ticks"][2], ticks[1])
+    assert ms._edge_pair(hidden, bottom=False) == (ticks[0], ticks[1])
+    assert ms._edge_pair({"ticks": ticks[:1]}, bottom=True) is None
+    assert ms.TICK_EDGE_PX - 2 < ms.EDGE_TARGET_PX < ms.TICK_EDGE_PX
+    for y in (3.0, 5.9, 194.1, 199.0):
+        cut = {**ok, "ticks": [*ticks, {"price": 0.9, "y": y, "text": "0.9000"}]}
+        assert any("обрезано краем" in i for i in ms._tick_issues(cut, "w"))
+    for y in (6.0, 194.0):
+        fits = {**ok, "ticks": [*ticks, {"price": 0.9, "y": y, "text": "0.9000"}]}
+        assert ms._tick_issues(fits, "w") == []
+    assert any("подпись плашки цены None" in i
+               for i in ms._tick_issues({**ok, "lastTitle": None}, "w"))
+    one = {**ok, "ticks": ticks[:1]}
+    assert any("видимых подписей делений 1" in i for i in ms._tick_issues(one, "w"))
+    assert ms._tick_issues(one, "w", min_shown=1) == []
 
 
 async def test_exact_rule_matches_path_not_prefix() -> None:

@@ -3050,26 +3050,43 @@ async def act_decline(page: Page, url: str) -> None:
 
 # К5: высота плашки шкалы — как LABEL_GAP_PX в miniapp/chart.js (тест сверяет).
 TICK_GAP_PX = 18
+TICK_EDGE_PX = 6      # К4: полоса у края панели — как EDGE_GAP_PX в miniapp/chart.js (тест сверяет)
+LAST_TITLE = "last"   # К4: подпись плашки серии — как LAST_TITLE в miniapp/chart.js (тест сверяет)
 TICKS_JS = ("(() => {{ const b = document.getElementById('{box}');"
             " return b && b.tickLabels ? b.tickLabels() : null; }})()")
 
 
-def _tick_issues(data: Any, where: str) -> list[str]:
-    """Видимая подпись деления ближе TICK_GAP_PX к плашке линии или последней цены."""
+def _at_edge(y: float, height: float) -> bool:
+    return y < TICK_EDGE_PX or y > height - TICK_EDGE_PX
+
+
+def _tick_issues(data: Any, where: str, min_shown: int = 2) -> list[str]:
+    """Видимая подпись деления ближе TICK_GAP_PX к плашке линии или последней цены или ближе
+    TICK_EDGE_PX к краю панели (К4: обрезалась); плашка серии без подписи «last» (К4).
+    min_shown — сколько подписей обязано остаться (компактный график экрана 5 — 1: делений там
+    мало, часть под плашками, крайнее у края)."""
     if not data:
         return [f"{where}: подписей делений нет (tickLabels)"]
     labels = [y for y in data.get("labels") or [] if y is not None]
     shown = [t for t in data.get("ticks") or [] if t.get("text") and t.get("y") is not None]
-    issues = [] if len(shown) >= 2 else [f"{where}: видимых подписей делений {len(shown)}"]
+    issues = ([] if len(shown) >= min_shown
+              else [f"{where}: видимых подписей делений {len(shown)}"])
+    if data.get("lastTitle") != LAST_TITLE:
+        issues.append(f"{where}: подпись плашки цены {data.get('lastTitle')!r}, "
+                      f"ждали {LAST_TITLE!r}")
+    height = data.get("height") or 0
     for t in shown:
         near = [round(abs(t["y"] - y), 1) for y in labels if abs(t["y"] - y) < TICK_GAP_PX]
         if near:
             issues.append(f"{where}: деление {t['text']} в {near} px от плашки")
+        if _at_edge(t["y"], height):
+            issues.append(f"{where}: деление {t['text']} обрезано краем (y {round(t['y'], 1)}"
+                          f" из {height})")
     return issues
 
 
-async def _expect_ticks(page: Page, box: str, where: str) -> None:
-    for issue in _tick_issues(await page.js(TICKS_JS.format(box=box)), where):
+async def _expect_ticks(page: Page, box: str, where: str, min_shown: int = 2) -> None:
+    for issue in _tick_issues(await page.js(TICKS_JS.format(box=box)), where, min_shown):
         page.expect(False, issue)
 
 
@@ -3094,13 +3111,89 @@ async def chart_tick_labels(page: Page, url: str) -> None:
     await page.wait_for(lambda s: s["lines_on"] == "candles", 5, "обратно на свечи")
     await _to_actions(page)
     await page.pump(1.0)
-    await _expect_ticks(page, "actions-chart", "экран 5")
+    await _expect_ticks(page, "actions-chart", "экран 5", min_shown=1)
     await page.click('#actions-grid [data-code="sl"]')
     await page.click('#actions-chips [data-chip="1"]')
     await page.wait_for(lambda s: any(x.startswith("new-stop:") for x in _new_lines(s)), 6,
                         "пунктир превью")
     await page.pump(0.5)
-    await _expect_ticks(page, "actions-chart", "экран 5, пунктир превью")
+    await _expect_ticks(page, "actions-chart", "экран 5, пунктир превью", min_shown=1)
+
+
+# К4: куда ставится крайнее деление — внутри полосы TICK_EDGE_PX, но дальше ~3.7 px, где LWC
+# сам подпись не рисует (стенд 28.10: 3.9–4.4 px — нарисована со срезанными цифрами).
+EDGE_TARGET_PX = 4.5
+# Диапазон шкалы вдали от цен стенда (~1.4–1.6): плашки уровней и последней цены за экраном
+# и не прячут соседние деления.
+EDGE_RANGE = (2.0, 2.1)
+RANGE_JS = ("(() => {{ const b = document.getElementById('{box}');"
+            " if (!b || !b.setPriceRange) return false;"
+            " b.setPriceRange({lo}, {hi}); return true; }})()")
+
+
+def _edge_pair(data: Any, bottom: bool) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Крайнее деление у нужного края и его сосед (по координате хука, не по тексту)."""
+    ticks = sorted((t for t in data.get("ticks") or [] if t.get("y") is not None),
+                   key=lambda t: t["y"], reverse=bottom)
+    return (ticks[0], ticks[1]) if len(ticks) >= 2 else None
+
+
+async def _ticks_at_range(page: Page, box: str, lo: float, hi: float) -> Any:
+    page.expect(bool(await page.js(RANGE_JS.format(box=box, lo=lo, hi=hi))),
+                f"{box}: нет хука setPriceRange")
+    await page.pump(0.5)
+    return await page.js(TICKS_JS.format(box=box))
+
+
+async def _expect_edge(page: Page, box: str, where: str, bottom: bool) -> None:
+    """Деление ставится к краю детерминированно: диапазон EDGE_RANGE, по двум соседним делениям —
+    px на единицу цены, диапазон сдвигается (ширина та же — шаг делений тот же) так, что крайнее
+    встаёт в EDGE_TARGET_PX от края. Его подпись пуста, у соседа — есть."""
+    side = "нижний" if bottom else "верхний"
+    lo, hi = EDGE_RANGE
+    data = await _ticks_at_range(page, box, lo, hi)
+    pair = _edge_pair(data or {}, bottom)
+    if pair is None:
+        page.expect(False, f"{where}, {side} край: делений меньше двух ({data})")
+        return
+    edge, near = pair
+    px_per_price = abs(edge["y"] - near["y"]) / abs(near["price"] - edge["price"])
+    target = data["height"] - EDGE_TARGET_PX if bottom else EDGE_TARGET_PX
+    # Сдвиг диапазона на +d опускает цену на экране на d · px_per_price.
+    shift = (target - edge["y"]) / px_per_price
+    data = await _ticks_at_range(page, box, lo + shift, hi + shift)
+    ticks = {round(t["price"], 9): t for t in data.get("ticks") or [] if t.get("y") is not None}
+    at_edge, neighbour = ticks.get(round(edge["price"], 9)), ticks.get(round(near["price"], 9))
+    if at_edge is None or neighbour is None:
+        page.expect(False, f"{where}, {side} край: после сдвига нет делений {edge['price']}/"
+                           f"{near['price']} ({data})")
+        return
+    gap = data["height"] - at_edge["y"] if bottom else at_edge["y"]
+    page.expect(abs(gap - EDGE_TARGET_PX) < 1,
+                f"{where}, {side} край: деление {edge['price']} в {gap:.1f} px от края, "
+                f"ждали {EDGE_TARGET_PX} — случай не построен")
+    page.expect(not at_edge["text"],
+                f"{where}, {side} край: деление {edge['price']} в {gap:.1f} px от края подписано "
+                f"«{at_edge['text']}» — обрежется")
+    page.expect(bool(neighbour["text"]),
+                f"{where}, {side} край: соседнее деление {near['price']} без подписи")
+    for issue in _tick_issues(data, f"{where}, {side} край", min_shown=1):
+        page.expect(False, issue)
+
+
+@scenario("chart_tick_edge", "К4: подпись деления у нижнего и у верхнего края шкалы не "
+                             "выводится, соседние — выводятся (экран 5 и рынок, диапазон шкалы "
+                             "задан)")
+async def chart_tick_edge(page: Page, url: str) -> None:
+    await open_page(page, url, Setup(preset="single"))
+    await page.wait_for(lambda s: len(_lines(s)) >= 3, 10, "линии позиции на рынке")
+    for bottom in (True, False):
+        await _expect_edge(page, "market-chart", "рынок", bottom)
+    # Экран 5 — там на осмотре 27.10 обрезалась нижняя «1.2800».
+    await _to_actions(page)
+    await page.pump(1.0)
+    for bottom in (True, False):
+        await _expect_edge(page, "actions-chart", "экран 5", bottom)
 
 
 def _card_noise(data: Any) -> Any:

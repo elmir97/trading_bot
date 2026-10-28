@@ -70,6 +70,40 @@ def test_tick_labels_hidden_under_price_labels() -> None:
     assert "delete container.tickLabels;" in _body(js, "destroy() {")
 
 
+def test_tick_labels_hidden_at_pane_edge() -> None:
+    """К4 (28.10): нижняя подпись шкалы обрезалась краем панели — деление ближе половины
+    высоты текста к верхнему или нижнему краю без подписи."""
+    js = _js("chart.js")
+    assert "export const EDGE_GAP_PX = 6;" in js
+    ticks = _body(js, "function tickLabels(prices) {")
+    assert "const height = host ? chart.paneSize().height : null;" in ticks
+    assert "(y < EDGE_GAP_PX || y > height - EDGE_GAP_PX)" in ticks
+    assert "(atEdge(y) || covered.some(" in ticks
+
+
+def test_price_range_hook_independent_of_formatter() -> None:
+    """Хук сценария chart_tick_edge задаёт диапазон шкалы LWC — и только; переменные форматтера
+    (host, EDGE_GAP_PX, atEdge) не трогает, иначе мутация форматтера сломала бы и проверку."""
+    js = _js("chart.js")
+    hook = _body(js, "container.setPriceRange = (from, to) => {")
+    assert hook[1:-1].strip() == 'chart.priceScale("right").setVisibleRange({ from, to });'
+    assert "delete container.setPriceRange;" in _body(js, "destroy() {")
+    probe = _body(js, "container.tickLabels = () => {")
+    for name in ("host", "EDGE_GAP_PX", "atEdge", "LABEL_GAP_PX"):
+        assert not re.search(rf"\b{name}\b", probe), name
+    assert "height: chart.paneSize().height," in probe
+
+
+def test_last_value_label_titled_last() -> None:
+    """К4 (28.10): плашка серии — close последней свечи (последняя сделка), не mark шапки;
+    подписана «last» на свечах и на «линии»."""
+    js = _js("chart.js")
+    assert 'export const LAST_TITLE = "last";' in js
+    assert js.count("title: LAST_TITLE,") == 2
+    for series in ("chart.addSeries(LWC.CandlestickSeries, {", "chart.addSeries(LWC.LineSeries, {"):
+        assert "title: LAST_TITLE," in _body(js, series)
+
+
 def test_destroy_clears_lines_attributes() -> None:
     destroy = _body(_js("chart.js"), "destroy() {")
     assert "delete container.dataset.lines;" in destroy

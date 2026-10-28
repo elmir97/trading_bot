@@ -112,6 +112,13 @@ function priceFormat(precision) {
 // последней цены по вертикали выглядывало из-под неё хвостами («1.5500» под «1.5631») —
 // такое деление не подписываем.
 export const LABEL_GAP_PX = 18;
+// К4: подпись деления (текст 11 px без фона, по центру деления) ближе половины своей высоты к
+// верхнему или нижнему краю панели срезается краем («1.2800» на экране 5) — не подписываем.
+// Стенд 28.10: y 3.9–4.4 px — верх цифр срезан, 6 px — целиком; ближе ~3.7 px LWC не рисует сам.
+export const EDGE_GAP_PX = 6;
+// К4: плашка серии — close последней свечи, то есть цена последней сделки, не mark шапки
+// (1.3146 на графике против 1.3151 в шапке) — подписана, как плашки «вход»/«стоп».
+export const LAST_TITLE = "last";
 
 export function createPriceChart(container, { precision = 4, interval = "5m" } = {}) {
   let colors = themeColors();
@@ -153,23 +160,29 @@ export function createPriceChart(container, { precision = 4, interval = "5m" } =
   const candles = chart.addSeries(LWC.CandlestickSeries, {
     ...candleColors(colors), borderVisible: false, autoscaleInfoProvider,
     priceFormat: priceFormat(precision), lastValueVisible: true, priceLineVisible: true,
+    title: LAST_TITLE,
   });
   const line = chart.addSeries(LWC.LineSeries, {
     color: colors.ink, lineWidth: 2, visible: false, autoscaleInfoProvider,
     priceFormat: priceFormat(precision), lastValueVisible: true, priceLineVisible: true,
+    title: LAST_TITLE,
   });
 
   host = candles;
 
-  // Подписи делений: ближе LABEL_GAP_PX к плашке (уровень линии или последняя цена) — пусто.
+  // Подписи делений: ближе LABEL_GAP_PX к плашке (уровень линии или последняя цена) или
+  // ближе EDGE_GAP_PX к краю панели — пусто.
   function tickLabels(prices) {
     const busy = levels.map((level) => Number(level.price));
     if (last) busy.push(last.close);
     const covered = host ? busy.map((p) => host.priceToCoordinate(p)).filter((y) => y !== null)
       : [];
+    const height = host ? chart.paneSize().height : null;
+    const atEdge = (y) => height !== null && (y < EDGE_GAP_PX || y > height - EDGE_GAP_PX);
     ticks = prices.map((price) => {
       const y = host ? host.priceToCoordinate(price) : null;
-      const hidden = y !== null && covered.some((c) => Math.abs(c - y) < LABEL_GAP_PX);
+      const hidden = y !== null
+        && (atEdge(y) || covered.some((c) => Math.abs(c - y) < LABEL_GAP_PX));
       return { price, y, text: hidden ? "" : price.toFixed(digits) };
     });
     return ticks.map((t) => t.text);
@@ -183,10 +196,18 @@ export function createPriceChart(container, { precision = 4, interval = "5m" } =
     const y = (p) => shown.priceToCoordinate(p);
     return {
       type,
+      height: chart.paneSize().height,
+      lastTitle: shown.options().title,
       ticks: ticks.map((t) => ({ ...t, y: y(t.price) })),
       labels: [...levels.map((level) => Number(level.price)), ...(last ? [last.close] : [])]
         .map(y),
     };
+  };
+
+  // Для сценариев (--scenario, К4): задать видимый диапазон шкалы (автомасштаб выключается) —
+  // деление ставится к краю панели детерминированно. Только шкала LWC, без переменных форматтера.
+  container.setPriceRange = (from, to) => {
+    chart.priceScale("right").setVisibleRange({ from, to });
   };
 
   // Для сценариев (--scenario): какие уровни сейчас в видимом диапазоне цены.
@@ -285,6 +306,7 @@ export function createPriceChart(container, { precision = 4, interval = "5m" } =
       delete container.dataset.linesOn;
       delete container.levelsInView;
       delete container.tickLabels;
+      delete container.setPriceRange;
       chart.remove();
     },
   };

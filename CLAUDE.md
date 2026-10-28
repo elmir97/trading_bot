@@ -209,7 +209,7 @@ python -m scripts.miniapp_dev [--port 8765]
   подменяется через `Fetch` (свой статус, правка ответа, обрыв, зависание, `exact` — путь целиком) — следы своих
   правил замечанием не считаются. SDK с telegram.org не загрузился (сеть) — сценарий прерывается с этим текстом,
   повторить; так же `wait_for`, если посреди сценария показан `screen-sdk`. Стенд вне Telegram — initData-заглушка в хеше (`#tgWebAppData=…`, `page_url`), без неё — экран «Открой Mini
-  App из бота» (`no_init_data`, `Setup(init_data=False)`); `me_502` — прокси без api (502 без JSON). `all` (82, 27.10); exit 0/1/2 как выше. Новый экран — новый сценарий там же.
+  App из бота» (`no_init_data`, `Setup(init_data=False)`); `me_502` — прокси без api (502 без JSON). `all` (83, 28.10); exit 0/1/2 как выше. Новый экран — новый сценарий там же.
   Экран 5 (действия с позицией, 5.3): `act_be_disabled`, `act_stop_preview` (5 правок → 1 превью, чип — строка
   `level_percent`), `act_card_timer` (ttl, часы телефона −2 ч), `act_confirm_done` (демо — без `showConfirm`),
   `act_pending` (2 с, скрытая вкладка — пауза), `act_busy`, `act_risk_increase`, `act_double`, `act_double_old`,
@@ -220,7 +220,8 @@ python -m scripts.miniapp_dev [--port 8765]
   `act_diff_noise` («пересчитано» без mark/комиссии/equity); К6 (27.10): `act_card_pause` («Да» другого цвета, первую секунду
   неактивна, по инерции — 0 `/confirm`, после «Пересчитать» — снова пауза; `act_double`/`act_double_old` — под ту же паузу,
   `CARD_ARM_S` сценариев = `CARD_ARM_MS` фронта; `act_card_pause_nodisable` — клиент без блокировки кнопки, держит одна
-  проверка `cardReadyAt`),
+  проверка `cardReadyAt`); К4 (28.10): `chart_tick_edge` (подпись деления у нижнего и у верхнего края не выводится, сосед —
+  выводится; диапазон шкалы задаёт хук `#…-chart.setPriceRange(from, to)`, деление ставится в 4.5 px от края),
   `design_actions` (числа ответа как есть). **Для `act_*`/`design_actions` и `--shot actions` стенд — с
   `MINIAPP_ACTIONS_ENABLED=true` и `EXEC_DRY_RUN=false`** (иначе сценарий прерывается с этим текстом); `pos_list`,
   `pos_chat`, `design_positions` сами выключают действия патчем `/api/me` (проверяют путь «в чат»). Перехват запроса,
