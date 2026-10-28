@@ -36,11 +36,16 @@ SL/TP, цена уровня) ставится только после окон�
 
 Чтобы понять, хватает ли 15 секунд, в лог пишется, сколько пути было
 пройдено в момент уведомления (перескок за порог, п.п.).
+
+К9 (28.10.2026): стоп в безубытке или в прибыли (LONG — не ниже безубытка, SHORT — не выше;
+ровно на безубытке — тоже) — «приближается к стопу» не шлётся: риска убытка нет. Безубыток — та
+же цена, что у карточки «Стоп в безубыток» (комиссия входа журнала, иначе ставкой). Кнопка
+«🛡 Стоп в безубыток» — по той же проверке mark, что у плана (stop_clear_of_mark).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
@@ -55,12 +60,20 @@ from app.core.logging import get_logger
 from app.core.numfmt import fmt_money, fmt_price
 from app.core.security import SecretCipher
 from app.database.models.position_alert import PositionAlert
+from app.database.models.trade import TradeFill
 from app.database.models.user import DEFAULT_ALERT_PERCENT
 from app.database.repositories.trade import TradeRepository
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
 from app.exchanges.base import ExchangeAuthError, ExchangeError
-from app.execution.position_actions import DISCLAIMER, breakeven_price
+from app.execution.position_actions import (
+    DISCLAIMER,
+    breakeven_price,
+    entry_fee_or_rate,
+    journal_entry_fee_unit,
+    stop_clear_of_mark,
+    stop_secures_breakeven,
+)
 from app.execution.position_view import PositionView, build_views
 from app.market.cache import TTLCache
 from app.market.data import MarketDataService
@@ -81,6 +94,9 @@ HYSTERESIS = Decimal("0.20")
 FALLBACK_BASE = Decimal("0.01")
 LOCK_PATTERN = "exec:lock:*"
 PULSE_EVERY = timedelta(hours=1)
+# Безубыток для «стоп в безубытке?» без справочника (точность не получена): шаг 1e-12 — по сути
+# без округления; округление к шагу символа — в сторону прибыли, сравнение от этого не меняется.
+BE_FALLBACK_PRECISION = 12
 
 # callback_data кнопок — те же, что у экрана «Позиции» и карточек этапа 4
 # (app/bot/handlers/position_actions.ActionCB.OPEN, positions.PositionsCB.
@@ -140,6 +156,9 @@ class UserSnapshot:
     # risk_unit); нет сделки, стопа или стоп не в убытке — None, R «н/д».
     r_unit: dict[tuple[str, TradeSide], Decimal | None]
     precision: dict[str, int]
+    # (symbol, side) → комиссия входа на единицу по журналу (К9: безубыток — как у карточки);
+    # нет сделки или входа — None, тогда ставкой.
+    entry_fee: dict[tuple[str, TradeSide], Decimal | None] = field(default_factory=dict)
 
 
 def level_of(view: PositionView, kind: str) -> Decimal | None:
@@ -180,24 +199,32 @@ def render_alert(
     ])
 
 
+def position_breakeven(
+    view: PositionView, fee_rate: Decimal, journal_fee_unit: Decimal | None, precision: int,
+) -> Decimal:
+    """Безубыток позиции — как у карточки «Стоп в безубыток» (вход биржи, комиссия входа журнала,
+    иначе ставкой)."""
+    p = view.position
+    fee_unit = entry_fee_or_rate(journal_fee_unit, p.entry_price, fee_rate)
+    return breakeven_price(p.side, p.entry_price, fee_rate, fee_unit, precision)
+
+
 def alert_keyboard(
     view: PositionView, mark: Decimal, *, fee_rate: Decimal, min_distance_percent: Decimal,
-    precision: int | None,
+    precision: int | None, journal_fee_unit: Decimal | None = None,
 ) -> InlineKeyboardMarkup:
     """Кнопки — входы в карточки этапа 4 (строятся заново с биржи в момент
-    нажатия). «Стоп в безубыток» — только если mark уже за безубытком с
-    запасом минимальной дистанции стопа, иначе карточка всё равно откажет."""
+    нажатия). «Стоп в безубыток» — только если карточка пройдёт: та же проверка, что у плана
+    (stop_clear_of_mark — из неё и порог X подсказки, breakeven_threshold; для mark на шаге
+    цены это ровно «mark ≥ X», mark биржи бывает точнее шага). К9: раньше было
+    mark ≥ БУ·(1+m) против плана mark ≥ БУ/(1−m) — в узкой полосе кнопка была, а карточка
+    отказывала."""
     p = view.position
     tail = f"{p.symbol}:{SIDE_CODE[p.side]}"
     rows: list[list[InlineKeyboardButton]] = []
     if precision is not None:
-        be = breakeven_price(p.side, p.entry_price, fee_rate, p.entry_price * fee_rate, precision)
-        room = min_distance_percent / HUNDRED
-        if p.side is TradeSide.LONG:
-            beyond = mark >= be * (ONE + room)
-        else:
-            beyond = mark <= be * (ONE - room)
-        if beyond:
+        be = position_breakeven(view, fee_rate, journal_fee_unit, precision)
+        if stop_clear_of_mark(be, mark, min_distance_percent, p.side):
             rows.append([InlineKeyboardButton(
                 text="🛡 Стоп в безубыток", callback_data=f"{ACTION_OPEN}be:{tail}"
             )])
@@ -318,15 +345,35 @@ class PositionMonitor:
                     pos = view.position
                     r_unit[(pos.symbol, pos.side)] = risk_unit(pos.side, pos.entry_price, stop)
                 precision = await self._precision({v.position.symbol for v in views})
+                entry_fee = await self._entry_fees(session, views)
                 await self._prune(session, user.id, views)
                 snapshots.append(UserSnapshot(
                     user_id=user.id, telegram_id=user.telegram_id, sl_on=sl_on, tp_on=tp_on,
                     sl_percent=st.sl_alert_percent or DEFAULT_ALERT_PERCENT,
                     tp_percent=st.tp_alert_percent or DEFAULT_ALERT_PERCENT,
                     views=tuple(views), r_unit=r_unit, precision=precision,
+                    entry_fee=entry_fee,
                 ))
         self._snapshots = snapshots
         self._snapshot_at = now
+
+    @staticmethod
+    async def _entry_fees(
+        session: AsyncSession, views: list[PositionView]
+    ) -> dict[tuple[str, TradeSide], Decimal | None]:
+        """Комиссия входа на единицу по журналу для позиций со сделкой — одним запросом."""
+        by_trade = {v.trade.id: v for v in views if v.trade is not None}
+        out: dict[tuple[str, TradeSide], Decimal | None] = {
+            (v.position.symbol, v.position.side): None for v in views}
+        if not by_trade:
+            return out
+        fills = list(await session.scalars(
+            select(TradeFill).where(TradeFill.trade_id.in_(list(by_trade)))
+        ))
+        for trade_id, view in by_trade.items():
+            own = [f for f in fills if f.trade_id == trade_id]
+            out[(view.position.symbol, view.position.side)] = journal_entry_fee_unit(own)
+        return out
 
     async def _precision(self, symbols: set[str]) -> dict[str, int]:
         if not symbols:
@@ -369,6 +416,12 @@ class PositionMonitor:
         if level is None:
             return
         p = view.position
+        journal_fee = snap.entry_fee.get((p.symbol, p.side))
+        if kind == "SL":
+            be = position_breakeven(view, self._settings.exec_taker_fee_rate, journal_fee,
+                                    snap.precision.get(p.symbol, BE_FALLBACK_PRECISION))
+            if stop_secures_breakeven(p.side, level, be):
+                return   # К9: стоп в безубытке/прибыли — риска убытка нет, не предупреждаем
         r_unit = snap.r_unit.get((p.symbol, p.side))
         remaining, base = approach_geometry(p.side, kind, p.entry_price, level, mark, r_unit)
         if base <= ZERO:
@@ -392,7 +445,7 @@ class PositionMonitor:
         keyboard = alert_keyboard(
             view, mark, fee_rate=self._settings.exec_taker_fee_rate,
             min_distance_percent=self._settings.exec_min_stop_distance_percent,
-            precision=precision,
+            precision=precision, journal_fee_unit=journal_fee,
         )
         delivery = await send_notification(self._bot, snap.telegram_id, text,
                                            reply_markup=keyboard)

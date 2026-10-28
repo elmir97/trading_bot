@@ -2413,7 +2413,7 @@ async def act_be_disabled(page: Page, url: str) -> None:
     page.expect(a.get("buttons", {}).get("be") is False, f"кнопки: {a.get('buttons')}")
     page.expect(all(a.get("buttons", {}).get(c) for c in ("sl", "tp", "c25", "c50", "cf")),
                 f"остальные кнопки: {a.get('buttons')}")
-    page.expect(bool(re.search(r"Стоп в безубыток: доступно, когда mark выше \d+\.\d{4}(?!\d)",
+    page.expect(bool(re.search(r"Стоп в безубыток: доступно, когда mark не ниже \d+\.\d{4}(?!\d)",
                                a.get("hints") or "")) and "безубыток — 1.5116" in a["hints"],
                 f"причина: {a.get('hints')!r}")
     page.expect((a.get("pnl") or "").endswith("R"), f"PnL без R: {a.get('pnl')!r}")

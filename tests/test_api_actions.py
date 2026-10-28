@@ -264,10 +264,10 @@ async def test_actions_screen_breakeven_hint_is_threshold(ctx) -> None:  # type:
     level = breakeven_price(TradeSide.LONG, ENTRY, settings.exec_taker_fee_rate,
                             ENTRY * settings.exec_taker_fee_rate, 4)
     x = breakeven_threshold(TradeSide.LONG, level, settings.exec_min_stop_distance_percent, 4)
-    assert be["enabled"] is False and be["hint"] == f"доступно, когда mark выше {x}"
+    assert be["enabled"] is False and be["hint"] == f"доступно, когда mark не ниже {x}"
     data = await _card(ctx)
     assert data["card"]["refusal"]["message"].startswith(
-        f"Стоп в безубыток доступен, когда mark выше {x} (сейчас 1.5265, безубыток {level})"
+        f"Стоп в безубыток доступен, когда mark не ниже {x} (сейчас 1.5265, безубыток {level})"
     )
 
 

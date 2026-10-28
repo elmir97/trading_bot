@@ -244,7 +244,8 @@ def _hint(code: str, inputs: ActionInputs) -> ActionHintOut:
     if not isinstance(plan, ExecutionRefusal):
         return ActionHintOut(code=code, enabled=True, hint=None)
     needs_input = code in ("sl", "tp") and plan.code is Code.INVALID_PRICE
-    # Короткая подсказка отказа, если есть (К4: «доступно, когда mark выше X»), иначе текст.
+    # Короткая подсказка отказа, если есть (К4/К9: «доступно, когда mark не ниже/не выше X»),
+    # иначе текст.
     hint = plan.hint or plan.message
     return ActionHintOut(code=code, enabled=needs_input, hint=None if needs_input else hint)
 

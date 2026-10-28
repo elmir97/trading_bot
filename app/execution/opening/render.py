@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from decimal import ROUND_DOWN, Decimal
 
-from app.core.numfmt import fmt_amount, fmt_pct, fmt_price, fmt_qty, fmt_rr
+from app.core.numfmt import fmt_amount, fmt_fee, fmt_fee_html, fmt_pct, fmt_price, fmt_qty, fmt_rr
 from app.exchanges.base import MarginType
 from app.execution.opening.calc import Issue, Level, OpeningCalc, OpeningInputs, RoundedLevel
 from app.execution.price_step import price_step
@@ -84,7 +84,9 @@ def render_card(
         lines += [
             f"Риск: {fmt_amount(calc.risk_usd)} $ ({fmt_pct(calc.risk_percent)} от "
             f"{fmt_amount(equity)} $ equity), с комиссией",
-            f"Комиссия ≈ {fmt_amount(calc.fee_usd)} $ (вход и выход по стопу)",
+            # К9: меньше цента — «<0.01» без «≈» (экранировано: текст чата — HTML), как у действий.
+            f"Комиссия {'' if '<' in fmt_fee(calc.fee_usd) else '≈ '}"
+            f"{fmt_fee_html(calc.fee_usd)} $ (вход и выход по стопу)",
             f"Объём: {fmt_qty(calc.quantity, quantity_precision)} {base_asset(inputs.symbol)} "
             f"(≈{fmt_amount(calc.notional)} $)",
             f"Маржа: {fmt_amount(calc.margin)} $ ({_MARGIN[margin_type]}, плечо "

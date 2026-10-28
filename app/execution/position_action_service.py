@@ -75,6 +75,7 @@ from app.execution.position_actions import (
     ActionPlan,
     CardView,
     card_view,
+    journal_entry_fee_unit,
     levels_after_partial,
     plan_action,
     render_card,
@@ -96,7 +97,6 @@ from app.services.position_mode import refresh_position_mode
 from app.trading.calculations import risk_per_unit
 from app.trading.enums import (
     CancelSource,
-    FillSide,
     OrderRole,
     OrderSide,
     OrderStatus,
@@ -254,10 +254,7 @@ class PositionActionService:
         fee_unit: Decimal | None = None
         one_r: Decimal | None = None
         if trade is not None:
-            entries = [f for f in trade.fills if f.fill_side is FillSide.ENTRY]
-            entry_qty = sum((f.quantity for f in entries), ZERO)
-            if entry_qty > ZERO:
-                fee_unit = sum((f.fee for f in entries), ZERO) / entry_qty
+            fee_unit = journal_entry_fee_unit(trade.fills)
             if trade.entry_price is not None:
                 one_r = risk_per_unit(trade.side, trade.entry_price, trade.risk_stop)
         return ActionInputs(

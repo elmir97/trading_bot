@@ -124,7 +124,7 @@ class ExecutionRefusal:
     code: ExecutionRefusalCode
     message: str
     # Короткая подсказка под кнопкой (Mini App, «Стоп в безубыток: доступно, когда mark
-    # выше X»); None — подсказка = message (К4, 28.10.2026).
+    # не ниже/не выше X»); None — подсказка = message (К4, 28.10.2026; К9 — «не ниже/не выше»).
     hint: str | None = None
 
 

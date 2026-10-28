@@ -19,10 +19,13 @@ from app.execution.position_actions import (
     breakeven_price,
     breakeven_threshold,
     card_view,
+    entry_fee_or_rate,
+    journal_entry_fee_unit,
     loss_at,
     plan_action,
     render_card,
     stop_clear_of_mark,
+    stop_secures_breakeven,
 )
 from app.execution.position_view import ProtectiveOrder
 from app.trading.enums import PositionActionKind as Kind
@@ -494,9 +497,10 @@ class TestBreakevenThreshold:
     def test_long_message_and_hint(self) -> None:
         refusal = _refusal(Kind.MOVE_STOP, {"breakeven": True}, mark=D("1.5265"))
         assert refusal.message == (
-            "Стоп в безубыток доступен, когда mark выше 1.5285 (сейчас 1.5265, безубыток 1.5269)."
+            "Стоп в безубыток доступен, когда mark не ниже 1.5285 (сейчас 1.5265, безубыток "
+            "1.5269)."
         )
-        assert refusal.hint == "доступно, когда mark выше 1.5285"
+        assert refusal.hint == "доступно, когда mark не ниже 1.5285"
 
     def test_short_message_says_below(self) -> None:
         refusal = _refusal(
@@ -504,9 +508,10 @@ class TestBreakevenThreshold:
             position=_position(TradeSide.SHORT, entry="1.58"), stops=(_order("1.62"),),
         )
         assert refusal.message == (
-            "Стоп в безубыток доступен, когда mark ниже 1.5768 (сейчас 1.5790, безубыток 1.5784)."
+            "Стоп в безубыток доступен, когда mark не выше 1.5768 (сейчас 1.5790, безубыток "
+            "1.5784)."
         )
-        assert refusal.hint == "доступно, когда mark ниже 1.5768"
+        assert refusal.hint == "доступно, когда mark не выше 1.5768"
 
     @pytest.mark.parametrize("side", [TradeSide.LONG, TradeSide.SHORT])
     @pytest.mark.parametrize("percent", ["0.1", "0.15", "0.2", "0.33", "1"])
@@ -555,3 +560,31 @@ class TestSmallAmounts:
         text = render_card(plan, inputs)
         assert "Риск после — &lt;0.01% от 100000000.00 USDT" in text
         assert re.findall(r"<(?!/?[bi]>)", text) == []
+
+
+
+class TestStopSecuresBreakeven:
+    """К9: стоп в безубытке или прибыли — LONG не ниже БУ, SHORT не выше; ровно на БУ — тоже."""
+
+    @pytest.mark.parametrize(("side", "stop", "expected"), [
+        (TradeSide.LONG, "100.11", True), (TradeSide.LONG, "100.12", True),
+        (TradeSide.LONG, "100.10", False),
+        (TradeSide.SHORT, "99.90", True), (TradeSide.SHORT, "99.89", True),
+        (TradeSide.SHORT, "99.91", False),
+    ])
+    def test_boundary(self, side: TradeSide, stop: str, expected: bool) -> None:
+        be = D("100.11") if side is TradeSide.LONG else D("99.90")
+        assert stop_secures_breakeven(side, D(stop), be) is expected
+
+    def test_journal_fee_unit_from_entry_fills(self) -> None:
+        from types import SimpleNamespace
+
+        from app.trading.enums import FillSide
+
+        fills = [SimpleNamespace(fill_side=FillSide.ENTRY, quantity=D(1), fee=D("0.3")),
+                 SimpleNamespace(fill_side=FillSide.ENTRY, quantity=D(3), fee=D("0.5")),
+                 SimpleNamespace(fill_side=FillSide.EXIT, quantity=D(4), fee=D(9))]
+        assert journal_entry_fee_unit(fills) == D("0.2")
+        assert journal_entry_fee_unit(fills[2:]) is None
+        assert entry_fee_or_rate(None, D(100), F) == D("0.05")
+        assert entry_fee_or_rate(D("0.2"), D(100), F) == D("0.2")

@@ -762,6 +762,24 @@ async def _imported_trade(c) -> Trade:  # type: ignore[no-untyped-def]
     return trade
 
 
+
+async def test_breakeven_card_uses_journal_entry_fee(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Безубыток карточки — с комиссией входа журнала (0.3 на 30 = 0.01 на единицу), не ставкой:
+    (1.5253 + 0.01) / 0.9995 → вверх 1.5361 (ставкой — 1.5269). Та же цена — у монитора (К9)."""
+    await TradeJournal(TradeRepository(ctx.session)).open_trade(
+        user_id=ctx.uid, symbol="XRP-USDT", side=TradeSide.LONG, entry_price=ENTRY,
+        quantity=D(30), stop_loss=D("1.4795"), source=TradeSource.IMPORTED,
+        account_mode=ExchangeKeyMode.DEMO,
+        external_position_id=PID, external_fill_id="f1", fee=D("0.3"),
+    )
+    await ctx.session.commit()
+    card = await _card(ctx, PositionActionKind.MOVE_STOP, {"breakeven": True})
+    assert card.action is not None, card.text
+    rate = D("0.0005")
+    assert card.action.new_level == breakeven_price(TradeSide.LONG, ENTRY, rate, D("0.01"), 4)
+    assert card.action.new_level == D("1.5361")
+    assert card.action.new_level != breakeven_price(TradeSide.LONG, ENTRY, rate, ENTRY * rate, 4)
+
 async def test_full_close_post_filled_read_down_is_done(ctx, caplog) -> None:  # type: ignore[no-untyped-def]
     """#37 (11.10): позиция закрылась, чтение по cid не подтвердило. Теперь —
     DONE, строка FILLED с price NULL («не дочитано»), выход в журнал не

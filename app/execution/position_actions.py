@@ -21,8 +21,10 @@ SymbolInfo) и журнала (комиссия входа, исходный с�
 from __future__ import annotations
 
 import html
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_FLOOR, ROUND_HALF_UP, Decimal
+from typing import Any
 
 from app.core.numfmt import (
     fmt_amount,
@@ -38,8 +40,8 @@ from app.execution.models import ExecutionRefusal
 from app.execution.models import ExecutionRefusalCode as Code
 from app.execution.position_view import ProtectiveOrder
 from app.execution.price_step import stop_closer, take_closer
+from app.trading.enums import FillSide, TradeSide
 from app.trading.enums import PositionActionKind as Kind
-from app.trading.enums import TradeSide
 
 ZERO = Decimal(0)
 ONE = Decimal(1)
@@ -111,9 +113,30 @@ def _sign(side: TradeSide) -> Decimal:
 
 def entry_fee_unit(inputs: ActionInputs) -> Decimal:
     """Комиссия входа на единицу: из журнала, иначе ставкой от цены входа."""
-    if inputs.entry_fee_per_unit is not None:
-        return inputs.entry_fee_per_unit
-    return inputs.position.entry_price * inputs.fee_rate
+    return entry_fee_or_rate(inputs.entry_fee_per_unit, inputs.position.entry_price,
+                             inputs.fee_rate)
+
+
+def entry_fee_or_rate(journal_unit: Decimal | None, entry: Decimal, fee_rate: Decimal) -> Decimal:
+    """Комиссия входа на единицу — журнала, иначе ставкой от входа. Одна для карточки «Стоп в
+    безубыток» и монитора позиций (К9): безубыток у них — одна цена."""
+    return journal_unit if journal_unit is not None else entry * fee_rate
+
+
+def journal_entry_fee_unit(fills: Iterable[Any]) -> Decimal | None:
+    """Комиссия входа на единицу по исполнениям журнала (fill_side ENTRY): сумма комиссий /
+    объём входа; входа нет — None (тогда ставкой, entry_fee_or_rate)."""
+    entries = [f for f in fills if f.fill_side is FillSide.ENTRY]
+    qty = sum((f.quantity for f in entries), ZERO)
+    if qty <= ZERO:
+        return None
+    return sum((f.fee for f in entries), ZERO) / qty
+
+
+def stop_secures_breakeven(side: TradeSide, stop: Decimal, breakeven: Decimal) -> bool:
+    """Стоп в безубытке или в прибыли (К9): LONG — не ниже безубытка, SHORT — не выше; ровно на
+    безубытке — тоже (сработав, убытка не даст). Алерт «приближается к стопу» тогда не шлётся."""
+    return stop >= breakeven if side is TradeSide.LONG else stop <= breakeven
 
 
 def breakeven_price(
@@ -240,10 +263,11 @@ def plan_action(
             level = stop_closer(typed, p.side, step)
         if not stop_clear_of_mark(level, inputs.mark, inputs.min_distance_percent, p.side):
             if breakeven:
-                # К4 (осмотр 27.10): порог прямо — «доступно, когда mark выше X», а не
-                # «безубыток Z: mark ещё не ушёл за него на 0.20%».
+                # К4 (осмотр 27.10): порог прямо — «доступно, когда mark не ниже X», а не
+                # «безубыток Z: mark ещё не ушёл за него на 0.20%». «Не ниже/не выше» (К9):
+                # при mark = X стоп проходит — «выше X» читалось как строго.
                 x = breakeven_threshold(p.side, level, inputs.min_distance_percent, precision)
-                when = f"когда mark {'выше' if long else 'ниже'} {fmt_price(x, precision)}"
+                when = f"когда mark {'не ниже' if long else 'не выше'} {fmt_price(x, precision)}"
                 return ExecutionRefusal(
                     Code.BREAKEVEN_NOT_REACHED,
                     f"Стоп в безубыток доступен, {when} (сейчас "

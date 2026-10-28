@@ -340,3 +340,23 @@ def test_take_at_2r_none_when_stop_wrong_side(stop, side) -> None:  # type: igno
 
 def test_take_at_2r_none_below_zero() -> None:
     assert take_at_r(D("1.0"), D("2.0"), TradeSide.SHORT, 2, 4) is None   # 1 − 2·1 = −1
+
+
+
+@pytest.mark.parametrize(("fee", "line"), [
+    (D("0.004"), "Комиссия &lt;0.01 $ (вход и выход по стопу)"),
+    (D("0.02"), "Комиссия ≈ 0.02 $ (вход и выход по стопу)"),
+])
+def test_card_fee_below_cent_html(fee: Decimal, line: str) -> None:
+    """К9 (бэклог К4 п.4): комиссия карточки открытия меньше цента — «<0.01» без «≈»,
+    экранировано (текст чата — HTML, иначе Telegram отклонит сообщение)."""
+    from app.execution.opening.render import render_card
+    from app.trading.enums import ExchangeKeyMode
+
+    calc = replace(compute(INPUTS, MARKET, LIMITS), fee_usd=fee)
+    text = render_card(
+        INPUTS, calc, account_mode=ExchangeKeyMode.DEMO, equity=D(1500), available=D(1475),
+        margin_type=MarginType.ISOLATED, price_precision=4, quantity_precision=0, dry_run=True,
+        ttl_seconds=60,
+    )
+    assert line in text.splitlines()

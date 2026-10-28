@@ -152,7 +152,7 @@ async def ctx(unique_telegram_id):  # type: ignore[no-untyped-def]
 
 async def test_stop_80_percent_long(ctx) -> None:  # type: ignore[no-untyped-def]
     assert await ctx.step("92.5") == []          # 75% пути — рано
-    [text] = await ctx.step("92")                # 80%
+    text = await _one(ctx, "92")                # 80%
     assert "SOL-USDT LONG</b> приближается к стопу" in text
     assert "стоп 90" in text and "осталось 2.17%" in text
     assert "PnL -16.00 USDT" in text and "R не определён" in text   # позиции нет в журнале
@@ -160,12 +160,12 @@ async def test_stop_80_percent_long(ctx) -> None:  # type: ignore[no-untyped-def
 
 
 async def test_take_80_percent_and_short(ctx) -> None:  # type: ignore[no-untyped-def]
-    [text] = await ctx.step("116")
+    text = await _one(ctx, "116")
     assert "приближается к тейку" in text and "PnL +32.00 USDT" in text
     ctx.exchange.position = replace(ctx.exchange.position, side=TradeSide.SHORT)
     ctx.exchange.orders = [_order("s2", "STOP_MARKET", D(110), "SHORT"),
                            _order("t2", "TAKE_PROFIT_MARKET", D(80), "SHORT")]
-    [text] = await ctx.step("108")               # SHORT: 80% к стопу 110
+    text = await _one(ctx, "108")               # SHORT: 80% к стопу 110
     assert "SOL-USDT SHORT</b> приближается к стопу" in text
 
 
@@ -177,7 +177,7 @@ async def test_r_from_journal_initial_stop(ctx) -> None:  # type: ignore[no-unty
             account_mode=ExchangeKeyMode.DEMO,
             external_position_id="p1", external_fill_id="f1", fee=D("0.1"),
         )
-    [text] = await ctx.step("92")
+    text = await _one(ctx, "92")
     # 1R = 10 на единицу: осталось 2 → 0.20R; PnL −16 на 2 шт → −0.80R
     assert "(0.20R)" in text and "(-0.80R)" in text
 
@@ -185,7 +185,7 @@ async def test_r_from_journal_initial_stop(ctx) -> None:  # type: ignore[no-unty
 async def test_disabled_and_threshold_per_user(ctx) -> None:  # type: ignore[no-untyped-def]
     await ctx.set_user(notifications={"sl_approaching": False}, tp_alert_percent=50)
     assert await ctx.step("91") == []            # стоп выключен
-    [text] = await ctx.step("110")               # тейк: порог 50% — 110
+    text = await _one(ctx, "110")               # тейк: порог 50% — 110
     assert "приближается к тейку" in text
 
 
@@ -210,7 +210,7 @@ async def test_hysteresis_and_dedup_by_level(ctx) -> None:  # type: ignore[no-un
 async def test_moved_level_is_new_key(ctx) -> None:  # type: ignore[no-untyped-def]
     assert len(await ctx.step("92")) == 1
     ctx.exchange.orders[0] = _order("s3", "STOP_MARKET", D(91))   # стоп перенесли
-    [text] = await ctx.step("91.4")              # 80% к 91 = 91.8 — пройдено
+    text = await _one(ctx, "91.4")              # 80% к 91 = 91.8 — пройдено
     assert "стоп 91" in text
     assert await ctx.alerts() == [("SL", D(91))]   # ключ старого уровня снят
 
@@ -236,6 +236,14 @@ async def test_live_lock_skips_cycle(ctx) -> None:  # type: ignore[no-untyped-de
     assert await ctx.step("92") == []
     assert ctx.exchange.calls == []
 
+
+
+async def _one(ctx, mark: str) -> str:  # type: ignore[no-untyped-def]
+    """Ровно одно уведомление на шаге — проверкой (assert), не распаковкой: мутант иначе падал бы
+    ValueError, а это не «поймана» (прогонщик мутаций, 28.10)."""
+    texts = await ctx.step(mark)
+    assert len(texts) == 1, texts
+    return texts[0]
 
 async def test_no_keys_no_alerts(ctx) -> None:  # type: ignore[no-untyped-def]
     ctx.state.auth_error = True
@@ -270,20 +278,30 @@ async def _as_short(ctx, *, stop: str | None = None, take: str | None = None) ->
     )
 
 
-async def test_short_breakeven_stop_no_alert_in_profit_alert_near_stop(ctx) -> None:  # type: ignore[no-untyped-def]
-    """SHORT вход 100, стоп в безубытке 99 (ниже входа), без журнала: база
-    1% входа = 1, полоса 20% = 0.2 — уведомление при mark ≥ 98.8."""
+async def test_short_stop_in_profit_no_alert(ctx) -> None:  # type: ignore[no-untyped-def]
+    """К9: SHORT вход 100, стоп 99 — в прибыли (БУ без журнала 99.90): риска убытка нет —
+    «приближается к стопу» не шлётся и у самого стопа (до К9 — слался при mark ≥ 98.8)."""
     await _as_short(ctx, stop="99")
-    assert await ctx.step("95") == []            # прибыль растёт — стоп всё дальше
-    assert await ctx.step("98.5") == []          # до стопа 0.5 > 0.2
-    [text] = await ctx.step("98.9")              # до стопа 0.1
+    assert await ctx.step("95") == []
+    assert await ctx.step("98.9") == []          # до стопа 0.1
+    assert await ctx.step("99.5") == []          # уровень пройден
+    assert await ctx.alerts() == []
+
+
+async def test_short_stop_between_breakeven_and_entry_alerts(ctx) -> None:  # type: ignore[no-untyped-def]
+    """SHORT стоп 99.95: ниже входа, но выше БУ 99.90 — сработав, даст малый убыток: алерт есть.
+    Без журнала база 1% входа = 1, полоса 0.2 — уведомление при mark ≥ 99.75."""
+    await _as_short(ctx, stop="99.95")
+    assert await ctx.step("99.6") == []          # до стопа 0.35
+    text = await _one(ctx, "99.8")              # до стопа 0.15
     assert "SOL-USDT SHORT</b> приближается к стопу" in text and "осталось" in text
-    assert await ctx.alerts() == [("SL", D(99))]
+    assert await ctx.alerts() == [("SL", D("99.95"))]
 
 
 async def test_long_stop_above_entry_uses_r(ctx) -> None:  # type: ignore[no-untyped-def]
-    """LONG стоп перенесён выше входа (101 при входе 100), в журнале исходный
-    стоп 90 → 1R = 10, полоса 2: уведомление при mark ≤ 103."""
+    """LONG стоп чуть выше входа, но ниже безубытка (100.05 при входе 100, БУ 100.11) — малый
+    убыток, алерт есть; в журнале исходный стоп 90 → 1R = 10, полоса 2: уведомление при
+    mark ≤ 102.05. Стоп 101 (в прибыли) — К9, без алерта (до К9 — при mark ≤ 103)."""
     async with ctx.db.session() as session:
         trade = await TradeJournal(TradeRepository(session)).open_trade(
             user_id=ctx.uid, symbol="SOL-USDT", side=TradeSide.LONG, entry_price=ENTRY,
@@ -293,9 +311,11 @@ async def test_long_stop_above_entry_uses_r(ctx) -> None:  # type: ignore[no-unt
         )
         trade.initial_stop_loss = D(90)
     ctx.exchange.orders = [_order("s9", "STOP_MARKET", D(101))]
+    assert await ctx.step("102.5") == []         # К9: стоп 101 в прибыли — без алерта
+    ctx.exchange.orders = [_order("s8", "STOP_MARKET", D("100.05"))]
     assert await ctx.step("110") == []           # было: «пройдено 1000%»
-    assert await ctx.step("103.5") == []
-    [text] = await ctx.step("102.5")             # до стопа 1.5 = 0.15R
+    assert await ctx.step("102.5") == []         # до стопа 2.45 > 2
+    text = await _one(ctx, "101.55")            # до стопа 1.5 = 0.15R
     assert "приближается к стопу" in text and "(0.15R)" in text
 
 
@@ -304,24 +324,122 @@ async def test_short_take_above_entry(ctx) -> None:  # type: ignore[no-untyped-d
     падении к 101; без журнала база max(1, 1% входа) = 1, полоса 0.2."""
     await _as_short(ctx, take="101")
     assert await ctx.step("102") == []           # было: «пройдено 200%»
-    [text] = await ctx.step("101.1")
+    text = await _one(ctx, "101.1")
     assert "приближается к тейку" in text
 
 
 async def test_fallback_one_percent_without_journal(ctx) -> None:  # type: ignore[no-untyped-def]
-    """|вход − уровень| = 0.2 < 1% входа: база 1, полоса 0.2 (а не 0.04 —
-    «только у самого уровня»)."""
-    await _as_short(ctx, stop="99.8")
-    assert await ctx.step("99.5") == []          # до стопа 0.3
-    assert len(await ctx.step("99.65")) == 1     # до стопа 0.15
+    """|вход − уровень| = 0.05 < 1% входа: база 1, полоса 0.2 (а не 0.01 —
+    «только у самого уровня»). Стоп 99.95 — между БУ 99.90 и входом (К9: ниже БУ — без алерта)."""
+    await _as_short(ctx, stop="99.95")
+    assert await ctx.step("99.6") == []          # до стопа 0.35
+    assert len(await ctx.step("99.8")) == 1      # до стопа 0.15
 
 
 async def test_hysteresis_for_flipped_level(ctx) -> None:  # type: ignore[no-untyped-def]
-    """Полоса 0.2, сброс — когда до стопа больше 0.2 + 20% базы = 0.4."""
-    await _as_short(ctx, stop="99")
-    assert len(await ctx.step("98.9")) == 1
-    assert await ctx.step("98.7") == []          # до стопа 0.3 — отметка держится
-    assert await ctx.alerts() == [("SL", D(99))]
-    assert await ctx.step("98.5") == []          # 0.5 > 0.4 — сброс
+    """Полоса 0.2, сброс — когда до стопа больше 0.2 + 20% базы = 0.4 (стоп 99.95 — между БУ и
+    входом, К9)."""
+    await _as_short(ctx, stop="99.95")
+    assert len(await ctx.step("99.8")) == 1
+    assert await ctx.step("99.65") == []         # до стопа 0.3 — отметка держится
+    assert await ctx.alerts() == [("SL", D("99.95"))]
+    assert await ctx.step("99.5") == []          # 0.45 > 0.4 — сброс
     assert await ctx.alerts() == []
-    assert len(await ctx.step("98.9")) == 1      # новый подход
+    assert len(await ctx.step("99.8")) == 1      # новый подход
+
+
+
+# --- К9: стоп в безубытке — без алерта; кнопка БУ — по порогу плана -----------------------
+
+
+@pytest.mark.parametrize(("stop", "alerts"), [("100.11", 0), ("100.10", 1)])
+async def test_long_stop_exactly_at_breakeven_no_alert(ctx, stop: str, alerts: int) -> None:  # type: ignore[no-untyped-def]
+    """БУ LONG без журнала — 100·1.0005/0.9995 = 100.10005 → вверх 100.11. Стоп ровно на БУ — без
+    алерта; на шаг ниже — малый убыток, алерт (база 1% = 1, полоса 0.2: mark ≤ 100.30)."""
+    ctx.exchange.orders = [_order("sb", "STOP_MARKET", D(stop))]
+    assert len(await ctx.step("100.2")) == alerts
+
+
+@pytest.mark.parametrize(("stop", "alerts"), [("99.90", 0), ("99.91", 1)])
+async def test_short_stop_exactly_at_breakeven_no_alert(ctx, stop: str, alerts: int) -> None:  # type: ignore[no-untyped-def]
+    """БУ SHORT без журнала — 100·0.9995/1.0005 = 99.90005 → вниз 99.90."""
+    await _as_short(ctx, stop=stop)
+    assert len(await ctx.step("99.8")) == alerts
+
+
+async def test_breakeven_uses_journal_entry_fee(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Безубыток — как у карточки: комиссия входа журнала 0.4 на 2 → 0.2 на единицу, БУ
+    100.2/0.9995 = 100.2501 → 100.26. Стоп 100.20 ставкой был бы в безубытке (БУ 100.11),
+    с журналом — ниже БУ: алерт есть."""
+    async with ctx.db.session() as session:
+        await TradeJournal(TradeRepository(session)).open_trade(
+            user_id=ctx.uid, symbol="SOL-USDT", side=TradeSide.LONG, entry_price=ENTRY,
+            quantity=D(2), stop_loss=D(90), source=TradeSource.IMPORTED,
+            account_mode=ExchangeKeyMode.DEMO,
+            external_position_id="p1", external_fill_id="f1", fee=D("0.4"),
+        )
+    ctx.exchange.orders = [_order("sj", "STOP_MARKET", D("100.20"))]
+    assert len(await ctx.step("100.3")) == 1
+    # Кнопка БУ — от того же безубытка: порог 100.26/0.999 = 100.3603 > mark 100.3 — кнопки нет
+    # (ставкой БУ 100.11, порог 100.2102 — была бы).
+    _, keyboard = ctx.bot.sent[-1]
+    assert not any(b.callback_data.startswith("pa:be:")
+                   for row in keyboard.inline_keyboard for b in row)
+
+
+def _view(side: TradeSide) -> Any:
+    from app.execution.position_view import PositionView
+
+    p = Position(symbol="SOL-USDT", side=side, quantity=D(2), entry_price=ENTRY,
+                 mark_price=ENTRY, leverage=10, unrealized_pnl=D(0), liquidation_price=D(50),
+                 position_id="p1")
+    return PositionView(position=p, stops=(), takes=(), trade=None)
+
+
+def _has_be(view: Any, mark: str, journal_fee_unit: Decimal | None = None) -> bool:
+    kb = monitor_module.alert_keyboard(view, D(mark), fee_rate=D("0.0005"),
+                                       min_distance_percent=D("0.1"), precision=2,
+                                       journal_fee_unit=journal_fee_unit)
+    return any(b.callback_data.startswith("pa:be:") for row in kb.inline_keyboard for b in row)
+
+
+@pytest.mark.parametrize(("side", "mark", "has"), [
+    # LONG: БУ 100.11; старая формула — mark ≥ 100.11·1.001 = 100.21011, план — mark ≥
+    # 100.11/0.999 = 100.210210… Полоса между ними: старая давала кнопку, карточка отказывала.
+    (TradeSide.LONG, "100.21015", False), (TradeSide.LONG, "100.2102", False),
+    (TradeSide.LONG, "100.21022", True), (TradeSide.LONG, "100.22", True),
+    # SHORT: БУ 99.90; старая — mark ≤ 99.90·0.999 = 99.8001, план — mark ≤ 99.90/1.001 =
+    # 99.800199… Полоса: старая кнопки не давала, карточка проходила.
+    (TradeSide.SHORT, "99.80015", True), (TradeSide.SHORT, "99.8002", False),
+    (TradeSide.SHORT, "99.80", True),
+])
+def test_breakeven_button_same_threshold_as_plan(side: TradeSide, mark: str, has: bool) -> None:
+    from app.execution.position_actions import breakeven_threshold, stop_clear_of_mark
+
+    assert _has_be(_view(side), mark) is has
+    be = D("100.11") if side is TradeSide.LONG else D("99.90")
+    # Кнопка есть ⇔ карточка «Стоп в безубыток» пройдёт проверку плана при этом mark.
+    assert stop_clear_of_mark(be, D(mark), D("0.1"), side) is has
+    # На шаге цены — ровно «mark ≥ X» (LONG) / «mark ≤ X» (SHORT) подсказки.
+    x = breakeven_threshold(side, be, D("0.1"), 2)
+    assert x == (D("100.22") if side is TradeSide.LONG else D("99.80"))
+    step = D("0.01") if side is TradeSide.LONG else D("-0.01")
+    assert _has_be(_view(side), str(x)) and not _has_be(_view(side), str(x - step))
+
+
+@pytest.mark.parametrize(("side", "mark"), [(TradeSide.LONG, "100.21015"),
+                                            (TradeSide.SHORT, "99.80015")])
+def test_old_button_formula_disagreed_in_band(side: TradeSide, mark: str) -> None:
+    """Полоса выше — правда расхождение: старая формула БУ·(1±m) решала наоборот."""
+    be, room, m = (D("100.11") if side is TradeSide.LONG else D("99.90")), D("0.001"), D(mark)
+    old = m >= be * (1 + room) if side is TradeSide.LONG else m <= be * (1 - room)
+    assert old is not _has_be(_view(side), mark)
+
+
+
+def test_breakeven_button_uses_journal_fee() -> None:
+    """Комиссия входа журнала 0.2 на единицу: БУ 100.26, порог 100.3603 — при mark 100.30 кнопки
+    нет (ставкой — БУ 100.11, была бы), при 100.37 — есть."""
+    view = _view(TradeSide.LONG)
+    assert _has_be(view, "100.30") and not _has_be(view, "100.30", D("0.2"))
+    assert _has_be(view, "100.37", D("0.2"))
