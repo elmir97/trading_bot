@@ -24,6 +24,7 @@ scripts/miniapp_scenarios.py
 scripts/miniapp_shots.py
 # Прогонщик мутаций — инструмент гейта на машине разработки.
 scripts/mutation_runner.py
+scripts/gate.py
 # Копия SDK telegram.org для стенда (сценарии без сети) — не для прода и не для образа.
 scripts/stand_sdk/
 # Caddyfile и шаблон override — Caddy монтирует с диска сервера, образу не нужны.

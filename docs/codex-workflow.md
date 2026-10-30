@@ -161,18 +161,27 @@ CRLF/LF без перезаписи файлов. На Windows оставить 
    ради зелёного результата. Обновить документацию вместе с поведением.
 4. Гейт — по существующему `CLAUDE.md`, последовательно:
 
-   ```text
-   python -m pytest --collect-only --capture=sys -q
-   python -m pytest --capture=sys <файлы очередной части>
+   На Windows каждую фазу запускать через `scripts/gate.py`: только одна
+   foreground-команда на вызов, без автономного перехода к следующей части.
+   `RUN` — новый идентификатор; каждый каталог фазы должен отсутствовать.
+   Прямые запуски в обход обёртки не защищены от потери оболочки; исходный
+   дефект для них не считается закрытым. Поддержка обёртки — Windows/Python 3.12,
+   реальные проверки PowerShell 5.1/7, Git Bash и cmd; Linux/WSL не поддерживаются.
+   Подробности кодов/уборки/отчётов — раздел «Локальный прогон» CLAUDE.md.
+
+   ```powershell
+   $py = 'C:\Users\vladz\venvs\trading_bot-312\Scripts\python.exe'
+   & $py -m scripts.gate --report-dir logs/gate-RUN/collect -- $py -m pytest --collect-only --capture=sys -q
+   & $py -m scripts.gate --report-dir logs/gate-RUN/partN -- $py -m pytest --capture=sys <файлы очередной части>
    # все части по одной: покрывают весь collect, 0 skipped
-   python -m scripts.smoke_check
-   python -m scripts.smoke_check
-   python -m ruff check .
-   python -m ruff check . --statistics
-   python -m mypy app
+   & $py -m scripts.gate --report-dir logs/gate-RUN/smoke1 -- $py -m scripts.smoke_check
+   & $py -m scripts.gate --report-dir logs/gate-RUN/smoke2 -- $py -m scripts.smoke_check
+   & $py -m scripts.gate --report-dir logs/gate-RUN/ruff -- $py -m ruff check .
+   & $py -m scripts.gate --report-dir logs/gate-RUN/statistics -- $py -m ruff check . --statistics
+   & $py -m scripts.gate --report-dir logs/gate-RUN/mypy -- $py -m mypy app
    ```
 
-   `python` в этом блоке означает явный интерпретатор нужного venv, не
+   `$py` в этом блоке означает явный интерпретатор нужного venv, не
    заглушку WindowsApps. Списки шести старых частей в архивном репозитории
    не обнаружены: перед новым полным гейтом сформировать и проверить
    покрытие актуального набора, не подставлять исторические суммы.
