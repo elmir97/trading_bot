@@ -477,6 +477,65 @@ def test_parse_args_spec_xor_restore() -> None:
         mr.parse_args(["spec.py", "--restore"])
 
 
+@pytest.mark.parametrize("encoding", ["cp1251", "ascii"])
+@pytest.mark.parametrize("mode", ["caught", "mixed", "restore", "empty", "foreign",
+                                 "missing", "args", "help"])
+def test_cli_utf8_with_non_utf8_defaults(tmp_path: Path, encoding: str, mode: str) -> None:
+    """Real CLI pipes must contain UTF-8, including restore and both error paths."""
+    path = _target(tmp_path)
+    original = path.read_bytes()
+    journal = tmp_path / mr.JOURNAL.name
+    probe = _PROBE.replace("Path('target.txt')", f"Path({str(path)!r})")
+    spec = _spec(tmp_path, probe).read_text(encoding="utf-8")
+    spec_path = tmp_path / "spec.py"
+    spec_path.write_text(spec.replace("'target.txt', Probe()", f"{str(path)!r}, Probe()"),
+                         encoding="utf-8")
+    args = [str(spec_path)]
+    stream, expected, code = "stdout", "итог: CAUGHT 1, MISSED 1", 1
+    if mode == "caught":
+        args += ["--only", "alpha"]
+        expected, code = "итог: CAUGHT 1, MISSED 0", 0
+    elif mode in ("restore", "empty", "foreign"):
+        args = ["--restore"]
+        expected, code = "журнала нет — восстанавливать нечего", 0
+        if mode != "empty":
+            mr.write_journal(journal, path, original, b"MUT\n")
+            path.write_bytes(b"MUT\n" if mode == "restore" else b"foreign\n")
+            expected = "восстановлен, журнал снят"
+        if mode == "foreign":
+            stream, expected, code = "stderr", "ни исходный, ни мутированный", 2
+    elif mode == "missing":
+        args = [str(tmp_path / "missing.py")]
+        stream, expected, code = "stderr", "✗ Прогон не состоялся: спеки нет:", 2
+    elif mode == "args":
+        args = []
+        stream, expected, code = "stderr", "нужна спека или --restore (одно из двух)", 2
+    elif mode == "help":
+        args = ["--help"]
+        expected, code = "Прогон мутаций по спеке", 0
+    env = {**os.environ, "PYTHONUTF8": "0", "PYTHONIOENCODING": encoding,
+           "TMP": str(tmp_path), "TEMP": str(tmp_path), "TMPDIR": str(tmp_path)}
+    bootstrap = (
+        "import runpy, sys; "
+        f"assert sys.stdout.encoding == sys.stderr.encoding == {encoding!r}; "
+        "sys.argv = ['scripts.mutation_runner', *sys.argv[1:]]; "
+        "runpy.run_module('scripts.mutation_runner', run_name='__main__')"
+    )
+    result = subprocess.run([sys.executable, "-c", bootstrap, *args], cwd=_ROOT,
+                            env=env, capture_output=True, stdin=subprocess.DEVNULL,
+                            timeout=60, check=False)
+    assert result.returncode == code
+    output = getattr(result, stream)
+    assert expected.encode("utf-8") in output, output
+    for data in (result.stdout, result.stderr):
+        assert "\ufffd" not in data.decode("utf-8")
+    if mode in ("caught", "mixed"):
+        assert "alpha пойман".encode() in result.stdout
+        assert "база:".encode() in result.stdout
+    assert path.read_bytes() == (b"foreign\n" if mode == "foreign" else original)
+    assert journal.exists() == (mode == "foreign")
+
+
 def test_not_in_docker_image() -> None:
     lines = (_ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
     assert "scripts/mutation_runner.py" in lines

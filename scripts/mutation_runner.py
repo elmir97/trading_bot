@@ -401,7 +401,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None, root: Path = ROOT, journal: Path = JOURNAL) -> int:
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
-            stream.reconfigure(errors="backslashreplace")
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
     args = parse_args(sys.argv[1:] if argv is None else argv)
     try:
         if args.restore:
