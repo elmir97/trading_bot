@@ -16,8 +16,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models.mistake import MistakeType, TradeMistake
 from app.database.models.strategy import Strategy
-from app.database.models.trade import Trade
+from app.database.models.trade import Trade, TradeFill
 from app.trading.enums import TradeStatus
+from app.trading.realized import realized_result
 from app.trading.statistics import TradeSnapshot
 
 ZERO = Decimal(0)
@@ -54,7 +55,9 @@ class StatisticsService:
                 Trade.side,
                 Strategy.name.label("strategy"),
                 Trade.timeframe,
-                Trade.risk_reward,
+                Trade.id,
+                Trade.initial_stop_loss,
+                Trade.fill_confirmed,
                 Trade.account_balance_at_entry,
             )
             .outerjoin(Strategy, Trade.strategy_id == Strategy.id)
@@ -87,6 +90,23 @@ class StatisticsService:
             query = query.where(Trade.is_annotated.is_(True))
 
         rows = await self._session.execute(query.order_by(Trade.closed_at))
+        records = rows.all()
+        executions = (await self._session.scalars(
+            select(TradeFill).where(
+                TradeFill.trade_id.in_([row.id for row in records]), TradeFill.user_id == user_id
+            )
+        )).all() if records else []
+        by_trade: dict[int, list[TradeFill]] = {}
+        for fill in executions:
+            by_trade.setdefault(fill.trade_id, []).append(fill)
+        results = {
+            row.id: realized_result(
+                row.side, by_trade.get(row.id, []),
+                row.initial_stop_loss,
+                row.fill_confirmed,
+            )
+            for row in records
+        }
         return [
             TradeSnapshot(
                 pnl=row.pnl,
@@ -95,10 +115,11 @@ class StatisticsService:
                 side=row.side.value if hasattr(row.side, "value") else str(row.side),
                 strategy=row.strategy,
                 timeframe=row.timeframe,
-                risk_reward=row.risk_reward,
+                realized_r=results[row.id].value,
+                realized_r_reason=results[row.id].reason,
                 account_balance=row.account_balance_at_entry,
             )
-            for row in rows
+            for row in records
         ]
 
     async def mistake_impact(

@@ -347,7 +347,7 @@ async def _run_scenarios(sim, tg, db, redis, settings) -> None:  # type: ignore[
     text = await close_trade(sim, "BTC", "102500", mistakes=("Ранний выход",))
     check("сделка закрывается", has(text, "сделка закрыта"), text[:80])
     check("PnL верный", "390" in text, text[:200])
-    check("результат в R", "2R" in text, text[:200])
+    check("результат в R нетто", "1.95R" in text, text[:200])
     check("ошибка записана", has(text, "ранний выход"), text[:250])
 
     print("\n[5] Статистика с данными")

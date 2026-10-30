@@ -51,7 +51,7 @@ def _closed(initial: str | None, stop: str | None = "3000") -> Trade:
         stop_loss=D(stop) if stop else None,
         initial_stop_loss=D(initial) if initial else None,
         status=TradeStatus.CLOSED, source=TradeSource.IMPORTED, opened_at=AT, closed_at=AT,
-        risk_reward=D("9.99"),
+        risk_reward=D("9.99"), fill_confirmed=True,
     )
     trade.fills = [
         TradeFill(user_id=1, exchange="bingx", fill_side=FillSide.ENTRY, price=D(3000),
@@ -65,12 +65,14 @@ def _closed(initial: str | None, stop: str | None = "3000") -> Trade:
 @pytest.mark.parametrize("initial", ["3000", "3050"])
 def test_close_r_undefined_when_initial_not_in_loss(initial) -> None:  # type: ignore[no-untyped-def]
     trade = TradeJournal(None).recalculate(_closed(initial))  # type: ignore[arg-type]
-    assert trade.pnl == D(120) and trade.risk_reward is None
+    assert trade.pnl == D(120) and trade.realized_result.value is None
+    assert trade.risk_reward == D("9.99")
 
 
 def test_close_r_from_loss_side_initial() -> None:
     trade = TradeJournal(None).recalculate(_closed("2940"))  # type: ignore[arg-type]
-    assert trade.risk_reward == D("2.00")
+    assert trade.realized_result.value == D("2.00")
+    assert trade.risk_reward == D("9.99")
 
 
 @pytest.mark.parametrize("initial", ["3000", "3050"])
@@ -84,14 +86,15 @@ def test_trade_card_shows_r_undefined() -> None:
     trade.pnl, trade.pnl_percent, trade.id = D(120), D("1.2"), 5
     trade.strategy, trade.mistakes = None, []
     assert f"Результат: {R_UNDEFINED}" in trade_card(trade)
-    trade.risk_reward = D("2")
+    trade.risk_reward = D("99")
+    trade.initial_stop_loss = D("2940")
     assert "Результат: +2" in trade_card(trade) or "Результат: 2" in trade_card(trade)
 
 
 def test_statistics_average_r_undefined() -> None:
     stats = calculate_statistics([
         TradeSnapshot(pnl=D(10), closed_at=AT, symbol="X", side="LONG", strategy=None,
-                      timeframe=None, risk_reward=None, account_balance=None),
+                      timeframe=None, realized_r=None, account_balance=None),
     ])
     assert stats.average_rr is None
     assert "Средний R: не определён" in render_statistics(stats, "Статистика")
@@ -138,7 +141,7 @@ async def test_check_pnl_skips_when_initial_not_in_loss(caplog) -> None:  # type
 
 def _snap(rr: str | None) -> TradeSnapshot:
     return TradeSnapshot(pnl=D(10), closed_at=AT, symbol="X", side="LONG", strategy=None,
-                         timeframe=None, risk_reward=D(rr) if rr is not None else None,
+                         timeframe=None, realized_r=D(rr) if rr is not None else None,
                          account_balance=None)
 
 

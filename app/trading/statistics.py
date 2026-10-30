@@ -35,8 +35,9 @@ class TradeSnapshot:
     side: str = ""
     strategy: str | None = None
     timeframe: str | None = None
-    risk_reward: Decimal | None = None
+    realized_r: Decimal | None = None
     account_balance: Decimal | None = None
+    realized_r_reason: str | None = None
 
     @property
     def is_win(self) -> bool:
@@ -233,7 +234,7 @@ def calculate_statistics(
     loss_rate = _safe_divide(Decimal(len(losses)), Decimal(total))
     expectancy = (win_rate / Decimal(100)) * average_win - loss_rate * average_loss
 
-    rr_values = [t.risk_reward for t in trades if t.risk_reward is not None]
+    rr_values = [t.realized_r for t in trades if t.realized_r is not None]
     average_rr = (
         (sum(rr_values, ZERO) / Decimal(len(rr_values))).quantize(Decimal("0.01"))
         if rr_values

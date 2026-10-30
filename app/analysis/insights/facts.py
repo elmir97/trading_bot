@@ -48,6 +48,7 @@ class TradeFact:
     planned_rr: Decimal | None
     realized_r: Decimal | None
     mistakes: tuple[str, ...] = ()
+    realized_r_reason: str | None = None
 
     @property
     def is_win(self) -> bool:

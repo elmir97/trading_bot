@@ -187,11 +187,12 @@ def trade_card(trade: Trade, price_precision: int | None = None) -> str:
             "",
             f"<b>PnL: {fmt_money(trade.pnl)} USDT ({fmt_percent(trade.pnl_percent)})</b>",
         ]
-        if trade.risk_reward is not None:
-            lines.append(f"Результат: {fmt_ratio(trade.risk_reward)}R")
+        result = trade.realized_result
+        if result.value is not None:
+            lines.append(f"Результат: {fmt_ratio(result.value)}R")
         else:
             # Стопа не было или он не в убытке — R не посчитать (К3, 27.10).
-            lines.append(f"Результат: {R_UNDEFINED}")
+            lines.append(f"Результат: {R_UNDEFINED} ({result.reason})")
     else:
         lines.append("")
         lines.append("Статус: открыта")

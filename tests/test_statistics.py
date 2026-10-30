@@ -40,7 +40,7 @@ def snap(
         side=side,
         strategy=strategy,
         timeframe=timeframe,
-        risk_reward=D(rr) if rr is not None else None,
+        realized_r=D(rr) if rr is not None else None,
     )
 
 

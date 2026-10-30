@@ -25,7 +25,6 @@ from sqlalchemy.orm import selectinload
 
 from app.analysis.insights.facts import TradeFact
 from app.database.models.trade import Trade
-from app.trading.calculations import CalculationError, calculate_realized_rr
 from app.trading.enums import TradeStatus
 
 
@@ -45,26 +44,7 @@ def _risk_amount(trade: Trade) -> Decimal | None:
 
 
 def _realized_r(trade: Trade) -> Decimal | None:
-    """Фактический результат в единицах риска — по цене входа/стопа/выхода.
-
-    Требует entry_price, стоп риска и exit_price: без одного из них R не
-    посчитать, а не «взять на глаз». Стоп риска — исходный (Trade.risk_stop):
-    перенесённый в безубыток стоп дал бы R задним числом.
-    """
-    risk_stop = trade.risk_stop
-    if trade.entry_price is None or risk_stop is None or trade.exit_price is None:
-        return None
-    try:
-        return calculate_realized_rr(
-            entry_price=trade.entry_price,
-            stop_loss=risk_stop,
-            exit_price=trade.exit_price,
-            side=trade.side,
-        )
-    except CalculationError:
-        # Стоп с неправильной стороны от входа — данные испорчены,
-        # а не повод уронить весь разбор журнала.
-        return None
+    return trade.realized_result.value
 
 
 def to_fact(trade: Trade) -> TradeFact:
@@ -81,6 +61,7 @@ def to_fact(trade: Trade) -> TradeFact:
         risk_amount=_risk_amount(trade),
         planned_rr=_as_decimal(trade.risk_reward),
         realized_r=_realized_r(trade),
+        realized_r_reason=trade.realized_result.reason,
         mistakes=tuple(
             m.mistake_type.code.value
             if hasattr(m.mistake_type.code, "value")

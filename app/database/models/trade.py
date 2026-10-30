@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from app.database.models.signal import SignalRecord
     from app.database.models.strategy import Strategy
     from app.database.models.user import User
+    from app.trading.realized import RealizedResult
 
 
 class Trade(IntPKMixin, TimestampMixin, Base):
@@ -133,7 +134,12 @@ class Trade(IntPKMixin, TimestampMixin, Base):
     pnl: Mapped[Decimal | None] = mapped_column(MoneyNumeric)
     pnl_percent: Mapped[Decimal | None] = mapped_column(PercentNumeric)
     risk_percent: Mapped[Decimal | None] = mapped_column(PercentNumeric)
+    # K8: planned RR only; legacy values are immutable migration evidence.
     risk_reward: Mapped[Decimal | None] = mapped_column(PercentNumeric)
+    legacy_risk_reward: Mapped[Decimal | None] = mapped_column(PercentNumeric)
+    k8_legacy_row: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False
+    )
 
     # Баланс на момент открытия — нужен, чтобы risk % и PnL % оставались
     # корректными задним числом. Текущий баланс для этого не годится.
@@ -224,6 +230,14 @@ class Trade(IntPKMixin, TimestampMixin, Base):
         if self.pnl is None or self.status is not TradeStatus.CLOSED:
             return None
         return self.pnl > 0
+
+    @property
+    def realized_result(self) -> RealizedResult:
+        from app.trading.realized import realized_result
+
+        return realized_result(
+            self.side, self.fills, self.initial_stop_loss, self.fill_confirmed is True
+        )
 
     @property
     def risk_stop(self) -> Decimal | None:

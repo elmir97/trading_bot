@@ -94,8 +94,9 @@ async def test_full_close_computes_pnl(ctx) -> None:  # type: ignore[no-untyped-
     # (3120 - 3000) * 1 - 3.0 комиссий
     assert trade.pnl == D("117")
     assert trade.pnl_percent == D("1.1700")  # от баланса 10000
-    # Стоп на 2940 = риск 60; результат 120 пунктов = +2R
-    assert trade.risk_reward == D("2.00")
+    # Net result 117 / initial risk 60; a missing plan remains unknown.
+    assert trade.risk_reward is None
+    assert trade.realized_result.value == D("1.95")
 
 
 async def test_short_profit_on_drop(ctx) -> None:  # type: ignore[no-untyped-def]
@@ -261,4 +262,5 @@ async def test_close_r_uses_initial_stop_after_breakeven(ctx) -> None:  # type: 
     trade.stop_loss = D("3000")
     await journal.close_trade(trade, exit_price=D("3120"), fee=D("1.5"))
 
-    assert trade.risk_reward == D("2.00")
+    assert trade.risk_reward is None
+    assert trade.realized_result.value == D("1.95")

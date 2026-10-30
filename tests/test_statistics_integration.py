@@ -93,6 +93,36 @@ async def test_statistics_match_manual_calculation(ctx) -> None:  # type: ignore
     assert stats.profit_factor == D("6.000")  # 300 / 50
 
 
+async def test_k8_card_statistics_and_insights_share_net_r(ctx) -> None:  # type: ignore[no-untyped-def]
+    from app.analysis.insights.loader import to_fact
+    from app.bot.keyboards.trade import trade_card
+
+    user, journal, session = ctx
+    trade = await journal.open_trade(
+        user_id=user.id, symbol="ETH-USDT", side=TradeSide.LONG,
+        entry_price=D(100), quantity=D(10), stop_loss=D(90), take_profit=D(130), fee=D(1),
+    )
+    await journal.close_trade(trade, exit_price=D(110), quantity=D(5), fee=D("0.5"))
+    assert trade.realized_result.value == D("0.98")
+    assert trade.risk_reward == D(3)
+    await journal.close_trade(trade, exit_price=D(120), fee=D("0.5"))
+    snapshots = await StatisticsService(session).load_snapshots(user.id)
+    assert len(snapshots) == 1
+    fact = to_fact(trade)
+    assert snapshots[0].realized_r == fact.realized_r == trade.realized_result.value == D("1.48")
+    assert fact.planned_rr == D(3)
+    assert "1.48" in trade_card(trade)
+    trade.risk_reward = None
+    assert to_fact(trade).realized_r == D("1.48")
+    trade.initial_stop_loss = D(100)
+    await session.flush()
+    snapshots = await StatisticsService(session).load_snapshots(user.id)
+    fact = to_fact(trade)
+    assert snapshots[0].realized_r is fact.realized_r is None
+    assert snapshots[0].realized_r_reason == fact.realized_r_reason
+    assert fact.realized_r_reason == "Начальный стоп не задаёт убыточный риск"
+
+
 async def test_symbol_breakdown_from_db(ctx) -> None:  # type: ignore[no-untyped-def]
     user, journal, session = ctx
     base = datetime.now(UTC) - timedelta(hours=5)

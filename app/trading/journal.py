@@ -21,7 +21,6 @@ from app.trading.calculations import (
     calculate_pnl,
     calculate_pnl_percent,
     calculate_pnl_percent_of_balance,
-    calculate_realized_rr,
     calculate_risk_reward,
     stop_distance,
 )
@@ -118,6 +117,7 @@ class TradeJournal:
             quantity=quantity,
             fees=fee,
             stop_loss=stop_loss,
+            initial_stop_loss=stop_loss,
             take_profit=take_profit,
             leverage=leverage,
             risk_reward=risk_reward,
@@ -405,18 +405,5 @@ class TradeJournal:
                 quantity=aggregate.exit_quantity,
                 leverage=trade.leverage,
             )
-
-        # R — от исходного стопа (Trade.risk_stop): стоп, перенесённый в
-        # безубыток, дал бы деление на ноль задним числом (этап 3).
-        if trade.risk_stop is not None:
-            try:
-                trade.risk_reward = calculate_realized_rr(
-                    entry_price=aggregate.entry_price,
-                    stop_loss=trade.risk_stop,
-                    exit_price=aggregate.exit_price,
-                    side=trade.side,
-                )
-            except CalculationError:
-                trade.risk_reward = None
 
         return trade
