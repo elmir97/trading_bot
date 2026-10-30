@@ -252,6 +252,122 @@ def test_help() -> None:
     assert "--allow-schema-diff" in res.stdout.decode("utf-8")
 
 
+def _functions_probe(code: str) -> subprocess.CompletedProcess[str]:
+    definitions = TEXT.rsplit('main "$@"; exit $?', 1)[0]
+    return subprocess.run(
+        [_bash(), "-s"], input=definitions + "\ninit_state\n" + code,
+        cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize("k8", [0, 1])
+def test_dispatch_and_cleanup_ownership(k8: int) -> None:
+    # Execute the actual cleanup with a Docker double: an unowned container/network
+    # must remain, while ordinary mode retains its historical rm/rmi behavior.
+    result = _functions_probe(f'''
+K8={k8}; RUN_ID=mine; PG=copy; NET=net; IMAGE=tag
+PG_CREATED=1; NET_CREATED=1; IMAGE_CHECKED=1
+DELETED=''
+dk() {{
+  case "$*" in
+    "container ls"*) echo copy ;;
+    "network ls"*) echo net ;;
+    "image ls"*) echo image-probed >&2; echo tag ;;
+    *"inspect -f"*) echo other ;;
+    *"network inspect -f"*) echo other ;;
+    "rm -f copy"|"network rm net"|"rmi tag") DELETED+="DELETE:$*;" ;;
+    *) return 1 ;;
+  esac
+}}
+cleanup
+echo "$DELETED"
+''')
+    assert result.returncode == 0, result.stderr
+    if k8:
+        assert "DELETE:" not in result.stdout
+        assert "image-probed" not in result.stderr
+    else:
+        assert "DELETE:rm -f copy" in result.stdout
+        assert "DELETE:network rm net" in result.stdout
+        assert "DELETE:rmi tag" in result.stdout
+
+
+@pytest.mark.parametrize("kind", ["container", "network", "image"])
+@pytest.mark.parametrize("mode", ["absent", "daemon", "access", "timeout", "delete", "post", "ok"])
+@pytest.mark.parametrize("primary", [0, 1, 2])
+def test_cleanup_three_states(kind, mode, primary, tmp_path):
+    archive = tmp_path / "archive.json"
+    archive.write_text("preserved")
+    flags = {"container": "PG_CREATED=1", "network": "NET_CREATED=1", "image": "IMAGE_CHECKED=1"}
+    result = _functions_probe(f'''
+RC={primary}; PG=target; NET=target; IMAGE=target
+{flags[kind]}
+REMOVED=0; DELETED=0
+dk() {{
+  case "$*" in
+    *" ls"*)
+      case "{mode}" in
+        daemon|access) return 1 ;;
+        timeout) return 124 ;;
+        absent) return 0 ;;
+      esac
+      if ((REMOVED)); then
+        [[ "{mode}" != post ]] || return 1
+      else echo target; fi ;;
+    "rm -f target"|"network rm target"|"rmi target")
+      DELETED=1
+      [[ "{mode}" != delete ]] || return 1
+      REMOVED=1 ;;
+    *) return 1 ;;
+  esac
+}}
+cleanup
+printf 'RC=%s DELETE=%s\n' "$RC" "$DELETED"
+printf '%s\n' "${{STEPS[@]}}"
+exit "$RC"
+''')
+    expected = primary if mode in ("absent", "ok") else 3
+    assert result.returncode == expected, result.stdout + result.stderr
+    assert f"RC={expected}" in result.stdout
+    if mode in ("daemon", "access", "timeout", "absent"):
+        assert "DELETE=0" in result.stdout
+    if expected == 3:
+        assert "unconfirmed" in result.stdout
+        assert "временные ресурсы удалены" not in result.stdout
+    assert archive.read_text() == "preserved"
+
+
+def test_cleanup_original_daemon_failure_reproduction():
+    result = _functions_probe('''
+K8=1; RUN_ID=mine; PG=copy; NET=net; PG_CREATED=1; NET_CREATED=1
+dk() { return 1; }
+cleanup
+printf '%s\n' "${STEPS[@]}"
+exit "$RC"
+''')
+    assert result.returncode == 3
+    assert "unconfirmed" in result.stdout
+    assert "временные ресурсы удалены" not in result.stdout
+
+
+def test_k8_argument_contract_and_normal_defaults() -> None:
+    normal = _functions_probe('parse_args --from abc --image trading_bot:rehearsal\n'
+                              'echo "$K8|$FINAL_DOWN|$CHECKSUM|$BASE"')
+    assert normal.returncode == 0, normal.stderr
+    assert normal.stdout.strip() == "0|1|0|abc"
+    args = ('--k8 --from 919ae8ad384e --to c8a030202610 '
+            '--image trading_bot:rehearsal_k8_unique --image-id sha256:' + 'a' * 64
+            + ' --commit ' + 'b' * 40)
+    good = _functions_probe('parse_args ' + args + '\necho "$K8|$CHECKSUM|$BASE"')
+    assert good.returncode == 0, good.stderr
+    assert good.stdout.strip() == "1|1|919ae8ad384e"
+    for extra in (' --allow-count-change trades', ' --allow-data-change trades.risk_reward',
+                  ' --expect-null trades.risk_reward', ' --expect-columns trades.foo',
+                  ' --rewind-to abc'):
+        bad = _functions_probe('parse_args ' + args + extra)
+        assert bad.returncode == 2, bad.stderr
+
+
 # --- meta_py: ревизии по файлам образа ------------------------------------
 
 _SCRIPT_DIR = ScriptDirectory.from_config(Config(str(ROOT / "alembic.ini")))
@@ -390,6 +506,7 @@ def test_sql_call_sites_are_all_known() -> None:
         "$FAULT_SQL",
         "SELECT pg_database_size(current_database())",
         "SELECT version_num FROM alembic_version",
+        "SELECT current_setting('server_version_num')",
     }
 
 
@@ -486,7 +603,7 @@ def test_sql_runs_read_only_with_expected_shape(call: str) -> None:
         assert any(r.startswith("idx|alembic_version|alembic_version_pkc|") for r in rows)
         assert _c_sorted(rows)
         assert len(rows) == len(set(rows))
-    elif call.startswith("SELECT pg_database_size"):
+    elif call.startswith("SELECT pg_database_size") or "server_version_num" in call:
         assert len(rows) == 1 and int(rows[0]) > 0
     else:
         assert len(rows) == 1

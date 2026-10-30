@@ -7,6 +7,8 @@ import asyncio
 import hashlib
 import json
 import os
+import stat
+from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -64,10 +66,24 @@ def save_archive(path: Path, payload: dict[str, Any]) -> None:
         stream.write(_canonical(envelope))
         stream.flush()
         os.fsync(stream.fileno())
+    if os.name != "nt":
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
 
 
 def load_archive(path: Path) -> dict[str, Any]:
-    envelope = json.loads(path.read_bytes())
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("K8 archive must be a regular file")
+        if os.name != "nt" and (stat.S_IMODE(info.st_mode) != 0o600
+                                 or info.st_uid != os.geteuid()):
+            raise ValueError("K8 archive must be owned by the caller with mode 600")
+        envelope = json.loads(stream.read())
     payload: dict[str, Any] = envelope["payload"]
     if envelope["sha256"] != hashlib.sha256(_canonical(payload)).hexdigest():
         raise ValueError("K8 archive checksum mismatch")
@@ -80,17 +96,24 @@ def load_archive(path: Path) -> dict[str, Any]:
 
 
 def _alembic(conn: Connection, target: str, *, down: bool) -> None:
-    config = Config(str(ROOT / "alembic.ini"))
+    # Embedded Alembic must preserve the caller's logging configuration.
+    # Loading alembic.ini triggers env.py/fileConfig and disables other loggers.
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
     config.attributes["connection"] = conn
     (command.downgrade if down else command.upgrade)(config, target)
 
 
-def rollback(conn: Connection, path: Path) -> None:
+def rollback(
+    conn: Connection, path: Path, verify: Callable[[Path], None] | None = None,
+) -> None:
     conn.execute(sa.text("LOCK TABLE trades, trade_fills IN ACCESS EXCLUSIVE MODE"))
     payload = capture(conn)
     save_archive(path, payload)
     if load_archive(path) != capture(conn):
         raise ValueError("K8 archive read-back mismatch")
+    if verify is not None:
+        verify(path)
     conn.execute(sa.text("SELECT set_config('k8.rollback_verified', 'yes', true)"))
     _alembic(conn, BASE, down=True)
     conn.execute(sa.text("SELECT set_config('k8.rollback_verified', 'no', true)"))

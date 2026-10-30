@@ -62,6 +62,20 @@ al() {
         "$IMAGE" sh -c 'python -c "$GUARD_PY" && exec alembic "$@"' sh "$@"
 }
 
+k8_cycle() {
+    local args=()
+    ((FINAL_DOWN)) || args+=(--no-final-downgrade)
+    dk run --rm --user "$(id -u):$(id -g)" --name "${PG}_migrator" \
+        --label "rehearsal.run=$RUN_ID" --network "$NET" \
+        --mount "type=bind,src=$RUN_DIR,dst=/rehearsal" \
+        -e "DATABASE_URL=postgresql+asyncpg://$COPY_USER:$COPY_PW@$PG:5432/$COPY_DB" \
+        -e "BOT_TOKEN=0:rehearsal" -e "ENCRYPTION_KEY=$FERNET" \
+        -e "EXPECT_DB=$COPY_DB" -e "EXPECT_ADDR=$COPY_ADDR" -e "EXPECT_VERSION=$SOURCE_VERSION" \
+        -e "REHEARSAL_IMAGE_ID=$IMAGE_ID" -e "REHEARSAL_COMMIT=$COMMIT" \
+        -e "REHEARSAL_RUN_ID=$RUN_ID" \
+        "$IMAGE_ID" python -m scripts.k8_rehearsal /rehearsal "${args[@]}"
+}
+
 guard_py() {
     cat <<'PY'
 import asyncio
@@ -234,6 +248,11 @@ usage() {
                                 (тег в конце удаляется)
   --final-downgrade             второй downgrade — прогон отката (по умолчанию)
   --no-final-downgrade          без второго downgrade
+  --k8                         explicit K8 archive cycle; requires exact revisions,
+                                unique rehearsal_k8 tag, --image-id and --commit;
+                                retains image, archives and report in run directory
+  --image-id sha256:<hex>       immutable image ID (K8 only)
+  --commit <40 hex>             image revision label must match (K8 only)
   --expect-columns t.c[,t.c]    колонки, которые обязаны быть после upgrade
   --allow-count-change t[,t]    таблицы, где число строк вправе меняться
   --allow-schema-diff o[,o]     объекты схемы (таблица или таблица.имя), которым
@@ -266,6 +285,7 @@ refuse_args() {
 }
 
 init_state() {
+    K8=0 RUN_DIR='' RUN_ID='' IMAGE_ID='' COMMIT='' SOURCE_VERSION='' COPY_VERSION=''
     FROM='' TO=head IMAGE='' REWIND='' SRC=$PROD_DB_CONTAINER FAULT='' FINAL_DOWN=1
     EXPECT_COLS='' ALLOW_COUNT='' ALLOW_SCHEMA='' BASE=''
     CHECKSUM=0 ALLOW_DATA='' EXPECT_NULL='' CHECKSUM_TEMPLATE='' NULL_TEMPLATE=''
@@ -294,6 +314,7 @@ parse_args() {
     while (($#)); do
         case $1 in
             --from | --to | --image | --rewind-to | --source-container | --fault | \
+                --image-id | --commit | \
                 --expect-columns | --allow-count-change | --allow-schema-diff | \
                 --allow-data-change | --expect-null)
                 (($# >= 2)) || refuse_args "у $1 нет значения"
@@ -303,6 +324,8 @@ parse_args() {
                     --from) FROM=$val ;;
                     --to) TO=$val ;;
                     --image) IMAGE=$val ;;
+                    --image-id) IMAGE_ID=$val ;;
+                    --commit) COMMIT=$val ;;
                     --rewind-to) REWIND=$val ;;
                     --source-container) SRC=$val src_given=1 ;;
                     --fault) FAULT=$val ;;
@@ -312,6 +335,10 @@ parse_args() {
                     --allow-data-change) ALLOW_DATA+=${ALLOW_DATA:+,}$val ;;
                     --expect-null) EXPECT_NULL+=${EXPECT_NULL:+,}$val ;;
                 esac
+                ;;
+            --k8)
+                K8=1
+                shift
                 ;;
             --checksum)
                 CHECKSUM=1
@@ -370,6 +397,18 @@ parse_args() {
         refuse_args "--fault data-change — только с --checksum: без него подмену нечем поймать"
     fi
     BASE=${REWIND:-$FROM}
+    if ((K8)); then
+        [[ $FROM == 919ae8ad384e && $TO == c8a030202610 && -z $REWIND && -z $FAULT ]] ||
+            refuse_args "K8 requires exact --from 919ae8ad384e --to c8a030202610 without rewind/fault"
+        [[ $IMAGE =~ ^trading_bot:rehearsal_k8_[A-Za-z0-9_-]+$ &&
+            $IMAGE_ID =~ ^sha256:[0-9a-f]{64}$ && $COMMIT =~ ^[0-9a-f]{40}$ ]] ||
+            refuse_args "K8 requires unique rehearsal_k8 tag, --image-id sha256 and full --commit"
+        [[ -z $ALLOW_DATA && -z $ALLOW_COUNT && -z $ALLOW_SCHEMA && -z $EXPECT_NULL && -z $EXPECT_COLS ]] ||
+            refuse_args "K8 does not allow data/count/schema exceptions or blanket NULL checks"
+        CHECKSUM=1
+    elif [[ -n $IMAGE_ID || -n $COMMIT ]]; then
+        refuse_args "--image-id and --commit require --k8"
+    fi
 }
 
 start_log() {
@@ -379,6 +418,18 @@ start_log() {
     DUMP=$BACKUP_DIR/rehearsal_$TS.sql.gz
     NET=tb_rehearsal_net_$TS
     PG=tb_rehearsal_db_$TS
+    if ((K8)); then
+        [[ ! -L $BACKUP_DIR && $(stat -c %a "$BACKUP_DIR") == 700 &&
+            $(stat -c %u "$BACKUP_DIR") == "$(id -u)" ]] ||
+            refuse_args "K8 backup directory must be owned by caller, mode 700, not symlink"
+        RUN_ID="${TS}_$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+        RUN_DIR=$BACKUP_DIR/rehearsal_k8_$RUN_ID
+        mkdir -m 700 "$RUN_DIR" || refuse_args "cannot create K8 run directory"
+        LOG=$RUN_DIR/rehearsal.log
+        DUMP=$RUN_DIR/source.sql.gz
+        NET=tb_rehearsal_net_$RUN_ID
+        PG=tb_rehearsal_db_$RUN_ID
+    fi
     [[ ! -e $LOG ]] || refuse_args "$LOG уже есть — повторить через секунду"
     exec > >(tee --output-error=warn-nopipe -a "$LOG") 2>&1
     TEE_PID=$!
@@ -562,9 +613,19 @@ step_preconditions() {
     local ram
     ram=$(free -m | awk '/^Mem:/ { print $7 }')
     ((ram >= MIN_FREE_RAM_MB)) || refuse "свободно RAM $ram МБ < $MIN_FREE_RAM_MB МБ"
+    if ((K8)); then
+        ((ram >= 700)) || refuse "K8 available RAM below 700 MB"
+    fi
 
     dk image inspect "$IMAGE" >/dev/null 2>&1 || refuse "нет образа $IMAGE — сначала собрать (CLAUDE.md)"
     IMAGE_CHECKED=1
+    if ((K8)); then
+        [[ $(dk image inspect -f '{{.Id}}' "$IMAGE") == "$IMAGE_ID" ]] || refuse "K8 image ID mismatch"
+        [[ $(dk image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE_ID") == "$COMMIT" ]] ||
+            refuse "K8 image commit label mismatch"
+        # Pin every subsequent invocation. The supplied tag is never removed.
+        IMAGE=$IMAGE_ID
+    fi
     local image_info meta
     image_info=$(dk image inspect -f '{{slice .Id 7 19}}, собран {{.Created}}' "$IMAGE") ||
         fail "не прочитать образ $IMAGE"
@@ -582,8 +643,15 @@ step_preconditions() {
     size=$(src_sql "SELECT pg_database_size(current_database())") || fail "не прочитать размер базы $SRC"
     DB_MB=$(((size + 1048575) / 1048576))
     TMPFS_MB=$((DB_MB * 3 > TMPFS_MIN_MB ? DB_MB * 3 : TMPFS_MIN_MB))
+    if ((K8)); then
+        ((ram >= 700 && ram >= TMPFS_MB + 256 + 200)) || refuse "K8 insufficient RAM budget"
+        SOURCE_VERSION=$(src_sql "SELECT current_setting('server_version_num')") || fail "source version"
+    fi
     disk=$(df -Pm "$BACKUP_DIR" | awk 'NR == 2 { print $4 }')
     ((disk >= DB_MB + MIN_FREE_DISK_MB)) || refuse "свободно на диске $disk МБ < $((DB_MB + MIN_FREE_DISK_MB)) МБ"
+    if ((K8)); then
+        ((disk >= 2 * DB_MB + MIN_FREE_DISK_MB)) || refuse "K8 insufficient disk for dump and retained archives"
+    fi
 
     end_step "" "RAM $ram МБ, диск $disk МБ, база $DB_MB МБ → tmpfs $TMPFS_MB МБ; образ $image_info; цепочка $BASE → ${CHAIN[*]}"
 }
@@ -593,8 +661,10 @@ step_dump() {
     COUNTS["прод (инфо)"]=$(src_sql "$COUNT_SQL") || fail "число строк $SRC не прочитано"
     SNAP_ORDER+=("прод (инфо)")
     DUMP_CREATED=1
+    local dump_options=()
+    ((K8)) && dump_options=(-e "PGOPTIONS=-c default_transaction_read_only=on")
     # shellcheck disable=SC2016
-    dk exec "$SRC" sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --no-owner --no-privileges' |
+    dk exec "${dump_options[@]}" "$SRC" sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --no-owner --no-privileges' |
         gzip >"$DUMP" || fail "pg_dump"
     gzip -t "$DUMP" || fail "gzip -t $DUMP"
     local mode
@@ -606,9 +676,11 @@ step_dump() {
 step_copy() {
     begin_step "Копия: $PG_IMAGE, tmpfs $TMPFS_MB МБ"
     NET_CREATED=1
-    dk network create --internal "$NET" >/dev/null || fail "сеть $NET не создана"
+    local labels=()
+    ((K8)) && labels=(--label "rehearsal.run=$RUN_ID")
+    dk network create --internal "${labels[@]}" "$NET" >/dev/null || fail "сеть $NET не создана"
     PG_CREATED=1
-    dk run -d --name "$PG" --network "$NET" --memory "$COPY_MEMORY" \
+    dk run -d --name "$PG" "${labels[@]}" --network "$NET" --memory "$COPY_MEMORY" \
         --tmpfs "/var/lib/postgresql/data:rw,size=${TMPFS_MB}m" \
         -e "POSTGRES_USER=$COPY_USER" -e "POSTGRES_PASSWORD=$COPY_PW" -e "POSTGRES_DB=$COPY_DB" \
         "$PG_IMAGE" -c fsync=off -c full_page_writes=off >/dev/null || fail "копия не запустилась"
@@ -625,6 +697,10 @@ step_copy() {
     COPY_ADDR=$(dk inspect -f "{{(index .NetworkSettings.Networks \"$NET\").IPAddress}}" "$PG") ||
         fail "адрес копии не прочитан"
     [[ $COPY_ADDR =~ ^[0-9.]+$ ]] || fail "адрес копии не прочитан: «$COPY_ADDR»"
+    if ((K8)); then
+        COPY_VERSION=$(copy_sql "SELECT current_setting('server_version_num')") || fail "copy version"
+        [[ $COPY_VERSION == "$SOURCE_VERSION" ]] || refuse "K8 PostgreSQL version mismatch"
+    fi
     end_step "" "сеть $NET (--internal), адрес $COPY_ADDR, --memory $COPY_MEMORY, fsync=off, full_page_writes=off"
 }
 
@@ -712,22 +788,59 @@ step_fault_data() {
     end_step "$REV" "UPDATE $FAULT_TARGET: 1 строка копии + « [fault]»; ждать ❌ md5 на downgrade 1"
 }
 
+# Inventory success is required to prove absence; inspect errors never do.
+# shellcheck disable=SC2329  # called by cleanup through EXIT trap
+resource_state() { # kind name: 0 exists, 4 absent, 5 unknown
+    local listing
+    case $1 in
+        container) listing=$(dk container ls -a --format '{{.Names}}') || return 5 ;;
+        network) listing=$(dk network ls --format '{{.Name}}') || return 5 ;;
+        image) listing=$(dk image ls -a --format '{{.Repository}}:{{.Tag}}') || return 5 ;;
+        *) return 5 ;;
+    esac
+    if grep -Fxq -- "$2" <<<"$listing"; then return 0; fi
+    return 4
+}
+
+# shellcheck disable=SC2329  # called by cleanup through EXIT trap
+cleanup_resource() { # kind name
+    local state owner
+    if resource_state "$1" "$2"; then state=0; else state=$?; fi
+    if ((state == 4)); then return 0; fi
+    if ((state != 0)); then return 1; fi
+    if ((K8)); then
+        case $1 in
+            container) owner=$(dk container inspect -f '{{index .Config.Labels "rehearsal.run"}}' "$2") || return 1 ;;
+            network) owner=$(dk network inspect -f '{{index .Labels "rehearsal.run"}}' "$2") || return 1 ;;
+            *) return 1 ;;
+        esac
+        [[ $owner == "$RUN_ID" ]] || return 1
+    fi
+    case $1 in
+        container) dk rm -f "$2" >/dev/null || return 1 ;;
+        network) dk network rm "$2" >/dev/null || return 1 ;;
+        image) dk rmi "$2" >/dev/null || return 1 ;;
+    esac
+    if resource_state "$1" "$2"; then state=0; else state=$?; fi
+    ((state == 4))
+}
+
 # shellcheck disable=SC2329  # из on_exit (trap)
 cleanup() {
     echo
     echo "== Уборка"
     local left=()
+    if ((K8)); then
+        cleanup_resource container "${PG}_migrator" || left+=("container ${PG}_migrator: unconfirmed")
+    fi
     if ((PG_CREATED)); then
-        dk rm -f "$PG" >/dev/null 2>&1 || true
-        if dk container inspect "$PG" >/dev/null 2>&1; then left+=("контейнер $PG"); fi
+        cleanup_resource container "$PG" || left+=("container $PG: unconfirmed")
     fi
     if ((NET_CREATED)); then
-        dk network rm "$NET" >/dev/null 2>&1 || true
-        if dk network inspect "$NET" >/dev/null 2>&1; then left+=("сеть $NET"); fi
+        cleanup_resource network "$NET" || left+=("network $NET: unconfirmed")
     fi
-    if ((IMAGE_CHECKED)); then
-        dk rmi "$IMAGE" >/dev/null 2>&1 || true
-        if dk image inspect "$IMAGE" >/dev/null 2>&1; then left+=("образ $IMAGE"); fi
+    if ((IMAGE_CHECKED && !K8)); then
+        cleanup_resource image "$IMAGE" || left+=("image $IMAGE: unconfirmed")
     fi
     if ((DUMP_CREATED)); then
         rm -f "$DUMP" 2>/dev/null || true
@@ -735,10 +848,12 @@ cleanup() {
     fi
     if ((${#left[@]})); then
         STEPS+=("| $((${#STEPS[@]} + 1)) | Уборка | — | осталось: ${left[*]} | ❌ | — |")
-        REASON="${REASON:+$REASON; }уборка неполная: ${left[*]}"
+        REASON="${REASON:+$REASON; }уборка не подтверждена: ${left[*]}"
         RC=3
     else
-        STEPS+=("| $((${#STEPS[@]} + 1)) | Уборка | — | контейнер, сеть, тег, дамп — нет; лог оставлен | ✅ | — |")
+        local kept="лог оставлен"
+        if ((K8)); then kept="образ и каталог $RUN_DIR сохранены"; fi
+        STEPS+=("| $((${#STEPS[@]} + 1)) | Уборка | — | временные ресурсы удалены; $kept | ✅ | — |")
     fi
 }
 
@@ -887,6 +1002,24 @@ main() {
     step_copy
     step_restore
     step_baseline
+    if ((K8)); then
+        begin_step "K8 archive cycle"
+        k8_cycle || fail "K8 archive cycle"
+        copy_revision
+        if ((FINAL_DOWN)); then
+            [[ $REV == "$BASE" ]] || fail "K8 final revision"
+            snap "downgrade K8"
+            check_schema "downgrade K8" baseline
+            check_counts "downgrade K8"
+            data_snap "downgrade K8"
+            check_data "downgrade K8"
+        else
+            [[ $REV == "$TO" ]] || fail "K8 final revision"
+        fi
+        end_step "$REV" "K8 archives retained in $RUN_DIR; image retained"
+        DONE=1
+        return
+    fi
     migrate_step upgrade "$TO" "upgrade 1" ""
     if [[ $FAULT == data-change ]]; then
         step_fault_data

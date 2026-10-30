@@ -77,6 +77,15 @@ async def test_roundtrip_with_old_null_and_new_rows(tmp_path: Path) -> None:
                         _alembic(c, "919ae8ad384e", down=True)
                     assert capture(c) == before
                     archive = tmp_path / "rollback.json"
+                    def reject_archive(path):
+                        raise OSError("simulated archive durability failure")
+
+                    with pytest.raises(OSError, match="durability"):
+                        rollback(c, tmp_path / "failed-verification.json", reject_archive)
+                    assert capture(c) == before
+                    with pytest.raises(FileNotFoundError):
+                        rollback(c, tmp_path / "missing-directory" / "archive.json")
+                    assert capture(c) == before
                     rollback(c, archive)
                     assert str(sa.inspect(c).get_columns("trades")) == str(baseline_columns)
                     assert c.scalar(sa.text("SELECT risk_reward FROM trades WHERE id=1")) == 9
@@ -88,6 +97,14 @@ async def test_roundtrip_with_old_null_and_new_rows(tmp_path: Path) -> None:
                         "INSERT INTO trades(id,risk_reward,status) VALUES (7,88,'CLOSED')"
                     ))
                     _alembic(c, HEAD, down=False)
+                    wrong_db = capture(c)
+                    wrong_db["database"] = "other_database"
+                    wrong_archive = tmp_path / "wrong-db.json"
+                    save_archive(wrong_archive, wrong_db)
+                    unchanged_before_restore = capture(c)
+                    with pytest.raises(ValueError, match="database mismatch"):
+                        restore(c, wrong_archive)
+                    assert capture(c) == unchanged_before_restore
                     assert restore(c, archive) == 6
                     after = capture(c)
                     assert after["rows"][:6] == before["rows"]
@@ -134,3 +151,31 @@ def test_archive_integrity_and_no_overwrite(tmp_path: Path) -> None:
     path.write_text(json.dumps(envelope))
     with pytest.raises(ValueError, match="checksum"):
         load_archive(path)
+
+
+@pytest.mark.parametrize("change,match", [
+    ({"format": 2}, "Unsupported"),
+    ({"revision": "wrong"}, "Unsupported"),
+    ({"rows": [{"id": 1}, {"id": 1}]}, "Duplicate"),
+])
+def test_archive_rejects_invalid_payload(tmp_path: Path, change, match):
+    payload = {"format": 1, "revision": HEAD, "database": "trading_bot_test", "rows": []}
+    payload.update(change)
+    path = tmp_path / "invalid.json"
+    save_archive(path, payload)
+    with pytest.raises(ValueError, match=match):
+        load_archive(path)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url", [
+    "postgresql+asyncpg://test:test@remote/trading_bot_test",
+    "postgresql+asyncpg://test:test@localhost/trading_bot_rehearsal",
+])
+async def test_local_cli_still_refuses_other_destinations(monkeypatch, tmp_path, url):
+    from scripts.k8_rollback import run
+
+    monkeypatch.setenv("DATABASE_URL", url)
+    with pytest.raises(ValueError, match="restricted to local"):
+        await run("downgrade", tmp_path / "never-created.json")
+    assert list(tmp_path.iterdir()) == []
