@@ -1944,7 +1944,61 @@ def _receipt_want(calc: dict[str, Any], margin_type: str) -> list[str]:
     margin = {"ISOLATED": "маржа, изол.", "CROSSED": "маржа, кросс"}.get(margin_type, "маржа")
     return [f"{g(calc['quantity'])} XRP", f"{g(calc['notional'])} $", margin,
             f"{g(calc['margin'])} $", f"{g(calc['risk_usd'])} $ · {calc['risk_percent']}%",
-            "—" if calc["rr"] is None else f"1 : {calc['rr']}", liq, f"≈ {g(calc['fee_usd'])} $"]
+            "—" if calc["rr"] is None else f"1 : {calc['rr']}", liq, _opening_fee_want(calc)]
+
+
+def _opening_fee_want(calc: dict[str, Any]) -> str:
+    value = calc.get("fee_text", calc.get("fee_usd"))
+    if value is None or value == "—":
+        return "—"
+    return f"{'' if '<' in value else '≈ '}{_grouped(value)} $"
+
+
+@scenario("opening_fee", "Opening fee: exact API amount, server text in preview and confirmation")
+async def opening_fee(page: Page, url: str) -> None:
+    cases = [
+        ("0", "0.00", "≈ 0.00 $"),
+        ("0.000000000000000001", "<0.01", "<0.01 $"),
+        ("0.0049", "<0.01", "<0.01 $"),
+        ("0.005", "0.01", "≈ 0.01 $"),
+        ("0.0099", "0.01", "≈ 0.01 $"),
+        ("0.01", "0.01", "≈ 0.01 $"),
+        ("1234.565", "1234.57", "≈ 1 234.57 $"),
+        (None, None, "—"),
+        ("0.02", None, "≈ 0.02 $"),  # older API without the additive display field
+    ]
+    for index, (raw, display, expected) in enumerate(cases):
+        def patch(data: Any, raw: str | None = raw, display: str | None = display) -> Any:
+            card = data.get("card", data)
+            if isinstance(card.get("calc"), dict):
+                calc = card["calc"]
+                calc.pop("fee_text", None)
+                calc.pop("fee_usd", None)
+                if raw is not None:
+                    calc["fee_usd"] = raw
+                if display is not None:
+                    calc["fee_text"] = display
+            return data
+
+        if index:
+            page.rules.clear()
+            await page.call("Page.navigate", {"url": "about:blank"})
+            await page.pump(0.1)
+        await open_page(page, url, Setup(native=True, width=320,
+            theme="dark" if index % 2 else "light", rules=[
+                Rule("/api/open/preview", "patch", patch=patch, method="POST"),
+                Rule("/api/open", "patch", patch=patch, method="POST", exact=True)]))
+        await _ready_form(page, True)
+        shown = await page.js("document.getElementById('trade-fee').textContent")
+        page.expect(" ".join(shown.split()) == expected, f"preview fee {raw}: {shown!r}")
+        await _to_confirm(page, True)
+        view = await page.js(RECORD_JS)
+        fees = [value for label, value in view["rows"] if label == "комиссия"]
+        page.expect(fees == [expected], f"confirmation fee {raw}: {fees!r}")
+        page.expect(await page.js(
+            "document.documentElement.scrollWidth <= document.documentElement.clientWidth"),
+            f"fee {raw}: horizontal overflow at 320px")
+    page.expect(not _confirms(page), "Fee presentation must not send a confirm request")
 
 
 async def _form_design(page: Page) -> dict[str, Any]:
@@ -2066,7 +2120,7 @@ def _record_want(card: dict[str, Any], margin_type: str) -> tuple[str, list[list
         ["риск с комиссией", f"{g(c['risk_usd'])} $ · {c['risk_percent']}%"],
         ["RR", "—" if c["rr"] is None else f"1 : {c['rr']}"],
         ["ликвидация", "—" if c["liq_estimate"] is None else f"≈ {g(c['liq_estimate'])}"],
-        ["комиссия", f"≈ {g(c['fee_usd'])} $"],
+        ["комиссия", _opening_fee_want(c)],
     ]
     return sub, rows
 

@@ -46,6 +46,7 @@ from app.api.schemas import (
 from app.bot import opening_messages
 from app.bot.opening_result import result_position, send_opening_result, strip_markup
 from app.core.logging import get_logger
+from app.core.numfmt import fmt_fee
 from app.database.models.execution_order import ExecutionOrder
 from app.database.models.outgoing_message import OutgoingMeta
 from app.database.models.trade_opening import TradeOpening
@@ -187,7 +188,7 @@ def card_out(outcome: CardOutcome) -> CardOut:
         calc = CalcOut(
             entry_price=price(c.entry_price, pp), quantity=qty(c.quantity, qp),
             notional=money(c.notional), risk_usd=money(c.risk_usd),
-            risk_percent=money(c.risk_percent), fee_usd=money(c.fee_usd),
+            risk_percent=money(c.risk_percent), fee_usd=c.fee_usd, fee_text=fmt_fee(c.fee_usd),
             margin=money(c.margin), liq_estimate=price(c.liq_estimate, pp),
             liq_ratio=money(c.liq_ratio), distance_percent=money(c.distance_percent),
             rr=money(c.rr), max_leverage_for_stop=c.max_leverage_for_stop,

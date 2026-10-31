@@ -275,7 +275,8 @@ def _render_fn(name: str) -> str:
 
 
 @pytest.mark.parametrize("name", ["export function openAction(", "export function renderPreview(",
-                                  "export function riskHint(", "function usd("])
+                                  "export function riskHint(", "function usd(",
+                                  "export function openingFee("])
 def test_receipt_and_button_only_format_server_strings(name: str) -> None:
     """Владелец 18.10 (Д.4): числа квитанции и «N XRP» на кнопке — из ответа сервера,
     фронт только форматирует (groupDigits); никакого пересчёта в JS."""
@@ -290,9 +291,11 @@ def test_button_and_receipt_numbers_go_through_group_digits() -> None:
     assert "groupDigits(card.calc.quantity)" in _render_fn("export function openAction(")
     preview = _render_fn("export function renderPreview(")
     for value in ("groupDigits(c.quantity)", "usd(c.notional)", "usd(c.margin)", "usd(c.risk_usd)",
-                  "groupDigits(c.liq_estimate)", "usd(c.fee_usd)"):
+                  "groupDigits(c.liq_estimate)", "openingFee(c)"):
         assert value in preview, value
     assert "groupDigits(value)" in _render_fn("function usd(")
+    assert "usd(value)" in _render_fn("export function openingFee(")
+    assert "openingFee(c)" in _render_fn("export function recordRows(")
 
 
 def test_form_has_one_hand_note_and_receipt() -> None:

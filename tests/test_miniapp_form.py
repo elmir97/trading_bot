@@ -103,8 +103,13 @@ def test_client_does_not_compute_money() -> None:
     assert re.search(r"\bparseFloat\b|\bparseInt\b|\btoFixed\b", form) is None
     preview = _body(render, "{ symbol, marginType }) {")
     for field in ("c.quantity", "c.notional", "c.margin", "c.rr", "c.liq_estimate",
-                  "c.fee_usd", "c.risk_usd", "c.risk_percent"):
+                  "c.risk_usd", "c.risk_percent"):
         assert field in preview, field
+    assert "openingFee(c)" in preview
+    fee = _body(render, "export function openingFee(calc)")
+    assert "calc?.fee_text" in fee and "calc?.fee_usd" in fee
+    for banned in ("Number(", "parseFloat", "parseInt", "toFixed", "Math.", "BigInt"):
+        assert banned not in fee
 
 
 def test_amount_input_is_validated_not_converted() -> None:

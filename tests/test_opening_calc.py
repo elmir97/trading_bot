@@ -360,3 +360,32 @@ def test_card_fee_below_cent_html(fee: Decimal, line: str) -> None:
         ttl_seconds=60,
     )
     assert line in text.splitlines()
+
+
+@pytest.mark.parametrize(("raw", "shown"), [
+    ("0", "0.00"), ("0.000000000000000001", "<0.01"),
+    ("0.0049", "<0.01"), ("0.005", "0.01"), ("0.0099", "0.01"),
+    ("0.01", "0.01"), ("1234.565", "1234.57"), ("-0.004", "-<0.01"),
+])
+def test_card_out_preserves_exact_fee_and_formats_separately(raw: str, shown: str) -> None:
+    from app.api.opening import card_out
+    from app.execution.opening.service import CardOutcome
+
+    calc = replace(compute(INPUTS, MARKET, LIMITS), fee_usd=D(raw))
+    outcome = CardOutcome("", None, calc, (), market=MARKET, inputs=INPUTS)
+    data = card_out(outcome).model_dump(mode="json")
+    assert data["calc"]["fee_usd"] == str(D(raw))
+    assert data["calc"]["fee_text"] == shown
+    assert outcome.calc is calc and calc.fee_usd == D(raw)
+    # Existing keys/types remain usable; the display field is additive and optional.
+    from app.api.schemas import CalcOut
+
+    legacy = {key: value for key, value in data["calc"].items() if key != "fee_text"}
+    assert CalcOut.model_validate(legacy).fee_text is None
+
+
+def test_card_out_without_calculation_has_no_fee() -> None:
+    from app.api.opening import card_out
+    from app.execution.opening.service import CardOutcome
+
+    assert card_out(CardOutcome("", None, None, ())).calc is None

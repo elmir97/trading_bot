@@ -1,6 +1,6 @@
 // Показ формы сделки (§5а, экран 2): ответ POST /api/open/preview → строки экрана.
 // Объём, риск $ с комиссией, RR, маржа, ликвидация, нарушения — только из ответа
-// сервера (строки, уже округлённые): здесь ничего не считается, только подписи.
+// сервера (строки; показ комиссии — fee_text): здесь ничего не считается, только подписи.
 // Плечо: потолок формы — min(максимум стороны контракта по ключу, max_leverage плана);
 // нет ключа или максимум не прочитан — потолка нет, открытия нет (решение владельца 17.10).
 
@@ -90,6 +90,13 @@ function usd(value) {
   return value === null || value === undefined ? "—" : `${groupDigits(value)} $`;
 }
 
+// Server formats the exact fee; keep old two-decimal API responses usable too.
+export function openingFee(calc) {
+  const value = calc?.fee_text ?? calc?.fee_usd;
+  if (value === null || value === undefined || value === "—") return "—";
+  return `${String(value).includes("<") ? "" : "≈ "}${usd(value)}`;
+}
+
 // Отрисовка ответа preview — квитанция «РАСЧЁТ» (Д.4). el — элементы блока результата;
 // meta — {symbol, marginType}. Все числа — строки сервера (calc), здесь только разряды,
 // подписи и единицы: ни одного расчёта.
@@ -104,7 +111,7 @@ export function renderPreview(el, card, { symbol, marginType }) {
   el.liq.textContent = c && c.liq_estimate !== null
     ? `≈ ${groupDigits(c.liq_estimate)}${c.liq_ratio !== null ? ` · ${c.liq_ratio}× дальше стопа` : ""}`
     : "—";
-  el.fee.textContent = c ? `≈ ${usd(c.fee_usd)}` : "—";
+  el.fee.textContent = openingFee(c);
   el.risk.textContent = c ? `${usd(c.risk_usd)} · ${c.risk_percent}%` : "—";
 
   el.issues.replaceChildren();
@@ -239,7 +246,7 @@ export function recordRows(card, symbol) {
     ["риск с комиссией", `${usd(c.risk_usd)} · ${c.risk_percent}%`, "", "text-red strong"],
     ["RR", c.rr === null || c.rr === undefined ? "—" : `1 : ${c.rr}`, "", "text-blue strong"],
     ["ликвидация", c.liq_estimate === null ? "—" : `≈ ${groupDigits(c.liq_estimate)}`, "", ""],
-    ["комиссия", `≈ ${usd(c.fee_usd)}`, "", ""],
+    ["комиссия", openingFee(c), "", ""],
   ];
 }
 

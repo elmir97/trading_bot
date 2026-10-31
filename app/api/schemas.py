@@ -1,5 +1,6 @@
 """Ответы API. Деньги, цены, проценты — Decimal: в JSON уходят строками
-(pydantic v2), уже округлёнными для показа — JS только форматирует (§5)."""
+(pydantic v2). Обычно округлены для показа; fee_usd сохраняет точность, а fee_text
+отвечает за показ комиссии. JS только добавляет подписи и разряды (§5)."""
 
 from __future__ import annotations
 
@@ -195,7 +196,8 @@ class CalcOut(BaseModel):
     notional: Decimal
     risk_usd: Decimal                   # с комиссией входа и выхода по стопу
     risk_percent: Decimal
-    fee_usd: Decimal
+    fee_usd: Decimal                   # exact amount; fee_text is presentation only
+    fee_text: str | None = None         # additive; older responses may omit it
     margin: Decimal
     liq_estimate: Decimal | None
     liq_ratio: Decimal | None
