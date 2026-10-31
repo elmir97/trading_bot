@@ -30,6 +30,7 @@ from app.exchanges.base import (
     Ticker,
 )
 from app.services.user_service import UserService
+from app.trading.enums import ExchangeKeyMode
 from tests.conftest import cleanup_user
 
 TOKEN = "0:apitest"
@@ -166,6 +167,7 @@ async def api_fixture(unique_telegram_id):  # type: ignore[no-untyped-def]
             UserRepository(session), StrategyRepository(session),
             MistakeTypeRepository(session), settings,
         ).get_or_create(telegram_id=tid)
+        user.settings.active_exchange_mode = ExchangeKeyMode.DEMO
         await session.commit()
         uid = user.id
 

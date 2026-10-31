@@ -199,10 +199,12 @@ def test_number_font_loads_after_me_before_market() -> None:
     design_font_swap); preload нет — на экранах ошибок шрифт не нужен."""
     app = _app()
     start = app[app.index("async function start() {"):]
-    i_me = start.index('me = await api.get("/api/me");')
+    i_me = start.index('const next = await api.get("/api/me");')
+    i_current = start.index("if (request !== accountRequest) return;", i_me)
+    i_apply = start.index("me = next;", i_current)
     i_load = start.index("loadNumberFont();")
     i_market = start.index('show("market");')
-    assert i_me < i_load < i_market
+    assert i_me < i_current < i_apply < i_load < i_market
     assert "document.fonts.load(spec" in app
     html = (_MINIAPP / "index.html").read_text(encoding="utf-8")
     assert "ibm-plex-mono" not in html

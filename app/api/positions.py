@@ -3,9 +3,8 @@
 Данные — тем же путём, что экран «💼 Позиции» бота (app/bot/handlers/positions.py):
 get_positions + get_open_orders без символа (только если позиции есть) →
 build_views / journal_only (app/execution/position_view.py), точность цен — из
-списка контрактов (кэш 1 ч). Счёт — bingx_allowed_exchange_mode, как у /api/me,
-/api/market и открытия (решение владельца 17.10); выбранный в боте счёт
-(user.settings.active_exchange_mode) только показывается, если расходится.
+списка контрактов (кэш 1 ч). Счёт чтения — user.settings.active_exchange_mode,
+как у /api/me и /api/market. Разрешённый конфигом счёт исполнения не меняется.
 Сделки без счёта (NULL) и другого счёта с позицией не связываются (link_trade).
 
 Лимиты BingX: positions — 10/с, openOrders — 5/с на ключ, ключ общий с ботом
@@ -24,7 +23,7 @@ from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
-from app.api.deps import ApiError, ApiState
+from app.api.deps import ApiError, ApiState, selected_mode
 from app.api.market import MarketReader
 from app.api.schemas import (
     BarOut,
@@ -48,7 +47,7 @@ from app.execution.position_view import (
     journal_only,
     start_param,
 )
-from app.trading.enums import TradeSide
+from app.trading.enums import ExchangeKeyMode, TradeSide
 
 logger = get_logger(__name__)
 
@@ -78,8 +77,9 @@ class Snapshot:
     orders: tuple[OpenOrder, ...]
 
 
-def cache_key(state: ApiState, user_id: int) -> str:
-    return f"api:positions:{user_id}:{state.settings.bingx_allowed_exchange_mode.value}"
+def cache_key(state: ApiState, user_id: int, mode: ExchangeKeyMode | None = None) -> str:
+    mode = mode if mode is not None else state.settings.bingx_allowed_exchange_mode
+    return f"api:positions:{user_id}:{mode.value}"
 
 
 def forget(state: ApiState, user_id: int) -> None:
@@ -87,8 +87,9 @@ def forget(state: ApiState, user_id: int) -> None:
     state.market_cache.invalidate(f"api:positions:{user_id}:")
 
 
-async def _snapshot(state: ApiState, session: Any, user_id: int) -> Snapshot:
-    mode = state.settings.bingx_allowed_exchange_mode
+async def _snapshot(
+    state: ApiState, session: Any, user_id: int, mode: ExchangeKeyMode,
+) -> Snapshot:
 
     async def fetch() -> Snapshot:
         client = ExchangeReads(await state.factory.for_user(session, user_id, mode=mode))
@@ -100,7 +101,7 @@ async def _snapshot(state: ApiState, session: Any, user_id: int) -> Snapshot:
         return Snapshot(tuple(positions), tuple(orders))
 
     snapshot: Snapshot = await state.market_cache.get_or_fetch(
-        cache_key(state, user_id), TTL_POSITIONS, fetch
+        cache_key(state, user_id, mode), TTL_POSITIONS, fetch
     )
     return snapshot
 
@@ -212,7 +213,7 @@ async def _journal_precision(state: ApiState, user_id: int,
 
 
 async def positions_out(state: ApiState, session: Any, user: User) -> PositionsOut:
-    mode = state.settings.bingx_allowed_exchange_mode
+    mode = selected_mode(user)
     open_trades = await TradeRepository(session).list_open(user.id)
 
     async def journal_answer(code: str, message: str) -> PositionsOut:
@@ -227,7 +228,7 @@ async def positions_out(state: ApiState, session: Any, user: User) -> PositionsO
     if await state.factory.get_credentials(session, user.id, mode=mode) is None:
         return await journal_answer("NO_KEY", NO_KEY_TEXT)
     try:
-        snapshot = await _snapshot(state, session, user.id)
+        snapshot = await _snapshot(state, session, user.id, mode)
         precision: dict[str, int] = {}
         if snapshot.positions:
             async with MarketReader(state) as reader:

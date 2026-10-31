@@ -12,7 +12,7 @@ from sqlalchemy import select
 from app.api import actions as actions_api
 from app.api import opening as opening_api
 from app.api import positions as positions_api
-from app.api.deps import ApiError, CurrentUser, Session, State
+from app.api.deps import ApiError, CurrentUser, Session, State, selected_mode
 from app.api.market import MarketReader, change_from, max_leverage
 from app.api.ratelimit import ACTION_PER_SECOND, PREVIEW_PER_SECOND, limit
 from app.api.schemas import (
@@ -97,7 +97,7 @@ async def health() -> Health:
 @router.get("/me")
 async def me(user: CurrentUser, state: State, session: Session) -> Me:
     settings = state.settings
-    mode = settings.bingx_allowed_exchange_mode
+    mode = selected_mode(user)
     limits = await plan_limits(session, user.id)
     equity = available = None
     balance_error: str | None = None
@@ -141,7 +141,7 @@ async def me(user: CurrentUser, state: State, session: Session) -> Me:
 async def symbols(user: CurrentUser, state: State, q: str = "") -> list[Contract]:
     """До 20 контрактов USDT-M: точное совпадение — одно; иначе по началу и вхождению.
     Максимум плеча — только из кэша (приватная ручка 5/с — на поиск не опрашиваем)."""
-    async with MarketReader(state) as reader:
+    async with MarketReader(state, mode=selected_mode(user)) as reader:
         try:
             found = match_contracts(await reader.symbols(), q, SYMBOLS_LIMIT)
         except ExchangeError as exc:
@@ -154,7 +154,7 @@ async def symbols(user: CurrentUser, state: State, q: str = "") -> list[Contract
 async def market(
     symbol: str, user: CurrentUser, state: State, session: Session, interval: Interval = "5m",
 ) -> Market:
-    async with MarketReader(state) as reader:
+    async with MarketReader(state, mode=selected_mode(user)) as reader:
         info = await _known(reader, symbol)
         p = info.price_precision
         try:
@@ -213,7 +213,7 @@ async def candles(
     symbol: str, user: CurrentUser, state: State, interval: Interval = "5m",
 ) -> Candles:
     """≤ 200 свечей, последняя — незакрытая (график обновляет её от цены)."""
-    async with MarketReader(state) as reader:
+    async with MarketReader(state, mode=selected_mode(user)) as reader:
         info = await _known(reader, symbol)
         try:
             rows = await reader.candles(symbol, interval)

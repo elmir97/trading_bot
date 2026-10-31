@@ -42,6 +42,9 @@ const history = [];
 let current = "loading";
 let screens = {};
 let me = null;               // /api/me: план (риск, max_leverage), сроки лимита, режим маржи
+let refreshing = false;
+let refreshQueued = false;
+let accountRequest = 0;
 
 function $(id) {
   return document.getElementById(id);
@@ -86,6 +89,9 @@ function text(value) {
 // с «⚠️ Реальный счёт»; нажатие — детали: equity, свободно, счёт, сухой прогон (🧪 в
 // плашке нет — решение 18.10). Ошибка баланса — строкой под шапкой, видна без нажатия.
 function renderAccount(me) {
+  if (!["DEMO", "LIVE"].includes(me.account_mode)) {
+    throw new ApiError(503, "ACCOUNT_MODE_UNKNOWN", "Режим счёта не определён — проверь настройки бота.");
+  }
   const account = $("account");
   const live = me.account_mode === "LIVE";
   account.classList.toggle("live", live);
@@ -150,7 +156,7 @@ function toMarket() {
 
 // Пока «Открыть» в полёте или идёт проверка итога — меню не уводит с экрана.
 function busy() {
-  return Boolean(screens[current] && screens[current].busy && screens[current].busy());
+  return refreshing || Boolean(screens[current] && screens[current].busy && screens[current].busy());
 }
 
 function openPositions() {
@@ -177,24 +183,46 @@ function openSymbol(symbol) {
 
 // «🔄 Обновить»: счёт заново и данные текущего экрана (у формы и подтверждения — только счёт).
 async function refresh() {
+  if (refreshing) {
+    accountRequest += 1;
+    refreshQueued = true;
+    return;
+  }
   if (busy() || current === "loading") return;
   if (current === "error") {
     start();
     return;
   }
-  if (screens[current] && screens[current].refresh) screens[current].refresh();
+  refreshing = true;
+  const request = ++accountRequest;
   try {
-    me = await api.get("/api/me");
-    renderAccount(me);
+    const next = await api.get("/api/me");
+    if (request !== accountRequest) return;
+    const changed = me && next.account_mode !== me.account_mode;
+    renderAccount(next);
+    me = next;
+    if (changed) {
+      history.length = 0;
+      show("market", { push: false });
+    }
+    if (screens[current] && screens[current].refresh) screens[current].refresh();
   } catch (err) {
+    if (request !== accountRequest) return;
+    me = null;
+    $("account").hidden = true;
     if (err instanceof ApiError && err.status === 401) {
       showError(err, start);
       return;
     }
     if (!(err instanceof ApiError)) console.error(err);
-    const note = $("account-note");
-    note.textContent = `Счёт не обновился: ${err instanceof ApiError ? err.message : "ошибка"}`;
-    note.hidden = false;
+    showError(err, start);
+    return;
+  } finally {
+    refreshing = false;
+    if (refreshQueued) {
+      refreshQueued = false;
+      refresh();
+    }
   }
 }
 
@@ -234,14 +262,21 @@ function loadNumberFont() {
 }
 
 async function start() {
+  const request = ++accountRequest;
+  refreshQueued = false;
   history.length = 0;
+  me = null;
+  $("account").hidden = true;
   show("loading", { push: false });
   try {
-    me = await api.get("/api/me");
+    const next = await api.get("/api/me");
+    if (request !== accountRequest) return;
+    me = next;
     loadNumberFont();
     renderAccount(me);
     show("market");
   } catch (err) {
+    if (request !== accountRequest) return;
     if (!(err instanceof ApiError)) console.error(err);
     showError(err, start);
   }
@@ -317,6 +352,9 @@ function init() {
     openExternal(TV_URL);
   });
   start();
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) refresh();
+  });
 }
 
 init();

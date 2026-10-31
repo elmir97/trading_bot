@@ -1549,6 +1549,96 @@ async def no_init_data(page: Page, url: str) -> None:
                 "кнопки «Лонг»/«Шорт» видны вне Telegram")
 
 
+@scenario("account_switch", "Смена счёта: refresh, возврат, переоткрытие, "
+                           "неизвестный режим и ошибка")
+async def account_switch(page: Page, url: str) -> None:
+    mode = "DEMO"
+
+    def account(data: Any) -> Any:
+        data["account_mode"] = mode
+        data["equity"] = "101.00" if mode == "LIVE" else "202.00"
+        data["available"] = data["equity"]
+        data["flags"]["dry_run"] = True
+        return data
+
+    await open_page(page, url, Setup(native=True, rules=[
+        Rule("/api/me", "patch", exact=True, patch=account)]))
+    await page.js(FAKE_POPUP)
+    await page.js("window.__choice = 'refresh'")
+    await _to_form(page, True)
+    for selected in ["LIVE", "DEMO"]:
+        mode = selected
+        await page.telegram_event("settings_button_pressed")
+        await page.pump(1.5)
+        page.expect("screen-market" in (await page.state())["screens"],
+                    "смена сохранила старую форму")
+        got = await page.js("[document.getElementById('account-mode-text').textContent, "
+                            "document.getElementById('account-equity-full').textContent, "
+                            "document.getElementById('account-dry').textContent]")
+        page.expect(got == ["LIVE · реальный счёт" if mode == "LIVE" else "DEMO",
+                            "101.00" if mode == "LIVE" else "202.00",
+                            "да — на биржу не уйдёт"], f"счёт после refresh: {got}")
+    mode = "LIVE"
+    await page.js("document.dispatchEvent(new Event('visibilitychange'))")
+    await page.pump(1.5)
+    page.expect(await page.js("document.getElementById('account-mode-text').textContent")
+                == "LIVE · реальный счёт", "возврат не перечитал счёт")
+    # Hold a completed old DEMO response while a newer LIVE refresh is requested.
+    await page.js("""(() => {
+      const original = Response.prototype.json;
+      window.__holdAccount = true;
+      window.__heldAccountReady = false;
+      Response.prototype.json = async function () {
+        const data = await original.call(this);
+        if (this.url.endsWith('/api/me') && window.__holdAccount) {
+          window.__holdAccount = false;
+          window.__heldAccountReady = true;
+          await new Promise((resolve) => { window.__releaseAccount = resolve; });
+        }
+        return data;
+      };
+      window.__accountLabels = [];
+      new MutationObserver(() => window.__accountLabels.push(
+        document.getElementById('account-mode-text').textContent
+      )).observe(document.getElementById('account-mode-text'), {childList: true});
+    })()""")
+    mode = "DEMO"
+    since = page.now()
+    await page.js("document.dispatchEvent(new Event('visibilitychange'))")
+    for _ in range(40):
+        await page.pump(0.1)
+        if await page.js("window.__heldAccountReady"):
+            break
+    page.expect(await page.js("window.__heldAccountReady"), "old response was not held")
+    mode = "LIVE"
+    await page.js("document.dispatchEvent(new Event('visibilitychange')); "
+                  "window.__releaseAccount()")
+    await page.pump(2)
+    page.expect(len(page.api("/api/me", since=since)) >= 2, "new refresh was dropped")
+    labels = await page.js("window.__accountLabels")
+    page.expect("DEMO" not in labels, f"old account rendered: {labels}")
+    page.expect(await page.js("document.getElementById('account-equity-full').textContent")
+                == "101.00", "old balance returned after switch")
+    await page.call("Page.reload")
+    await page.pump(3)
+    page.expect(await page.js("document.getElementById('account-equity-full').textContent")
+                == "101.00", "переоткрытие потеряло реальный баланс")
+    page.rules.insert(0, Rule("/api/me", "status", exact=True, status=503,
+                             body={"code": "TEST", "message": "Счёт недоступен"}, times=1))
+    await page.js("document.dispatchEvent(new Event('visibilitychange'))")
+    await page.pump(1.5)
+    page.expect("screen-error" in (await page.state())["screens"], "ошибка скрыта")
+    page.expect(await page.js("document.getElementById('account').hidden"),
+                "ошибка оставила старый баланс")
+    mode = "UNKNOWN"
+    await page.click("#error-retry")
+    await page.pump(1.5)
+    page.expect("screen-error" in (await page.state())["screens"], "неизвестный режим принят")
+    page.expect(await page.js("document.getElementById('account').hidden"),
+                "неизвестный режим показал баланс")
+    page.expect(not _confirms(page), "отправлен confirm")
+
+
 @scenario("me_502", "Прокси без api: /api/me 502 без JSON — «Сервер недоступен», повтор открывает")
 async def me_502(page: Page, url: str) -> None:
     await open_page(page, url, Setup(rules=[

@@ -32,6 +32,7 @@ from app.exchanges.base import (
     Ticker,
 )
 from app.market.cache import TTL_SYMBOLS
+from app.trading.enums import ExchangeKeyMode
 
 INTERVALS = ("1m", "5m", "15m", "1h", "4h", "1d")
 CANDLES_LIMIT = 200
@@ -47,8 +48,9 @@ TTL_LEVERAGE = 300
 class MarketReader:
     """Один запрос API — один публичный клиент (лениво)."""
 
-    def __init__(self, state: ApiState) -> None:
+    def __init__(self, state: ApiState, *, mode: ExchangeKeyMode | None = None) -> None:
         self._state = state
+        self._mode = mode if mode is not None else state.settings.bingx_allowed_exchange_mode
         self._cache = state.market_cache
         self._client: ExchangeClient | None = None
 
@@ -109,7 +111,7 @@ class MarketReader:
         return result
 
     def _leverage_key(self, user_id: int, symbol: str) -> str:
-        mode = self._state.settings.bingx_allowed_exchange_mode
+        mode = self._mode
         return f"leverage:{user_id}:{mode.value}:{symbol}"
 
     def cached_leverage(self, user_id: int, symbol: str) -> LeverageInfo | None:
@@ -120,7 +122,7 @@ class MarketReader:
     async def leverage(self, session: Any, user_id: int, symbol: str) -> LeverageInfo | None:
         """Плечо счёта по символу (ключ пользователя); ключа нет — None."""
         factory = self._state.factory
-        mode = self._state.settings.bingx_allowed_exchange_mode
+        mode = self._mode
 
         async def fetch() -> LeverageInfo | None:
             if await factory.get_credentials(session, user_id, mode=mode) is None:

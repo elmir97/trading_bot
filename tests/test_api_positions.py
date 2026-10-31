@@ -232,7 +232,7 @@ async def test_unauthorized(api) -> None:  # type: ignore[no-untyped-def]
 
 @pytest.mark.parametrize("bot_mode", [DEMO, LIVE])
 async def test_bot_account_shown(api, bot_mode) -> None:  # type: ignore[no-untyped-def]
-    """Счёт — всегда серверный (DEMO); выбранный в боте приходит для строки о расхождении."""
+    """Счёт чтения совпадает с выбранным в боте; legacy-поле сохранено в API."""
     state = api.state(factory=FakeFactory(PositionsClient()))
     async with state.db.session() as session:
         st = await session.scalar(select(UserSettings).where(UserSettings.user_id == api.uid))
@@ -240,7 +240,7 @@ async def test_bot_account_shown(api, bot_mode) -> None:  # type: ignore[no-unty
         st.active_exchange_mode = bot_mode
         await session.commit()
     body = (await _get(state, api)).json()
-    assert (body["account_mode"], body["bot_account_mode"]) == ("DEMO", bot_mode.value)
+    assert (body["account_mode"], body["bot_account_mode"]) == (bot_mode.value, bot_mode.value)
 
 
 async def test_cache_per_user_and_forget(api) -> None:  # type: ignore[no-untyped-def]

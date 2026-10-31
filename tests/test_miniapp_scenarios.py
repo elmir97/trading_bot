@@ -372,7 +372,8 @@ def test_registry_covers_queue_scenarios() -> None:
         "no_init_data", "me_502",
         "design_fonts", "design_theme", "design_market", "design_live", "design_font_swap",
         "sdk_real", "design_font_404", "design_font_hang", "design_form", "design_confirm",
-        "design_confirm_refused", "opening_fee", "confirm_double", "confirm_double_old",
+        "design_confirm_refused", "opening_fee", "account_switch",
+        "confirm_double", "confirm_double_old",
         "confirm_double_burst", "design_positions", "design_positions_bar",
         # экран 5 — действия с позицией (5.3)
         "act_be_disabled", "act_stop_preview", "act_card_timer", "act_confirm_done",

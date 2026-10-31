@@ -18,6 +18,7 @@ from app.database.models.user import User
 from app.database.repositories.user import UserRepository
 from app.database.session import Database
 from app.market.cache import TTLCache
+from app.trading.enums import ExchangeKeyMode
 
 logger = get_logger(__name__)
 
@@ -93,10 +94,19 @@ async def current_user(request: Request, state: State, session: Session) -> User
     if user is None:
         logger.warning("Mini App: пользователя нет в базе", extra={"telegram_id": masked})
         raise ApiError(403, "FORBIDDEN", "Сначала открой бота и нажми /start.")
+    selected_mode(user)
     return user
 
 
 CurrentUser = Annotated[User, Depends(current_user)]
+
+
+def selected_mode(user: User) -> ExchangeKeyMode:
+    """Чтение только выбранного пользователем счёта; конфиг разрешает исполнение."""
+    mode = user.settings.active_exchange_mode if user.settings is not None else None
+    if not isinstance(mode, ExchangeKeyMode):
+        raise ApiError(409, "ACCOUNT_MODE_UNKNOWN", "Счёт не выбран — проверь настройки бота.")
+    return mode
 
 
 __all__ = ["ApiError", "ApiState", "CurrentUser", "Session", "State", "get_state"]
